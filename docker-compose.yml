@@ -30,7 +30,7 @@ services:
   # Cloudflare Tunnel service
   cloudflared:
     image: cloudflare/cloudflared:latest
-    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN:?CLOUDFLARE_TUNNEL_TOKEN is required for the production profile}
     restart: unless-stopped
     depends_on:
       - nginx

@@ -1,49 +1,55 @@
 #!/bin/bash
 
-# Default hostname
+set -euo pipefail
+
 HOSTNAME="${1:-dazbeez.com}"
+RESPONSE_FILE="$(mktemp)"
+trap 'rm -f "$RESPONSE_FILE"' EXIT
 
-# Perform HTTPS request to the hostname
 echo "Checking tunnel connectivity for $HOSTNAME..."
-RESPONSE=$(curl -s -w "%{http_code}" -o /tmp/response.html https://$HOSTNAME)
+if ! HTTP_CODE="$(curl -sS -L -o "$RESPONSE_FILE" -w "%{http_code}" "https://$HOSTNAME")"; then
+  echo "ERROR: Failed to reach https://$HOSTNAME"
+  echo "Check local network connectivity, DNS, and Cloudflare status before retrying."
+  exit 1
+fi
+CNAME_TARGET="$(dig +short CNAME "$HOSTNAME" | head -n 1 | sed 's/\.$//')"
 
-# Check if we got a 1033 error
-if [[ $RESPONSE == "1033" ]]; then
-    echo "ERROR: Cloudflare Tunnel returned HTTP 1033"
-    echo "This indicates the tunnel is not properly connected or the origin is unreachable."
-    
-    # Check DNS records for cfargotunnel.com target
-    echo "Checking DNS records for $HOSTNAME..."
-    DNS_RESULT=$(dig +short $HOSTNAME | grep -i cfargotunnel)
-    
-    if [[ -n "$DNS_RESULT" ]]; then
-        echo "DNS records show cfargotunnel.com target - tunnel configuration appears correct"
-    else
-        echo "WARNING: No cfargotunnel.com DNS records found"
-        echo "This may indicate tunnel misconfiguration or DNS propagation delay"
-    fi
-    
-    echo "ACTION REQUIRED: Check tunnel status and origin server connectivity"
-    exit 1
-elif [[ $RESPONSE == "200" ]]; then
-    echo "SUCCESS: Tunnel is functioning correctly"
-    echo "Origin server is reachable and tunnel is properly connected"
-    exit 0
+print_recovery_steps() {
+  echo "Recovery steps:"
+  echo "  1. cp .env.example .env"
+  echo "  2. Set CLOUDFLARE_TUNNEL_TOKEN in .env to the token from the dazbeez.com tunnel"
+  echo "  3. Run: docker compose --profile production up -d --build"
+  echo "  4. Confirm: docker compose --profile production ps"
+  echo "  5. Inspect logs if needed: docker compose --profile production logs cloudflared --tail=50"
+}
+
+if [[ -n "$CNAME_TARGET" ]]; then
+  echo "DNS CNAME target: $CNAME_TARGET"
 else
-    echo "INFO: HTTP response code $RESPONSE"
-    echo "Checking if this is a Cloudflare error page..."
-    
-    # Check if response contains Cloudflare error content
-    if grep -q "1033" /tmp/response.html 2>/dev/null; then
-        echo "ERROR: Cloudflare Tunnel returned HTTP 1033"
-        echo "This indicates the tunnel is not properly connected or the origin is unreachable."
-        exit 1
-    else
-        echo "INFO: Non-1033 error encountered - may be origin server issue"
-        echo "Tunnel may be connected but origin server not responding properly"
-        exit 2
-    fi
+  echo "DNS CNAME target: not exposed publicly (record may be proxied through Cloudflare)"
 fi
 
-# Cleanup
-rm -f /tmp/response.html
+if [[ "$HTTP_CODE" == "200" ]]; then
+  echo "SUCCESS: Tunnel is functioning correctly"
+  echo "Origin server is reachable and tunnel is properly connected"
+  exit 0
+fi
+
+if grep -Eqi "Error 1033|error code[:[:space:]]*1033" "$RESPONSE_FILE"; then
+  echo "ERROR: Cloudflare returned Error 1033 for $HOSTNAME"
+  echo "The tunnel is not connected to an active cloudflared origin."
+  print_recovery_steps
+  exit 1
+fi
+
+echo "INFO: Received HTTP $HTTP_CODE from https://$HOSTNAME"
+
+if [[ "$HTTP_CODE" == "530" ]] && grep -qi "cloudflare" "$RESPONSE_FILE"; then
+  echo "ERROR: Cloudflare is serving an origin/tunnel error page"
+  print_recovery_steps
+  exit 1
+fi
+
+echo "INFO: Tunnel did not return a 1033 page"
+echo "This is likely an origin application or proxy issue rather than a missing tunnel."
+exit 2
