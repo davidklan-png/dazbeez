@@ -22,9 +22,10 @@ export const metadata: Metadata = {
     siteName: "Dazbeez",
     images: [
       {
-        url: "https://dazbeez.com/og-image.jpg",
+        url: "/opengraph-image",
         width: 1200,
         height: 630,
+        alt: "Dazbeez AI, Automation & Data Solutions",
       },
     ],
     locale: "en_US",
@@ -34,7 +35,7 @@ export const metadata: Metadata = {
     card: "summary_large_image",
     title: "Dazbeez - AI, Automation & Data Solutions",
     description: "Transform your business with AI integration, automation, data management, and governance services.",
-    images: ["https://dazbeez.com/og-image.jpg"],
+    images: ["/opengraph-image"],
   },
 };
 
