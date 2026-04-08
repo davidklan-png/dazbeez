@@ -1,4 +1,6 @@
-version: '3.8'
+# Dazbeez reserved host port: 4488
+# Internal container port: 3000
+# Do not change host port — reserved to avoid conflicts with other local services.
 
 services:
   # Next.js application
@@ -6,9 +8,19 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    ports:
+      - "4488:3000"
     environment:
       - NODE_ENV=production
     restart: unless-stopped
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider",
+             "http://127.0.0.1:3000"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
     networks:
       - dazbeez-network
 
