@@ -2,11 +2,11 @@
 
 ## Project Context
 
-Dazbeez is a Next.js 15 website for AI, Automation & Data consulting services. The site is designed for local Mac M4 hosting with optional public access via Cloudflare Tunnel.
+Dazbeez is a Next.js 16.2.1 website for AI, Automation & Data consulting services. The site is designed for local Mac M4 hosting with optional public access via Cloudflare Tunnel.
 
 ## Tech Stack
 
-- **Framework:** Next.js 15 (App Router - not Pages Router!)
+- **Framework:** Next.js 16.2.1 (App Router - not Pages Router!)
 - **Styling:** Tailwind CSS (bee theme: amber/yellow + charcoal)
 - **Deployment:** Docker Compose on Mac M4
 - **Optional LLM:** Ollama for chatbot enhancement
@@ -61,12 +61,19 @@ app/
 
 ## Cloudflare Tunnel
 
-For public access from local Mac:
-```bash
-cloudflared tunnel --url http://localhost:3000
-```
+Traffic flow: `dazbeez.com → Cloudflare Tunnel (server-tunnel) → Caddy:80 → host.docker.internal:4488 → Next.js container`
+
+The named tunnel `server-tunnel` is configured in `~/.cloudflared/config.yml` and runs as a launchd system daemon.
+Caddy proxies `dazbeez.com` and `www.dazbeez.com` to `host.docker.internal:4488`.
 
 Use the provided HTTPS URL for NFC tags.
+
+## Reboot / Restart Procedure
+1. Docker Compose services restart automatically (`restart: unless-stopped`)
+2. Wait for nextjs container to report healthy before cloudflared will serve traffic
+3. If cloudflared is a launchd service, it will retry connections — no action needed
+4. If running cloudflared manually, use `docker/wait-for-healthy.sh`
+5. Verify end-to-end: `curl -s -o /dev/null -w "%{http_code}" http://localhost:4488`
 
 <!-- BEGIN:nextjs-agent-rules -->
 # This is NOT the Next.js you know

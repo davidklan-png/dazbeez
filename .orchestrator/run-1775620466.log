@@ -1,0 +1,201 @@
+[PLAN] ```json_plan
+[PLAN] {
+[PLAN]   "summary": "Build the NFC business-card experience: a /connect/[slug] dynamic route with contact micro-pages, lead capture, LLM-backed chat, analytics, vCard download, and full mobile-first UX.",
+[PLAN]   "milestone": "NFC Business Card Experience",
+[PLAN]   "steps": [
+[PLAN]     {
+[PLAN]       "id": 1,
+[PLAN]       "name": "Contact data model + seed data",
+[PLAN]       "description": "Create lib/contacts.ts with a TypeScript interface (NfcContact) covering all required fields: slug, fullName, title, email, phone, linkedinUrl, head
+[PLAN] shotUrl, shortBio, specialties, meetingContextIntro, featuredServices, llmEnabled, calendarUrl, crmDestinationTag, campaignTag, status. Export a contacts Map/Record keyed by slug. Include one fully populated seed entry for 'david' (David Klan, Founder, hello@dazbeez.com) with realistic data so the /connect/david route works out of the box. Export a helper getContact(slug) that returns the contact or null. Export getAllContactSlugs() for generateStaticParams. Mark status as a union type 'active'|'inactive'."
+[PLAN] ,
+[PLAN]       "files": ["lib/contacts.ts"],
+[PLAN]       "action": "create",
+[PLAN]       "depends_on": [],
+[PLAN]       "result_contract": {
+[PLAN]         "files_required": ["lib/contacts.ts"],
+[PLAN]         "exports": [
+[PLAN]           {"file": "lib/contacts.ts", "symbols": ["NfcContact", "contacts", "getContact", "getAllContactSlugs"]}
+[PLAN]         ],
+[PLAN]         "tests_expected": []
+[PLAN]       },
+[PLAN]       "issue_title": "Create contact data model and seed data for NFC pages"
+[PLAN]     },
+[PLAN]     {
+[PLAN]       "id": 2,
+[PLAN]       "name": "Analytics event abstraction",
+[PLAN]       "descriptio
+[PLAN] n": "Create lib/analytics.ts with a pluggable analytics layer. Define an AnalyticsEvent union type covering: nfc_page_viewed, cta_clicked, chat_started, lead_form_started, lead_form_submitted, contact_saved, outbound_link_clicked, calendar_clicked. Export a trackEvent(event, payload?) function that: (a) logs to console in development, (b) dispatches a custom event on window for any provider to listen to, (c) has a clear TODO comment for wiring to a real provider (PostHog, Plausible, etc.). Export a useAnaly
+[PLAN] tics() hook that returns trackEvent, auto-fires nfc_page_viewed on mount when given a slug. Keep it zero-dependency.",
+[PLAN]       "files": ["lib/analytics.ts"],
+[PLAN]       "action": "create",
+[PLAN]       "depends_on": [],
+[PLAN]       "result_contract": {
+[PLAN]         "files_required": ["lib/analytics.ts"],
+[PLAN]         "exports": [
+[PLAN]           {"file": "lib/analytics.ts", "symbols": ["AnalyticsEvent", "trackEvent", "useAnalytics"]}
+[PLAN]         ],
+[PLAN]         "tests_expected": []
+[PLAN]       },
+[PLAN]       "issue_title": "Add pluggable analytics abstraction for
+[PLAN]  NFC conversion tracking"
+[PLAN]     },
+[PLAN]     {
+[PLAN]       "id": 3,
+[PLAN]       "name": "vCard generator utility",
+[PLAN]       "description": "Create lib/vcard.ts. Export a function generateVCard(contact: NfcContact): string that produces a valid vCard 3.0 string with FN, N, ORG, TITLE, EMAIL, TEL, URL, PHOTO fields. Import NfcContact type from lib/contacts.ts. Export a helper downloadVCard(contact: NfcContact) that creates a Blob and triggers a browser download of the .vcf file. This runs client-side only.",
+[PLAN]       "files": ["lib/vc
+[PLAN] ard.ts"],
+[PLAN]       "action": "create",
+[PLAN]       "depends_on": [1],
+[PLAN]       "result_contract": {
+[PLAN]         "files_required": ["lib/vcard.ts"],
+[PLAN]         "exports": [
+[PLAN]           {"file": "lib/vcard.ts", "symbols": ["generateVCard", "downloadVCard"]}
+[PLAN]         ],
+[PLAN]         "tests_expected": []
+[PLAN]       },
+[PLAN]       "issue_title": "Add vCard generator for contact-save action"
+[PLAN]     },
+[PLAN]     {
+[PLAN]       "id": 4,
+[PLAN]       "name": "LLM client + guided chat prompts",
+[PLAN]       "description": "Create lib/llm.ts with a clean abstraction for local LLM infe
+[PLAN] rence. Export an async function chatWithLlm(messages: {role:string,content:string}[], systemPrompt: string): Promise<string> that: (a) tries POST to http://localhost:11434/api/chat (Ollama) with model 'llama3.2' and a bounded max_tokens, (b) on connection failure returns null. Export isLlmAvailable(): Promise<boolean> that pings Ollama /api/tags. Export BUSINESS_SYSTEM_PROMPT constant that instructs the LLM to be a Dazbeez business assistant focused on AI, automation, data solutions — professional, concis
+[PLAN] e, no hallucinated pricing. Export GUIDED_PROMPTS array with the 5 required quick-start chips: workflow automation, internal AI assistant, data visibility, local/private LLMs, prototype scoping. Keep responses bounded and business-oriented.",
+[PLAN]       "files": ["lib/llm.ts"],
+[PLAN]       "action": "create",
+[PLAN]       "depends_on": [],
+[PLAN]       "result_contract": {
+[PLAN]         "files_required": ["lib/llm.ts"],
+[PLAN]         "exports": [
+[PLAN]           {"file": "lib/llm.ts", "symbols": ["chatWithLlm", "isLlmAvailable", "BUSINESS_SYSTEM_PRO
+[PLAN] MPT", "GUIDED_PROMPTS"]}
+[PLAN]         ],
+[PLAN]         "tests_expected": []
+[PLAN]       },
+[PLAN]       "issue_title": "Add LLM client abstraction with Ollama backend and fallback"
+[PLAN]     },
+[PLAN]     {
+[PLAN]       "id": 5,
+[PLAN]       "name": "Lead capture API endpoint",
+[PLAN]       "description": "Create app/api/leads/route.ts as a Next.js route handler. Export POST function that: (a) parses JSON body with fields: name, email, company, role, helpWith, urgency, context, consent, cardSlug, referralSource, campaignTag, (b) validates required fields (name, em
+[PLAN] ail, consent must be true), (c) sanitizes string inputs (trim, strip HTML tags), (d) logs the lead with console.info (with clear TODO for CRM/webhook integration), (e) returns {success: true} with 200. On validation failure return 400 with error details. On consent missing return 422. Include JSDoc comments documenting expected integration points.",
+[PLAN]       "files": ["app/api/leads/route.ts"],
+[PLAN]       "action": "create",
+[PLAN]       "depends_on": [],
+[PLAN]       "result_contract": {
+[PLAN]         "files_required": ["app/api/lead
+[PLAN] s/route.ts"],
+[PLAN]         "exports": [
+[PLAN]           {"file": "app/api/leads/route.ts", "symbols": ["POST"]}
+[PLAN]         ],
+[PLAN]         "tests_expected": []
+[PLAN]       },
+[PLAN]       "issue_title": "Add lead capture API endpoint with validation"
+[PLAN]     },
+[PLAN]     {
+[PLAN]       "id": 6,
+[PLAN]       "name": "Connect layout (minimal, no nav/footer)",
+[PLAN]       "description": "Create app/connect/layout.tsx that renders only {children} wrapped in a div with className='connect-layout' — no SiteNavigation, no Footer. This gives the NFC landing page a clean, dis
+[PLAN] traction-free mobile-first canvas. Include the Inter font and globals.css import is inherited from root layout. The layout should set a dark background (bg-gray-900) as default so the mobile experience feels premium from first paint.",
+[PLAN]       "files": ["app/connect/layout.tsx"],
+[PLAN]       "action": "create",
+[PLAN]       "depends_on": [],
+[PLAN]       "result_contract": {
+[PLAN]         "files_required": ["app/connect/layout.tsx"],
+[PLAN]         "exports": [
+[PLAN]           {"file": "app/connect/layout.tsx", "symbols": ["default"]}
+[PLAN]         ],
+[PLAN]        "tests_expected": []
+[PLAN]       },
+[PLAN]       "issue_title": "Add minimal layout for NFC connect pages"
+[PLAN]     },
+[PLAN]     {
+[PLAN]       "id": 7,
+[PLAN]       "name": "Lead form client component",
+[PLAN]       "description": "Create components/connect/lead-form.tsx as a 'use client' component. Props: {cardSlug: string, campaignTag?: string}. Renders a mobile-friendly form with fields: name, work email, company, role/title, what they want help with (select + other), urgency/timeline (select), freeform context (textarea), consent checkbox 
+[PLAN] with privacy language. Hidden fields: cardSlug, referralSource='nfc_business_card', timestamp, pageUrl. Client-side validation on submit. On valid submit, POST to /api/leads. Show a friendly success state on completion. Fire trackEvent('lead_form_started') on first field focus and trackEvent('lead_form_submitted') on success. Style with Tailwind matching the bee theme (amber-500 buttons, gray-900 borders, rounded-xl inputs). Include proper labels, aria attributes, and keyboard navigation.",
+[PLAN]       "files": [
+[PLAN] "components/connect/lead-form.tsx"],
+[PLAN]       "action": "create",
+[PLAN]       "depends_on": [2, 5],
+[PLAN]       "result_contract": {
+[PLAN]         "files_required": ["components/connect/lead-form.tsx"],
+[PLAN]         "exports": [
+[PLAN]           {"file": "components/connect/lead-form.tsx", "symbols": ["LeadForm"]}
+[PLAN]         ],
+[PLAN]         "tests_expected": []
+[PLAN]       },
+[PLAN]       "issue_title": "Build lead capture form component with validation and tracking"
+[PLAN]     },
+[PLAN]     {
+[PLAN]       "id": 8,
+[PLAN]       "name": "Chat widget client component",
+[PLAN]       "description":
+[PLAN]  "Create components/connect/chat-widget.tsx as a 'use client' component. Props: {cardSlug: string, llmEnabled: boolean}. Implements a collapsible chat section that: (a) shows the 5 GUIDED_PROMPTS as clickable chips, (b) when a chip or free-text is submitted, attempts chatWithLlm() — if LLM is unavailable, falls back to a static smart suggestion response like 'Great question! While our AI assistant is offline, you can share your details below and we\\'ll follow up personally.', (c) after 2+ exchanges, show
+[PLAN] s a CTA: 'Send this context to Dazbeez' (triggers trackEvent + scrolls to lead form), 'Book a follow-up' (link to calendarUrl or mailto), 'Continue by email' (mailto link). Fire trackEvent('chat_started') on first interaction. Chat messages displayed as chat bubbles (user=amber, assistant=gray). Include a typing indicator for LLM calls. Keep UI compact for mobile. Style with Tailwind bee theme.",
+[PLAN]       "files": ["components/connect/chat-widget.tsx"],
+[PLAN]       "action": "create",
+[PLAN]       "depends_on": [2, 4],
+[PLAN]    "result_contract": {
+[PLAN]         "files_required": ["components/connect/chat-widget.tsx"],
+[PLAN]         "exports": [
+[PLAN]           {"file": "components/connect/chat-widget.tsx", "symbols": ["ChatWidget"]}
+[PLAN]         ],
+[PLAN]         "tests_expected": []
+[PLAN]       },
+[PLAN]       "issue_title": "Build LLM-backed chat widget with guided prompts and fallback"
+[PLAN]     },
+[PLAN]     {
+[PLAN]       "id": 9,
+[PLAN]       "name": "Connect dynamic page (main NFC landing)",
+[PLAN]       "description": "Create app/connect/[slug]/page.tsx as the core NFC landing page. This is a s
+[PLAN] erver component that: (a) calls getContact(slug) and returns notFound() if null/inactive, (b) exports generateStaticParams from getAllContactSlugs(), (c) exports generateMetadata that returns per-slug title, description, canonical, OG tags (title, description, image from headshotUrl or fallback). The page renders these sections in order, all mobile-first and styled with Tailwind bee theme:\n\n1. **Hero**: person headshot (or bee icon fallback), fullName, title, company. NFC-aware messaging: 'You tapped my c
+[PLAN] ard' subtitle.\n2. **Intro**: meetingContextIntro text, shortBio.\n3. **Specialties**: badges/pills for each specialty.\n4. **What Dazbeez does**: brief 2-3 line summary + featured services as small cards with links to /services/[slug].\n5. **CTA buttons** (sticky or prominent): 'Start conversation' (scrolls to chat), 'Share your business need' (scrolls to form), 'Save contact' (triggers vCard download via downloadVCard), 'Visit main site' (link to /).\n6. **ChatWidget** component.\n7. **LeadForm** componen
+[PLAN] t.\n8. **Footer links**: email, LinkedIn (if exists), calendar (if exists).\n\nUse <section> tags with aria labels. Ensure contrast passes WCAG AA. Add 'Save contact' as a floating action button on mobile. Fire trackEvent('nfc_page_viewed') via a tiny client-side script or the useAnalytics hook in a wrapper.",
+[PLAN]       "files": ["app/connect/[slug]/page.tsx"],
+[PLAN]       "action": "create",
+[PLAN]       "depends_on": [1, 2, 3, 6, 7, 8],
+[PLAN]       "result_contract": {
+[PLAN]         "files_required": ["app/connect/[slug]/page.tsx"],
+[PLAN]         "exports": [
+[PLAN]           {"file": "app/connect/[slug]/page.tsx", "symbols": ["default", "generateStaticParams", "generateMetadata"]}
+[PLAN]         ],
+[PLAN]         "tests_expected": []
+[PLAN]       },
+[PLAN]       "issue_title": "Build NFC connect landing page with hero, CTAs, chat, and lead form"
+[PLAN]     },
+[PLAN]     {
+[PLAN]       "id": 10,
+[PLAN]       "name": "Sitemap + footer + nav updates",
+[PLAN]       "description": "Update three existing files:\n\n1. **app/sitemap.ts**: Import getAllContactSlugs and add entries for each active contact slug (https:/
+[PLAN] /dazbeez.com/connect/{slug}) with priority 0.6.\n\n2. **app/layout.tsx** (Footer): Add 'Connect' section or update the 'Connect' column to include a link to /connect/david as 'NFC Business Card'. Keep existing links.\n\n3. **components/site-navigation.tsx**: No changes needed — the connect page uses its own minimal layout without nav.\n\nThese are small, targeted edits to existing files.",
+[PLAN]       "files": ["app/sitemap.ts", "app/layout.tsx"],
+[PLAN]       "action": "modify",
+[PLAN]       "depends_on": [1, 9],
+[PLAN]       "res
+[PLAN] ult_contract": {
+[PLAN]         "files_required": ["app/sitemap.ts", "app/layout.tsx"],
+[PLAN]         "exports": [],
+[PLAN]         "tests_expected": []
+[PLAN]       },
+[PLAN]       "issue_title": "Update sitemap and footer to include NFC connect routes"
+[PLAN]     }
+[PLAN]   ]
+[PLAN] }
+[PLAN] ```
+[EXECUTE]     __( O)>  ● new session · claude-code sonnet
+[EXECUTE]    \____)    20260408_4 · /Users/dklan/projects/work/dazbeez
+[EXECUTE]      L L     goose is ready
+[EXECUTE] Let me explore the existing codebase structure to understand what's already in place before planning the implementation.Excellent. I now have a thorough understanding of the codebase. Let me design the implementation plan.Let me verify a couple of critical files before finalizing the plan.Good. I have all the context I need. Let me also quickly check how the existing contact form and inquiry pages work for reference patterns.I have all the context I need. Let me write the final plan.The plan is ready for your review. Here's a summary of what I'll build:
+[EXECUTE] **13 new files, 1 modified file** implementing the full NFC business-card experience:
+[EXECUTE] - **`/connect/[slug]`** dynamic route with per-card SEO metadata and OG tags
+[EXECUTE] - **`lib/contact-cards.ts`** — typed data model with seed entry for David Klan
+[EXECUTE] - **Lead capture form** — 8 fields + hidden tracking fields, validated client + server via a Next.js server action
+[EXECUTE] - **Chat module** — connects to Ollama if available, falls back to static scripted flow (matching existing inquiry page pattern)
+[EXECUTE] - **Guided prompt chips** — 5 business discovery quick-starts
+[EXECUTE] - **vCard download** — generates and downloads `.vcf` client-side
+[EXECUTE] - **Analytics** — pluggable `track()` function (console.log for MVP)
+[EXECUTE] - **Sitemap update** — adds connect routes automatically
+[EXECUTE] Everything follows the existing codebase patterns exactly — inline data records, Tailwind bee theme, server components by default, client components only for interactivity. No new dependencies needed.

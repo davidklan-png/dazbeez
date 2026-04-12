@@ -1,0 +1,310 @@
+[PLAN] Now I have a clear picture. The existing repo is a Next.js site with Docker + Cloudflare Tunnel. The networking card system is a **separate** Cloudflare Pages + Workers project that will live in a `networking-card/` subdirectory.
+[PLAN] ```json_plan
+[PLAN] {
+[PLAN]   "summary": "Scaffold a Cloudflare Pages + Workers + D1 networking card system in networking-card/ with landing page, OAuth, manual form, Discord notifications, Resend emails, vCard download, and seed script.",
+[PLAN]   "milestone": "Networking Card Landing System",
+[PLAN]   "st
+[PLAN] eps": [
+[PLAN]     {
+[PLAN]       "id": 1,
+[PLAN]       "name": "Scaffold project config",
+[PLAN]       "description": "Create networking-card/ directory with wrangler.toml (Pages project, D1 binding named DB, compatibility_date 2025-04-01), package.json (name: dazbeez-networking-card, devDependencies: wrangler, typescript, @cloudflare/workers-types), and tsconfig.json (target ES2022, module ES2022, moduleResolution bundler, types: [@cloudflare/workers-types]). No external runtime dependencies — use platform fetch for OAuth and Rese
+[PLAN] nd API calls.",
+[PLAN]       "files": [
+[PLAN]         "networking-card/wrangler.toml",
+[PLAN]         "networking-card/package.json",
+[PLAN]         "networking-card/tsconfig.json"
+[PLAN]       ],
+[PLAN]       "action": "create",
+[PLAN]       "depends_on": [],
+[PLAN]       "result_contract": {
+[PLAN]         "files_required": [
+[PLAN]           "networking-card/wrangler.toml",
+[PLAN]           "networking-card/package.json",
+[PLAN]           "networking-card/tsconfig.json"
+[PLAN]         ],
+[PLAN]         "exports": [],
+[PLAN]         "tests_expected": []
+[PLAN]       },
+[PLAN]       "issue_title": "Scaffold networking-car
+[PLAN] d project config (wrangler, package.json, tsconfig)"
+[PLAN]     },
+[PLAN]     {
+[PLAN]       "id": 2,
+[PLAN]       "name": "D1 migration",
+[PLAN]       "description": "Create migrations/0001_init.sql with three tables: cards (token TEXT PRIMARY KEY, label TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now'))), contacts (id INTEGER PRIMARY KEY AUTOINCREMENT, token TEXT NOT NULL REFERENCES cards(token), name TEXT NOT NULL, email TEXT NOT NULL, source TEXT NOT NULL CHECK(source IN ('google','linkedin','manual')), linkedin_url TEXT, company T
+[PLAN] EXT, cf_country TEXT, cf_city TEXT, user_agent TEXT, created_at TEXT DEFAULT (datetime('now'))), taps (id INTEGER PRIMARY KEY AUTOINCREMENT, token TEXT NOT NULL REFERENCES cards(token), cf_country TEXT, cf_city TEXT, user_agent TEXT, created_at TEXT DEFAULT (datetime('now'))). Include indexes on contacts.token and taps.token.",
+[PLAN]       "files": [
+[PLAN]         "networking-card/migrations/0001_init.sql"
+[PLAN]       ],
+[PLAN]       "action": "create",
+[PLAN]       "depends_on": [],
+[PLAN]       "result_contract": {
+[PLAN]         "files_required": [
+[PLAN]           "networking-card/migrations/0001_init.sql"
+[PLAN]         ],
+[PLAN]         "exports": [],
+[PLAN]         "tests_expected": []
+[PLAN]       },
+[PLAN]       "issue_title": "Add D1 schema migration for cards, contacts, taps tables"
+[PLAN]     },
+[PLAN]     {
+[PLAN]       "id": 3,
+[PLAN]       "name": "Shared utilities",
+[PLAN]       "description": "Create src/types.ts (interfaces: Env, Card, Contact, Tap with proper types for D1 bindings and secrets), src/db.ts (functions: getCard, insertContact, insertTap — each takes DB and typed params), src/discord.ts (function:
+[PLAN]  notifyContact — POSTs JSON to DISCORD_WEBHOOK_URL with name, email, source, token label via platform fetch), src/email.ts (function: sendThankYou — POSTs to Resend API (https://api.resend.com/emails) with FROM david@dazbeez.com, TO the contact's email, subject 'Great meeting you', plain body: friendly one-paragraph thank-you with David's name, email, phone placeholder, and LinkedIn URL placeholder. No CTAs, no booking links. Uses RESEND_API_KEY in Authorization Bearer header), src/vcard.ts (function: g
+[PLAN] enerateVcf — returns a vCard 3.0 string with David Klan's contact info: name, org Dazbeez, email david@dazbeez.com, phone/URL placeholders).",
+[PLAN]       "files": [
+[PLAN]         "networking-card/src/types.ts",
+[PLAN]         "networking-card/src/db.ts",
+[PLAN]         "networking-card/src/discord.ts",
+[PLAN]         "networking-card/src/email.ts",
+[PLAN]         "networking-card/src/vcard.ts"
+[PLAN]       ],
+[PLAN]       "action": "create",
+[PLAN]       "depends_on": [1],
+[PLAN]       "result_contract": {
+[PLAN]         "files_required": [
+[PLAN]           "networking-card/src/types.
+[PLAN] ts",
+[PLAN]           "networking-card/src/db.ts",
+[PLAN]           "networking-card/src/discord.ts",
+[PLAN]           "networking-card/src/email.ts",
+[PLAN]           "networking-card/src/vcard.ts"
+[PLAN]         ],
+[PLAN]         "exports": [
+[PLAN]           {"file": "networking-card/src/types.ts", "symbols": ["Env", "Card", "Contact", "Tap"]},
+[PLAN]           {"file": "networking-card/src/db.ts", "symbols": ["getCard", "insertContact", "insertTap"]},
+[PLAN]           {"file": "networking-card/src/discord.ts", "symbols": ["notifyContact"]},
+[PLAN]           {"file": "netw
+[PLAN] orking-card/src/email.ts", "symbols": ["sendThankYou"]},
+[PLAN]           {"file": "networking-card/src/vcard.ts", "symbols": ["generateVcf"]}
+[PLAN]         ],
+[PLAN]         "tests_expected": []
+[PLAN]       },
+[PLAN]       "issue_title": "Create shared utilities (types, db, discord, email, vcard)"
+[PLAN]     },
+[PLAN]     {
+[PLAN]       "id": 4,
+[PLAN]       "name": "Landing page route",
+[PLAN]       "description": "Create functions/hi/[[token]].ts as a Cloudflare Pages Function (onRequestGet). It: (1) extracts token from params, (2) calls getCard — returns 404 if null, 
+[PLAN] (3) calls insertTap with cf-country, cf-city from request.cf and user-agent from headers, (4) returns HTML response with: photo placeholder (gray rounded-full div), one-line pitch placeholder ('AI & Automation consulting, simplified.'), three CTA buttons — 'Sign in with Google' linking to Google OAuth URL with client_id=GOOGLE_CLIENT_ID, redirect_uri={BASE_URL}/auth/google/callback, scope=email profile, state=token; 'Sign in with LinkedIn' linking to LinkedIn OAuth URL with client_id=LINKEDIN_CLIENT_ID, r
+[PLAN] edirect_uri={BASE_URL}/auth/linkedin/callback, scope=r_liteprofile r_emailaddress, state=token; 'Enter info manually' that toggles a form via JS. The manual form POSTs to /submit with token (hidden), name, email, optional company and linkedin_url fields. Include privacy note at bottom: 'Your info goes to David only, never shared.' Style with embedded CSS matching the bee theme (amber-500 #F59E0B primary, gray-900 #111827 dark, rounded-xl, clean mobile-first layout). Use BASE_URL env var for OAuth redirect U
+[PLAN] RIs.",
+[PLAN]       "files": [
+[PLAN]         "networking-card/functions/hi/[[token]].ts"
+[PLAN]       ],
+[PLAN]       "action": "create",
+[PLAN]       "depends_on": [3],
+[PLAN]       "result_contract": {
+[PLAN]         "files_required": [
+[PLAN]           "networking-card/functions/hi/[[token]].ts"
+[PLAN]         ],
+[PLAN]         "exports": [
+[PLAN]           {"file": "networking-card/functions/hi/[[token]].ts", "symbols": ["onRequestGet"]}
+[PLAN]         ],
+[PLAN]         "tests_expected": []
+[PLAN]       },
+[PLAN]       "issue_title": "Implement GET /hi/:token landing page with tap logging and CTAs"
+[PLAN]     },
+[PLAN]     {
+[PLAN]       "id": 5,
+[PLAN]       "name": "Google OAuth callback",
+[PLAN]       "description": "Create functions/auth/google/callback.ts as onRequestGet. It: (1) reads code and state (token) from URL search params, returns 400 if missing, (2) POSTs to https://oauth2.googleapis.com/token with code, client_id=GOOGLE_CLIENT_ID, client_secret=GOOGLE_CLIENT_SECRET, redirect_uri={BASE_URL}/auth/google/callback, grant_type=authorization_code, (3) extracts access_token from JSON response, (4) GETs https://www.googleapis.com/oau
+[PLAN] th2/v2/userinfo with Bearer token, (5) extracts name and email, (6) looks up card label via getCard, (7) calls insertContact with source='google', (8) calls notifyContact and sendThankYou (fire-and-forget, do not await blocking), (9) redirects 302 to /thanks?contact_id={id}. Wrap in try/catch — on error return 500 with plain error message.",
+[PLAN]       "files": [
+[PLAN]         "networking-card/functions/auth/google/callback.ts"
+[PLAN]       ],
+[PLAN]       "action": "create",
+[PLAN]       "depends_on": [3],
+[PLAN]       "result_contract": {
+[PLAN]       "files_required": [
+[PLAN]           "networking-card/functions/auth/google/callback.ts"
+[PLAN]         ],
+[PLAN]         "exports": [
+[PLAN]           {"file": "networking-card/functions/auth/google/callback.ts", "symbols": ["onRequestGet"]}
+[PLAN]         ],
+[PLAN]         "tests_expected": []
+[PLAN]       },
+[PLAN]       "issue_title": "Implement Google OAuth callback handler"
+[PLAN]     },
+[PLAN]     {
+[PLAN]       "id": 6,
+[PLAN]       "name": "LinkedIn OAuth callback",
+[PLAN]       "description": "Create functions/auth/linkedin/callback.ts as onRequestGet. Same flow as Google but: (1)
+[PLAN]  POST to https://www.linkedin.com/oauth/v2/accessToken with code, client_id, client_secret, redirect_uri={BASE_URL}/auth/linkedin/callback, grant_type=authorization_code, (2) GET https://api.linkedin.com/v2/meow to fetch name (extract localizedFirstName + localizedLastName), (3) GET https://api.linkedin.com/v2/emailAddress?q=members&projection=(elements*(handle~)) to fetch email, (4) insertContact with source='linkedin', linkedin_url='https://www.linkedin.com/in/' from the profile response if available, (5)
+[PLAN]  same Discord + email + redirect to /thanks flow.",
+[PLAN]       "files": [
+[PLAN]         "networking-card/functions/auth/linkedin/callback.ts"
+[PLAN]       ],
+[PLAN]       "action": "create",
+[PLAN]       "depends_on": [3],
+[PLAN]       "result_contract": {
+[PLAN]         "files_required": [
+[PLAN]           "networking-card/functions/auth/linkedin/callback.ts"
+[PLAN]         ],
+[PLAN]         "exports": [
+[PLAN]           {"file": "networking-card/functions/auth/linkedin/callback.ts", "symbols": ["onRequestGet"]}
+[PLAN]         ],
+[PLAN]         "tests_expected": []
+[PLAN]       },
+[PLAN]       "issue_title
+[PLAN] ": "Implement LinkedIn OAuth callback handler"
+[PLAN]     },
+[PLAN]     {
+[PLAN]       "id": 7,
+[PLAN]       "name": "Manual form submission",
+[PLAN]       "description": "Create functions/submit.ts as onRequestPost. It: (1) parses form data from the request (FormData), (2) extracts token, name, email, company (optional), linkedin_url (optional), (3) validates name and email are present — returns 400 with error HTML if not, (4) looks up card via getCard (404 if invalid token), (5) reads cf-country, cf-city from request.cf, user-agent from 
+[PLAN] headers, (6) calls insertContact with source='manual', (7) calls notifyContact and sendThankYou (fire-and-forget), (8) redirects 302 to /thanks?contact_id={id}.",
+[PLAN]       "files": [
+[PLAN]         "networking-card/functions/submit.ts"
+[PLAN]       ],
+[PLAN]       "action": "create",
+[PLAN]       "depends_on": [3],
+[PLAN]       "result_contract": {
+[PLAN]         "files_required": [
+[PLAN]           "networking-card/functions/submit.ts"
+[PLAN]         ],
+[PLAN]         "exports": [
+[PLAN]           {"file": "networking-card/functions/submit.ts", "symbols": ["onRequestPost"]}
+[PLAN]      ],
+[PLAN]         "tests_expected": []
+[PLAN]       },
+[PLAN]       "issue_title": "Implement POST /submit manual form handler"
+[PLAN]     },
+[PLAN]     {
+[PLAN]       "id": 8,
+[PLAN]       "name": "Thank-you page",
+[PLAN]       "description": "Create functions/thanks.ts as onRequestGet. It: (1) reads contact_id from URL search params, (2) returns HTML page styled with the bee theme: 'Thanks for connecting!' heading, a short message ('David will be in touch.'), a download vCard button linking to /vcard/{contact_id}, and a LinkedIn profile link (placeholder 
+[PLAN] href). Page is mobile-first with amber accent, centered layout, rounded-xl cards.",
+[PLAN]       "files": [
+[PLAN]         "networking-card/functions/thanks.ts"
+[PLAN]       ],
+[PLAN]       "action": "create",
+[PLAN]       "depends_on": [3],
+[PLAN]       "result_contract": {
+[PLAN]         "files_required": [
+[PLAN]           "networking-card/functions/thanks.ts"
+[PLAN]         ],
+[PLAN]         "exports": [
+[PLAN]           {"file": "networking-card/functions/thanks.ts", "symbols": ["onRequestGet"]}
+[PLAN]         ],
+[PLAN]         "tests_expected": []
+[PLAN]       },
+[PLAN]       "issue_title": "Implement GE
+[PLAN] T /thanks page with vCard download link"
+[PLAN]     },
+[PLAN]     {
+[PLAN]       "id": 9,
+[PLAN]       "name": "vCard download route",
+[PLAN]       "description": "Create functions/vcard/[contact_id].ts as onRequestGet. It: (1) extracts contact_id from params, (2) queries contacts table for that id (returns 404 if not found), (3) calls generateVcf(), (4) returns Response with Content-Type text/vcard, Content-Disposition attachment filename=david-klan.vcf, and the vCard string as body.",
+[PLAN]       "files": [
+[PLAN]         "networking-card/functions/vca
+[PLAN] rd/[contact_id].ts"
+[PLAN]       ],
+[PLAN]       "action": "create",
+[PLAN]       "depends_on": [3],
+[PLAN]       "result_contract": {
+[PLAN]         "files_required": [
+[PLAN]           "networking-card/functions/vcard/[contact_id].ts"
+[PLAN]         ],
+[PLAN]         "exports": [
+[PLAN]           {"file": "networking-card/functions/vcard/[contact_id].ts", "symbols": ["onRequestGet"]}
+[PLAN]         ],
+[PLAN]         "tests_expected": []
+[PLAN]       },
+[PLAN]       "issue_title": "Implement GET /vcard/:contact_id vCard download route"
+[PLAN]     },
+[PLAN]     {
+[PLAN]       "id": 10,
+[PLAN]       "name": "Seed script",
+[PLAN]     "description": "Create scripts/seed-cards.ts — a standalone Node.js script (run via npx wrangler d1 execute or tsx) that: (1) accepts --count N argument (default 10), (2) generates N random 8-character alphanumeric tokens (using crypto.randomUUID truncated, or nanoid-style), (3) labels each token 'Card {i}', (4) inserts into the cards table via wrangler d1 execute command (spawning child process), (5) outputs CSV to stdout: token,url,label where url = https://dazbeez.com/hi/{token}. Include a comment 
+[PLAN] at the top explaining usage: npx tsx scripts/seed-cards.ts --count 20.",
+[PLAN]       "files": [
+[PLAN]         "networking-card/scripts/seed-cards.ts"
+[PLAN]       ],
+[PLAN]       "action": "create",
+[PLAN]       "depends_on": [1, 2],
+[PLAN]       "result_contract": {
+[PLAN]         "files_required": [
+[PLAN]           "networking-card/scripts/seed-cards.ts"
+[PLAN]         ],
+[PLAN]         "exports": [],
+[PLAN]         "tests_expected": []
+[PLAN]       },
+[PLAN]       "issue_title": "Add seed-cards script for generating NFC/QR token batches"
+[PLAN]     },
+[PLAN]     {
+[PLAN]       "id": 11,
+[PLAN]       "name": "README",
+[PLAN]       "description": "Create networking-card/README.md with these sections: Overview (networking card landing system on Cloudflare stack), Prerequisites (Node.js 22+, wrangler CLI, Cloudflare account with D1 access), Setup (clone, npm install, cp .dev.vars.example .dev-vars, wrangler d1 create dazbeez-networking, wrangler d1 migrations apply dazbeez-networking), Secrets (list all 6: GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, LINKEDIN_CLIENT_ID, LINKEDIN_CLIENT_SECRET, RESEND_API_KEY, DISCORD_WEBHOOK_URL — ea
+[PLAN] ch with one-line description and how to set via wrangler secret put), OAuth Setup (step-by-step for Google Cloud Console: create OAuth 2.0 client, set redirect URI to {BASE_URL}/auth/google/callback, enable People API; and LinkedIn Developer Portal: create app, add Sign In with LinkedIn product, set redirect URI to {BASE_URL}/auth/linkedin/callback), DNS for Resend (add SPF, DKIM, MX records per Resend docs for dazbeez.com domain verification), Deploying (wrangler pages deploy public --project-name dazbeez-
+[PLAN] networking or wrangler deploy for Workers), Seeding Cards (npx tsx scripts/seed-cards.ts --count 20, pipe output to cards.csv for QR/NFC production), Local Development (wrangler pages dev public --d1 DB --binding BASE_URL=http://localhost:8788), Architecture (brief diagram: NFC/QR → /hi/:token → OAuth or form → contacts table → Discord + email → /thanks → vCard download).",
+[PLAN]       "files": [
+[PLAN]         "networking-card/README.md"
+[PLAN]       ],
+[PLAN]       "action": "create",
+[PLAN]       "depends_on": [1, 2, 3, 4, 5,
+[PLAN]  6, 7, 8, 9, 10],
+[PLAN]       "result_contract": {
+[PLAN]         "files_required": [
+[PLAN]           "networking-card/README.md"
+[PLAN]         ],
+[PLAN]         "exports": [],
+[PLAN]         "tests_expected": []
+[PLAN]       },
+[PLAN]       "issue_title": "Write comprehensive README for networking card system"
+[PLAN]     }
+[PLAN]   ]
+[PLAN] }
+[PLAN] ```
+[EXECUTE]     __( O)>  ● new session · claude-code sonnet
+[EXECUTE]    \____)    20260410_1 · /Users/dklan/projects/work/dazbeez
+[EXECUTE]      L L     goose is ready
+[EXECUTE] ## Understanding Summary
+[EXECUTE] **Problem**: Build a standalone networking card landing system — NFC/QR → landing page → sign-in (Google/LinkedIn/manual) → Discord ping + acknowledgment email + vCard thank-you page. This runs on Cloudflare Pages + Workers + D1, separate from the existing Next.js site.
+[EXECUTE] **Affected files/modules**: This is a new sub-project within the dazbeez repo (likely in a `networking-card/` or `hi/` directory). It won't touch the existing Next.js app. It needs: wrangler.toml, D1 migration, route handlers, static pages, seed script, README.
+[EXECUTE] **Contract risk**: The task is very specific — token-based routes, OAuth flows, D1 schema, Discord + Resend integrations. No architectural ambiguity. I'll scaffold exactly what's specified.
+[EXECUTE] **Planned verification**: TypeScript compiles, wrangler config is valid, migration SQL is sound, route handlers match the spec.
+[EXECUTE] Let me inspect the repo first, then build in dependency order.Good. Now I'll write all files in batches. Starting with infrastructure and shared libraries.Infrastructure files done. Now the shared libraries:All shared libraries written. Now the route handlers:All route handlers written. Now the seed script and README:All files written. Let me verify the file structure and run a quick TypeScript check:The seed script uses Node.js APIs that conflict with Workers types. Let me fix the tsconfig to scope properly:TypeScript passes clean for the functions. Let me also verify the seed script runs:Let me clean up the test artifacts and verify the SQL:Everything checks out. Let me also verify the file structure is complete:All done. Here's the summary:
+[EXECUTE] ---
+[EXECUTE] ## Summary
+[EXECUTE] ### Files created (18 new files in `networking-card/`)
+[EXECUTE] **Infrastructure:**
+[EXECUTE] - `package.json` — scripts for dev, deploy, migrate, seed; 4 dev dependencies
+[EXECUTE] - `wrangler.toml` — Cloudflare Pages config with D1 binding
+[EXECUTE] - `tsconfig.json` — strict TypeScript for the functions directory
+[EXECUTE] - `.gitignore` — ignores node_modules, .wrangler, generated seed files
+[EXECUTE] - `public/_headers` — security headers (nosniff, deny frame, referrer policy)
+[EXECUTE] **Database:**
+[EXECUTE] - `migrations/0001_init.sql` — `cards`, `contacts`, `taps` tables with indexes
+[EXECUTE] **Shared libraries** (`functions/_lib/`):
+[EXECUTE] - `env.ts` — shared `Env` interface with all secret bindings
+[EXECUTE] - `db.ts` — `logTap()`, `getCard()`, `insertContact()`
+[EXECUTE] - `discord.ts` — webhook notification with embed (amber color)
+[EXECUTE] - `email.ts` — Resend "Great meeting you" plain-text email
+[EXECUTE] - `oauth.ts` — Google & LinkedIn OAuth URL builders + code exchange
+[EXECUTE] - `vcard.ts` — static vCard 3.0 generator
+[EXECUTE] - `html.ts` — shared page layout with bee-theme CSS (amber + charcoal)
+[EXECUTE] **Routes (6 endpoints):**
+[EXECUTE] - `functions/hi/[token].ts` — GET landing page, logs tap, shows 3 CTAs
+[EXECUTE] - `functions/auth/google/callback.ts` — Google OAuth callback
+[EXECUTE] - `functions/auth/linkedin/callback.ts` — LinkedIn OAuth callback
+[EXECUTE] - `functions/submit.ts` — POST manual form handler
+[EXECUTE] - `functions/thanks.ts` — GET thank-you with vCard download + LinkedIn link
+[EXECUTE] - `functions/vcard/[contact_id].ts` — GET serves `david-klan.vcf`
+[EXECUTE] **Tooling:**
+[EXECUTE] - `scripts/seed-cards.ts` — generates N tokens, outputs `seed.sql` + `cards.csv`
+[EXECUTE] - `README.md` — full setup guide: D1, OAuth apps, Resend DNS, secrets, deploy
+[EXECUTE] ### Checks run
+[EXECUTE] - `npx tsc --noEmit` — **passes clean** (0 errors)
+[EXECUTE] - `npx tsx scripts/seed-cards.ts 5` — **generates valid SQL + CSV**
+[EXECUTE] - Migration SQL — verified schema matches spec exactly
+[EXECUTE] ### Remaining steps (user actions)
+[EXECUTE] 1. `npx wrangler d1 create dazbeez-networking` → paste `database_id` into `wrangler.toml`
+[EXECUTE] 2. `npm run db:migrate:local` to create tables
+[EXECUTE] 3. Set 6 secrets via `wrangler pages secret put`
+[EXECUTE] 4. Configure Google + LinkedIn OAuth apps with redirect URIs
+[EXECUTE] 5. Add DNS records for Resend domain verification
+[EXECUTE] 6. `npm run seed -- 20` → apply SQL → use CSV for QR/NFC
+[EXECUTE] 7. `npm run dev` to test locally, `npm run deploy` to ship
