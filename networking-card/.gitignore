@@ -1,0 +1,4 @@
+node_modules/
+.wrangler/
+seed.sql
+cards.csv

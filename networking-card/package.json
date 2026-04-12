@@ -1,0 +1,19 @@
+{
+  "name": "dazbeez-networking-card",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler pages dev public --d1 DB=dazbeez-networking --port 8788",
+    "deploy": "wrangler pages deploy public --project-name dazbeez-networking-card",
+    "db:migrate:local": "wrangler d1 execute dazbeez-networking --local --file=migrations/0001_init.sql",
+    "db:migrate:remote": "wrangler d1 execute dazbeez-networking --remote --file=migrations/0001_init.sql",
+    "seed": "npx tsx scripts/seed-cards.ts"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4",
+    "@types/node": "^25.6.0",
+    "tsx": "^4",
+    "typescript": "^5",
+    "wrangler": "^3"
+  }
+}

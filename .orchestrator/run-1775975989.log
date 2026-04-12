@@ -1,0 +1,166 @@
+[PLAN] ```json_plan
+[PLAN] {
+[PLAN]   "summary": "Create a front-end-only internal `/admin` dashboard route for Dazbeez using typed seed data, reusable presentation components, and explicit non-indexing safeguards.",
+[PLAN]   "milestone": "Admin Dashboard Prototype",
+[PLAN]   "steps": [
+[PLAN]     {
+[PLAN]       "id": 1,
+[PLAN]       "name": "Create admin dashboard seed data",
+[PLAN]       "description": "Create `lib/admin-dashboard-data.ts` to centralize all dashboard content and types. Export typed seed data for KPI summary cards, service-interest breakdown, lead pipeline rows, recent activity items, and pending action items. Keep this file framework-agnostic so the page layer only consumes structured data and does not hardcode business content inline.",
+[PLAN]       "files": [
+[PLAN]         "lib/admin-dashboard-data.ts"
+[PLAN]       ],
+[PLAN]       "action": "create",
+[PLAN]       "depends_on": [],
+[PLAN]       "result_contract": {
+[PLAN]         "files_required": [
+[PLAN]           "lib/admin-dashboard-data.ts"
+[PLAN]         ],
+[PLAN]         "exports": [
+[PLAN]           {
+[PLAN]             "file": "lib/admin-dashboard-data.ts",
+[PLAN]             "symbols": [
+[PLAN]               "dashboardKpis",
+[PLAN]               "serviceInterestBreakdown",
+[PLAN]               "leadPipeline",
+[PLAN]               "recentActivity",
+[PLAN]               "pendingActions"
+[PLAN]             ]
+[PLAN]           }
+[PLAN]         ],
+[PLAN]         "tests_expected": []
+[PLAN]       },
+[PLAN]       "issue_title": "Create typed seed data for the admin dashboard"
+[PLAN]     },
+[PLAN]     {
+[PLAN]       "id": 2,
+[PLAN]       "name": "Build reusable admin dashboard UI",
+[PLAN]       "description": "Create `components/admin/admin-dashboard.tsx` as a reusable server component that accepts the seeded datasets as props and renders the full dashboard presentation. The component must include: a page header with title and last-updated text, a responsive KPI card grid, a service-interest visualization using Tailwind bars/progress rows, a lead pipeline table with status badges, a recent activity feed, and a pending actions panel. Keep styling consistent with the bee theme and ensure the layout stacks cleanly on mobile and becomes a multi-column dashboard on desktop.",
+[PLAN]       "files": [
+[PLAN]         "components/admin/admin-dashboard.tsx"
+[PLAN]       ],
+[PLAN]       "action": "create",
+[PLAN]       "depends_on": [
+[PLAN]         1
+[PLAN]       ],
+[PLAN]       "result_contract": {
+[PLAN]         "files_required": [
+[PLAN]           "components/admin/admin-dashboard.tsx"
+[PLAN]         ],
+[PLAN]         "exports": [
+[PLAN]           {
+[PLAN]             "file": "components/admin/admin-dashboard.tsx",
+[PLAN]             "symbols": [
+[PLAN]               "AdminDashboard"
+[PLAN]             ]
+[PLAN]           }
+[PLAN]         ],
+[PLAN]         "tests_expected": []
+[PLAN]       },
+[PLAN]       "issue_title": "Build reusable admin dashboard presentation components"
+[PLAN]     },
+[PLAN]     {
+[PLAN]       "id": 3,
+[PLAN]       "name": "Add internal admin dashboard route",
+[PLAN]       "description": "Create `app/admin/page.tsx` to expose the new dashboard at `/admin` as an App Router page. Export page-level `metadata` with an admin-specific title and description and set page robots to `index: false, follow: false`. Import the seeded datasets from `lib/admin-dashboard-data.ts` and render the `AdminDashboard` component with those props. Do not add this route to the public site navigation or footer.",
+[PLAN]       "files": [
+[PLAN]         "app/admin/page.tsx"
+[PLAN]       ],
+[PLAN]       "action": "create",
+[PLAN]       "depends_on": [
+[PLAN]         1,
+[PLAN]         2
+[PLAN]       ],
+[PLAN]       "result_contract": {
+[PLAN]         "files_required": [
+[PLAN]           "app/admin/page.tsx"
+[PLAN]         ],
+[PLAN]         "exports": [
+[PLAN]           {
+[PLAN]             "file": "app/admin/page.tsx",
+[PLAN]             "symbols": [
+[PLAN]               "metadata",
+[PLAN]               "default"
+[PLAN]             ]
+[PLAN]           }
+[PLAN]         ],
+[PLAN]         "tests_expected": []
+[PLAN]       },
+[PLAN]       "issue_title": "Add the internal /admin dashboard route"
+[PLAN]     },
+[PLAN]     {
+[PLAN]       "id": 4,
+[PLAN]       "name": "Block dashboard indexing in robots rules",
+[PLAN]       "description": "Modify `app/robots.ts` so the generated robots policy explicitly disallows `/admin/` in addition to the existing `/private/` rule, while preserving the current sitemap URL and overall metadata route structure.",
+[PLAN]       "files": [
+[PLAN]         "app/robots.ts"
+[PLAN]       ],
+[PLAN]       "action": "modify",
+[PLAN]       "depends_on": [
+[PLAN]         3
+[PLAN]       ],
+[PLAN]       "result_contract": {
+[PLAN]         "files_required": [
+[PLAN]           "app/robots.ts"
+[PLAN]         ],
+[PLAN]         "exports": [
+[PLAN]           {
+[PLAN]             "file": "app/robots.ts",
+[PLAN]             "symbols": [
+[PLAN]               "default"
+[PLAN]             ]
+[PLAN]           }
+[PLAN]         ],
+[PLAN]         "tests_expected": []
+[PLAN]       },
+[PLAN]       "issue_title": "Prevent admin dashboard indexing via robots metadata"
+[PLAN]     }
+[PLAN]   ]
+[PLAN] }
+[PLAN] ```
+[EXECUTE]     __( O)>  ● new session · claude-code sonnet
+[EXECUTE]    \____)    20260412_1 · /Users/dklan/projects/work/dazbeez
+[EXECUTE]      L L     goose is ready
+[EXECUTE] The file `prompts/admin-dashboard.md` does not exist in this repository. There's no `prompts/` directory at all.
+[EXECUTE] **Summary:** No prompt file found — nothing to run. Could you provide the correct path or paste the prompt contents directly?
+[REPAIR]     __( O)>  ● new session · claude-code sonnet
+[REPAIR]    \____)    20260412_2 · /Users/dklan/projects/work/dazbeez
+[REPAIR]      L L     goose is ready
+[REPAIR] ## Recovery Summary
+[REPAIR] **Problem**: Previous execution of `prompts/admin-dashboard.md` failed — no file changes were produced.
+[REPAIR] **Approach**: Read the prompt, inspect the smallest target file set, implement one concrete improvement, verify.
+[REPAIR] Let me start by reading the prompt file and understanding the current codebase state.Now I understand the situation. The plan was produced but the executor failed because it tried to find a missing prompt file. The actual plan from the log is clear — I need to implement 4 steps. Let me inspect the existing files for compatibility.Good. I have full context now. The plan has 4 steps. Let me implement them all.
+[REPAIR] **Step 1**: Create `lib/admin-dashboard-data.ts` — typed seed data.
+[REPAIR] **Step 2**: Create `components/admin/admin-dashboard.tsx` — reusable dashboard component.
+[REPAIR] **Step 3**: Create `app/admin/page.tsx` — the route page.
+[REPAIR] **Step 4**: Modify `app/robots.ts` — disallow `/admin/`.Now step 4 — modify `robots.ts` to disallow `/admin/`:Now verify the changes:The TS errors are pre-existing in `networking-card/` (a Cloudflare Workers subproject, not part of Dazbeez). Let me verify the new files specifically compile clean:All new files pass type-checking. Let me verify the file contents are correct:Let me do a final quick verification of the robots.ts change:---
+[REPAIR] ## Repair Complete
+[REPAIR] ### Summary
+[REPAIR] The previous execution failed because the Goose executor tried to read a non-existent `prompts/admin-dashboard.md` file. The actual plan was captured in the orchestrator log. I implemented all 4 planned steps directly.
+[REPAIR] ### Files Changed
+[REPAIR] | File | Action | Description |
+[REPAIR] |------|--------|-------------|
+[REPAIR] | `lib/admin-dashboard-data.ts` | **created** | Typed seed data with 5 exports: `dashboardKpis`, `serviceInterestBreakdown`, `leadPipeline`, `recentActivity`, `pendingActions` |
+[REPAIR] | `components/admin/admin-dashboard.tsx` | **created** | Reusable server component with KPI card grid, service interest bars, lead pipeline table, activity feed, and pending actions panel |
+[REPAIR] | `app/admin/page.tsx` | **created** | `/admin` route with `metadata` export (robots `noindex, nofollow`), imports seed data, renders `AdminDashboard` |
+[REPAIR] | `app/robots.ts` | **modified** | Added `/admin/` to the `disallow` array alongside existing `/private/` |
+[REPAIR] ### Checks Run
+[REPAIR] - TypeScript type-check (`tsc --noEmit`) — no errors in new files (pre-existing errors are in unrelated `networking-card/` Cloudflare Workers code)
+[REPAIR] - Verified `robots.ts` `disallow` is now a string array
+[REPAIR] - Confirmed all 4 planned result-contract symbols are exported
+[REPAIR] ### Remaining Gaps
+[REPAIR] - None. All planned steps implemented. The `/admin` route is not linked from site navigation or footer as specified.
+[REVIEW] **Findings**
+[REVIEW] 1. Fixed a render-contract leak in [components/admin/admin-dashboard.tsx](/Users/dklan/projects/work/dazbeez/components/admin/admin-dashboard.tsx:68). The dashboard component was reading `new Date()` itself, which made the UI depend on ambient render time instead of only on its inputs. I moved that to the data/page boundary via [lib/admin-dashboard-data.ts](/Users/dklan/projects/work/dazbeez/lib/admin-dashboard-data.ts:47) and [app/admin/page.tsx](/Users/dklan/projects/work/dazbeez/app/admin/page.tsx:21), so the component is now purely prop-driven.
+[REVIEW] 2. Fixed a visual/data contract mismatch in [lib/admin-dashboard-data.ts](/Users/dklan/projects/work/dazbeez/lib/admin-dashboard-data.ts:56). `ServiceInterest.percent` was hardcoded independently from `count`, so the bar widths could disagree with the numeric values. It now derives `percent` from the counts, preserving the existing `ServiceInterest` interface while keeping render output internally consistent.
+[REVIEW] 3. Tightened enum-bound styling in [components/admin/admin-dashboard.tsx](/Users/dklan/projects/work/dazbeez/components/admin/admin-dashboard.tsx:42). `statusStyles`, `StatusBadge`, and `priorityDot` now use the exact exported status/priority unions, so future contract drift is caught by TypeScript instead of silently falling back at runtime.
+[REVIEW] **What I Checked**
+[REVIEW] I reviewed the changed dashboard route, its presentation component, the seed-data module, and the related crawler rule in [app/robots.ts](/Users/dklan/projects/work/dazbeez/app/robots.ts:3). I also checked current consumers of the new dashboard exports and validated the touched files with `npx eslint app/admin/page.tsx components/admin/admin-dashboard.tsx lib/admin-dashboard-data.ts app/robots.ts`.
+[REVIEW] **Changed Files**
+[REVIEW] - [app/admin/page.tsx](/Users/dklan/projects/work/dazbeez/app/admin/page.tsx:1)
+[REVIEW] - [components/admin/admin-dashboard.tsx](/Users/dklan/projects/work/dazbeez/components/admin/admin-dashboard.tsx:1)
+[REVIEW] - [lib/admin-dashboard-data.ts](/Users/dklan/projects/work/dazbeez/lib/admin-dashboard-data.ts:1)
+[REVIEW] **Remaining Risks**
+[REVIEW] - `/admin` is now disallowed in [app/robots.ts](/Users/dklan/projects/work/dazbeez/app/robots.ts:3) and the page is `noindex`, but it is still a public route. If “internal” means access-controlled, that contract is still unenforced.
+[REVIEW] - Repo-wide `tsc` still fails outside this diff in `networking-card/functions/*` because Cloudflare types are missing there.
+[REVIEW] - `npm run build` is still blocked in this environment by `next/font/google` fetching `Inter` over the network.
