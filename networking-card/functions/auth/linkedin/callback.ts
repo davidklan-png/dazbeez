@@ -1,32 +1,18 @@
 import { type Env } from '../../_lib/env';
 import { getCard, insertContact } from '../../_lib/db';
-import { exchangeLinkedInCode, decodeOAuthState } from '../../_lib/oauth';
+import { exchangeLinkedInCode } from '../../_lib/oauth';
 import { sendDiscordNotification } from '../../_lib/discord';
 import { sendAcknowledgmentEmail } from '../../_lib/email';
 
 export const onRequestGet: PagesFunction<Env> = async (context) => {
   const url = new URL(context.request.url);
   const code = url.searchParams.get('code');
-  const rawState = url.searchParams.get('state');
+  const token = url.searchParams.get('state');
 
-  if (!code || !rawState) {
+  if (!code || !token) {
     return new Response('Missing code or state', { status: 400 });
   }
 
-  const stateData = decodeOAuthState(rawState);
-  if (!stateData) {
-    return new Response('Invalid OAuth state', { status: 400 });
-  }
-
-  // Verify CSRF nonce matches the cookie set when the hi/ page was served.
-  const cookieHeader = context.request.headers.get('Cookie') ?? '';
-  const nonceCookie = cookieHeader.split(';').map((c) => c.trim()).find((c) => c.startsWith('__Host-oauth_state='));
-  const cookieNonce = nonceCookie?.slice('__Host-oauth_state='.length);
-  if (!cookieNonce || cookieNonce !== stateData.nonce) {
-    return new Response('OAuth state mismatch', { status: 400 });
-  }
-
-  const { cardToken: token } = stateData;
   const card = await getCard(context.env.DB, token);
   if (!card) {
     return new Response('Invalid card token', { status: 400 });

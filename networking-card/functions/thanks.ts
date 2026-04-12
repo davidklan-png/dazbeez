@@ -2,7 +2,7 @@ import { page } from './_lib/html';
 
 export const onRequestGet: PagesFunction = async (context) => {
   const url = new URL(context.request.url);
-  const contactId = encodeURIComponent(url.searchParams.get('contact_id') || '0');
+  const contactId = url.searchParams.get('contact_id') || '0';
 
   const html = page(
     'Thanks!',
