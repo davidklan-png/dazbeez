@@ -1,3 +1,33 @@
+// JWT segments use base64url (- and _ instead of + and /). atob() requires
+// standard base64, so convert and restore any stripped padding first.
+function decodeBase64Url(s: string): string {
+  const b64 = s.replace(/-/g, '+').replace(/_/g, '/');
+  const padded = b64.padEnd(b64.length + ((4 - (b64.length % 4)) % 4), '=');
+  return atob(padded);
+}
+
+// OAuth state helpers — encode a CSRF nonce + card token together so the
+// callback can verify both without needing server-side session storage.
+export function encodeOAuthState(nonce: string, cardToken: string): string {
+  return btoa(`${nonce}:${cardToken}`);
+}
+
+export function decodeOAuthState(
+  state: string,
+): { nonce: string; cardToken: string } | null {
+  try {
+    const decoded = atob(state);
+    const colonIdx = decoded.indexOf(':');
+    if (colonIdx === -1) return null;
+    return {
+      nonce: decoded.slice(0, colonIdx),
+      cardToken: decoded.slice(colonIdx + 1),
+    };
+  } catch {
+    return null;
+  }
+}
+
 export interface OAuthConfig {
   clientId: string;
   clientSecret: string;
@@ -45,8 +75,8 @@ export async function exchangeGoogleCode(
 
   const tokens = (await tokenRes.json()) as { id_token: string };
 
-  // Decode id_token payload (base64)
-  const payload = JSON.parse(atob(tokens.id_token.split('.')[1]));
+  // Decode id_token payload (base64url → base64 → JSON)
+  const payload = JSON.parse(decodeBase64Url(tokens.id_token.split('.')[1]));
   return { name: payload.name as string, email: payload.email as string };
 }
 

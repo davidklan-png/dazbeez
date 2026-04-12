@@ -1,7 +1,7 @@
 import { type Env } from '../_lib/env';
 import { logTap, getCard } from '../_lib/db';
 import { page } from '../_lib/html';
-import { getGoogleAuthUrl, getLinkedInAuthUrl } from '../_lib/oauth';
+import { getGoogleAuthUrl, getLinkedInAuthUrl, encodeOAuthState } from '../_lib/oauth';
 
 export const onRequestGet: PagesFunction<Env> = async (context) => {
   const raw = context.params.token;
@@ -26,15 +26,22 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
   );
 
   const origin = new URL(context.request.url).origin;
+
+  // Generate a random nonce for CSRF protection. The nonce is bound to this
+  // page load via a short-lived cookie; the callback verifies it matches.
+  const nonceBytes = crypto.getRandomValues(new Uint8Array(16));
+  const nonce = Array.from(nonceBytes, (b) => b.toString(16).padStart(2, '0')).join('');
+  const state = encodeOAuthState(nonce, token);
+
   const googleUrl = getGoogleAuthUrl(
     context.env.GOOGLE_CLIENT_ID,
     `${origin}/auth/google/callback`,
-    token,
+    state,
   );
   const linkedinUrl = getLinkedInAuthUrl(
     context.env.LINKEDIN_CLIENT_ID,
     `${origin}/auth/linkedin/callback`,
-    token,
+    state,
   );
 
   const html = page(
@@ -73,6 +80,9 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
   );
 
   return new Response(html, {
-    headers: { 'Content-Type': 'text/html; charset=utf-8' },
+    headers: {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Set-Cookie': `__Host-oauth_state=${nonce}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=300`,
+    },
   });
 };
