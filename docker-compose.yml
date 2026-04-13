@@ -27,8 +27,8 @@ services:
   # Nginx reverse proxy (optional, for production)
   nginx:
     image: nginx:alpine
-    ports:
-      - "80:80"
+    expose:
+      - "80"
     volumes:
       - ./docker/nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
@@ -42,12 +42,13 @@ services:
   # Cloudflare Tunnel service
   cloudflared:
     image: cloudflare/cloudflared:latest
-    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN:?CLOUDFLARE_TUNNEL_TOKEN is required for the production profile}
+    command: tunnel --no-autoupdate run --credentials-file /etc/cloudflared/creds.json e2d0eab2-b36f-4496-86a7-363d095fb78c
+    volumes:
+      - ${HOME}/.cloudflared/e2d0eab2-b36f-4496-86a7-363d095fb78c.json:/etc/cloudflared/creds.json:ro
     restart: unless-stopped
+    network_mode: host
     depends_on:
-      - nginx
-    networks:
-      - dazbeez-network
+      - nextjs
     profiles:
       - production
 
