@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
+import Image from "next/image";
 import { SiteNavigation } from "@/components/site-navigation";
 import "./globals.css";
 
@@ -45,11 +46,14 @@ function Footer() {
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="grid md:grid-cols-3 gap-8">
           <div>
-            <div className="flex items-center gap-2 mb-4">
-              <div className="w-8 h-8 bg-gradient-to-br from-amber-400 to-amber-600 rounded-full flex items-center justify-center">
-                <span className="text-white font-bold text-sm">D</span>
-              </div>
-              <span className="font-bold text-xl">Dazbeez</span>
+            <div className="mb-4">
+              <Image
+                src="/logo.png"
+                alt="Dazbeez"
+                width={140}
+                height={93}
+                className="h-20 w-auto brightness-0 invert"
+              />
             </div>
             <p className="text-gray-400">AI, Automation & Data Solutions for modern businesses.</p>
           </div>
@@ -74,8 +78,12 @@ function Footer() {
           </div>
         </div>
 
-        <div className="border-t border-gray-800 mt-8 pt-8 text-center text-gray-500">
-          <p>&copy; {new Date().getFullYear()} Dazbeez. All rights reserved.</p>
+        <div className="border-t border-gray-800 mt-8 pt-8 flex flex-col sm:flex-row items-center justify-between gap-3 text-gray-500 text-sm">
+          <p>&copy; {new Date().getFullYear()} Dazbeez K.K. All rights reserved.</p>
+          <div className="flex gap-6">
+            <a href="/privacy-policy" className="hover:text-amber-400 transition-colors">Privacy Policy</a>
+            <a href="/terms-of-service" className="hover:text-amber-400 transition-colors">Terms of Service</a>
+          </div>
         </div>
       </div>
     </footer>

@@ -3,31 +3,31 @@ import Link from "next/link";
 const services = [
   {
     title: "AI Integration",
-    description: "Leverage AI to automate decisions, enhance customer experiences, and unlock new insights.",
+    description: "Deploy AI that works — health assistants, document intelligence, and classification systems built for production with privacy-first design.",
     icon: "🤖",
     slug: "ai"
   },
   {
     title: "Automation",
-    description: "Streamline workflows and eliminate repetitive tasks with intelligent automation solutions.",
+    description: "Eliminate repetitive work with pipelines, agents, and self-hosted tools that replace expensive SaaS and run reliably at scale.",
     icon: "⚙️",
     slug: "automation"
   },
   {
     title: "Data Management",
-    description: "Transform raw data into actionable intelligence with robust data architecture.",
+    description: "Build data systems that meet Japanese regulatory requirements — NTA compliance, 7-year retention, audit logs, and MoneyForward integration.",
     icon: "📊",
     slug: "data"
   },
   {
     title: "Governance",
-    description: "Ensure compliance, security, and quality with comprehensive data governance frameworks.",
+    description: "Design governance frameworks that satisfy Japanese law — APPI compliance, retention policies, identity controls, and security hardening built into your stack.",
     icon: "🛡️",
     slug: "governance"
   },
   {
     title: "Project Management",
-    description: "Expert guidance for your digital transformation initiatives from concept to delivery.",
+    description: "Ship technical projects cleanly — test-driven, privacy-first, and production-verified, with full handoff documentation and real engineering oversight.",
     icon: "📋",
     slug: "pm"
   }

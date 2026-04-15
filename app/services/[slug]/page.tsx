@@ -10,71 +10,71 @@ const servicesData: Record<string, {
 }> = {
   ai: {
     title: "AI Integration",
-    description: "Harness the power of artificial intelligence to transform your business operations.",
-    fullDescription: "From machine learning models to generative AI, we help you identify opportunities and implement AI solutions that deliver real business value.",
+    description: "Build intelligent systems that learn from your data — from patient health assistants to Japanese-language document OCR.",
+    fullDescription: "We design and deploy AI-powered applications tailored to your domain, integrating computer vision, large language models, and classification pipelines into production-grade workflows. Our projects include a patient health assistant and a Google Cloud Vision OCR system for Japanese receipt classification — built with a focus on privacy, accuracy, and operational reliability.",
     useCases: [
-      "Predictive analytics for business forecasting",
-      "Natural language processing for customer service",
-      "Computer vision for quality control",
-      "Generative AI for content creation",
-      "Recommendation engines",
-      "Sentiment analysis"
+      "Patient health assistant with AI-guided symptom tracking",
+      "Japanese receipt OCR using Google Cloud Vision API",
+      "Multimodal document intelligence combining vision and language models",
+      "Privacy-first AI design with zero full-document logging",
+      "LLM integration for conversational workflows and decision support",
+      "Automated compliance checks on AI-extracted data fields"
     ],
     icon: "🤖"
   },
   automation: {
     title: "Automation",
-    description: "Eliminate repetitive tasks and free your team to focus on what matters.",
-    fullDescription: "We design and implement automation solutions that reduce errors, save time, and lower operational costs across your organization.",
+    description: "Replace manual workflows with reliable, self-hosted pipelines — from ETL processing to AI agent orchestration.",
+    fullDescription: "We build automation systems that eliminate repetitive data tasks and reduce SaaS dependency. Our work includes a financial ETL pipeline for Japanese expense categorization with 91% test coverage, an AI agent framework built on OpenClaw, and a self-hosted bounty tracker that quantifies cost savings from replacing paid subscriptions with open-source alternatives.",
     useCases: [
-      "Workflow automation and process optimization",
-      "RPA (Robotic Process Automation)",
-      "API integrations and data sync",
-      "Scheduled task automation",
-      "Email automation and routing",
-      "Document processing automation"
+      "ETL pipeline for Japanese credit card expense categorization with Shift-JIS/UTF-8 support",
+      "SaaS cost tracker measuring open-source replacement savings (Bountymon)",
+      "AI agent orchestration with the OpenClaw framework",
+      "Automated attendee estimation from financial transaction amounts",
+      "GitHub Actions CI/CD with 91% test coverage enforcement",
+      "Self-hosted Cloudflare Pages deployment with zero recurring infrastructure costs"
     ],
     icon: "⚙️"
   },
   data: {
     title: "Data Management",
-    description: "Turn your data into a strategic asset with modern data architecture.",
-    fullDescription: "We build data pipelines, warehouses, and analytics platforms that enable data-driven decision making at every level of your organization.",
+    description: "Structure, store, and audit your business data with full Japanese regulatory compliance and long-term retention.",
+    fullDescription: "We build data management platforms that meet Japanese statutory requirements, including NTA invoice registration number validation, 7-year retention policies, and MoneyForward-compatible exports. Our receipt management system for Japanese cooperatives features Google Cloud Vision OCR, multi-user audit logging, and mobile-first capture — deployed on a FastAPI + SQLite + React stack.",
     useCases: [
-      "Data warehouse design and implementation",
-      "ETL pipeline development",
-      "Business intelligence dashboards",
-      "Data migration and cleanup",
-      "Real-time data streaming",
-      "Data lake architecture"
+      "NTA invoice registration number validation for Japanese tax compliance",
+      "Seven-year data retention with automated compliant archiving",
+      "MoneyForward-compatible monthly export for cooperative accounting",
+      "Google Cloud Vision OCR for Japanese-language receipt capture on mobile",
+      "Multi-user cooperative audit log management with tamper-evident records",
+      "FastAPI + SQLite backend with React/Vite frontend for local-network deployment"
     ],
     icon: "📊"
   },
   governance: {
     title: "Governance",
-    description: "Ensure your data is secure, compliant, and trustworthy.",
-    fullDescription: "Establish governance frameworks that protect your organization while enabling innovation and maintaining trust with your customers.",
+    description: "Establish data policies, compliance frameworks, and privacy controls that protect your business under Japanese law.",
+    fullDescription: "We design governance frameworks aligned to Japan's Act on the Protection of Personal Information (APPI), covering data retention policies, cross-border transfer assessments, OAuth identity governance, and security hardening. Our approach treats compliance as an engineering discipline — auditable, testable, and integrated into your development workflow from day one.",
     useCases: [
-      "Data governance framework design",
-      "Compliance consulting (GDPR, CCPA)",
-      "Data quality management",
-      "Security and access controls",
-      "Audit trail implementation",
-      "Privacy by design"
+      "APPI-compliant privacy policy design for Japanese companies",
+      "Data retention framework aligned to statutory requirements (7-year accounting, 90-day logs)",
+      "Cross-border data transfer assessment under Article 28 of the APPI",
+      "Security hardening: CORS allowlisting, rate limiting, and input validation",
+      "OAuth 2.0 identity governance for web and mobile applications",
+      "Audit trail implementation with tamper-evident, compliance-ready logging"
     ],
     icon: "🛡️"
   },
   pm: {
     title: "Project Management",
-    description: "Expert guidance for your digital transformation initiatives.",
-    fullDescription: "Our experienced project managers ensure your initiatives are delivered on time, on budget, and to specification while maintaining stakeholder alignment.",
+    description: "Deliver technical projects with precision — from greenfield builds to production-grade handoffs.",
+    fullDescription: "We combine hands-on engineering with structured delivery discipline. Bio_HP demonstrates our approach: a privacy-focused, rate-limited job-fit assessment tool built with Jekyll and Cloudflare Workers, enforced by git-hook test coverage requirements, production request ID verification, and strict CORS controls — clean, testable, and ready to hand off.",
     useCases: [
-      "Digital transformation roadmapping",
-      "Agile project management",
-      "Stakeholder coordination",
-      "Risk assessment and mitigation",
-      "Resource planning",
-      "Change management"
+      "Privacy-focused application design with zero PII logging enforced by policy",
+      "Git hook enforcement of test coverage standards before every commit",
+      "Rate-limited Cloudflare Worker API with strict CORS origin allowlisting",
+      "Resume and job-description fit scoring with real-time character counting",
+      "Production verification using request IDs and cache header validation",
+      "JAMstack architecture (Jekyll + Cloudflare Workers) for cost-efficient delivery"
     ],
     icon: "📋"
   }

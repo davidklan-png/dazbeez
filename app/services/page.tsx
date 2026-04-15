@@ -4,61 +4,61 @@ const services = [
   {
     slug: "ai",
     title: "AI Integration",
-    description: "Harness the power of artificial intelligence to transform your business operations.",
-    fullDescription: "From machine learning models to generative AI, we help you identify opportunities and implement AI solutions that deliver real business value.",
+    description: "Build intelligent systems that learn from your data — from patient health assistants to Japanese-language document OCR.",
+    fullDescription: "We design and deploy AI-powered applications tailored to your domain, integrating computer vision, large language models, and classification pipelines into production-grade workflows.",
     useCases: [
-      "Predictive analytics for business forecasting",
-      "Natural language processing for customer service",
-      "Computer vision for quality control",
-      "Generative AI for content creation"
+      "Patient health assistant with AI-guided symptom tracking",
+      "Japanese receipt OCR using Google Cloud Vision API",
+      "Multimodal document intelligence combining vision and language models",
+      "Privacy-first AI design with zero full-document logging"
     ]
   },
   {
     slug: "automation",
     title: "Automation",
-    description: "Eliminate repetitive tasks and free your team to focus on what matters.",
-    fullDescription: "We design and implement automation solutions that reduce errors, save time, and lower operational costs.",
+    description: "Replace manual workflows with reliable, self-hosted pipelines — from ETL processing to AI agent orchestration.",
+    fullDescription: "We build automation systems that eliminate repetitive data tasks and reduce SaaS dependency, from financial ETL pipelines to AI agent frameworks.",
     useCases: [
-      "Workflow automation and process optimization",
-      "RPA (Robotic Process Automation)",
-      "API integrations and data sync",
-      "Scheduled task automation"
+      "ETL pipeline for Japanese credit card expense categorization with Shift-JIS/UTF-8 support",
+      "SaaS cost tracker measuring open-source replacement savings (Bountymon)",
+      "AI agent orchestration with the OpenClaw framework",
+      "Automated attendee estimation from financial transaction amounts"
     ]
   },
   {
     slug: "data",
     title: "Data Management",
-    description: "Turn your data into a strategic asset with modern data architecture.",
-    fullDescription: "We build data pipelines, warehouses, and analytics platforms that enable data-driven decision making.",
+    description: "Structure, store, and audit your business data with full Japanese regulatory compliance and long-term retention.",
+    fullDescription: "We build data management platforms that meet Japanese statutory requirements, including NTA invoice validation, 7-year retention policies, and MoneyForward-compatible exports.",
     useCases: [
-      "Data warehouse design and implementation",
-      "ETL pipeline development",
-      "Business intelligence dashboards",
-      "Data migration and cleanup"
+      "NTA invoice registration number validation for Japanese tax compliance",
+      "Seven-year data retention with automated compliant archiving",
+      "MoneyForward-compatible monthly export for cooperative accounting",
+      "Google Cloud Vision OCR for Japanese-language receipt capture on mobile"
     ]
   },
   {
     slug: "governance",
     title: "Governance",
-    description: "Ensure your data is secure, compliant, and trustworthy.",
-    fullDescription: "Establish governance frameworks that protect your organization while enabling innovation.",
+    description: "Establish data policies, compliance frameworks, and privacy controls that protect your business under Japanese law.",
+    fullDescription: "We design APPI-aligned governance frameworks covering data retention, cross-border transfer assessments, OAuth identity governance, and security hardening.",
     useCases: [
-      "Data governance framework design",
-      "Compliance consulting (GDPR, CCPA)",
-      "Data quality management",
-      "Security and access controls"
+      "APPI-compliant privacy policy design for Japanese companies",
+      "Data retention framework aligned to statutory requirements (7-year accounting, 90-day logs)",
+      "Cross-border data transfer assessment under Article 28 of the APPI",
+      "Security hardening: CORS allowlisting, rate limiting, and input validation"
     ]
   },
   {
     slug: "pm",
     title: "Project Management",
-    description: "Expert guidance for your digital transformation initiatives.",
-    fullDescription: "Our experienced project managers ensure your initiatives are delivered on time, on budget, and to specification.",
+    description: "Deliver technical projects with precision — from greenfield builds to production-grade handoffs.",
+    fullDescription: "We combine hands-on engineering with structured delivery discipline, shipping clean, testable, production-verified software ready to hand off.",
     useCases: [
-      "Digital transformation roadmapping",
-      "Agile project management",
-      "Stakeholder coordination",
-      "Risk assessment and mitigation"
+      "Privacy-focused application design with zero PII logging enforced by policy",
+      "Git hook enforcement of test coverage standards before every commit",
+      "Rate-limited Cloudflare Worker API with strict CORS origin allowlisting",
+      "Resume and job-description fit scoring with real-time character counting"
     ]
   }
 ];
