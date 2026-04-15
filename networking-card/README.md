@@ -1,6 +1,14 @@
 # Dazbeez Networking Card
 
-NFC/QR → landing page → sign-in (Google / LinkedIn / manual form) → Discord ping + acknowledgment email + vCard download.
+NFC/QR → immediate vCard access → Google GIS contact capture or manual form → Discord ping + acknowledgment email + later-return hook.
+
+## Event Behavior
+
+This flow is optimized for networking events where 15-20 physical cards may be handed out and people may tap either immediately or later on mobile.
+
+- First tap: give the visitor David's contact card immediately and make sharing their own details feel low-friction.
+- Later tap: bring the visitor back to a landing page that still works as a warm re-entry point into services or an inquiry.
+- After registration: reinforce the return path in the thank-you page and follow-up email.
 
 ## Stack
 
@@ -41,20 +49,18 @@ npm run db:migrate:remote
 ```bash
 npx wrangler pages secret put GOOGLE_CLIENT_ID       -p dazbeez-networking-card
 npx wrangler pages secret put GOOGLE_CLIENT_SECRET    -p dazbeez-networking-card
-npx wrangler pages secret put LINKEDIN_CLIENT_ID      -p dazbeez-networking-card
-npx wrangler pages secret put LINKEDIN_CLIENT_SECRET  -p dazbeez-networking-card
 npx wrangler pages secret put RESEND_API_KEY          -p dazbeez-networking-card
 npx wrangler pages secret put DISCORD_WEBHOOK_URL     -p dazbeez-networking-card
+npx wrangler pages secret put ADMIN_API_KEY           -p dazbeez-networking-card
 ```
 
 | Secret | Purpose |
 |--------|---------|
-| `GOOGLE_CLIENT_ID` | Google OAuth 2.0 Client ID |
-| `GOOGLE_CLIENT_SECRET` | Google OAuth 2.0 Client Secret |
-| `LINKEDIN_CLIENT_ID` | LinkedIn OAuth 2.0 Client ID |
-| `LINKEDIN_CLIENT_SECRET` | LinkedIn OAuth 2.0 Client Secret |
+| `GOOGLE_CLIENT_ID` | Google Identity Services client ID for the landing page button |
+| `GOOGLE_CLIENT_SECRET` | Optional legacy Google OAuth callback secret |
 | `RESEND_API_KEY` | Resend API key for outbound email |
 | `DISCORD_WEBHOOK_URL` | Discord channel webhook URL for notifications |
+| `ADMIN_API_KEY` | Shared secret for the lightweight admin API |
 
 ### 5. OAuth app setup
 
@@ -62,17 +68,14 @@ npx wrangler pages secret put DISCORD_WEBHOOK_URL     -p dazbeez-networking-card
 
 1. Open [Google Cloud Console](https://console.cloud.google.com/) → Credentials
 2. Create an OAuth 2.0 Client ID (Web application)
-3. Add **Authorized redirect URI**: `https://dazbeez.com/auth/google/callback`
-4. For local dev also add: `http://localhost:8788/auth/google/callback`
-5. Copy the Client ID and Client Secret
-
-#### LinkedIn
-
-1. Open [LinkedIn Developer Portal](https://www.linkedin.com/developers/) → Create App
-2. Auth tab → Add redirect URL: `https://dazbeez.com/auth/linkedin/callback`
-3. For local dev also add: `http://localhost:8788/auth/linkedin/callback`
-4. Request the `openid`, `email`, `profile` scopes (OpenID Connect)
-5. Copy the Client ID and Client Secret
+3. Add **Authorized JavaScript origins**:
+   - `https://hi.dazbeez.com`
+   - `http://localhost:8788`
+4. Add **Authorized redirect URIs**:
+   - `https://hi.dazbeez.com/auth/google/callback`
+   - `http://localhost:8788/auth/google/callback`
+5. Copy the Client ID
+6. Keep the Client Secret only if you want the legacy GET callback path available for recovery/testing
 
 ### 6. Resend DNS
 
@@ -119,22 +122,28 @@ npm run deploy
 
 | Route | Method | Purpose |
 |-------|--------|---------|
-| `/hi/:token` | GET | Landing page — logs tap, shows photo + pitch + 3 CTAs |
-| `/auth/google/callback` | GET | Google OAuth callback — creates contact, fires notifications |
-| `/auth/linkedin/callback` | GET | LinkedIn OAuth callback — same flow |
+| `/hi/:token` | GET | Landing page — logs tap, offers immediate vCard save, then frictionless registration |
+| `/auth/google/callback` | GET / POST | Google callback endpoint for legacy OAuth GET flow and GIS POST flow |
 | `/submit` | POST | Manual form handler — same downstream |
-| `/thanks` | GET | Thank-you page with vCard download + LinkedIn link |
+| `/thanks` | GET | Thank-you page with vCard download + return-path links |
 | `/vcard/:contact_id` | GET | Serves `david-klan.vcf` |
+| `/admin/contacts` | GET | Authenticated JSON view of contacts and per-card conversion counts |
+| `/admin/contacts/:id` | DELETE | Authenticated contact deletion endpoint for PII removal |
+| `/admin/vcard` | GET / PUT | Authenticated vCard profile read/update endpoint |
 
 ## Data Flow
 
 1. Visitor taps NFC / scans QR → lands on `/hi/abc123`
 2. Tap logged to `taps` table (every hit, before any sign-in)
-3. Visitor picks Google, LinkedIn, or manual form
-4. Contact written to `contacts` table
-5. Discord webhook fires with name, email, source, card label
-6. Resend sends "Great meeting you" acknowledgment email
-7. Visitor lands on `/thanks` with vCard download
+3. Visitor can immediately save David's vCard from the landing page and see a sheet explaining what was saved and where the file usually lands
+4. Visitor shares their own details with Google GIS or the manual form
+5. Contact written to `contacts` table (deduplicated per `token + email`)
+6. Registration event written to `contact_events` so every Google and manual submission is preserved, plus any legacy LinkedIn records already captured
+7. Discord webhook fires with name, email, source, card label
+8. Resend sends "Great meeting you" acknowledgment email with a return link
+9. Any Discord/email failure is logged to `notification_failures` for later review
+10. Visitor lands on `/thanks` with contact save + follow-up exploration links
+11. Admin can edit the live vCard profile from `/admin` on the main site or via `PUT /admin/vcard`
 
 ## Domain Setup
 
@@ -150,4 +159,4 @@ This project runs as a Cloudflare Pages project. To route `dazbeez.com/hi/*` tra
 
 The landing page includes: *"Your info goes to David only, never shared."*
 
-No analytics beyond the `taps` table. No cookies, no tracking pixels.
+No analytics beyond the `taps` table. No tracking pixels. Short-lived `__Host-oauth_state` and Google `g_csrf_token` cookies are used only during Google sign-in to prevent CSRF and expire quickly.

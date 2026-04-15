@@ -7,6 +7,33 @@ The NFC module consists of two independent pieces:
 1. **`/nfc` page** — a lightweight widget page on the main Next.js site for quick navigation (no contact capture)
 2. **`networking-card/`** — a full Cloudflare Pages + D1 application for tokenized NFC card landing pages with OAuth-based contact capture
 
+## BDD Framing
+
+### Feature: Event-ready NFC networking flow
+
+**Business goal:** turn a physical card tap into a low-friction digital handshake that works both in the moment and later.
+
+#### Scenario: First tap at a networking event
+- **Given** David hands a physical NFC card to a new contact at an event
+- **When** the contact taps the card on their phone
+- **Then** they should be able to save David&rsquo;s contact immediately
+- **And** they should be offered the fastest possible way to share their own details
+- **And** the tap should be logged even if they do not register yet
+
+#### Scenario: Frictionless registration on mobile
+- **Given** the contact wants to share their information quickly
+- **When** they land on the tokenized card page
+- **Then** Google GIS should be offered as the primary one-tap registration path
+- **And** a manual fallback should remain available without blocking the fast path
+- **And** LinkedIn should remain a destination CTA, not a sign-in dependency
+
+#### Scenario: Later follow-up after the event
+- **Given** the contact does not act immediately or wants more context later
+- **When** they tap the same card again hours or days later
+- **Then** the card should still give them David&rsquo;s contact details
+- **And** it should provide clear next steps into services or inquiry
+- **And** follow-up messaging should reinforce that return path
+
 ---
 
 ## Part 1: `/nfc` Page (Main Site)
@@ -56,19 +83,18 @@ Physical NFC card / QR code
         ↓
 GET /hi/:token
   → Log tap to `taps` table (async, before sign-in)
-  → Show landing page: photo, pitch, 3 sign-in options
+  → Show landing page: immediate vCard CTA, fast registration options, later-return hook
         ↓
 [Google OAuth] ─────────── /auth/google/callback
-[LinkedIn OAuth] ────────── /auth/linkedin/callback
 [Manual form POST] ─────── /submit
         ↓ (all paths)
   → insertContact() → `contacts` table
   → sendDiscordNotification() (waitUntil)
-  → sendAcknowledgmentEmail() (waitUntil)
+  → sendAcknowledgmentEmail() with return link (waitUntil)
   → Redirect to /thanks?contact_id=<id>
         ↓
 GET /thanks
-  → Download vCard button → GET /vcard/:contact_id
+  → Save vCard again + explore services/inquiry
 ```
 
 ---
@@ -122,30 +148,31 @@ taps (
 2. Logs tap to `taps` table via `context.waitUntil` (non-blocking)
 3. Generates a cryptographic nonce (16 random bytes → hex string)
 4. Encodes OAuth state as `btoa(nonce + ":" + token)`
-5. Builds Google and LinkedIn OAuth URLs with the encoded state
+5. Builds a Google Identity Services button configuration with the encoded state
 6. Returns HTML page with:
-   - "Sign in with Google" button
-   - "Sign in with LinkedIn" button
+   - Primary "Save David's contact" CTA
+   - Google GIS sign-in button
    - Collapsible manual contact form
    - Hidden token field
-   - Privacy disclaimer: *"Your info goes to David only, never shared."*
+   - "Tap again later" section with links to the explainer page, LinkedIn, services, and inquiry
+   - Privacy disclaimer explaining the short-lived OAuth security cookie
 7. Sets `__Host-oauth_state=<nonce>` cookie (HttpOnly, Secure, SameSite=Lax, Max-Age=300)
 
-#### `GET /auth/google/callback` and `GET /auth/linkedin/callback`
+#### `GET /auth/google/callback` and `POST /auth/google/callback`
 
-**Files:** `networking-card/functions/auth/google/callback.ts`, `networking-card/functions/auth/linkedin/callback.ts`
+**File:** `networking-card/functions/auth/google/callback.ts`
 
 CSRF verification flow:
-1. Extract `code` and `state` from query params
-2. Decode state → `{ nonce, cardToken }`
-3. Read `__Host-oauth_state` cookie
-4. Assert `cookieNonce === stateData.nonce` — return 400 if mismatch
-5. Exchange code for user profile (`name`, `email`)
-6. Call `insertContact()` with source = `"google"` or `"linkedin"`
-7. Fire Discord notification + acknowledgment email (both `waitUntil`)
+1. Extract `state` from the request and decode it → `{ nonce, cardToken }`
+2. Read `__Host-oauth_state` cookie
+3. Assert `cookieNonce === stateData.nonce` — return 400 if mismatch
+4. For GIS `POST`, also verify Google’s `g_csrf_token` double-submit cookie/body pair
+5. Verify the Google ID token signature against Google JWKS, plus `aud`, `iss`, `exp`, and `nonce`
+6. Call `insertContact()` with source = `"google"`
+7. Fire Discord notification + acknowledgment email with a return link (both `waitUntil`)
 8. Redirect to `/thanks?contact_id=<id>`
 
-**Google token decoding note:** The JWT `id_token` uses base64url encoding. The implementation converts `-` → `+` and `_` → `/` before padding and calling `atob()` — see `decodeBase64Url()` in `_lib/oauth.ts`.
+**Legacy note:** A `GET /auth/google/callback` code-exchange path still exists as a compatibility fallback, but the landing page now uses the GIS button flow.
 
 #### `POST /submit`
 
@@ -161,7 +188,8 @@ CSRF verification flow:
 Confirmation page with:
 - Friendly success message
 - "Download my contact card" button → links to `/vcard/:contact_id`
-- Link to David's LinkedIn profile
+- Links to services, inquiry, and David's LinkedIn profile
+- Copy that encourages the visitor to tap the card again later when they want more information
 
 #### `GET /vcard/:contact_id`
 
@@ -180,13 +208,42 @@ Set via `npx wrangler pages secret put <SECRET> -p dazbeez-networking-card`.
 | Secret | Required | Purpose |
 |--------|----------|---------|
 | `GOOGLE_CLIENT_ID` | Yes | Google OAuth app |
-| `GOOGLE_CLIENT_SECRET` | Yes | Google OAuth app |
-| `LINKEDIN_CLIENT_ID` | Yes | LinkedIn OAuth app |
-| `LINKEDIN_CLIENT_SECRET` | Yes | LinkedIn OAuth app |
+| `GOOGLE_CLIENT_SECRET` | Optional | Legacy Google code-exchange fallback |
 | `RESEND_API_KEY` | Yes | Acknowledgment emails from `david@dazbeez.com` |
 | `DISCORD_WEBHOOK_URL` | Yes | Real-time contact notifications |
+| `ADMIN_API_KEY` | Recommended | Shared secret for the admin contacts API |
 
 D1 database binding: `DB` (configured in `wrangler.toml`).
+
+Operational notes:
+- Contacts are deduplicated per `token + email`.
+- Every registration is also logged to `contact_events`, so Google, manual, and any legacy LinkedIn submissions remain visible even when they resolve to the same contact row.
+- Failed Discord/email deliveries are logged to `notification_failures`.
+- Admin API routes: `GET /admin/contacts` and `DELETE /admin/contacts/:id`.
+- Main-site admin UI: `GET /admin` on the Next.js app fetches the live NFC admin feed server-side and shows card metrics, recent contacts, registration activity, and delete controls for contact removal.
+
+### Admin Operations
+
+There are now two admin surfaces for the networking-card data:
+
+1. **Machine-readable API on the Cloudflare app**
+   - `GET https://hi.dazbeez.com/admin/contacts`
+   - `DELETE https://hi.dazbeez.com/admin/contacts/:id`
+   - Auth: `Authorization: Bearer <ADMIN_API_KEY>` or `x-admin-key: <ADMIN_API_KEY>`
+
+2. **Human-facing admin page on the main Next.js site**
+   - `GET https://dazbeez.com/admin`
+   - The page fetches the live NFC feed with server-side env vars:
+     - `NFC_ADMIN_API_URL`
+     - `NFC_ADMIN_API_KEY`
+   - The NFC section shows:
+     - an editable vCard profile form that updates the live `.vcf` download and saved-contact sheet
+     - per-card tap/contact conversion metrics
+     - recent captured contacts with all recorded methods used
+     - recent registration activity for every sign-in/submission event
+     - inline `Delete` controls that call the Cloudflare admin API through a server action
+
+This keeps the admin API key on the server side while letting contact cleanup happen from the existing admin UI.
 
 ---
 
@@ -194,16 +251,12 @@ D1 database binding: `DB` (configured in `wrangler.toml`).
 
 #### Google
 - [Google Cloud Console](https://console.cloud.google.com/) → APIs & Services → Credentials → OAuth 2.0 Client ID
+- Authorized JavaScript origins:
+  - `https://hi.dazbeez.com`
+  - `http://localhost:8788`
 - Authorized redirect URIs:
-  - `https://dazbeez.com/auth/google/callback`
+  - `https://hi.dazbeez.com/auth/google/callback`
   - `http://localhost:8788/auth/google/callback` (local dev)
-
-#### LinkedIn
-- [LinkedIn Developer Portal](https://www.linkedin.com/developers/) → Create App → Auth
-- Redirect URLs:
-  - `https://dazbeez.com/auth/linkedin/callback`
-  - `http://localhost:8788/auth/linkedin/callback` (local dev)
-- Required scopes: `openid`, `email`, `profile`
 
 ---
 

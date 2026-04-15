@@ -1,69 +1,108 @@
 import { type Env } from '../../_lib/env';
-import { getCard, insertContact } from '../../_lib/db';
+import { getCard, saveContact } from '../../_lib/db';
 import { exchangeLinkedInCode, decodeOAuthState } from '../../_lib/oauth';
-import { sendDiscordNotification } from '../../_lib/discord';
-import { sendAcknowledgmentEmail } from '../../_lib/email';
+import { queueContactNotifications } from '../../_lib/notifications';
+import {
+  extractOauthStateNonce,
+  oauthErrorResponse,
+  redirectToThanks,
+} from '../../_lib/auth-flow';
 
 export const onRequestGet: PagesFunction<Env> = async (context) => {
   const url = new URL(context.request.url);
+  const origin = url.origin;
   const code = url.searchParams.get('code');
   const rawState = url.searchParams.get('state');
 
   if (!code || !rawState) {
-    return new Response('Missing code or state', { status: 400 });
+    return oauthErrorResponse(
+      'LinkedIn sign-in issue',
+      'LinkedIn did not return the information needed to complete sign-in. Please try again from the card page.',
+      `${origin}/`,
+    );
   }
 
   const stateData = decodeOAuthState(rawState);
   if (!stateData) {
-    return new Response('Invalid OAuth state', { status: 400 });
-  }
-
-  // Verify CSRF nonce matches the cookie set when the hi/ page was served.
-  const cookieHeader = context.request.headers.get('Cookie') ?? '';
-  const nonceCookie = cookieHeader.split(';').map((c) => c.trim()).find((c) => c.startsWith('__Host-oauth_state='));
-  const cookieNonce = nonceCookie?.slice('__Host-oauth_state='.length);
-  if (!cookieNonce || cookieNonce !== stateData.nonce) {
-    return new Response('OAuth state mismatch', { status: 400 });
+    return oauthErrorResponse(
+      'LinkedIn sign-in issue',
+      'The sign-in session could not be verified. Please return to the card and try again.',
+      `${origin}/`,
+    );
   }
 
   const { cardToken: token } = stateData;
-  const card = await getCard(context.env.DB, token);
-  if (!card) {
-    return new Response('Invalid card token', { status: 400 });
+  const retryHref = `${origin}/hi/${token}`;
+
+  // Verify CSRF nonce matches the cookie set when the hi/ page was served.
+  const cookieHeader = context.request.headers.get('Cookie') ?? '';
+  const cookieNonce = extractOauthStateNonce(cookieHeader);
+  if (!cookieNonce || cookieNonce !== stateData.nonce) {
+    return oauthErrorResponse(
+      'LinkedIn sign-in issue',
+      'Your sign-in session expired or was opened in a different browser context. Please start again from the card page.',
+      retryHref,
+    );
   }
 
-  const origin = url.origin;
-  const userInfo = await exchangeLinkedInCode(
-    {
-      clientId: context.env.LINKEDIN_CLIENT_ID,
-      clientSecret: context.env.LINKEDIN_CLIENT_SECRET,
-      redirectUri: `${origin}/auth/linkedin/callback`,
-    },
-    code,
-  );
+  const card = await getCard(context.env.DB, token);
+  if (!card) {
+    return oauthErrorResponse(
+      'Card not found',
+      'That card link is no longer valid. Please rescan the card or contact David directly.',
+      `${origin}/`,
+    );
+  }
+
+  let userInfo: { name: string; email: string };
+  try {
+    userInfo = await exchangeLinkedInCode(
+      {
+        clientId: context.env.LINKEDIN_CLIENT_ID,
+        clientSecret: context.env.LINKEDIN_CLIENT_SECRET,
+        redirectUri: `${origin}/auth/linkedin/callback`,
+      },
+      code,
+    );
+  } catch {
+    return oauthErrorResponse(
+      'LinkedIn sign-in issue',
+      'LinkedIn sign-in could not be completed right now. Please try again or use the manual form instead.',
+      retryHref,
+      502,
+    );
+  }
 
   const cf = context.request.cf as Record<string, string> | undefined;
-  const contactId = await insertContact(context.env.DB, {
-    token,
-    name: userInfo.name,
-    email: userInfo.email,
-    source: 'linkedin',
-    cf_country: cf?.country ?? null,
-    cf_city: cf?.city ?? null,
-    user_agent: context.request.headers.get('user-agent'),
-  });
-
-  context.waitUntil(
-    sendDiscordNotification(context.env.DISCORD_WEBHOOK_URL, {
+  let savedContact;
+  try {
+    savedContact = await saveContact(context.env.DB, {
+      token,
       name: userInfo.name,
       email: userInfo.email,
       source: 'linkedin',
-      label: card.label || token,
-    }),
-  );
-  context.waitUntil(
-    sendAcknowledgmentEmail(context.env.RESEND_API_KEY, userInfo),
-  );
+      cf_country: cf?.country ?? null,
+      cf_city: cf?.city ?? null,
+      user_agent: context.request.headers.get('user-agent'),
+    });
+  } catch {
+    return oauthErrorResponse(
+      'LinkedIn sign-in issue',
+      'Your details could not be saved right now. Please try again or use the manual form instead.',
+      retryHref,
+      503,
+    );
+  }
 
-  return Response.redirect(`${origin}/thanks?contact_id=${contactId}`, 302);
+  queueContactNotifications(context, {
+    contactId: savedContact.id,
+    token,
+    cardLabel: card.label || token,
+    source: 'linkedin',
+    name: userInfo.name,
+    email: userInfo.email,
+    followUpUrl: `${origin}/hi/${token}`,
+  });
+
+  return redirectToThanks(origin, savedContact.id);
 };

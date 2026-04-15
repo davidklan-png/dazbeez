@@ -4,5 +4,5 @@ pages_build_output_dir = "public"
 
 [[d1_databases]]
 binding = "DB"
+database_id = "4ce69aa7-efac-4739-8ed1-43c9d1a1db4c"
 database_name = "dazbeez-networking"
-database_id = "REPLACE_WITH_YOUR_DATABASE_ID"

@@ -34,6 +34,129 @@ export interface OAuthConfig {
   redirectUri: string;
 }
 
+interface GoogleJwtHeader {
+  alg: string;
+  kid?: string;
+  typ?: string;
+}
+
+interface GoogleIdTokenPayload {
+  aud: string | string[];
+  email?: string;
+  email_verified?: boolean;
+  exp?: number;
+  family_name?: string;
+  given_name?: string;
+  hd?: string;
+  iat?: number;
+  iss?: string;
+  name?: string;
+  nonce?: string;
+  sub?: string;
+}
+
+function decodeBase64UrlJson<T>(segment: string): T {
+  return JSON.parse(decodeBase64Url(segment)) as T;
+}
+
+function decodeBase64UrlBytes(segment: string): Uint8Array {
+  const binary = decodeBase64Url(segment);
+  return Uint8Array.from(binary, (char) => char.charCodeAt(0));
+}
+
+async function getGoogleSigningKey(kid: string) {
+  const response = await fetch('https://www.googleapis.com/oauth2/v3/certs');
+
+  if (!response.ok) {
+    throw new Error(`Google cert fetch failed: ${await response.text()}`);
+  }
+
+  const payload = (await response.json()) as { keys?: JsonWebKey[] };
+  const jwk = payload.keys?.find((candidate) => {
+    const key = candidate as JsonWebKey & { kid?: string; kty?: string };
+    return key.kid === kid && key.kty === 'RSA';
+  });
+
+  if (!jwk) {
+    throw new Error('Google signing key not found');
+  }
+
+  return jwk;
+}
+
+export async function verifyGoogleIdToken(
+  idToken: string,
+  clientId: string,
+  expectedNonce?: string,
+): Promise<{ name: string; email: string }> {
+  const segments = idToken.split('.');
+  if (segments.length !== 3) {
+    throw new Error('Google ID token is malformed');
+  }
+
+  const [headerSegment, payloadSegment, signatureSegment] = segments;
+  const header = decodeBase64UrlJson<GoogleJwtHeader>(headerSegment);
+  const payload = decodeBase64UrlJson<GoogleIdTokenPayload>(payloadSegment);
+
+  if (header.alg !== 'RS256' || !header.kid) {
+    throw new Error('Google ID token uses an unsupported signing algorithm');
+  }
+
+  const jwk = await getGoogleSigningKey(header.kid);
+  const cryptoKey = await crypto.subtle.importKey(
+    'jwk',
+    jwk,
+    {
+      name: 'RSASSA-PKCS1-v1_5',
+      hash: 'SHA-256',
+    },
+    false,
+    ['verify'],
+  );
+
+  const verified = await crypto.subtle.verify(
+    'RSASSA-PKCS1-v1_5',
+    cryptoKey,
+    decodeBase64UrlBytes(signatureSegment),
+    new TextEncoder().encode(`${headerSegment}.${payloadSegment}`),
+  );
+
+  if (!verified) {
+    throw new Error('Google ID token signature is invalid');
+  }
+
+  const audience = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
+  if (!audience.includes(clientId)) {
+    throw new Error('Google ID token audience mismatch');
+  }
+
+  if (!payload.iss || !['accounts.google.com', 'https://accounts.google.com'].includes(payload.iss)) {
+    throw new Error('Google ID token issuer mismatch');
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  if (!payload.exp || payload.exp <= now) {
+    throw new Error('Google ID token has expired');
+  }
+
+  if (expectedNonce && payload.nonce !== expectedNonce) {
+    throw new Error('Google ID token nonce mismatch');
+  }
+
+  if (!payload.email) {
+    throw new Error('Google ID token is missing email');
+  }
+
+  const fallbackName =
+    [payload.given_name, payload.family_name].filter(Boolean).join(' ').trim() ||
+    payload.email;
+
+  return {
+    name: payload.name?.trim() || fallbackName,
+    email: payload.email,
+  };
+}
+
 // ---------- Google ----------
 
 export function getGoogleAuthUrl(
@@ -47,8 +170,6 @@ export function getGoogleAuthUrl(
     response_type: 'code',
     scope: 'openid email profile',
     state,
-    access_type: 'offline',
-    prompt: 'consent',
   });
   return `https://accounts.google.com/o/oauth2/v2/auth?${params}`;
 }
@@ -74,10 +195,7 @@ export async function exchangeGoogleCode(
   }
 
   const tokens = (await tokenRes.json()) as { id_token: string };
-
-  // Decode id_token payload (base64url → base64 → JSON)
-  const payload = JSON.parse(decodeBase64Url(tokens.id_token.split('.')[1]));
-  return { name: payload.name as string, email: payload.email as string };
+  return verifyGoogleIdToken(tokens.id_token, config.clientId);
 }
 
 // ---------- LinkedIn ----------

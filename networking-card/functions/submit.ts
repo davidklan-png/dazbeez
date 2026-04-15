@@ -1,7 +1,7 @@
 import { type Env } from './_lib/env';
-import { getCard, insertContact } from './_lib/db';
-import { sendDiscordNotification } from './_lib/discord';
-import { sendAcknowledgmentEmail } from './_lib/email';
+import { getCard, saveContact } from './_lib/db';
+import { flowErrorResponse } from './_lib/auth-flow';
+import { queueContactNotifications } from './_lib/notifications';
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {
   const form = await context.request.formData();
@@ -21,30 +21,39 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
   }
 
   const cf = context.request.cf as Record<string, string> | undefined;
-  const contactId = await insertContact(context.env.DB, {
-    token,
-    name,
-    email,
-    source: 'manual',
-    company,
-    linkedin_url: linkedinUrl,
-    cf_country: cf?.country ?? null,
-    cf_city: cf?.city ?? null,
-    user_agent: context.request.headers.get('user-agent'),
-  });
-
-  context.waitUntil(
-    sendDiscordNotification(context.env.DISCORD_WEBHOOK_URL, {
+  const origin = new URL(context.request.url).origin;
+  let savedContact;
+  try {
+    savedContact = await saveContact(context.env.DB, {
+      token,
       name,
       email,
       source: 'manual',
-      label: card.label || token,
-    }),
-  );
-  context.waitUntil(
-    sendAcknowledgmentEmail(context.env.RESEND_API_KEY, { name, email }),
-  );
+      company,
+      linkedin_url: linkedinUrl,
+      cf_country: cf?.country ?? null,
+      cf_city: cf?.city ?? null,
+      user_agent: context.request.headers.get('user-agent'),
+    });
+  } catch {
+    return flowErrorResponse(
+      'Could not save your details',
+      'Your information could not be saved right now. Please try again from the card or contact David directly.',
+      `${origin}/hi/${token}`,
+      'Back to card',
+      503,
+    );
+  }
 
-  const origin = new URL(context.request.url).origin;
-  return Response.redirect(`${origin}/thanks?contact_id=${contactId}`, 302);
+  queueContactNotifications(context, {
+    contactId: savedContact.id,
+    token,
+    cardLabel: card.label || token,
+    source: 'manual',
+    name,
+    email,
+    followUpUrl: `${origin}/hi/${token}`,
+  });
+
+  return Response.redirect(`${origin}/thanks?contact_id=${savedContact.id}`, 302);
 };

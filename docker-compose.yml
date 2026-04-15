@@ -12,6 +12,10 @@ services:
       - "4488:3000"
     environment:
       - NODE_ENV=production
+      - ADMIN_PAGE_USERNAME=${ADMIN_PAGE_USERNAME}
+      - ADMIN_PAGE_PASSWORD=${ADMIN_PAGE_PASSWORD}
+      - NFC_ADMIN_API_URL=${NFC_ADMIN_API_URL}
+      - NFC_ADMIN_API_KEY=${NFC_ADMIN_API_KEY}
     restart: unless-stopped
     stop_grace_period: 30s
     healthcheck:

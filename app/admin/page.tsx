@@ -7,6 +7,8 @@ import {
   recentActivity,
   pendingActions,
 } from "@/lib/admin-dashboard-data";
+import { assertAdminPageAccess } from "@/lib/admin-page-auth-request";
+import { getNfcAdminPanelData } from "@/lib/admin-nfc-dashboard";
 import { AdminDashboard } from "@/components/admin/admin-dashboard";
 
 export const metadata: Metadata = {
@@ -15,7 +17,12 @@ export const metadata: Metadata = {
   robots: { index: false, follow: false },
 };
 
-export default function AdminPage() {
+export const dynamic = "force-dynamic";
+
+export default async function AdminPage() {
+  await assertAdminPageAccess();
+  const nfc = await getNfcAdminPanelData();
+
   return (
     <div className="mx-auto max-w-7xl px-4 py-10 sm:px-6 lg:px-8">
       <AdminDashboard
@@ -25,6 +32,7 @@ export default function AdminPage() {
         activity={recentActivity}
         actions={pendingActions}
         lastUpdatedLabel={dashboardLastUpdated}
+        nfc={nfc}
       />
     </div>
   );

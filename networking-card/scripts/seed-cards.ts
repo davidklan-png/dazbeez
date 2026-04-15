@@ -32,7 +32,7 @@ function randomToken(): string {
 
 function main() {
   const count = parseInt(process.argv[2] || '20', 10);
-  const baseUrl = process.argv[3] || 'https://dazbeez.com';
+  const baseUrl = process.argv[3] || 'https://hi.dazbeez.com';
 
   if (count < 1 || count > 1000) {
     console.error('Count must be between 1 and 1000');
@@ -48,22 +48,20 @@ function main() {
 
   // Generate SQL
   const sqlLines: string[] = [];
+  const csvLines = ['token,url,label'];
+  let idx = 1;
   for (const token of tokens) {
-    const label = `card-${token}`;
+    const label = `card-${idx}`;
     sqlLines.push(
       `INSERT OR IGNORE INTO cards (token, label) VALUES ('${token}', '${label}');`,
     );
+    csvLines.push(`${token},${baseUrl}/hi/${token},${label}`);
+    idx++;
   }
   const sqlPath = path.join(outDir, 'seed.sql');
   fs.writeFileSync(sqlPath, sqlLines.join('\n') + '\n');
 
   // Generate CSV
-  const csvLines = ['token,url,label'];
-  let idx = 1;
-  for (const token of tokens) {
-    csvLines.push(`${token},${baseUrl}/hi/${token},card-${idx}`);
-    idx++;
-  }
   const csvPath = path.join(outDir, 'cards.csv');
   fs.writeFileSync(csvPath, csvLines.join('\n') + '\n');
 
