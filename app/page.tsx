@@ -1,85 +1,52 @@
 import Link from "next/link";
-
-const services = [
-  {
-    title: "AI Integration",
-    description: "Deploy AI that works — health assistants, document intelligence, and classification systems built for production with privacy-first design.",
-    icon: "🤖",
-    slug: "ai"
-  },
-  {
-    title: "Automation",
-    description: "Eliminate repetitive work with pipelines, agents, and self-hosted tools that replace expensive SaaS and run reliably at scale.",
-    icon: "⚙️",
-    slug: "automation"
-  },
-  {
-    title: "Data Management",
-    description: "Build data systems that meet Japanese regulatory requirements — NTA compliance, 7-year retention, audit logs, and MoneyForward integration.",
-    icon: "📊",
-    slug: "data"
-  },
-  {
-    title: "Governance",
-    description: "Design governance frameworks that satisfy Japanese law — APPI compliance, retention policies, identity controls, and security hardening built into your stack.",
-    icon: "🛡️",
-    slug: "governance"
-  },
-  {
-    title: "Project Management",
-    description: "Ship technical projects cleanly — test-driven, privacy-first, and production-verified, with full handoff documentation and real engineering oversight.",
-    icon: "📋",
-    slug: "pm"
-  }
-];
-
-function ServiceCard({ title, description, icon, slug }: { title: string; description: string; icon: string; slug: string }) {
-  return (
-    <Link
-      href={`/services/${slug}`}
-      className="group p-6 bg-white rounded-xl border border-gray-200 hover:border-amber-400 hover:shadow-lg transition-all duration-300"
-    >
-      <div className="text-4xl mb-4 transform group-hover:scale-110 transition-transform">{icon}</div>
-      <h3 className="text-xl font-semibold text-gray-900 mb-2">{title}</h3>
-      <p className="text-gray-600">{description}</p>
-      <span className="inline-flex items-center gap-1 mt-4 text-amber-600 font-medium group-hover:gap-2 transition-all">
-        Learn more
-        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-        </svg>
-      </span>
-    </Link>
-  );
-}
+import { HexIcon } from "@/components/hex-icon";
+import { HoneycombBackdrop } from "@/components/honeycomb-backdrop";
+import { Reveal } from "@/components/reveal";
+import { serviceList } from "@/lib/services";
 
 export default function HomePage() {
   return (
     <div className="flex flex-col">
       {/* Hero Section */}
       <section className="relative overflow-hidden bg-gradient-to-br from-gray-900 via-gray-800 to-gray-900 text-white">
-        <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top_right,_var(--tw-gradient-stops))] from-amber-500/20 via-transparent to-transparent"></div>
+        <HoneycombBackdrop opacity={0.08} color="#FBBF24" />
+        <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top_right,_var(--tw-gradient-stops))] from-amber-500/20 via-transparent to-transparent" />
 
         <div className="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-24 md:py-32">
           <div className="max-w-3xl">
-            <h1 className="text-4xl md:text-6xl font-bold mb-6 leading-tight">
-              Transform Your Business with
-              <span className="text-transparent bg-clip-text bg-gradient-to-r from-amber-400 to-amber-600"> AI & Automation</span>
-            </h1>
-            <p className="text-xl text-gray-300 mb-8">
-              We help businesses leverage cutting-edge technology to streamline operations, make smarter decisions, and accelerate growth.
+            <p className="text-sm font-semibold uppercase tracking-[0.32em] text-amber-300 mb-5">
+              AI · Automation · Data
             </p>
-            <div className="flex flex-wrap gap-4">
+            <h1 className="text-5xl md:text-7xl font-bold mb-6 leading-[1.05] tracking-tight">
+              Engineering that
+              <span className="relative inline-block px-2">
+                <span className="relative z-10 text-transparent bg-clip-text bg-gradient-to-r from-amber-300 to-amber-500">
+                  compounds
+                </span>
+                <span className="absolute inset-x-1 bottom-1 h-3 bg-amber-500/30 -z-0 rounded" />
+              </span>
+              — not accumulates.
+            </h1>
+            <p className="text-xl text-gray-300 mb-10 max-w-2xl leading-relaxed">
+              We design AI, automation, and data systems for businesses that need
+              the work to still be correct in five years — auditable, testable, and
+              built to Japanese regulatory standards.
+            </p>
+            <div className="flex flex-wrap gap-3">
               <Link
-                href="/inquiry"
-                className="px-8 py-3 bg-amber-500 hover:bg-amber-600 text-white font-semibold rounded-full transition-colors"
+                href="/contact"
+                className="inline-flex items-center gap-2 px-7 py-3 bg-amber-500 hover:bg-amber-600 text-white font-semibold rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-900"
               >
-                Start Your Journey
+                Book a consultation
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
+                </svg>
               </Link>
               <Link
                 href="/services"
-                className="px-8 py-3 border border-white/30 hover:border-white/60 text-white font-semibold rounded-full transition-colors"
+                className="inline-flex items-center gap-2 px-7 py-3 border border-white/30 hover:border-amber-300/80 hover:text-amber-200 text-white font-semibold rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-900"
               >
-                Explore Services
+                Browse services
               </Link>
             </div>
           </div>
@@ -87,20 +54,44 @@ export default function HomePage() {
       </section>
 
       {/* Services Section */}
-      <section className="py-20 bg-gray-50">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="text-center mb-16">
-            <h2 className="text-3xl md:text-4xl font-bold text-gray-900 mb-4">
-              How We Can Help
-            </h2>
-            <p className="text-xl text-gray-600 max-w-2xl mx-auto">
-              Comprehensive solutions for the modern digital enterprise
-            </p>
-          </div>
+      <section className="relative py-20 bg-gray-50 overflow-hidden">
+        <HoneycombBackdrop opacity={0.05} color="#92400E" />
+        <div className="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+          <Reveal>
+            <div className="text-center mb-16">
+              <p className="text-sm font-semibold uppercase tracking-[0.32em] text-amber-600 mb-3">
+                How we help
+              </p>
+              <h2 className="text-3xl md:text-4xl font-bold text-gray-900 mb-4">
+                Five disciplines, one honeycomb.
+              </h2>
+              <p className="text-lg text-gray-600 max-w-2xl mx-auto">
+                Engagements combine these disciplines — most clients start with one
+                and stitch the others in as the system grows.
+              </p>
+            </div>
+          </Reveal>
 
           <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
-            {services.map((service) => (
-              <ServiceCard key={service.slug} {...service} />
+            {serviceList.map((service, idx) => (
+              <Reveal key={service.slug} delay={idx * 0.06}>
+                <Link
+                  href={`/services/${service.slug}`}
+                  className="group block h-full p-7 bg-white rounded-2xl border border-gray-200 hover:border-amber-400 hover:shadow-lg transition-all duration-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
+                >
+                  <div className="mb-5 transition-transform duration-300 group-hover:-translate-y-0.5">
+                    <HexIcon variant={service.slug} size="md" label={`${service.title} icon`} />
+                  </div>
+                  <h3 className="text-xl font-semibold text-gray-900 mb-2">{service.title}</h3>
+                  <p className="text-gray-600 text-sm leading-relaxed">{service.description}</p>
+                  <span className="inline-flex items-center gap-1 mt-5 text-amber-600 font-medium group-hover:gap-2 transition-all">
+                    Learn more
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                    </svg>
+                  </span>
+                </Link>
+              </Reveal>
             ))}
           </div>
         </div>
@@ -109,21 +100,32 @@ export default function HomePage() {
       {/* CTA Section */}
       <section className="py-20 bg-white">
         <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
-          <h2 className="text-3xl md:text-4xl font-bold text-gray-900 mb-6">
-            Ready to Get Started?
-          </h2>
-          <p className="text-xl text-gray-600 mb-8">
-            Answer a few questions and we'll guide you to the right solution for your needs.
-          </p>
-          <Link
-            href="/inquiry"
-            className="inline-flex items-center gap-2 px-8 py-4 bg-amber-500 hover:bg-amber-600 text-white font-semibold rounded-full transition-colors text-lg"
-          >
-            Launch Interactive Inquiry
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
-            </svg>
-          </Link>
+          <Reveal>
+            <h2 className="text-3xl md:text-4xl font-bold text-gray-900 mb-6">
+              Ready to talk specifics?
+            </h2>
+            <p className="text-xl text-gray-600 mb-8">
+              Tell us the outcome you need and the constraints you&apos;re working under.
+              We&apos;ll reply within 24 hours with a concrete next step.
+            </p>
+            <div className="flex flex-wrap justify-center gap-3">
+              <Link
+                href="/contact"
+                className="inline-flex items-center gap-2 px-8 py-4 bg-amber-500 hover:bg-amber-600 text-white font-semibold rounded-full transition-colors text-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2"
+              >
+                Book a consultation
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
+                </svg>
+              </Link>
+              <Link
+                href="/services"
+                className="inline-flex items-center gap-2 px-8 py-4 border border-gray-300 hover:border-gray-900 text-gray-900 font-semibold rounded-full transition-colors text-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2"
+              >
+                Browse services
+              </Link>
+            </div>
+          </Reveal>
         </div>
       </section>
     </div>

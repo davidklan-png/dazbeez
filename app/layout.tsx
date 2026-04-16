@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import Image from "next/image";
+import Link from "next/link";
 import { SiteNavigation } from "@/components/site-navigation";
 import "./globals.css";
 
@@ -61,19 +62,19 @@ function Footer() {
           <div>
             <h3 className="font-semibold mb-4">Services</h3>
             <ul className="space-y-2 text-gray-400">
-              <li><a href="/services/ai" className="hover:text-amber-400 transition-colors">AI Integration</a></li>
-              <li><a href="/services/automation" className="hover:text-amber-400 transition-colors">Automation</a></li>
-              <li><a href="/services/data" className="hover:text-amber-400 transition-colors">Data Management</a></li>
-              <li><a href="/services/governance" className="hover:text-amber-400 transition-colors">Governance</a></li>
+              <li><Link href="/services/ai" className="hover:text-amber-400 transition-colors">AI Integration</Link></li>
+              <li><Link href="/services/automation" className="hover:text-amber-400 transition-colors">Automation</Link></li>
+              <li><Link href="/services/data" className="hover:text-amber-400 transition-colors">Data Management</Link></li>
+              <li><Link href="/services/governance" className="hover:text-amber-400 transition-colors">Governance</Link></li>
             </ul>
           </div>
 
           <div>
             <h3 className="font-semibold mb-4">Connect</h3>
             <ul className="space-y-2 text-gray-400">
-              <li><a href="/contact" className="hover:text-amber-400 transition-colors">Contact Us</a></li>
-              <li><a href="/inquiry" className="hover:text-amber-400 transition-colors">Start Inquiry</a></li>
-              <li><a href="/nfc" className="hover:text-amber-400 transition-colors">NFC Quick Access</a></li>
+              <li><Link href="/contact" className="hover:text-amber-400 transition-colors">Contact Us</Link></li>
+              <li><Link href="/business-card" className="hover:text-amber-400 transition-colors">About the Card</Link></li>
+              <li><Link href="/nfc" className="hover:text-amber-400 transition-colors">NFC Quick Access</Link></li>
             </ul>
           </div>
         </div>
@@ -81,8 +82,8 @@ function Footer() {
         <div className="border-t border-gray-800 mt-8 pt-8 flex flex-col sm:flex-row items-center justify-between gap-3 text-gray-500 text-sm">
           <p>&copy; {new Date().getFullYear()} Dazbeez K.K. All rights reserved.</p>
           <div className="flex gap-6">
-            <a href="/privacy-policy" className="hover:text-amber-400 transition-colors">Privacy Policy</a>
-            <a href="/terms-of-service" className="hover:text-amber-400 transition-colors">Terms of Service</a>
+            <Link href="/privacy-policy" className="hover:text-amber-400 transition-colors">Privacy Policy</Link>
+            <Link href="/terms-of-service" className="hover:text-amber-400 transition-colors">Terms of Service</Link>
           </div>
         </div>
       </div>
@@ -98,8 +99,14 @@ export default function RootLayout({
   return (
     <html lang="en" className={`${inter.variable} antialiased`}>
       <body className="min-h-screen flex flex-col">
+        <a
+          href="#main-content"
+          className="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-[60] focus:rounded-md focus:bg-amber-500 focus:px-4 focus:py-2 focus:text-white focus:shadow-lg"
+        >
+          Skip to main content
+        </a>
         <SiteNavigation />
-        <main className="flex-1">{children}</main>
+        <main id="main-content" className="flex-1">{children}</main>
         <Footer />
       </body>
     </html>
