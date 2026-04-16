@@ -2,10 +2,7 @@ import test, { mock } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { onRequestGet as hiRoute } from '../functions/hi/[token]';
-import {
-  onRequestGet as googleCallback,
-  onRequestPost as googleCallbackPost,
-} from '../functions/auth/google/callback';
+import { onRequestPost as googleCallbackPost } from '../functions/auth/google/callback';
 import { onRequestGet as linkedinCallback } from '../functions/auth/linkedin/callback';
 import { onRequestPost as submitRoute } from '../functions/submit';
 import { encodeOAuthState } from '../functions/_lib/oauth';
@@ -54,8 +51,9 @@ test('hi route renders the Google GIS button and sets the CSRF cookie', async ()
   );
   assert.match(html, /https:\/\/accounts\.google\.com\/gsi\/client/);
   assert.match(html, /class="g_id_signin"/);
-  assert.match(html, /data-login_uri="https:\/\/hi\.dazbeez\.com\/auth\/google\/callback"/);
+  assert.match(html, /data-callback="handleGisResponse"/);
   assert.match(html, /data-use_fedcm_for_button="true"/);
+  assert.match(html, /function handleGisResponse/);
   assert.doesNotMatch(html, /Share your info with LinkedIn/);
   assert.match(html, /Save David&rsquo;s contact/);
   assert.match(html, /What is in the card/);
@@ -258,90 +256,37 @@ test('manual submit returns a recoverable error page when contact storage fails'
   assert.match(html, /Back to card/);
 });
 
-test('google callback rejects mismatched CSRF state and clears the cookie', async () => {
+test('google callback rejects GIS POST with mismatched page-nonce cookie', async () => {
   const env = createEnv({
     DB: createFakeD1Database(createFakeDbState([{ token: 'card-1', label: 'card-1' }])),
   });
-  const state = encodeOAuthState('expected-nonce', 'card-1');
+  const form = new FormData();
+  form.set('credential', createIdToken({
+    aud: env.GOOGLE_CLIENT_ID,
+    exp: Math.floor(Date.now() / 1000) + 3600,
+    iss: 'https://accounts.google.com',
+    name: 'Google Person',
+    nonce: 'expected-nonce',
+    email: 'google.person@example.com',
+  }));
+  form.set('state', encodeOAuthState('expected-nonce', 'card-1'));
+
   const { context } = createPagesContext({
-    url: `https://hi.dazbeez.com/auth/google/callback?code=abc&state=${encodeURIComponent(state)}`,
+    url: 'https://hi.dazbeez.com/auth/google/callback',
+    method: 'POST',
     headers: {
       Cookie: '__Host-oauth_state=different-nonce',
     },
+    body: form,
     env,
   });
 
-  const response = await googleCallback(context as never);
+  const response = await googleCallbackPost(context as never);
   const html = await response.text();
 
   assert.equal(response.status, 400);
   assert.match(html, /Google sign-in issue/);
   assert.match(response.headers.get('Set-Cookie') ?? '', /Max-Age=0/);
-});
-
-test('google callback completes the legacy GET happy path and clears the CSRF cookie', async () => {
-  const dbState = createFakeDbState([{ token: 'card-1', label: 'card-1' }]);
-  const env = createEnv({
-    DB: createFakeD1Database(dbState),
-  });
-  const state = encodeOAuthState('expected-nonce', 'card-1');
-
-  const fetchMock = mock.method(
-    globalThis,
-    'fetch',
-    async (input: string | URL | Request) => {
-      const url = typeof input === 'string'
-        ? input
-        : input instanceof URL
-          ? input.toString()
-          : input.url;
-
-      if (url === 'https://oauth2.googleapis.com/token') {
-        return Response.json({
-          id_token: createIdToken({
-            aud: env.GOOGLE_CLIENT_ID,
-            exp: Math.floor(Date.now() / 1000) + 3600,
-            iss: 'https://accounts.google.com',
-            name: 'Google Person',
-            nonce: 'expected-nonce',
-            email: 'google.person@example.com',
-          }),
-        });
-      }
-
-      if (url === 'https://www.googleapis.com/oauth2/v3/certs') {
-        return Response.json(createGoogleJwks());
-      }
-
-      return new Response('{}');
-    },
-  );
-
-  try {
-    const { context, waitUntilCalls } = createPagesContext({
-      url: `https://hi.dazbeez.com/auth/google/callback?code=abc&state=${encodeURIComponent(state)}`,
-      headers: {
-        Cookie: '__Host-oauth_state=expected-nonce',
-      },
-      env,
-    });
-
-    const response = await googleCallback(context as never);
-
-    assert.equal(response.status, 302);
-    assert.equal(
-      response.headers.get('Location'),
-      'https://hi.dazbeez.com/thanks?contact_id=1',
-    );
-    assert.match(response.headers.get('Set-Cookie') ?? '', /Max-Age=0/);
-
-    await Promise.all(waitUntilCalls);
-    assert.equal(dbState.contacts.length, 1);
-    assert.equal(dbState.contacts[0].source, 'google');
-    assert.equal(fetchMock.mock.calls.length, 4);
-  } finally {
-    fetchMock.mock.restore();
-  }
 });
 
 test('google callback completes the GIS POST happy path and clears the CSRF cookie', async () => {
@@ -359,7 +304,6 @@ test('google callback completes the GIS POST happy path and clears the CSRF cook
     nonce: 'expected-nonce',
     email: 'google.gis@example.com',
   }));
-  form.set('g_csrf_token', 'gsi-csrf-token');
   form.set('state', state);
 
   const fetchMock = mock.method(
@@ -385,7 +329,7 @@ test('google callback completes the GIS POST happy path and clears the CSRF cook
       url: 'https://hi.dazbeez.com/auth/google/callback',
       method: 'POST',
       headers: {
-        Cookie: 'g_csrf_token=gsi-csrf-token; __Host-oauth_state=expected-nonce',
+        Cookie: '__Host-oauth_state=expected-nonce',
       },
       body: form,
       env,
@@ -410,39 +354,21 @@ test('google callback completes the GIS POST happy path and clears the CSRF cook
   }
 });
 
-test('google callback rejects GIS POST requests with mismatched g_csrf_token', async () => {
-  const env = createEnv({
-    DB: createFakeD1Database(createFakeDbState([{ token: 'card-1', label: 'card-1' }])),
-  });
-  const form = new FormData();
-  form.set('credential', 'placeholder');
-  form.set('g_csrf_token', 'different-token');
-  form.set('state', encodeOAuthState('expected-nonce', 'card-1'));
-
-  const { context } = createPagesContext({
-    url: 'https://hi.dazbeez.com/auth/google/callback',
-    method: 'POST',
-    headers: {
-      Cookie: 'g_csrf_token=expected-token; __Host-oauth_state=expected-nonce',
-    },
-    body: form,
-    env,
-  });
-
-  const response = await googleCallbackPost(context as never);
-  const html = await response.text();
-
-  assert.equal(response.status, 400);
-  assert.match(html, /Google sign-in session could not be verified/);
-  assert.match(response.headers.get('Set-Cookie') ?? '', /Max-Age=0/);
-});
-
 test('google callback logs notification failures without breaking the user flow', async () => {
   const dbState = createFakeDbState([{ token: 'card-1', label: 'card-1' }]);
   const env = createEnv({
     DB: createFakeD1Database(dbState),
   });
-  const state = encodeOAuthState('expected-nonce', 'card-1');
+  const form = new FormData();
+  form.set('credential', createIdToken({
+    aud: env.GOOGLE_CLIENT_ID,
+    exp: Math.floor(Date.now() / 1000) + 3600,
+    iss: 'https://accounts.google.com',
+    name: 'Google Person',
+    nonce: 'expected-nonce',
+    email: 'google.person@example.com',
+  }));
+  form.set('state', encodeOAuthState('expected-nonce', 'card-1'));
 
   const fetchMock = mock.method(
     globalThis,
@@ -454,19 +380,6 @@ test('google callback logs notification failures without breaking the user flow'
           ? input.toString()
           : input.url;
 
-      if (url === 'https://oauth2.googleapis.com/token') {
-        return Response.json({
-          id_token: createIdToken({
-            aud: env.GOOGLE_CLIENT_ID,
-            exp: Math.floor(Date.now() / 1000) + 3600,
-            iss: 'https://accounts.google.com',
-            name: 'Google Person',
-            nonce: 'expected-nonce',
-            email: 'google.person@example.com',
-          }),
-        });
-      }
-
       if (url === 'https://www.googleapis.com/oauth2/v3/certs') {
         return Response.json(createGoogleJwks());
       }
@@ -477,14 +390,16 @@ test('google callback logs notification failures without breaking the user flow'
 
   try {
     const { context, waitUntilCalls } = createPagesContext({
-      url: `https://hi.dazbeez.com/auth/google/callback?code=abc&state=${encodeURIComponent(state)}`,
+      url: 'https://hi.dazbeez.com/auth/google/callback',
+      method: 'POST',
       headers: {
         Cookie: '__Host-oauth_state=expected-nonce',
       },
+      body: form,
       env,
     });
 
-    const response = await googleCallback(context as never);
+    const response = await googleCallbackPost(context as never);
 
     assert.equal(response.status, 302);
     await Promise.all(waitUntilCalls);
@@ -496,34 +411,31 @@ test('google callback logs notification failures without breaking the user flow'
   }
 });
 
-test('google callback returns a recoverable error page when Google exchange fails', async () => {
+test('google callback returns a recoverable error page when credential verification fails', async () => {
   const env = createEnv({
     DB: createFakeD1Database(createFakeDbState([{ token: 'card-1', label: 'card-1' }])),
   });
-  const state = encodeOAuthState('expected-nonce', 'card-1');
+  const form = new FormData();
+  // Malformed credential triggers verifyGoogleIdToken to throw.
+  form.set('credential', 'not-a-jwt');
+  form.set('state', encodeOAuthState('expected-nonce', 'card-1'));
 
-  const fetchMock = mock.method(globalThis, 'fetch', async () => {
-    return new Response('bad request', { status: 400 });
+  const { context } = createPagesContext({
+    url: 'https://hi.dazbeez.com/auth/google/callback',
+    method: 'POST',
+    headers: {
+      Cookie: '__Host-oauth_state=expected-nonce',
+    },
+    body: form,
+    env,
   });
 
-  try {
-    const { context } = createPagesContext({
-      url: `https://hi.dazbeez.com/auth/google/callback?code=abc&state=${encodeURIComponent(state)}`,
-      headers: {
-        Cookie: '__Host-oauth_state=expected-nonce',
-      },
-      env,
-    });
+  const response = await googleCallbackPost(context as never);
+  const html = await response.text();
 
-    const response = await googleCallback(context as never);
-    const html = await response.text();
-
-    assert.equal(response.status, 502);
-    assert.match(html, /Back to card/);
-    assert.match(html, /manual form/);
-  } finally {
-    fetchMock.mock.restore();
-  }
+  assert.equal(response.status, 502);
+  assert.match(html, /Back to card/);
+  assert.match(html, /manual form/);
 });
 
 test('linkedin callback completes the happy path', async () => {

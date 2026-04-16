@@ -84,7 +84,6 @@ async function withTemporaryDevVars(contents: string, fn: () => Promise<void>) {
 async function main() {
   const devVars = [
     'GOOGLE_CLIENT_ID=test-google-client-id',
-    'GOOGLE_CLIENT_SECRET=test-google-client-secret',
     'RESEND_API_KEY=test-resend-api-key',
     'DISCORD_WEBHOOK_URL=https://discord.example.test/webhook',
     'DISABLE_OUTBOUND_NOTIFICATIONS=true',
@@ -157,8 +156,8 @@ async function main() {
           await page.locator('#g_id_onload').waitFor({ state: 'attached' });
         });
         assert.equal(
-          await page.locator('#g_id_onload').getAttribute('data-login_uri'),
-          'http://localhost:8788/auth/google/callback',
+          await page.locator('#g_id_onload').getAttribute('data-callback'),
+          'handleGisResponse',
         );
         assert.equal(
           await page.locator('#g_id_onload').getAttribute('data-use_fedcm_for_button'),

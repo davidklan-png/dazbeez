@@ -401,7 +401,6 @@ export function createEnv(overrides: Record<string, unknown> = {}) {
   return {
     DB: createFakeD1Database(createFakeDbState()),
     GOOGLE_CLIENT_ID: 'google-client-id',
-    GOOGLE_CLIENT_SECRET: 'google-client-secret',
     LINKEDIN_CLIENT_ID: 'linkedin-client-id',
     LINKEDIN_CLIENT_SECRET: 'linkedin-client-secret',
     RESEND_API_KEY: 'resend-api-key',

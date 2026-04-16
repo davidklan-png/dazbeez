@@ -157,47 +157,6 @@ export async function verifyGoogleIdToken(
   };
 }
 
-// ---------- Google ----------
-
-export function getGoogleAuthUrl(
-  clientId: string,
-  redirectUri: string,
-  state: string,
-): string {
-  const params = new URLSearchParams({
-    client_id: clientId,
-    redirect_uri: redirectUri,
-    response_type: 'code',
-    scope: 'openid email profile',
-    state,
-  });
-  return `https://accounts.google.com/o/oauth2/v2/auth?${params}`;
-}
-
-export async function exchangeGoogleCode(
-  config: OAuthConfig,
-  code: string,
-): Promise<{ name: string; email: string }> {
-  const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      code,
-      client_id: config.clientId,
-      client_secret: config.clientSecret,
-      redirect_uri: config.redirectUri,
-      grant_type: 'authorization_code',
-    }),
-  });
-
-  if (!tokenRes.ok) {
-    throw new Error(`Google token exchange failed: ${await tokenRes.text()}`);
-  }
-
-  const tokens = (await tokenRes.json()) as { id_token: string };
-  return verifyGoogleIdToken(tokens.id_token, config.clientId);
-}
-
 // ---------- LinkedIn ----------
 
 export function getLinkedInAuthUrl(

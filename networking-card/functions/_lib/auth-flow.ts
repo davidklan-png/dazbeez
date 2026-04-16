@@ -1,12 +1,17 @@
 import { page } from './html';
 
-export function extractOauthStateNonce(cookieHeader: string): string | null {
-  const nonceCookie = cookieHeader
+export function extractCookie(cookieHeader: string, name: string): string | null {
+  const prefix = `${name}=`;
+  const match = cookieHeader
     .split(';')
     .map((cookie) => cookie.trim())
-    .find((cookie) => cookie.startsWith('__Host-oauth_state='));
+    .find((cookie) => cookie.startsWith(prefix));
 
-  return nonceCookie?.slice('__Host-oauth_state='.length) ?? null;
+  return match?.slice(prefix.length) ?? null;
+}
+
+export function extractOauthStateNonce(cookieHeader: string): string | null {
+  return extractCookie(cookieHeader, '__Host-oauth_state');
 }
 
 export function clearOauthStateCookie(): string {

@@ -48,7 +48,6 @@ npm run db:migrate:remote
 
 ```bash
 npx wrangler pages secret put GOOGLE_CLIENT_ID       -p dazbeez-networking-card
-npx wrangler pages secret put GOOGLE_CLIENT_SECRET    -p dazbeez-networking-card
 npx wrangler pages secret put RESEND_API_KEY          -p dazbeez-networking-card
 npx wrangler pages secret put DISCORD_WEBHOOK_URL     -p dazbeez-networking-card
 npx wrangler pages secret put ADMIN_API_KEY           -p dazbeez-networking-card
@@ -56,8 +55,7 @@ npx wrangler pages secret put ADMIN_API_KEY           -p dazbeez-networking-card
 
 | Secret | Purpose |
 |--------|---------|
-| `GOOGLE_CLIENT_ID` | Google Identity Services client ID for the landing page button |
-| `GOOGLE_CLIENT_SECRET` | Optional legacy Google OAuth callback secret |
+| `GOOGLE_CLIENT_ID` | Google Identity Services client ID for the landing page button (public — no client secret is used) |
 | `RESEND_API_KEY` | Resend API key for outbound email |
 | `DISCORD_WEBHOOK_URL` | Discord channel webhook URL for notifications |
 | `ADMIN_API_KEY` | Shared secret for the lightweight admin API |
@@ -71,11 +69,10 @@ npx wrangler pages secret put ADMIN_API_KEY           -p dazbeez-networking-card
 3. Add **Authorized JavaScript origins**:
    - `https://hi.dazbeez.com`
    - `http://localhost:8788`
-4. Add **Authorized redirect URIs**:
+4. Add **Authorized redirect URIs** (GIS posts the credential back to `login_uri`, which must appear here):
    - `https://hi.dazbeez.com/auth/google/callback`
    - `http://localhost:8788/auth/google/callback`
-5. Copy the Client ID
-6. Keep the Client Secret only if you want the legacy GET callback path available for recovery/testing
+5. Copy the Client ID — the server never needs the Client Secret
 
 ### 6. Resend DNS
 
@@ -123,7 +120,7 @@ npm run deploy
 | Route | Method | Purpose |
 |-------|--------|---------|
 | `/hi/:token` | GET | Landing page — logs tap, offers immediate vCard save, then frictionless registration |
-| `/auth/google/callback` | GET / POST | Google callback endpoint for legacy OAuth GET flow and GIS POST flow |
+| `/auth/google/callback` | POST | Google Identity Services callback — receives the signed credential, verifies CSRF + nonce + JWT, saves the contact |
 | `/submit` | POST | Manual form handler — same downstream |
 | `/thanks` | GET | Thank-you page with vCard download + return-path links |
 | `/vcard/:contact_id` | GET | Serves `david-klan.vcf` |
@@ -159,4 +156,4 @@ This project runs as a Cloudflare Pages project. To route `dazbeez.com/hi/*` tra
 
 The landing page includes: *"Your info goes to David only, never shared."*
 
-No analytics beyond the `taps` table. No tracking pixels. Short-lived `__Host-oauth_state` and Google `g_csrf_token` cookies are used only during Google sign-in to prevent CSRF and expire quickly.
+No analytics beyond the `taps` table. No tracking pixels. A short-lived `__Host-oauth_state` cookie is used only during Google sign-in to prevent CSRF and expires after 5 minutes.

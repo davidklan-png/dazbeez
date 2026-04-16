@@ -42,9 +42,24 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
   const googleSignIn = context.env.GOOGLE_CLIENT_ID
     ? `
     <script src="https://accounts.google.com/gsi/client" async defer></script>
+    <script>
+      function handleGisResponse(response) {
+        var form = document.createElement('form');
+        form.method = 'POST';
+        form.action = '/auth/google/callback';
+        var c = document.createElement('input');
+        c.type = 'hidden'; c.name = 'credential'; c.value = response.credential;
+        form.appendChild(c);
+        var s = document.createElement('input');
+        s.type = 'hidden'; s.name = 'state'; s.value = '${state}';
+        form.appendChild(s);
+        document.body.appendChild(form);
+        form.submit();
+      }
+    </script>
     <div id="g_id_onload"
       data-client_id="${context.env.GOOGLE_CLIENT_ID}"
-      data-login_uri="${origin}/auth/google/callback"
+      data-callback="handleGisResponse"
       data-nonce="${nonce}"
       data-context="use"
       data-ux_mode="popup"
@@ -60,8 +75,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
         data-text="continue_with"
         data-size="large"
         data-logo_alignment="left"
-        data-width="320"
-        data-state="${state}"></div>
+        data-width="320"></div>
     </div>
     <p class="subcopy">If you are already signed into Google on this device, Google may show a faster Continue as&hellip; path.</p>`
     : renderProviderNote(
