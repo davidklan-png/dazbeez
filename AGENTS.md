@@ -41,9 +41,12 @@ app/
 | `/` | Landing page |
 | `/services` | Services list |
 | `/services/[slug]` | Service detail (ai, automation, data, governance, pm) |
-| `/inquiry` | Interactive chatbot flow |
-| `/contact` | Contact form |
+| `/contact` | Contact form (accepts `?service=<slug>` to preselect) |
+| `/business-card` | Explainer for the NFC card |
 | `/nfc` | NFC micro-page (widget-style) |
+| `/api/contact` | POST endpoint for contact submissions (JSONL persistence) |
+
+> `/inquiry` has been retired and 308-redirects to `/contact`.
 
 ## When Making Changes
 

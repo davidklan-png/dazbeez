@@ -45,12 +45,6 @@ export default function sitemap(): MetadataRoute.Sitemap {
       priority: 0.7,
     },
     {
-      url: "https://dazbeez.com/inquiry",
-      lastModified: new Date(),
-      changeFrequency: "monthly",
-      priority: 0.6,
-    },
-    {
       url: "https://dazbeez.com/contact",
       lastModified: new Date(),
       changeFrequency: "monthly",

@@ -37,24 +37,28 @@ const principles = [
     description:
       "The first action is David's contact card, so a tap immediately gives the visitor something useful.",
     accent: "from-amber-400 to-amber-500",
+    label: "1. Save",
   },
   {
     title: "Low-friction capture",
     description:
       "Google, LinkedIn, and a manual fallback keep registration fast on mobile without requiring an app install.",
     accent: "from-sky-400 to-sky-500",
+    label: "2. Capture",
   },
   {
     title: "Useful later",
     description:
-      "The card stays relevant after the event by routing later taps into services, inquiry, and follow-up context.",
+      "The card stays relevant after the event by routing later taps into services, contact, and follow-up context.",
     accent: "from-emerald-400 to-emerald-500",
+    label: "3. Reuse",
   },
   {
     title: "Operational visibility",
     description:
       "Contacts, taps, sign-in methods, Discord alerts, and email follow-up are all measurable and recoverable.",
     accent: "from-gray-700 to-gray-900",
+    label: "4. Observe",
   },
 ];
 
@@ -135,10 +139,16 @@ export default function BusinessCardPage() {
                 Open a live example
               </Link>
               <Link
-                href="/inquiry"
+                href="/contact"
                 className="inline-flex items-center justify-center rounded-full border border-white/20 px-6 py-3 text-sm font-semibold text-white transition-colors hover:border-white/40"
               >
-                Start an inquiry
+                Book a consultation
+              </Link>
+              <Link
+                href="/nfc"
+                className="inline-flex items-center justify-center rounded-full border border-white/20 px-6 py-3 text-sm font-semibold text-white transition-colors hover:border-white/40"
+              >
+                See the mobile demo
               </Link>
             </div>
           </div>
@@ -154,8 +164,20 @@ export default function BusinessCardPage() {
                       </p>
                       <h2 className="mt-2 text-2xl font-bold">David Klan</h2>
                     </div>
-                    <div className="grid h-16 w-16 place-items-center rounded-2xl bg-white/20 text-3xl">
-                      🐝
+                    <div className="grid h-16 w-16 place-items-center rounded-2xl bg-white/20">
+                      <svg viewBox="-32 -32 64 64" className="h-10 w-10" role="img" aria-label="Dazbeez honeycomb">
+                        <polygon
+                          points="0,-22 19,-11 19,11 0,22 -19,11 -19,-11"
+                          fill="none"
+                          stroke="#ffffff"
+                          strokeWidth={2.5}
+                          strokeLinejoin="round"
+                        />
+                        <polygon
+                          points="0,-10 8.7,-5 8.7,5 0,10 -8.7,5 -8.7,-5"
+                          fill="#ffffff"
+                        />
+                      </svg>
                     </div>
                   </div>
                   <p className="mt-4 text-sm text-amber-50">
@@ -266,9 +288,12 @@ export default function BusinessCardPage() {
               key={item.title}
               className="overflow-hidden rounded-[1.75rem] border border-gray-200 bg-white shadow-sm"
             >
-              <div className={`h-2 bg-gradient-to-r ${item.accent}`} />
+              <div className={`h-2 bg-gradient-to-r ${item.accent}`} aria-hidden="true" />
               <div className="p-6">
-                <h3 className="text-xl font-semibold text-gray-900">{item.title}</h3>
+                <p className="text-xs font-semibold uppercase tracking-[0.28em] text-gray-500">
+                  {item.label}
+                </p>
+                <h3 className="mt-2 text-xl font-semibold text-gray-900">{item.title}</h3>
                 <p className="mt-3 text-sm leading-6 text-gray-600">{item.description}</p>
               </div>
             </article>
