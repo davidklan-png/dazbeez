@@ -76,8 +76,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
         data-size="large"
         data-logo_alignment="left"
         data-width="320"></div>
-    </div>
-    <p class="subcopy">If you are already signed into Google on this device, Google may show a faster Continue as&hellip; path.</p>`
+    </div>`
     : renderProviderNote(
         'Google sign-in is temporarily unavailable. You can still use the manual form below.',
       );
@@ -88,14 +87,10 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     <p class="eyebrow">Tap. Save. Connect.</p>
     <div class="photo">\ud83d\udc1d</div>
     <h1>David Klan</h1>
-    <p class="pitch">Met me at an event? Save my contact now, then share yours in the fastest way that works for you.</p>
-
-    <a href="/vcard/${token}" class="btn btn-amber" download="${vcardProfile.fileName}" data-vcard-download>Save David&rsquo;s contact</a>
-    <a href="https://www.linkedin.com/in/david-klan" target="_blank" rel="noopener" class="btn btn-linkedin">Connect with David on LinkedIn</a>
-    <p class="subcopy">After you tap save, a quick sheet shows exactly what is in the card and where the file usually lands on your device.</p>
+    <p class="pitch">Let&rsquo;s swap details.</p>
 
     ${googleSignIn}
-    <button onclick="document.getElementById('manual-form').style.display='block';this.style.display='none'" class="btn btn-manual">Or enter your info manually</button>
+    <button id="manual-toggle" type="button" class="btn btn-manual" aria-expanded="false" aria-controls="manual-form">Or enter your info manually</button>
 
     <form id="manual-form" method="POST" action="/submit">
       <input type="hidden" name="token" value="${token}">
@@ -118,19 +113,33 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       <button type="submit" class="btn btn-amber">Send</button>
     </form>
 
-    <div class="section">
-      <h2>Tap again later</h2>
-      <p class="section-copy">Keep the card. When the timing is better, tap again to review services, ask a question, or start an inquiry.</p>
-      <div class="links">
-        <a href="https://dazbeez.com/business-card" class="btn btn-outline">What is this business card?</a>
-        <a href="https://www.linkedin.com/in/david-klan" target="_blank" rel="noopener" class="btn btn-outline">David on LinkedIn</a>
-        <a href="https://dazbeez.com/services" class="btn btn-outline">See services</a>
-        <a href="https://dazbeez.com/inquiry" class="btn btn-outline">Start an inquiry</a>
-      </div>
+    <p class="divider-label">Take mine too</p>
+    <a href="/vcard/${token}" class="btn btn-amber" download="${vcardProfile.fileName}" data-vcard-download>Save David&rsquo;s contact</a>
+    <a href="https://www.linkedin.com/in/david-klan" target="_blank" rel="noopener" class="btn btn-linkedin">Connect with David on LinkedIn</a>
+
+    <div class="footer-links">
+      <a href="https://dazbeez.com/services">What I do</a>
+      <a href="https://dazbeez.com/inquiry">Start an inquiry</a>
+      <a href="https://dazbeez.com/business-card">About this card</a>
     </div>
 
-    <p class="privacy">Your info goes to David only, never sold or shared. Short-lived security cookies are used only to complete Google sign-in safely.</p>
-    ${renderVCardSavedSheet(vcardProfile)}`,
+    <p class="privacy">Your info goes to David only. Never shared.</p>
+    ${renderVCardSavedSheet(vcardProfile)}
+    <script>
+      (function () {
+        var toggle = document.getElementById('manual-toggle');
+        var form = document.getElementById('manual-form');
+        if (!toggle || !form) return;
+        var openLabel = 'Or enter your info manually';
+        var closeLabel = 'Hide manual form';
+        toggle.addEventListener('click', function () {
+          var isOpen = form.style.display === 'block';
+          form.style.display = isOpen ? 'none' : 'block';
+          toggle.setAttribute('aria-expanded', isOpen ? 'false' : 'true');
+          toggle.textContent = isOpen ? openLabel : closeLabel;
+        });
+      })();
+    </script>`,
   );
 
   return new Response(html, {

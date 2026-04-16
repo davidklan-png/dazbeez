@@ -110,7 +110,7 @@ test('manual submit stores the contact and redirects to thanks', async () => {
     assert.equal(response.status, 302);
     assert.equal(
       response.headers.get('Location'),
-      'https://hi.dazbeez.com/thanks?contact_id=1',
+      'https://hi.dazbeez.com/thanks?contact_id=1&token=card-1',
     );
 
     await Promise.all(waitUntilCalls);
@@ -201,7 +201,7 @@ test('manual submit deduplicates an existing contact and updates details', async
     assert.equal(response.status, 302);
     assert.equal(
       response.headers.get('Location'),
-      'https://hi.dazbeez.com/thanks?contact_id=1',
+      'https://hi.dazbeez.com/thanks?contact_id=1&token=card-1',
     );
 
     await Promise.all(waitUntilCalls);
@@ -340,7 +340,7 @@ test('google callback completes the GIS POST happy path and clears the CSRF cook
     assert.equal(response.status, 302);
     assert.equal(
       response.headers.get('Location'),
-      'https://hi.dazbeez.com/thanks?contact_id=1',
+      'https://hi.dazbeez.com/thanks?contact_id=1&token=card-1',
     );
     assert.match(response.headers.get('Set-Cookie') ?? '', /Max-Age=0/);
 
@@ -484,7 +484,7 @@ test('linkedin callback completes the happy path', async () => {
     assert.equal(response.status, 302);
     assert.equal(
       response.headers.get('Location'),
-      'https://hi.dazbeez.com/thanks?contact_id=1',
+      'https://hi.dazbeez.com/thanks?contact_id=1&token=card-1',
     );
 
     await Promise.all(waitUntilCalls);

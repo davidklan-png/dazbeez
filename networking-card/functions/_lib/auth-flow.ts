@@ -55,11 +55,16 @@ export function oauthErrorResponse(
   return flowErrorResponse(title, message, retryHref, 'Back to card', status);
 }
 
-export function redirectToThanks(origin: string, contactId: number): Response {
+export function redirectToThanks(
+  origin: string,
+  contactId: number,
+  token?: string,
+): Response {
+  const tokenSuffix = token ? `&token=${encodeURIComponent(token)}` : '';
   return new Response(null, {
     status: 302,
     headers: {
-      Location: `${origin}/thanks?contact_id=${contactId}`,
+      Location: `${origin}/thanks?contact_id=${contactId}${tokenSuffix}`,
       'Set-Cookie': clearOauthStateCookie(),
     },
   });

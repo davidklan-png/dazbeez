@@ -55,5 +55,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     followUpUrl: `${origin}/hi/${token}`,
   });
 
-  return Response.redirect(`${origin}/thanks?contact_id=${savedContact.id}`, 302);
+  return Response.redirect(
+    `${origin}/thanks?contact_id=${savedContact.id}&token=${encodeURIComponent(token)}`,
+    302,
+  );
 };

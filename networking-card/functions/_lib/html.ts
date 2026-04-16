@@ -26,14 +26,14 @@ export function page(title: string, body: string): string {
       text-align: center;
     }
     .photo {
-      width: 5.5rem; height: 5.5rem;
+      width: 3.5rem; height: 3.5rem;
       border-radius: 50%;
       background: #f59e0b;
-      margin: 0 auto 1.25rem;
+      margin: 0 auto 0.75rem;
       display: flex;
       align-items: center;
       justify-content: center;
-      font-size: 2.25rem;
+      font-size: 1.5rem;
     }
     .eyebrow {
       color: #fbbf24;
@@ -45,7 +45,29 @@ export function page(title: string, body: string): string {
     }
     h1 { font-size: 1.375rem; font-weight: 700; margin-bottom: 0.375rem; }
     h2 { font-size: 1rem; font-weight: 700; margin-bottom: 0.375rem; }
-    .pitch { color: #9ca3af; margin-bottom: 1.75rem; font-size: 0.9375rem; line-height: 1.5; }
+    .pitch { color: #9ca3af; margin-bottom: 1rem; font-size: 0.9375rem; line-height: 1.5; }
+    .divider-label {
+      color: #9ca3af;
+      font-size: 0.6875rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      margin: 1rem 0 0.5rem;
+    }
+    .footer-links {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 0.875rem;
+      margin-top: 1.25rem;
+      font-size: 0.75rem;
+    }
+    .footer-links a {
+      color: #9ca3af;
+      text-decoration: none;
+      transition: color 0.15s;
+    }
+    .footer-links a:hover { color: #fbbf24; }
     .subcopy { color: #d1d5db; margin: 0.875rem 0 1.125rem; font-size: 0.8125rem; line-height: 1.5; }
     .btn {
       display: block; width: 100%;

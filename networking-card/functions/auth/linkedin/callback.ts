@@ -104,5 +104,5 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     followUpUrl: `${origin}/hi/${token}`,
   });
 
-  return redirectToThanks(origin, savedContact.id);
+  return redirectToThanks(origin, savedContact.id, token);
 };
