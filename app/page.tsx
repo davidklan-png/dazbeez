@@ -5,6 +5,33 @@ import { HoneycombBackdrop } from "@/components/honeycomb-backdrop";
 import { Reveal } from "@/components/reveal";
 import { serviceList } from "@/lib/services";
 
+const processSteps = [
+  {
+    title: "Discovery call",
+    description: "30-minute scoped conversation to identify the problem worth solving.",
+  },
+  {
+    title: "Proposal",
+    description: "Fixed-scope statement of work with clear deliverables and timeline.",
+  },
+  {
+    title: "Build & iterate",
+    description: "Incremental delivery with test coverage and weekly check-ins.",
+  },
+  {
+    title: "Hand-off",
+    description: "Full documentation, runbooks, and a 30-day support window.",
+  },
+];
+
+const platformBadges = [
+  "Next.js",
+  "Cloudflare",
+  "Google Cloud",
+  "Tailwind CSS",
+  "TypeScript",
+];
+
 export const metadata: Metadata = {
   title: "Dazbeez — AI, Automation & Data Consulting",
   description:
@@ -59,6 +86,9 @@ export default function HomePage() {
                 Browse services
               </Link>
             </div>
+            <p className="mt-6 text-center text-sm text-gray-400">
+              Serving clients in Japan and Hawaii · Built to Japanese regulatory standards
+            </p>
           </div>
         </div>
       </section>
@@ -107,6 +137,42 @@ export default function HomePage() {
         </div>
       </section>
 
+      {/* How It Works */}
+      <section className="py-20 bg-white">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+          <Reveal>
+            <div className="text-center mb-12">
+              <p className="text-sm font-semibold uppercase tracking-[0.32em] text-amber-600 mb-3">
+                How it works
+              </p>
+              <h2 className="text-3xl md:text-4xl font-bold text-gray-900 mb-4">
+                Fixed scope, direct execution, clean hand-off.
+              </h2>
+              <p className="text-lg text-gray-600 max-w-2xl mx-auto">
+                The process stays simple on purpose: define the right problem,
+                agree the work, ship in increments, and leave the team with something maintainable.
+              </p>
+            </div>
+
+            <div className="overflow-hidden rounded-3xl border border-amber-100 bg-white shadow-[0_24px_80px_-48px_rgba(17,24,39,0.45)]">
+              <div className="grid divide-y divide-amber-100 md:grid-cols-4 md:divide-x md:divide-y-0">
+                {processSteps.map((step, index) => (
+                  <article key={step.title} className="p-6 md:p-7">
+                    <div className="flex items-center gap-4">
+                      <span className="grid h-11 w-11 place-items-center rounded-full bg-amber-500 text-base font-semibold text-white">
+                        {index + 1}
+                      </span>
+                      <h3 className="text-lg font-semibold text-gray-900">{step.title}</h3>
+                    </div>
+                    <p className="mt-4 text-sm leading-7 text-gray-600">{step.description}</p>
+                  </article>
+                ))}
+              </div>
+            </div>
+          </Reveal>
+        </div>
+      </section>
+
       {/* CTA Section */}
       <section className="py-20 bg-white">
         <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
@@ -136,6 +202,20 @@ export default function HomePage() {
               </Link>
             </div>
           </Reveal>
+        </div>
+      </section>
+
+      {/* Trust Bar */}
+      <section className="bg-gray-900 py-5">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+          <div className="flex flex-col items-center justify-center gap-2 text-center sm:flex-row sm:gap-3">
+            <span className="text-xs font-medium uppercase tracking-[0.28em] text-gray-500">
+              Built on
+            </span>
+            <p className="text-xs font-semibold uppercase tracking-[0.28em] text-amber-300">
+              {platformBadges.join(" · ")}
+            </p>
+          </div>
         </div>
       </section>
     </div>
