@@ -54,6 +54,7 @@ function Footer() {
                 width={140}
                 height={93}
                 className="h-20 w-auto brightness-0 invert"
+                loading="lazy"
               />
             </div>
             <p className="text-gray-400">AI, Automation & Data Solutions for modern businesses.</p>
