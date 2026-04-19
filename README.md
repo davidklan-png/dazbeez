@@ -2,7 +2,7 @@
 
 AI, Automation & Data Solutions website built with Next.js 16.2.1.
 
-> A modern consulting site featuring an interactive inquiry chatbot, service pages, and NFC-enabled micro-pages for quick access.
+> A modern consulting site featuring service pages, direct contact intake, and NFC-enabled micro-pages for quick access.
 
 ## Tech Stack
 
@@ -34,35 +34,35 @@ dazbeez.com → Cloudflare Tunnel → Caddy (localhost:80) → host.docker.inter
 ### Development
 1. Install dependencies with `npm install`.
 2. Start the app with `npm run dev`.
-3. Open `http://localhost:3000`.
+3. Open `http://localhost:4488`.
 
-### Production Deployment With Cloudflare Tunnel
-`dazbeez.com` requires the Docker Compose `production` profile. Running only `docker compose up -d` starts the app container, but it does not start `nginx` or `cloudflared`, which leaves Cloudflare serving Error 1033.
+### Production (Docker Compose)
 
-1. Create the production env file:
-   `cp .env.example .env`
-2. Edit `.env` and set `CLOUDFLARE_TUNNEL_TOKEN` to the token for the `dazbeez.com` tunnel in Cloudflare Zero Trust.
-3. Build and start the production stack:
-   `docker compose --profile production up -d --build`
-4. Confirm the tunnel path is running:
-   `docker compose --profile production ps`
-5. Verify public reachability:
-   `./scripts/check-cloudflare-tunnel.sh dazbeez.com`
+```bash
+# First deploy
+docker-compose up -d --build
 
-If Cloudflare shows Error 1033, the first things to check are:
-- `.env` exists in the project root.
-- `CLOUDFLARE_TUNNEL_TOKEN` is set correctly.
-- `cloudflared` is running under the `production` profile.
+# Subsequent deploys
+docker-compose down && docker-compose up -d --build
 
-Inspect tunnel logs with:
-`docker compose --profile production logs cloudflared --tail=50`
+# Verify the app is responding
+curl -s -o /dev/null -w "%{http_code}" http://localhost:4488
+```
 
-### Direct Origin Checks
-`./scripts/check-domain-resolution.sh` is for direct-origin validation against a local IP or reverse proxy. For the public `dazbeez.com` path behind Cloudflare Tunnel, use `./scripts/check-cloudflare-tunnel.sh` instead.
+### Public Access
+
+The primary public path for `dazbeez.com` is:
+
+```text
+dazbeez.com → Cloudflare Tunnel (server-tunnel) → Caddy:80 → host.docker.internal:4488 → Next.js container
+```
+
+That tunnel is managed outside this repo via `~/.cloudflared/config.yml`. The Docker Compose `production` profile still exists for repo-managed `nginx` and `cloudflared` containers when you explicitly want to run those services from Compose.
 
 ### Optional Ollama Profile
+
 Start the LLM sidecar with:
-`docker compose --profile llm up -d`
+`docker-compose --profile llm up -d`
 
 ## Reboot / Restart Procedure
 
@@ -95,11 +95,14 @@ DNS records for `dazbeez.com` and `www.dazbeez.com` must be CNAME'd to the tunne
 | Route | Purpose |
 |-------|---------|
 | `/` | Landing page |
+| `/about` | About David Klan |
 | `/services` | Services list |
 | `/services/[slug]` | Service detail (ai, automation, data, governance, pm) |
-| `/inquiry` | Interactive chatbot flow |
 | `/contact` | Contact form |
+| `/business-card` | NFC card explainer |
 | `/nfc` | NFC micro-page (widget-style) |
+| `/privacy-policy` | Privacy policy |
+| `/terms-of-service` | Terms of service |
 
 ## Docker Healthcheck
 
