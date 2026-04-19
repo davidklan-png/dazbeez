@@ -84,7 +84,7 @@ function Footer() {
         </div>
 
         <div className="border-t border-gray-800 mt-8 pt-8 flex flex-col sm:flex-row items-center justify-between gap-3 text-gray-500 text-sm">
-          <p>&copy; {new Date().getFullYear()} Dazbeez K.K. (法人番号: 登記中) All rights reserved.</p>
+          <p>&copy; {new Date().getFullYear()} Dazbeez G.K. (合同会社) · 法人番号: 登記中. All rights reserved.</p>
           <div className="flex gap-6">
             <Link href="/privacy-policy" className="rounded transition-colors hover:text-amber-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500">Privacy Policy</Link>
             <Link href="/terms-of-service" className="rounded transition-colors hover:text-amber-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500">Terms of Service</Link>

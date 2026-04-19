@@ -28,9 +28,9 @@ export default function TermsOfServicePage() {
         <section>
           <p className="text-gray-700 leading-relaxed">
             These Terms of Service (&ldquo;Terms&rdquo;) constitute a legally binding agreement between you
-            (&ldquo;User,&rdquo; &ldquo;you,&rdquo; or &ldquo;your&rdquo;) and <strong>Dazbeez K.K.</strong>
-            (合同会社 Dazbeez, &ldquo;Dazbeez,&rdquo; &ldquo;we,&rdquo; &ldquo;our,&rdquo; or &ldquo;us&rdquo;),
-            a corporation incorporated under the laws of Japan, governing your access to and use of the website
+            (&ldquo;User,&rdquo; &ldquo;you,&rdquo; or &ldquo;your&rdquo;) and <strong>Dazbeez G.K. (合同会社)</strong>
+            (&ldquo;Dazbeez,&rdquo; &ldquo;we,&rdquo; &ldquo;our,&rdquo; or &ldquo;us&rdquo;), a godo kaisha organized
+            under the laws of Japan, governing your access to and use of the website
             at <strong>dazbeez.com</strong> and any related services (collectively, the &ldquo;Service&rdquo;).
           </p>
           <p className="text-gray-700 leading-relaxed mt-4">
@@ -283,7 +283,7 @@ export default function TermsOfServicePage() {
             Please contact us at:
           </p>
           <div className="text-gray-700 space-y-1 mb-6">
-            <p><strong>Dazbeez K.K. (合同会社 Dazbeez)</strong></p>
+            <p><strong>Dazbeez G.K. (合同会社)</strong></p>
             <p>Japan</p>
             <p>
               Email:{" "}

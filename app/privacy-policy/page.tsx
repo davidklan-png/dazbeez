@@ -27,7 +27,7 @@ export default function PrivacyPolicyPage() {
         {/* Intro */}
         <section>
           <p className="text-gray-700 leading-relaxed">
-            Dazbeez K.K. (&ldquo;Dazbeez,&rdquo; &ldquo;we,&rdquo; &ldquo;our,&rdquo; or &ldquo;us&rdquo;) is a corporation incorporated under the laws of Japan.
+            Dazbeez G.K. (合同会社) (&ldquo;Dazbeez,&rdquo; &ldquo;we,&rdquo; &ldquo;our,&rdquo; or &ldquo;us&rdquo;) is a godo kaisha organized under the laws of Japan.
             This Privacy Policy explains how we collect, use, disclose, and safeguard personal information
             in accordance with Japan&rsquo;s <strong>Act on the Protection of Personal Information</strong> (個人情報保護法, &ldquo;APPI&rdquo;)
             and other applicable regulations.
@@ -44,7 +44,7 @@ export default function PrivacyPolicyPage() {
             1. Data Controller
           </h2>
           <div className="bg-gray-50 rounded-xl p-6 text-gray-700 space-y-2">
-            <p><strong>Company Name:</strong> Dazbeez K.K. (合同会社 Dazbeez)</p>
+            <p><strong>Company Name:</strong> Dazbeez G.K. (合同会社)</p>
             <p><strong>Registered Country:</strong> Japan</p>
             <p><strong>Email:</strong>{" "}
               <a href="mailto:admin@dazbeez.com" className="text-amber-600 hover:text-amber-700 transition-colors">
