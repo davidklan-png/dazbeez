@@ -4,7 +4,7 @@ import { isServiceSlug } from "@/lib/services";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-type Errors = Partial<Record<"firstName" | "lastName" | "email" | "message" | "service", string>>;
+type Errors = Partial<Record<"firstName" | "lastName" | "email" | "phoneNumber" | "message" | "service", string>>;
 
 function validate(body: Record<string, unknown>): { ok: true; data: Parameters<typeof appendSubmission>[0] } | { ok: false; errors: Errors } {
   const errors: Errors = {};
@@ -14,6 +14,7 @@ function validate(body: Record<string, unknown>): { ok: true; data: Parameters<t
   const email = typeof body.email === "string" ? body.email.trim() : "";
   const message = typeof body.message === "string" ? body.message.trim() : "";
   const company = typeof body.company === "string" ? body.company.trim() : "";
+  const phoneNumber = typeof body.phoneNumber === "string" ? body.phoneNumber.trim() : "";
   const service = typeof body.service === "string" ? body.service.trim() : "";
   const source = typeof body.source === "string" ? body.source.trim() : "";
 
@@ -26,6 +27,8 @@ function validate(body: Record<string, unknown>): { ok: true; data: Parameters<t
   if (!email) errors.email = "Email is required.";
   else if (!EMAIL_RE.test(email)) errors.email = "Enter a valid email address.";
   else if (email.length > 160) errors.email = "Email is too long.";
+
+  if (phoneNumber.length > 20) errors.phoneNumber = "Phone number is too long.";
 
   if (!message) errors.message = "Message is required.";
   else if (message.length < 10) errors.message = "Please add a few more details (at least 10 characters).";
@@ -46,6 +49,7 @@ function validate(body: Record<string, unknown>): { ok: true; data: Parameters<t
       lastName,
       email,
       company: company || undefined,
+      phoneNumber: phoneNumber || undefined,
       service: service || undefined,
       message,
       source: source || undefined,
@@ -60,6 +64,11 @@ export async function POST(request: Request) {
     body = await request.json();
   } catch {
     return NextResponse.json({ error: "Invalid JSON payload." }, { status: 400 });
+  }
+
+  const website = typeof body.website === "string" ? body.website.trim() : "";
+  if (website) {
+    return NextResponse.json({ ok: true }, { status: 400 });
   }
 
   const result = validate(body);

@@ -6,6 +6,7 @@ export type ContactSubmission = {
   lastName: string;
   email: string;
   company?: string;
+  phoneNumber?: string;
   service?: string;
   message: string;
   submittedAt: string;
