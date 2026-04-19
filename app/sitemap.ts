@@ -17,6 +17,12 @@ export default function sitemap(): MetadataRoute.Sitemap {
       priority: 0.8,
     },
     {
+      url: "https://dazbeez.com/about",
+      lastModified: LAST_MODIFIED,
+      changeFrequency: "monthly",
+      priority: 0.8,
+    },
+    {
       url: "https://dazbeez.com/services/ai",
       lastModified: LAST_MODIFIED,
       changeFrequency: "monthly",
