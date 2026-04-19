@@ -44,7 +44,7 @@ export const services: Record<ServiceSlug, Service> = {
       "GitHub Actions CI/CD with 91% test coverage enforcement",
       "Self-hosted Cloudflare Pages deployment with zero recurring infrastructure costs",
     ],
-    related: ["ai", "pm"],
+    related: ["ai", "data"],
   },
   data: {
     slug: "data",
@@ -78,7 +78,7 @@ export const services: Record<ServiceSlug, Service> = {
       "OAuth 2.0 identity governance for web and mobile applications",
       "Audit trail implementation with tamper-evident, compliance-ready logging",
     ],
-    related: ["data", "pm"],
+    related: ["data", "ai"],
   },
   pm: {
     slug: "pm",

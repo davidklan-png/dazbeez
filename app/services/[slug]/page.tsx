@@ -154,8 +154,8 @@ export default async function ServicePage({ params }: ServicePageProps) {
               Ready to discuss {service.title}?
             </h2>
             <p className="text-gray-700 mb-6">
-              Tell us the outcome you need. We&apos;ll reply within 24 hours with a
-              concrete next step.
+              Describe your situation and constraints. We&apos;ll come back within 24
+              hours with a concrete recommendation — not a generic brochure.
             </p>
             <Link
               href={`/contact?service=${slug}`}
@@ -165,6 +165,15 @@ export default async function ServicePage({ params }: ServicePageProps) {
             </Link>
           </div>
         </Reveal>
+
+        <div className="mt-4 text-right">
+          <a
+            href="#main-content"
+            className="text-sm text-gray-400 transition-colors hover:text-amber-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 rounded"
+          >
+            ↑ Back to top
+          </a>
+        </div>
       </div>
     </div>
   );
