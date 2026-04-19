@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { HexIcon, hexAccent } from "@/components/hex-icon";
@@ -5,11 +6,41 @@ import { HoneycombBackdrop } from "@/components/honeycomb-backdrop";
 import { Reveal } from "@/components/reveal";
 import { isServiceSlug, services, serviceSlugs } from "@/lib/services";
 
+type ServicePageProps = {
+  params: Promise<{ slug: string }>;
+};
+
+function truncateDescription(description: string, maxLength = 155) {
+  if (description.length <= maxLength) {
+    return description;
+  }
+
+  return `${description.slice(0, maxLength - 1).trimEnd()}…`;
+}
+
 export async function generateStaticParams() {
   return serviceSlugs.map((slug) => ({ slug }));
 }
 
-export default async function ServicePage({ params }: { params: Promise<{ slug: string }> }) {
+export async function generateMetadata({ params }: ServicePageProps): Promise<Metadata> {
+  const { slug } = await params;
+
+  if (!isServiceSlug(slug)) {
+    notFound();
+  }
+
+  const service = services[slug];
+
+  return {
+    title: `${service.title} — Dazbeez`,
+    description: truncateDescription(service.fullDescription),
+    alternates: {
+      canonical: `/services/${slug}`,
+    },
+  };
+}
+
+export default async function ServicePage({ params }: ServicePageProps) {
   const { slug } = await params;
 
   if (!isServiceSlug(slug)) {

@@ -2,14 +2,14 @@ import type { Metadata } from "next";
 import Link from "next/link";
 
 export const metadata: Metadata = {
-  title: "What Is This Business Card? | Dazbeez",
+  title: "Dazbeez NFC Business Card — How It Works",
   description:
-    "A mobile-first explainer for the Dazbeez NFC business card: save contact, capture leads, and keep a useful return path after the event.",
+    "See how the Dazbeez NFC business card turns a tap into contact save, lead capture, and a useful return path after the event.",
   alternates: {
     canonical: "/business-card",
   },
   openGraph: {
-    title: "What Is This Business Card? | Dazbeez",
+    title: "Dazbeez NFC Business Card — How It Works",
     description:
       "See how the Dazbeez NFC card turns a tap into contact save, lead capture, and later follow-up.",
     url: "https://dazbeez.com/business-card",
@@ -24,7 +24,7 @@ export const metadata: Metadata = {
   },
   twitter: {
     card: "summary_large_image",
-    title: "What Is This Business Card? | Dazbeez",
+    title: "Dazbeez NFC Business Card — How It Works",
     description:
       "See how the Dazbeez NFC card turns a tap into contact save, lead capture, and later follow-up.",
     images: ["/business-card/opengraph-image"],

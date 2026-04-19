@@ -1,8 +1,18 @@
+import type { Metadata } from "next";
 import Link from "next/link";
 import { HexIcon } from "@/components/hex-icon";
 import { HoneycombBackdrop } from "@/components/honeycomb-backdrop";
 import { Reveal } from "@/components/reveal";
 import { serviceList } from "@/lib/services";
+
+export const metadata: Metadata = {
+  title: "Services — Dazbeez",
+  description:
+    "Five disciplines — AI Integration, Automation, Data Management, Governance, Project Management — built to combine.",
+  alternates: {
+    canonical: "/services",
+  },
+};
 
 export default function ServicesPage() {
   return (

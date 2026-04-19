@@ -1,8 +1,18 @@
+import type { Metadata } from "next";
 import Link from "next/link";
 import { HexIcon } from "@/components/hex-icon";
 import { HoneycombBackdrop } from "@/components/honeycomb-backdrop";
 import { Reveal } from "@/components/reveal";
 import { serviceList } from "@/lib/services";
+
+export const metadata: Metadata = {
+  title: "Dazbeez — AI, Automation & Data Consulting",
+  description:
+    "We design AI, automation, and data systems for businesses that need the work to still be correct in five years.",
+  alternates: {
+    canonical: "/",
+  },
+};
 
 export default function HomePage() {
   return (
