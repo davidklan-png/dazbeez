@@ -113,6 +113,12 @@ const architecture = [
   },
 ];
 
+const usageSteps = [
+  "Tap your phone to the card",
+  "The contact page opens — sign in or share your details",
+  "Save David's contact and connect instantly",
+];
+
 export default function BusinessCardPage() {
   return (
     <div className="min-h-screen bg-[linear-gradient(180deg,#111827_0%,#18202d_22%,#f7f4ea_22%,#fffdf7_100%)]">
@@ -243,6 +249,32 @@ export default function BusinessCardPage() {
                 </span>
                 <h3 className="mt-4 text-xl font-semibold text-gray-900">{item.title}</h3>
                 <p className="mt-3 text-sm leading-6 text-gray-600">{item.body}</p>
+              </article>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      <section className="mx-auto max-w-6xl px-4 py-2 sm:px-6 lg:px-8">
+        <div className="rounded-[2rem] border border-amber-100 bg-white px-6 py-8 shadow-sm sm:px-8">
+          <div className="max-w-2xl">
+            <p className="text-sm font-semibold uppercase tracking-[0.32em] text-amber-600">
+              How to use your NFC card
+            </p>
+            <h2 className="mt-3 text-3xl font-bold text-gray-900">
+              Three quick steps from tap to contact.
+            </h2>
+          </div>
+
+          <div className="mt-8 grid gap-4 md:grid-cols-3">
+            {usageSteps.map((step, index) => (
+              <article key={step} className="rounded-[1.5rem] border border-gray-200 bg-gray-50 p-5">
+                <div className="flex items-center gap-3">
+                  <span className="grid h-9 w-9 place-items-center rounded-full bg-amber-500 text-sm font-semibold text-white">
+                    {index + 1}
+                  </span>
+                  <p className="text-sm font-medium leading-6 text-gray-700">{step}</p>
+                </div>
               </article>
             ))}
           </div>
