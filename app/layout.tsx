@@ -74,6 +74,7 @@ function Footer() {
           <div>
             <h3 className="font-semibold mb-4">Connect</h3>
             <ul className="space-y-2 text-gray-400">
+              <li><Link href="/case-studies" className="rounded transition-colors hover:text-amber-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500">Selected Work</Link></li>
               <li><Link href="/contact" className="rounded transition-colors hover:text-amber-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500">Contact Us</Link></li>
               <li><Link href="/about" className="rounded transition-colors hover:text-amber-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500">About David</Link></li>
               <li><Link href="/business-card" className="rounded transition-colors hover:text-amber-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500">About the Card</Link></li>
