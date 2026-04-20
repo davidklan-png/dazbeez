@@ -8,7 +8,10 @@ import {
 
 export function proxy(request: NextRequest) {
   if (!isAdminPageAuthConfigured()) {
-    return new NextResponse("Admin access is not configured.", { status: 503 });
+    return new NextResponse("Not Found", {
+      status: 404,
+      headers: { "X-Robots-Tag": "noindex, nofollow" },
+    });
   }
 
   if (isAdminPageAuthorized(request.headers)) {
@@ -17,7 +20,10 @@ export function proxy(request: NextRequest) {
 
   return new NextResponse("Authentication required.", {
     status: 401,
-    headers: getAdminPageAuthChallengeHeaders(),
+    headers: {
+      ...getAdminPageAuthChallengeHeaders(),
+      "X-Robots-Tag": "noindex, nofollow",
+    },
   });
 }
 
