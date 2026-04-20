@@ -3,6 +3,8 @@ import { HexIcon } from "@/components/hex-icon";
 import { HoneycombBackdrop } from "@/components/honeycomb-backdrop";
 import { Reveal } from "@/components/reveal";
 import { serviceList } from "@/lib/services";
+import { caseStudyList } from "@/lib/case-studies";
+import { services } from "@/lib/services";
 
 export default function HomePage() {
   return (
@@ -90,6 +92,69 @@ export default function HomePage() {
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
                     </svg>
                   </span>
+                </Link>
+              </Reveal>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* Selected Work Section */}
+      <section className="py-20 bg-white">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+          <Reveal>
+            <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4 mb-12">
+              <div>
+                <p className="text-sm font-semibold uppercase tracking-[0.32em] text-amber-600 mb-3">
+                  Selected Work
+                </p>
+                <h2 className="text-3xl md:text-4xl font-bold text-gray-900">
+                  Problems solved, systems shipped.
+                </h2>
+              </div>
+              <Link
+                href="/case-studies"
+                className="text-amber-600 hover:text-amber-700 font-medium inline-flex items-center gap-1 shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 rounded"
+              >
+                See all work
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                </svg>
+              </Link>
+            </div>
+          </Reveal>
+
+          <div className="grid md:grid-cols-3 gap-6">
+            {caseStudyList.slice(0, 3).map((study, idx) => (
+              <Reveal key={study.slug} delay={idx * 0.07}>
+                <Link
+                  href={`/case-studies/${study.slug}`}
+                  className="group flex flex-col h-full bg-gray-50 rounded-2xl border border-gray-200 hover:border-amber-400 hover:shadow-lg transition-all duration-300 overflow-hidden focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
+                >
+                  <div className="p-6 flex-1">
+                    <div className="flex flex-wrap gap-1.5 mb-3">
+                      {study.relatedServices.map((svc) => (
+                        <span
+                          key={svc}
+                          className="px-2 py-0.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-700"
+                        >
+                          {services[svc].title}
+                        </span>
+                      ))}
+                    </div>
+                    <h3 className="text-lg font-bold text-gray-900 mb-2 group-hover:text-amber-700 transition-colors">
+                      {study.title}
+                    </h3>
+                    <p className="text-gray-600 text-sm leading-relaxed">{study.tagline}</p>
+                  </div>
+                  <div className="px-6 pb-5">
+                    <span className="inline-flex items-center gap-1 text-amber-600 font-medium text-sm group-hover:gap-2 transition-all">
+                      Read case study
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                      </svg>
+                    </span>
+                  </div>
                 </Link>
               </Reveal>
             ))}

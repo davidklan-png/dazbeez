@@ -4,6 +4,7 @@ import { HexIcon, hexAccent } from "@/components/hex-icon";
 import { HoneycombBackdrop } from "@/components/honeycomb-backdrop";
 import { Reveal } from "@/components/reveal";
 import { isServiceSlug, services, serviceSlugs } from "@/lib/services";
+import { caseStudiesByService } from "@/lib/case-studies";
 
 export async function generateStaticParams() {
   return serviceSlugs.map((slug) => ({ slug }));
@@ -18,6 +19,7 @@ export default async function ServicePage({ params }: { params: Promise<{ slug: 
 
   const service = services[slug];
   const accent = hexAccent(slug);
+  const relatedStudies = caseStudiesByService(slug);
 
   return (
     <div className="py-16">
@@ -112,6 +114,37 @@ export default async function ServicePage({ params }: { params: Promise<{ slug: 
             </div>
           </section>
         </Reveal>
+
+        {/* Case studies */}
+        {relatedStudies.length > 0 && (
+          <Reveal>
+            <section className="mb-12">
+              <h2 className="text-2xl font-semibold text-gray-900 mb-4">In practice</h2>
+              <div className="grid gap-4">
+                {relatedStudies.map((study) => (
+                  <Link
+                    key={study.slug}
+                    href={`/case-studies/${study.slug}`}
+                    className="group flex items-start justify-between gap-4 p-5 bg-white rounded-2xl border border-gray-200 hover:border-amber-400 hover:shadow-md transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
+                  >
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs font-semibold uppercase tracking-[0.24em] text-gray-400 mb-1">
+                        {study.client}
+                      </p>
+                      <h3 className="font-semibold text-gray-900 group-hover:text-amber-700 transition-colors mb-1">
+                        {study.title}
+                      </h3>
+                      <p className="text-sm text-gray-600">{study.tagline}</p>
+                    </div>
+                    <svg className="w-5 h-5 text-amber-500 flex-shrink-0 mt-1" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                    </svg>
+                  </Link>
+                ))}
+              </div>
+            </section>
+          </Reveal>
+        )}
 
         {/* CTA */}
         <Reveal>

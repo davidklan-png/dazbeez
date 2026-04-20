@@ -72,6 +72,7 @@ function Footer() {
           <div>
             <h3 className="font-semibold mb-4">Connect</h3>
             <ul className="space-y-2 text-gray-400">
+              <li><Link href="/case-studies" className="hover:text-amber-400 transition-colors">Selected Work</Link></li>
               <li><Link href="/contact" className="hover:text-amber-400 transition-colors">Contact Us</Link></li>
               <li><Link href="/business-card" className="hover:text-amber-400 transition-colors">About the Card</Link></li>
               <li><Link href="/nfc" className="hover:text-amber-400 transition-colors">NFC Quick Access</Link></li>
