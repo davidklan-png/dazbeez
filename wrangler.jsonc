@@ -1,0 +1,47 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "dazbeez",
+  "main": ".open-next/worker.js",
+  "compatibility_date": "2025-08-01",
+  "compatibility_flags": [
+    "nodejs_compat",
+    "global_fetch_strictly_public"
+  ],
+  "assets": {
+    "directory": ".open-next/assets",
+    "binding": "ASSETS"
+  },
+  "services": [
+    {
+      "binding": "WORKER_SELF_REFERENCE",
+      "service": "dazbeez"
+    }
+  ],
+  "ai": {
+    "binding": "AI",
+    "remote": true
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "dazbeez-submissions",
+      "database_id": "34b405e3-1317-4521-b841-2d05225dc7be"
+    },
+    {
+      "binding": "CRM_DB",
+      "database_name": "dazbeez-networking",
+      "database_id": "4ce69aa7-efac-4739-8ed1-43c9d1a1db4c"
+    }
+  ]
+  // Add custom domains after validating the workers.dev deployment:
+  // "routes": [
+  //   {
+  //     "pattern": "dazbeez.com",
+  //     "custom_domain": true
+  //   },
+  //   {
+  //     "pattern": "www.dazbeez.com",
+  //     "custom_domain": true
+  //   }
+  // ]
+}

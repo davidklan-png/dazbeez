@@ -14,8 +14,23 @@ export const metadata: Metadata = {
   title: "Dazbeez - AI, Automation & Data Solutions",
   description: "Transform your business with AI integration, automation, data management, and governance services.",
   metadataBase: new URL("https://dazbeez.com"),
+  manifest: "/manifest.webmanifest",
   alternates: {
     canonical: "/",
+  },
+  icons: {
+    apple: [
+      {
+        url: "/icons/apple-touch-icon.png",
+        sizes: "180x180",
+        type: "image/png",
+      },
+    ],
+  },
+  appleWebApp: {
+    capable: true,
+    statusBarStyle: "black-translucent",
+    title: "Dazbeez",
   },
   openGraph: {
     title: "Dazbeez - AI, Automation & Data Solutions",
@@ -37,7 +52,7 @@ export const metadata: Metadata = {
     card: "summary_large_image",
     title: "Dazbeez - AI, Automation & Data Solutions",
     description: "Transform your business with AI integration, automation, data management, and governance services.",
-    images: ["/opengraph-image"],
+    images: ["/twitter-image"],
   },
 };
 

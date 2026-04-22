@@ -4,6 +4,11 @@ import { useMemo, useState } from "react";
 import { serviceList, type ServiceSlug } from "@/lib/services";
 
 type FieldErrors = Partial<Record<"firstName" | "lastName" | "email" | "phoneNumber" | "message" | "service", string>>;
+type ContactResponseBody = {
+  error?: string;
+  errors?: FieldErrors;
+  ok?: boolean;
+};
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -97,7 +102,7 @@ export function ContactForm({
         return;
       }
 
-      const body = await res.json().catch(() => ({}));
+      const body = (await res.json().catch(() => ({}))) as ContactResponseBody;
       if (res.status === 400 && body?.errors) {
         setErrors(body.errors as FieldErrors);
         setStatus("idle");

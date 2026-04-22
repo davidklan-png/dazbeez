@@ -1,9 +1,0 @@
-tunnel: e2d0eab2-b36f-4496-86a7-363d095fb78c
-credentials-file: /etc/cloudflared/creds.json
-
-ingress:
-  - hostname: dazbeez.com
-    service: http://host.docker.internal:4488
-  - hostname: www.dazbeez.com
-    service: http://host.docker.internal:4488
-  - service: http_status:404

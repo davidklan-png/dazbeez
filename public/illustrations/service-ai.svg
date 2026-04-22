@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 400" fill="none">
+  <defs>
+    <linearGradient id="ai-core" x1="171" y1="96" x2="425" y2="304" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FBBF24"/>
+      <stop offset="1" stop-color="#F59E0B"/>
+    </linearGradient>
+  </defs>
+  <g opacity=".14" stroke="#1F2937" stroke-width="2">
+    <path d="m108 87 52-30 52 30v60l-52 30-52-30z"/>
+    <path d="m380 61 60-34 60 34v68l-60 34-60-34z"/>
+    <path d="m372 239 68-39 68 39v78l-68 39-68-39z"/>
+  </g>
+  <path d="M144 104 244 160M144 296l100-56M300 100v68m0 64v68m56-140 92-52m-92 132 92 52M244 160l56-32 56 32m-112 80 56 32 56-32" stroke="#1F2937" stroke-linecap="round" stroke-width="8"/>
+  <circle cx="144" cy="104" r="20" fill="#FBBF24"/>
+  <circle cx="144" cy="296" r="20" fill="#F59E0B"/>
+  <circle cx="300" cy="100" r="20" fill="#FFFFFF"/>
+  <circle cx="300" cy="300" r="20" fill="#FFFFFF"/>
+  <circle cx="448" cy="108" r="20" fill="#FBBF24"/>
+  <circle cx="448" cy="292" r="20" fill="#F59E0B"/>
+  <circle cx="300" cy="200" r="58" fill="url(#ai-core)"/>
+  <circle cx="300" cy="200" r="28" fill="#111827"/>
+  <g stroke="#FFFFFF" stroke-linecap="round" stroke-width="6">
+    <path d="M300 172v56"/>
+    <path d="M272 200h56"/>
+    <path d="m281 181 38 38"/>
+    <path d="m319 181-38 38"/>
+  </g>
+</svg>

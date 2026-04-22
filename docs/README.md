@@ -15,19 +15,19 @@ Internal documentation for the Dazbeez consulting website and related systems.
 
 ## Quick Reference
 
-### Start the production stack
+### Deploy the main site
 
 ```bash
-bash scripts/make-env.sh
-docker compose --profile production up -d --build
-docker compose --profile production ps
-bash scripts/check-cloudflare-tunnel.sh dazbeez.com
+npm run build:cf
+npm run deploy
+bash scripts/check-deployment.sh https://dazbeez.com
 ```
 
 ### Development
 
 ```bash
-npm run dev           # Next.js dev server (port 3000)
+npm run dev           # Next.js dev server (port 4488)
+npm run cf:dev        # OpenNext/Workers local preview (port 8787)
 cd networking-card && npm run dev   # Cloudflare Pages local (port 8788)
 ```
 
@@ -38,7 +38,6 @@ cd networking-card && npm run dev   # Cloudflare Pages local (port 8788)
 | `https://dazbeez.com/` | Home page |
 | `https://dazbeez.com/services` | Services listing |
 | `https://dazbeez.com/services/[slug]` | Service detail (ai, automation, data, governance, pm) |
-| `https://dazbeez.com/inquiry` | Interactive chatbot inquiry flow |
 | `https://dazbeez.com/contact` | Contact form |
 | `https://dazbeez.com/nfc` | NFC quick-access widget |
 | `https://dazbeez.com/admin` | Internal operations dashboard (not publicly linked) |

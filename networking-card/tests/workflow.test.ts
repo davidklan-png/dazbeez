@@ -209,6 +209,7 @@ test('manual submit deduplicates an existing contact and updates details', async
     assert.equal(dbState.contacts[0].name, 'Casey Contact');
     assert.equal(dbState.contacts[0].company, 'New Co');
     assert.equal(dbState.contacts[0].source, 'google');
+    assert.equal(fetchMock.mock.calls.length, 1);
     assert.deepEqual(
       dbState.contactMethods
         .filter((entry) => entry.contact_id === 1)
@@ -223,6 +224,48 @@ test('manual submit deduplicates an existing contact and updates details', async
         .sort(),
       ['google', 'manual'],
     );
+  } finally {
+    fetchMock.mock.restore();
+  }
+});
+
+test('manual submit sends Discord but skips acknowledgment email for duplicate registrations', async () => {
+  const dbState = createFakeDbState(
+    [{ token: 'card-1', label: 'card-1' }],
+    {
+      contacts: [
+        {
+          token: 'card-1',
+          name: 'Casey Old',
+          email: 'casey@example.com',
+          source: 'manual',
+        },
+      ],
+    },
+  );
+  const env = createEnv({
+    DB: createFakeD1Database(dbState),
+  });
+  const form = new FormData();
+  form.set('token', 'card-1');
+  form.set('name', 'Casey Contact');
+  form.set('email', 'casey@example.com');
+
+  const fetchMock = mock.method(globalThis, 'fetch', async () => new Response('{}'));
+
+  try {
+    const { context, waitUntilCalls } = createPagesContext({
+      url: 'https://hi.dazbeez.com/submit',
+      method: 'POST',
+      body: form,
+      env,
+    });
+
+    const response = await submitRoute(context as never);
+
+    assert.equal(response.status, 302);
+    await Promise.all(waitUntilCalls);
+    assert.equal(fetchMock.mock.calls.length, 1);
   } finally {
     fetchMock.mock.restore();
   }

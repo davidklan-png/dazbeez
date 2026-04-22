@@ -1,0 +1,15 @@
+{
+  "existingContacts": [
+    {
+      "id": 11,
+      "companyId": 5,
+      "name": "Aiko Tanaka",
+      "company": "Mori Financial Group",
+      "email": "aiko.tanaka@mori-fg.co.jp",
+      "phone": null,
+      "mobile": "+819055551200",
+      "linkedinUrl": "https://www.linkedin.com/in/aiko-tanaka",
+      "website": "https://mori-fg.co.jp"
+    }
+  ]
+}

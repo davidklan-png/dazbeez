@@ -96,6 +96,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
 
   queueContactNotifications(context, {
     contactId: savedContact.id,
+    isNew: savedContact.isNew,
     token,
     cardLabel: card.label || token,
     source: 'linkedin',

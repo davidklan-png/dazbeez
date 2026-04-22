@@ -2,13 +2,15 @@
 
 ## Project Context
 
-Dazbeez is a Next.js 16.2.1 website for AI, Automation & Data consulting services. The site is designed for local Mac M4 hosting with optional public access via Cloudflare Tunnel.
+Dazbeez is a Next.js 16.2.3 website for AI, Automation & Data consulting services. Production now runs on Cloudflare Workers via OpenNext, with Cloudflare D1 used for contact submission persistence.
 
 ## Tech Stack
 
-- **Framework:** Next.js 16.2.1 (App Router - not Pages Router!)
+- **Framework:** Next.js 16.2.3 (App Router - not Pages Router!)
 - **Styling:** Tailwind CSS (bee theme: amber/yellow + charcoal)
-- **Deployment:** Docker Compose on Mac M4
+- **Production Runtime:** Cloudflare Workers via OpenNext
+- **Persistence:** Cloudflare D1
+- **Local Reference Runtime:** Docker Compose on Mac M4
 - **Optional LLM:** Ollama for chatbot enhancement
 
 ## Key Conventions
@@ -44,7 +46,7 @@ app/
 | `/contact` | Contact form (accepts `?service=<slug>` to preselect) |
 | `/business-card` | Explainer for the NFC card |
 | `/nfc` | NFC micro-page (widget-style) |
-| `/api/contact` | POST endpoint for contact submissions (JSONL persistence) |
+| `/api/contact` | POST endpoint for contact submissions (D1 persistence) |
 
 > `/inquiry` has been retired and 308-redirects to `/contact`.
 
@@ -56,27 +58,21 @@ app/
 4. **Preserve bee theme** - Keep amber/yellow + charcoal color scheme
 5. **Run dev server** - `npm run dev` to test changes
 
-## Docker & Deployment
+## Deployment
 
-- Build: `docker build -t dazbeez .`
-- Run: `docker-compose up -d`
-- With LLM: `docker-compose --profile llm up -d`
+- Cloudflare build: `npm run build:cf`
+- Local Workers preview: `npm run cf:dev`
+- Deploy worker: `npm run deploy`
 
-## Cloudflare Tunnel
+## Docker Reference
 
-Traffic flow: `dazbeez.com → Cloudflare Tunnel (server-tunnel) → Caddy:80 → host.docker.internal:4488 → Next.js container`
+- `Dockerfile` and `docker-compose.yml` are kept only for local/reference workflows.
+- The `llm` Compose profile is local-only and does not participate in production.
 
-The named tunnel `server-tunnel` is configured in `~/.cloudflared/config.yml` and runs as a launchd system daemon.
-Caddy proxies `dazbeez.com` and `www.dazbeez.com` to `host.docker.internal:4488`.
-
-Use the provided HTTPS URL for NFC tags.
-
-## Reboot / Restart Procedure
-1. Docker Compose services restart automatically (`restart: unless-stopped`)
-2. Wait for nextjs container to report healthy before cloudflared will serve traffic
-3. If cloudflared is a launchd service, it will retry connections — no action needed
-4. If running cloudflared manually, use `docker/wait-for-healthy.sh`
-5. Verify end-to-end: `curl -s -o /dev/null -w "%{http_code}" http://localhost:4488`
+## Verification
+1. Run `npm run build:cf` before shipping deployment changes
+2. For Cloudflare runtime checks, run `npm run cf:dev`
+3. Smoke-test the deployment with `bash scripts/check-deployment.sh <base-url>`
 
 <!-- BEGIN:nextjs-agent-rules -->
 # This is NOT the Next.js you know

@@ -1,0 +1,29 @@
+{
+  "confidence": {
+    "full_name": 0.62,
+    "company_name": 0.58,
+    "email": 0.49
+  },
+  "fields": {
+    "full_name": "Aiko Tanaka",
+    "first_name": "Aiko",
+    "last_name": "Tanaka",
+    "full_name_native": "田中 愛子",
+    "job_title": "Operations Lead",
+    "department": null,
+    "company_name": "Harbor Logistics",
+    "company_name_native": null,
+    "email": "aiko@harbor.jp",
+    "phone": null,
+    "mobile": null,
+    "website": "harbor.jp",
+    "linkedin_url": null,
+    "address": null,
+    "postal_code": null,
+    "city": "Tokyo",
+    "state_prefecture": "Tokyo",
+    "country": "Japan",
+    "notes_from_card": null,
+    "raw_ocr_text": "Aiko Tanaka 田中愛子 Harbor Logistics glare artifact"
+  }
+}

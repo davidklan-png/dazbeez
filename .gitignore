@@ -33,14 +33,17 @@ yarn-error.log*
 # env files (can opt-in for committing if needed)
 .env*
 !.env.example
+.dev.vars
 
 # vercel
 .vercel
+.open-next
+.wrangler/
 
 # typescript
 *.tsbuildinfo
 next-env.d.ts
 .ssh/
 
-# contact form submissions (written by /api/contact)
+# legacy local contact form artifacts
 /data/

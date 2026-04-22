@@ -30,7 +30,6 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     ),
   );
 
-  const origin = new URL(context.request.url).origin;
   const vcardProfile = await getVCardProfile(context.env.DB);
 
   // Generate a random nonce for CSRF protection. The nonce is bound to this

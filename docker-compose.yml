@@ -1,9 +1,11 @@
+# Production runs on Cloudflare Workers via OpenNext.
+# This compose file is kept only for local/reference container workflows.
 # Dazbeez reserved host port: 4488
 # Internal container port: 3000
 # Do not change host port — reserved to avoid conflicts with other local services.
 
 services:
-  # Next.js application
+  # Local reference Next.js container
   nextjs:
     build:
       context: .
@@ -28,7 +30,7 @@ services:
     networks:
       - dazbeez-network
 
-  # Nginx reverse proxy (optional, for production)
+  # Optional local reverse proxy reference
   nginx:
     image: nginx:alpine
     expose:
@@ -41,22 +43,9 @@ services:
     networks:
       - dazbeez-network
     profiles:
-      - production
+      - proxy
 
-  # Cloudflare Tunnel service
-  cloudflared:
-    image: cloudflare/cloudflared:latest
-    command: tunnel --no-autoupdate run --credentials-file /etc/cloudflared/creds.json e2d0eab2-b36f-4496-86a7-363d095fb78c
-    volumes:
-      - ${HOME}/.cloudflared/e2d0eab2-b36f-4496-86a7-363d095fb78c.json:/etc/cloudflared/creds.json:ro
-    restart: unless-stopped
-    network_mode: host
-    depends_on:
-      - nextjs
-    profiles:
-      - production
-
-  # Ollama LLM service (for future use)
+  # Optional local Ollama sidecar
   ollama:
     image: ollama/ollama:latest
     ports:

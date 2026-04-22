@@ -1,0 +1,24 @@
+{
+  "fields": {
+    "full_name": "Mina Sato",
+    "first_name": "Mina",
+    "last_name": "Sato",
+    "full_name_native": "佐藤 美奈",
+    "job_title": "Program Manager",
+    "department": "Innovation",
+    "company_name": "Pacific Advisory",
+    "company_name_native": null,
+    "email": "mina@pacific-advisory.co.jp",
+    "phone": null,
+    "mobile": null,
+    "website": "pacific-advisory.co.jp?ref=card",
+    "linkedin_url": "linkedin.com/in/mina-sato-12345?trk=public-profile",
+    "address": null,
+    "postal_code": null,
+    "city": "Honolulu",
+    "state_prefecture": "Hawaii",
+    "country": "USA",
+    "notes_from_card": null,
+    "raw_ocr_text": "Mina Sato Pacific Advisory Innovation"
+  }
+}

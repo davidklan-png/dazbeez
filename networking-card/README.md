@@ -44,6 +44,22 @@ npm run db:migrate:local
 npm run db:migrate:remote
 ```
 
+These scripts now include `migrations/0006_known_attendees.sql`, which creates the table used by the personalized post-tap flow.
+
+### 3a. Seed event personalization (optional)
+
+If you want the UH alumni event attendees to receive personalized thank-you copy and tier-specific follow-up prompts, apply the event seed after running migrations:
+
+```bash
+# Local development
+npm run db:seed:uh-alumni:local
+
+# Production
+npm run db:seed:uh-alumni:remote
+```
+
+This loads `seed-uh-alumni-2026-04-22.sql` into `known_attendees`.
+
 ### 4. Set secrets
 
 ```bash
@@ -96,8 +112,8 @@ npm run seed -- 50 https://hi.dazbeez.com
 This creates `seed.sql` and `cards.csv`. Apply the SQL:
 
 ```bash
-npx wrangler d1 execute dazbeez-networking --local  --file=seed.sql
-npx wrangler d1 execute dazbeez-networking --remote --file=seed.sql
+npx wrangler --config wrangler.toml d1 execute dazbeez-networking --local  --file=seed.sql
+npx wrangler --config wrangler.toml d1 execute dazbeez-networking --remote --file=seed.sql
 ```
 
 Use `cards.csv` to generate QR codes or program NFC tags.
