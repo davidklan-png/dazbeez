@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { appendSubmission } from "@/lib/contact-submissions";
+import { savePublicContactSubmissionToCrm } from "@/lib/crm";
 import { isServiceSlug } from "@/lib/services";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -78,6 +79,17 @@ export async function POST(request: Request) {
 
   try {
     await appendSubmission(result.data);
+    await savePublicContactSubmissionToCrm({
+      actor: "public_contact_form",
+      firstName: result.data.firstName,
+      lastName: result.data.lastName,
+      email: result.data.email,
+      company: result.data.company,
+      phoneNumber: result.data.phoneNumber,
+      service: result.data.service,
+      message: result.data.message,
+      source: result.data.source,
+    });
   } catch (err) {
     console.error("[contact] failed to persist submission", err);
     return NextResponse.json(

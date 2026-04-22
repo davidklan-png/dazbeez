@@ -1,5 +1,4 @@
-import { promises as fs } from "node:fs";
-import path from "node:path";
+import { getCloudflareContext } from "@opennextjs/cloudflare";
 
 export type ContactSubmission = {
   firstName: string;
@@ -13,11 +12,24 @@ export type ContactSubmission = {
   source?: string;
 };
 
-const DATA_DIR = process.env.DAZBEEZ_DATA_DIR ?? path.join(process.cwd(), "data");
-const FILE = path.join(DATA_DIR, "contact-submissions.jsonl");
+export async function appendSubmission(entry: ContactSubmission): Promise<void> {
+  const { env } = getCloudflareContext();
 
-export async function appendSubmission(entry: ContactSubmission) {
-  await fs.mkdir(DATA_DIR, { recursive: true });
-  const line = JSON.stringify(entry) + "\n";
-  await fs.appendFile(FILE, line, "utf8");
+  await env.DB.prepare(
+    `INSERT INTO contact_submissions
+      (first_name, last_name, email, company, phone_number, service, message, source, submitted_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(
+      entry.firstName,
+      entry.lastName,
+      entry.email,
+      entry.company ?? null,
+      entry.phoneNumber ?? null,
+      entry.service ?? null,
+      entry.message,
+      entry.source ?? null,
+      entry.submittedAt,
+    )
+    .run();
 }

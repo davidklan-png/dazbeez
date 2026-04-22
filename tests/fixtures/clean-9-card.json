@@ -1,0 +1,13 @@
+{
+  "detections": [
+    { "label": "card_1", "confidence": 0.97, "polygon": { "topLeft": { "x": 0.04, "y": 0.05 }, "topRight": { "x": 0.31, "y": 0.05 }, "bottomRight": { "x": 0.31, "y": 0.26 }, "bottomLeft": { "x": 0.04, "y": 0.26 } } },
+    { "label": "card_2", "confidence": 0.96, "polygon": { "topLeft": { "x": 0.36, "y": 0.05 }, "topRight": { "x": 0.63, "y": 0.05 }, "bottomRight": { "x": 0.63, "y": 0.26 }, "bottomLeft": { "x": 0.36, "y": 0.26 } } },
+    { "label": "card_3", "confidence": 0.96, "polygon": { "topLeft": { "x": 0.68, "y": 0.05 }, "topRight": { "x": 0.95, "y": 0.05 }, "bottomRight": { "x": 0.95, "y": 0.26 }, "bottomLeft": { "x": 0.68, "y": 0.26 } } },
+    { "label": "card_4", "confidence": 0.95, "polygon": { "topLeft": { "x": 0.04, "y": 0.37 }, "topRight": { "x": 0.31, "y": 0.37 }, "bottomRight": { "x": 0.31, "y": 0.58 }, "bottomLeft": { "x": 0.04, "y": 0.58 } } },
+    { "label": "card_5", "confidence": 0.95, "polygon": { "topLeft": { "x": 0.36, "y": 0.37 }, "topRight": { "x": 0.63, "y": 0.37 }, "bottomRight": { "x": 0.63, "y": 0.58 }, "bottomLeft": { "x": 0.36, "y": 0.58 } } },
+    { "label": "card_6", "confidence": 0.95, "polygon": { "topLeft": { "x": 0.68, "y": 0.37 }, "topRight": { "x": 0.95, "y": 0.37 }, "bottomRight": { "x": 0.95, "y": 0.58 }, "bottomLeft": { "x": 0.68, "y": 0.58 } } },
+    { "label": "card_7", "confidence": 0.94, "polygon": { "topLeft": { "x": 0.04, "y": 0.69 }, "topRight": { "x": 0.31, "y": 0.69 }, "bottomRight": { "x": 0.31, "y": 0.9 }, "bottomLeft": { "x": 0.04, "y": 0.9 } } },
+    { "label": "card_8", "confidence": 0.94, "polygon": { "topLeft": { "x": 0.36, "y": 0.69 }, "topRight": { "x": 0.63, "y": 0.69 }, "bottomRight": { "x": 0.63, "y": 0.9 }, "bottomLeft": { "x": 0.36, "y": 0.9 } } },
+    { "label": "card_9", "confidence": 0.94, "polygon": { "topLeft": { "x": 0.68, "y": 0.69 }, "topRight": { "x": 0.95, "y": 0.69 }, "bottomRight": { "x": 0.95, "y": 0.9 }, "bottomLeft": { "x": 0.68, "y": 0.9 } } }
+  ]
+}

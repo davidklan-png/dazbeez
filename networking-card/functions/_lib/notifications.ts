@@ -1,7 +1,12 @@
 import type { Env } from './env';
-import { logNotificationFailure } from './db';
+import { getKnownAttendee, logNotificationFailure } from './db';
 import { sendDiscordNotification } from './discord';
 import { sendAcknowledgmentEmail } from './email';
+import {
+  buildPersonalizedDiscord,
+  buildPersonalizedEmail,
+  type KnownAttendee,
+} from './personalization';
 
 export function outboundNotificationsEnabled(env: Env): boolean {
   return env.DISABLE_OUTBOUND_NOTIFICATIONS !== 'true';
@@ -40,11 +45,13 @@ export function queueContactNotifications(
   context: Pick<PagesFunction<Env> extends (ctx: infer T) => unknown ? T : never, 'env' | 'waitUntil'>,
   data: {
     contactId: number;
+    isNew: boolean;
     token: string;
     cardLabel: string;
     source: 'google' | 'linkedin' | 'manual';
     name: string;
     email: string;
+    linkedinUrl?: string | null;
     followUpUrl: string;
   },
 ): void {
@@ -52,20 +59,25 @@ export function queueContactNotifications(
     return;
   }
 
-  const discordPayload = {
-    name: data.name,
-    email: data.email,
-    source: data.source,
-    label: data.cardLabel,
-  };
-  const emailPayload = {
-    name: data.name,
-    email: data.email,
-    followUpUrl: data.followUpUrl,
-  };
+  // Resolve the known attendee once (if any); reuse for both channels.
+  const attendeePromise: Promise<KnownAttendee | null> = getKnownAttendee(
+    context.env.DB,
+    data.email,
+    data.linkedinUrl ?? null,
+  ).catch((error) => {
+    console.error('getKnownAttendee failed', error);
+    return null;
+  });
 
-  context.waitUntil(
-    sendDiscordNotification(context.env.DISCORD_WEBHOOK_URL, discordPayload).catch((error) =>
+  const discordTask = attendeePromise.then((attendee) => {
+    const discordPayload = {
+      name: data.name,
+      email: data.email,
+      source: data.source,
+      label: data.cardLabel,
+      personalization: attendee ? buildPersonalizedDiscord(attendee) : undefined,
+    };
+    return sendDiscordNotification(context.env.DISCORD_WEBHOOK_URL, discordPayload).catch((error) =>
       captureNotificationFailure(context.env, {
         contactId: data.contactId,
         token: data.token,
@@ -73,10 +85,29 @@ export function queueContactNotifications(
         error,
         payload: discordPayload,
       }),
-    ),
-  );
-  context.waitUntil(
-    sendAcknowledgmentEmail(context.env.RESEND_API_KEY, emailPayload).catch((error) =>
+    );
+  });
+
+  context.waitUntil(discordTask);
+
+  if (!data.isNew) {
+    return;
+  }
+
+  const emailTask = attendeePromise.then((attendee) => {
+    const emailPayload = {
+      name: data.name,
+      email: data.email,
+      followUpUrl: data.followUpUrl,
+      personalization: attendee
+        ? buildPersonalizedEmail({
+            attendee,
+            contactName: data.name,
+            followUpUrl: data.followUpUrl,
+          })
+        : undefined,
+    };
+    return sendAcknowledgmentEmail(context.env.RESEND_API_KEY, emailPayload).catch((error) =>
       captureNotificationFailure(context.env, {
         contactId: data.contactId,
         token: data.token,
@@ -84,6 +115,8 @@ export function queueContactNotifications(
         error,
         payload: emailPayload,
       }),
-    ),
-  );
+    );
+  });
+
+  context.waitUntil(emailTask);
 }

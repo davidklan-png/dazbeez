@@ -2,11 +2,11 @@
 
 ## Overview
 
-Dazbeez is a Next.js 16.2.1 consulting website hosted on a local Mac M4 and served publicly via Cloudflare Tunnel. It consists of two independent deployable units:
+Dazbeez is a Next.js 16.2.3 consulting website deployed on Cloudflare Workers via OpenNext. It consists of two independent deployable units:
 
 | Unit | Purpose | Runtime |
 |------|---------|---------|
-| **Main site** (`/`) | Marketing, inquiry, contact, admin | Docker on Mac M4 |
+| **Main site** (`/`) | Marketing, inquiry, contact, admin | Cloudflare Workers + D1 |
 | **Networking card** (`networking-card/`) | NFC/QR contact capture | Cloudflare Pages + Functions |
 
 ---
@@ -15,68 +15,67 @@ Dazbeez is a Next.js 16.2.1 consulting website hosted on a local Mac M4 and serv
 
 ```
 Browser → Cloudflare CDN (dazbeez.com)
-            ↓ Tunnel (QUIC)
-         cloudflared container (network_mode: host)
-            ↓ localhost:80
-         Caddy (server-caddy, port 80, separate compose project)
-            ↓ http://host.docker.internal:4488
-         Next.js container (port 4488→3000)
+            ↓
+        Cloudflare Worker (`dazbeez`)
+            ↓
+      OpenNext server bundle on Workers
+            ↓
+      Cloudflare D1 (`dazbeez-submissions`) for `/api/contact`
 ```
 
-`www.dazbeez.com` → Cloudflare redirect to `dazbeez.com` (handled at Caddy layer).
+`www.dazbeez.com` should be attached as a Worker custom domain alongside `dazbeez.com`.
 
 ---
 
-## Docker Compose Services
+## Main Site Runtime
 
-File: `docker-compose.yml`
+Core config files:
 
-### `nextjs` (always on)
-- Build: multi-stage Node 20 Alpine (`Dockerfile`)
-- Output: `next build` with `output: "standalone"`
-- Port: `4488:3000` on host
-- Healthcheck: `wget` to `127.0.0.1:3000` every 10s
-- Restart: `unless-stopped`
+- `wrangler.jsonc` — Worker entry, D1 binding, assets binding, self-reference binding
+- `open-next.config.ts` — OpenNext adapter config
+- `next.config.ts` — OpenNext dev init, redirects, headers, unoptimized images
+- `db/schema.sql` — D1 schema for contact submissions
+- `lib/contact-submissions.ts` — D1 insert path using `getCloudflareContext()`
 
-### `nginx` (profile: `production`)
-- Image: `nginx:alpine`
-- Config: `docker/nginx.conf`
-- Exposed (no host port) — listens on `:80` inside the Docker network
-- Proxies to `nextjs:3000` with WebSocket upgrade headers
-- **Note:** Currently unused in the live traffic path. Caddy handles ingress directly to port 4488.
+Deployment commands:
 
-### `cloudflared` (profile: `production`)
-- Image: `cloudflare/cloudflared:latest`
-- `network_mode: host` — sees `localhost:80` (Caddy)
-- Credentials: `~/.cloudflared/<tunnel-id>.json` mounted read-only
-- Tunnel ID: `e2d0eab2-b36f-4496-86a7-363d095fb78c` (`server-tunnel`)
-- Restart: `unless-stopped`
+```bash
+npm run build:cf
+npm run deploy
+```
+
+Local Worker preview:
+
+```bash
+npm run cf:dev
+```
+
+### D1 Schema
+
+`contact_submissions`
+- `id`
+- `first_name`
+- `last_name`
+- `email`
+- `company`
+- `phone_number`
+- `service`
+- `message`
+- `source`
+- `submitted_at`
+
+### Environment / Secrets
+
+Runtime secrets configured in Cloudflare:
+- `ADMIN_PAGE_USERNAME`
+- `ADMIN_PAGE_PASSWORD`
+- `NFC_ADMIN_API_URL`
+- `NFC_ADMIN_API_KEY`
 
 ### `ollama` (profile: `llm`)
 - Image: `ollama/ollama:latest`
 - Port: `11434:11434`
-- Reserved for future chatbot enhancement — not active
-
----
-
-## Cloudflare Tunnel
-
-Tunnel name: `server-tunnel`  
-Tunnel ID: `e2d0eab2-b36f-4496-86a7-363d095fb78c`
-
-Remote ingress config (managed via Cloudflare dashboard):
-
-| Hostname | Origin |
-|----------|--------|
-| `dazbeez.com` | `http://localhost:80` |
-| `www.dazbeez.com` | `http://localhost:80` |
-| `api.dazbeez.com` | `http://localhost:80` |
-| `chat.dazbeez.com` | `http://localhost:80` |
-| `*` | `http_status:404` |
-
-Local fallback config: `docker/cloudflared-config.yml` (routes to `host.docker.internal:4488`).
-
-Token management: `scripts/setup-keychain.sh` stores the tunnel token in macOS Keychain. `scripts/make-env.sh` regenerates `.env` from Keychain before starting the stack.
+- Reserved for future chatbot enhancement — local-only, not active in production
 
 ---
 
@@ -93,7 +92,6 @@ app/
 ├── services/
 │   ├── page.tsx            # Services listing
 │   └── [slug]/page.tsx     # Service detail (SSG via generateStaticParams)
-├── inquiry/page.tsx        # Chat-style inquiry flow (client component)
 ├── contact/page.tsx        # Contact form (client component)
 ├── nfc/page.tsx            # NFC landing widget (client component)
 └── admin/page.tsx          # Internal dashboard (server component, noindex)
@@ -104,7 +102,8 @@ components/
     └── admin-dashboard.tsx # Dashboard presentation component
 
 lib/
-└── admin-dashboard-data.ts # Typed seed data for admin dashboard
+├── admin-dashboard-data.ts # Typed seed data for admin dashboard
+└── contact-submissions.ts  # D1-backed submission persistence
 ```
 
 **Rendering pattern:**
@@ -151,24 +150,21 @@ taps      (id, token FK, cf_country, cf_city, user_agent, created_at)
 
 ---
 
-## Key Ports
+## Local Reference Runtime
 
-| Port | Service |
-|------|---------|
-| `4488` | Next.js (host) |
-| `80` | Caddy (host, `server-caddy`) — routes to 4488 |
-| `443` | Caddy (host, `server-caddy`) — TLS |
-| `11434` | Ollama (reserved, `llm` profile) |
-| `8788` | Cloudflare Pages local dev |
+`Dockerfile` and `docker-compose.yml` are retained only as local/reference artifacts.
+
+Current local ports:
+- `4488` — `npm run dev`
+- `8787` — `npm run cf:dev`
+- `8788` — `networking-card` local Pages dev
+- `11434` — optional local Ollama profile
 
 ---
 
-## Reboot / Recovery Procedure
+## Verification
 
-1. Docker services restart automatically (`restart: unless-stopped`)
-2. Wait for `dazbeez-nextjs` healthcheck → `healthy`
-3. `cloudflared` retries connections automatically
-4. Verify: `curl -s -o /dev/null -w "%{http_code}" http://localhost:4488`
-5. End-to-end: `bash scripts/check-cloudflare-tunnel.sh dazbeez.com`
-
-If `.env` is missing: `bash scripts/make-env.sh` (reads token from Keychain).
+1. `npm run build:cf`
+2. `npm run cf:dev`
+3. `bash scripts/check-deployment.sh http://localhost:8787`
+4. `bash scripts/check-deployment.sh https://dazbeez.com`

@@ -1,0 +1,24 @@
+{
+  "fields": {
+    "full_name": "Aiko Tanaka",
+    "first_name": "Aiko",
+    "last_name": "Tanaka",
+    "full_name_native": "田中 愛子",
+    "job_title": "Director, Data Governance",
+    "department": "Transformation Office",
+    "company_name": "Mori Financial Group",
+    "company_name_native": "森フィナンシャルグループ",
+    "email": "AIKO.TANAKA@MORI-FG.CO.JP",
+    "phone": "03-5555-1200",
+    "mobile": "+81 90-5555-1200",
+    "website": "mori-fg.co.jp",
+    "linkedin_url": "https://www.linkedin.com/in/aiko-tanaka/",
+    "address": "Tokyo, Japan",
+    "postal_code": "100-0001",
+    "city": "Tokyo",
+    "state_prefecture": "Tokyo",
+    "country": "Japan",
+    "notes_from_card": "Bilingual analytics and compliance programs",
+    "raw_ocr_text": "Aiko Tanaka 田中 愛子 Director, Data Governance Mori Financial Group 森フィナンシャルグループ"
+  }
+}

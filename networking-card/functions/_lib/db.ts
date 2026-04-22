@@ -3,6 +3,11 @@ import {
   normalizeContactCardProfile,
   type ContactCardProfile,
 } from './vcard';
+import {
+  normalizeEmail,
+  normalizeLinkedinUrl,
+  type KnownAttendee,
+} from './personalization';
 
 export async function logTap(
   db: D1Database,
@@ -209,22 +214,46 @@ export async function upsertVCardProfile(
   return normalized;
 }
 
-async function findContactByTokenAndEmail(
+async function findContactByIdentity(
   db: D1Database,
-  token: string,
   email: string,
+  linkedinUrl?: string | null,
 ): Promise<{
   id: number;
   linkedin_url: string | null;
   company: string | null;
 } | null> {
+  const byEmail = await db
+    .prepare(
+      `SELECT id, linkedin_url, company
+       FROM contacts
+       WHERE email_lower = ? OR email = ?
+       LIMIT 1`,
+    )
+    .bind(email, email)
+    .first<{
+      id: number;
+      linkedin_url: string | null;
+      company: string | null;
+    }>();
+
+  if (byEmail) {
+    return byEmail;
+  }
+
+  const normalizedLinkedin = normalizeLinkedinUrl(linkedinUrl);
+  if (!normalizedLinkedin) {
+    return null;
+  }
+
   return db
     .prepare(
       `SELECT id, linkedin_url, company
        FROM contacts
-       WHERE token = ? AND email = ?`,
+       WHERE linkedin_url = ?
+       LIMIT 1`,
     )
-    .bind(token, email)
+    .bind(normalizedLinkedin)
     .first<{
       id: number;
       linkedin_url: string | null;
@@ -266,20 +295,29 @@ async function updateContact(
     .prepare(
       `UPDATE contacts
        SET name = ?,
+           token = COALESCE(token, ?),
+           email = COALESCE(email, ?),
+           email_lower = COALESCE(email_lower, ?),
            linkedin_url = COALESCE(?, linkedin_url),
            company = COALESCE(?, company),
            cf_country = ?,
            cf_city = ?,
-           user_agent = ?
+           user_agent = ?,
+           source = COALESCE(source, ?),
+           updated_at = datetime('now')
        WHERE id = ?`,
     )
     .bind(
       data.name,
+      data.token,
+      data.email,
+      data.email,
       data.linkedin_url ?? null,
       data.company ?? null,
       data.cf_country ?? null,
       data.cf_city ?? null,
       data.user_agent ?? null,
+      data.source,
       id,
     )
     .run();
@@ -308,7 +346,7 @@ export async function saveContact(
     ...data,
     email: normalizedEmail,
   };
-  const existing = await findContactByTokenAndEmail(db, normalizedData.token, normalizedData.email);
+  const existing = await findContactByIdentity(db, normalizedData.email, normalizedData.linkedin_url);
   if (existing) {
     await updateContact(db, existing.id, normalizedData);
     await recordContactMethod(db, existing.id, normalizedData.source);
@@ -325,12 +363,13 @@ export async function saveContact(
   try {
     const result = await db
       .prepare(
-        `INSERT INTO contacts (token, name, email, source, linkedin_url, company, cf_country, cf_city, user_agent)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO contacts (token, name, email, email_lower, source, linkedin_url, company, cf_country, cf_city, user_agent, status, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'approved', datetime('now'))`,
       )
       .bind(
         normalizedData.token,
         normalizedData.name,
+        normalizedData.email,
         normalizedData.email,
         normalizedData.source,
         normalizedData.linkedin_url ?? null,
@@ -361,7 +400,7 @@ export async function saveContact(
       throw error;
     }
 
-    const duplicate = await findContactByTokenAndEmail(db, normalizedData.token, normalizedData.email);
+    const duplicate = await findContactByIdentity(db, normalizedData.email, normalizedData.linkedin_url);
     if (!duplicate) {
       throw error;
     }
@@ -377,6 +416,47 @@ export async function saveContact(
     });
     return { id: duplicate.id, isNew: false };
   }
+}
+
+/**
+ * Look up an event attendee by (email, linkedin_url). Email wins; LinkedIn
+ * URL is a fallback for OAuth taps where we have a LinkedIn URL but no
+ * pre-seeded email. Returns null when no match (the generic flow).
+ */
+export async function getKnownAttendee(
+  db: D1Database,
+  email: string | null | undefined,
+  linkedinUrl: string | null | undefined,
+): Promise<KnownAttendee | null> {
+  const emailLower = normalizeEmail(email);
+  if (emailLower) {
+    const byEmail = await db
+      .prepare(
+        `SELECT id, email_lower, linkedin_url, display_name, event_slug,
+                tier, role_company, opener, david_notes, cta_type, topic_hint
+         FROM known_attendees
+         WHERE email_lower = ?`,
+      )
+      .bind(emailLower)
+      .first<KnownAttendee>();
+    if (byEmail) return byEmail;
+  }
+
+  const linkedinNormalized = normalizeLinkedinUrl(linkedinUrl);
+  if (linkedinNormalized) {
+    const byLinkedin = await db
+      .prepare(
+        `SELECT id, email_lower, linkedin_url, display_name, event_slug,
+                tier, role_company, opener, david_notes, cta_type, topic_hint
+         FROM known_attendees
+         WHERE linkedin_url = ?`,
+      )
+      .bind(linkedinNormalized)
+      .first<KnownAttendee>();
+    if (byLinkedin) return byLinkedin;
+  }
+
+  return null;
 }
 
 export async function logNotificationFailure(
@@ -440,8 +520,14 @@ export async function listContacts(
                 created_at
          FROM contacts
          WHERE token = ?
+            OR EXISTS (
+              SELECT 1
+              FROM contact_events
+              WHERE contact_events.contact_id = contacts.id
+                AND contact_events.token = ?
+            )
          ORDER BY created_at DESC, id DESC`,
-      ).bind(token)
+      ).bind(token, token)
     : db.prepare(
         `SELECT id,
                 token,
@@ -497,7 +583,11 @@ export async function listCardMetrics(
         `SELECT cards.token,
                 cards.label,
                 (SELECT COUNT(*) FROM taps WHERE taps.token = cards.token) AS tap_count,
-                (SELECT COUNT(*) FROM contacts WHERE contacts.token = cards.token) AS contact_count
+                (
+                  SELECT COUNT(DISTINCT contact_events.contact_id)
+                  FROM contact_events
+                  WHERE contact_events.token = cards.token
+                ) AS contact_count
          FROM cards
          WHERE cards.token = ?
          ORDER BY cards.created_at DESC`,
@@ -506,7 +596,11 @@ export async function listCardMetrics(
         `SELECT cards.token,
                 cards.label,
                 (SELECT COUNT(*) FROM taps WHERE taps.token = cards.token) AS tap_count,
-                (SELECT COUNT(*) FROM contacts WHERE contacts.token = cards.token) AS contact_count
+                (
+                  SELECT COUNT(DISTINCT contact_events.contact_id)
+                  FROM contact_events
+                  WHERE contact_events.token = cards.token
+                ) AS contact_count
          FROM cards
          ORDER BY cards.created_at DESC`,
       );

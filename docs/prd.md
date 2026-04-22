@@ -159,13 +159,13 @@ greeting
 
 | Requirement | Detail |
 |-------------|--------|
-| Framework | Next.js 16.2.1 App Router |
+| Framework | Next.js 16.2.3 App Router |
 | Styling | Tailwind CSS, bee theme (amber + charcoal) |
-| Build | `next build` with `output: "standalone"` |
-| Runtime | Node 20 Alpine (Docker), ARM64 (Mac M4) |
+| Build | `opennextjs-cloudflare build` |
+| Runtime | Cloudflare Workers via OpenNext |
+| Persistence | Cloudflare D1 for contact submissions |
 | TypeScript | Strict mode |
-| Public access | Cloudflare Tunnel (named tunnel `server-tunnel`) |
-| Token security | Cloudflare tunnel token stored in macOS Keychain, not in repo |
+| Public access | Cloudflare CDN + Worker custom domain |
 | SEO | Full metadata, OG, sitemap, robots |
 | No external analytics | No tracking scripts, no cookies on main site |
 
@@ -176,8 +176,6 @@ greeting
 | Item | Notes |
 |------|-------|
 | Ollama chatbot integration | Container reserved (`llm` profile); inquiry flow has hook |
-| Contact form persistence | `// TODO: Save to local JSON file` in `contact/page.tsx` |
 | Admin dashboard live data | Replace seed data with real inquiry/lead sources |
-| `api.dazbeez.com` | Tunnel route reserved, no handler yet |
-| `chat.dazbeez.com` | Tunnel route reserved, no handler yet |
 | Networking card analytics | Tap counts by country/city visible in D1 but not surfaced in admin |
+| Middleware deprecation cleanup | Move admin auth back to `proxy.ts` once OpenNext supports Node middleware for Next 16 |

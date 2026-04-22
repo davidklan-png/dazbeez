@@ -1,6 +1,6 @@
-import { timingSafeEqual } from "node:crypto";
-
 const ADMIN_REALM = "Dazbeez Admin";
+const textDecoder = new TextDecoder();
+const textEncoder = new TextEncoder();
 
 type AdminPageCredentials = {
   username: string;
@@ -19,10 +19,23 @@ function getConfiguredAdminPageCredentials(): AdminPageCredentials | null {
 }
 
 function safeEqual(left: string, right: string) {
-  const leftBuffer = Buffer.from(left);
-  const rightBuffer = Buffer.from(right);
+  const leftBytes = textEncoder.encode(left);
+  const rightBytes = textEncoder.encode(right);
+  const length = Math.max(leftBytes.length, rightBytes.length);
+  let mismatch = leftBytes.length ^ rightBytes.length;
 
-  return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
+  for (let i = 0; i < length; i += 1) {
+    mismatch |= (leftBytes[i] ?? 0) ^ (rightBytes[i] ?? 0);
+  }
+
+  return mismatch === 0;
+}
+
+function decodeBase64(encoded: string) {
+  const binary = atob(encoded);
+  const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+
+  return textDecoder.decode(bytes);
 }
 
 function decodeBasicAuthorization(value: string | null) {
@@ -37,7 +50,7 @@ function decodeBasicAuthorization(value: string | null) {
   }
 
   try {
-    const decoded = Buffer.from(encoded, "base64").toString("utf8");
+    const decoded = decodeBase64(encoded);
     const separator = decoded.indexOf(":");
 
     if (separator <= 0) {
@@ -51,6 +64,11 @@ function decodeBasicAuthorization(value: string | null) {
   } catch {
     return null;
   }
+}
+
+export function getAdminPageUsernameFromHeaders(requestHeaders: Headers) {
+  const provided = decodeBasicAuthorization(requestHeaders.get("authorization"));
+  return provided?.username ?? null;
 }
 
 export function isAdminPageAuthConfigured() {

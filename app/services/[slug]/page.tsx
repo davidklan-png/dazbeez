@@ -1,9 +1,11 @@
 import type { Metadata } from "next";
+import Image from "next/image";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { HexIcon, hexAccent } from "@/components/hex-icon";
 import { HoneycombBackdrop } from "@/components/honeycomb-backdrop";
 import { Reveal } from "@/components/reveal";
+import { serviceIllustrations } from "@/lib/service-assets";
 import { isServiceSlug, services, serviceSlugs } from "@/lib/services";
 import { caseStudiesByService } from "@/lib/case-studies";
 
@@ -51,10 +53,11 @@ export default async function ServicePage({ params }: ServicePageProps) {
   const service = services[slug];
   const accent = hexAccent(slug);
   const relatedStudies = caseStudiesByService(slug);
+  const illustrationSrc = serviceIllustrations[slug];
 
   return (
     <div className="py-16">
-      <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8">
         {/* Breadcrumb */}
         <Link
           href="/services"
@@ -73,19 +76,35 @@ export default async function ServicePage({ params }: ServicePageProps) {
             style={{ background: `linear-gradient(135deg, ${accent.fill} 0%, #ffffff 75%)`, borderColor: accent.fill }}
           >
             <HoneycombBackdrop opacity={0.12} color={accent.stroke} />
-            <div className="relative flex flex-col gap-6 md:flex-row md:items-center">
-              <HexIcon variant={slug} size="lg" label={`${service.title} icon`} />
-              <div>
-                <p
-                  className="text-sm font-semibold uppercase tracking-[0.32em] mb-2"
-                  style={{ color: accent.icon }}
-                >
-                  {service.title}
-                </p>
-                <h1 className="text-4xl md:text-5xl font-bold text-gray-900 mb-3 leading-tight">
+            <div className="relative">
+              <div className="min-w-0 max-w-3xl">
+                <div className="mb-5 flex flex-wrap items-center gap-4">
+                  <HexIcon variant={slug} size="lg" label={`${service.title} icon`} />
+                  <p
+                    className="text-sm font-semibold uppercase tracking-[0.32em]"
+                    style={{ color: accent.icon }}
+                  >
+                    {service.title}
+                  </p>
+                </div>
+                <h1 className="max-w-[16ch] text-4xl font-bold leading-[1.05] tracking-tight text-gray-900 md:text-5xl xl:text-[3.2rem]">
                   {service.description}
                 </h1>
               </div>
+
+              {illustrationSrc ? (
+                <div className="relative mt-8 flex justify-center md:mt-10 lg:justify-end">
+                  <Image
+                    src={illustrationSrc}
+                    alt={`${service.title} illustration`}
+                    width={600}
+                    height={400}
+                    priority
+                    sizes="(min-width: 1280px) 520px, (min-width: 1024px) 40vw, (min-width: 640px) 28rem, 100vw"
+                    className="h-auto w-full max-w-sm drop-shadow-[0_28px_48px_rgba(17,24,39,0.14)] sm:max-w-md lg:max-w-lg"
+                  />
+                </div>
+              ) : null}
             </div>
           </div>
         </Reveal>

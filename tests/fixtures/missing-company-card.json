@@ -1,0 +1,24 @@
+{
+  "fields": {
+    "full_name": "Jordan Builder",
+    "first_name": "Jordan",
+    "last_name": "Builder",
+    "full_name_native": null,
+    "job_title": "Founder",
+    "department": null,
+    "company_name": null,
+    "company_name_native": null,
+    "email": "jordan@build.example",
+    "phone": null,
+    "mobile": null,
+    "website": null,
+    "linkedin_url": "https://www.linkedin.com/in/jordan-builder",
+    "address": null,
+    "postal_code": null,
+    "city": null,
+    "state_prefecture": null,
+    "country": null,
+    "notes_from_card": null,
+    "raw_ocr_text": "Jordan Builder Founder"
+  }
+}

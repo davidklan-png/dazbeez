@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Image from "next/image";
 import Link from "next/link";
 import { HexIcon } from "@/components/hex-icon";
 import { HoneycombBackdrop } from "@/components/honeycomb-backdrop";
@@ -51,7 +52,8 @@ export default function HomePage() {
         <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top_right,_var(--tw-gradient-stops))] from-amber-500/20 via-transparent to-transparent" />
 
         <div className="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-24 md:py-32">
-          <div className="max-w-3xl">
+          <div className="grid items-center gap-12 lg:grid-cols-[minmax(0,1fr)_minmax(240px,360px)]">
+            <div className="max-w-3xl">
             <p className="text-sm font-semibold uppercase tracking-[0.32em] text-amber-300 mb-5">
               AI · Automation · Data
             </p>
@@ -90,6 +92,20 @@ export default function HomePage() {
             <p className="mt-6 text-center text-sm text-gray-400">
               Serving clients in Japan and Hawaii · Built to Japanese regulatory standards
             </p>
+            </div>
+
+            <div className="mx-auto w-full max-w-[240px] sm:max-w-[280px] lg:max-w-[340px]">
+              <Image
+                src="/illustrations/hero-bee.svg"
+                alt=""
+                aria-hidden="true"
+                width={200}
+                height={200}
+                priority
+                sizes="(min-width: 1024px) 340px, (min-width: 640px) 280px, 240px"
+                className="h-auto w-full"
+              />
+            </div>
           </div>
         </div>
       </section>

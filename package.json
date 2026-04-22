@@ -5,28 +5,39 @@
   "scripts": {
     "dev": "next dev -p 4488",
     "build": "next build",
+    "build:cf": "opennextjs-cloudflare build",
+    "preview": "opennextjs-cloudflare preview",
+    "cf:dev": "opennextjs-cloudflare preview",
+    "deploy": "opennextjs-cloudflare deploy -- --keep-vars",
+    "upload": "opennextjs-cloudflare upload -- --keep-vars",
+    "cf-typegen": "wrangler types cloudflare-env.d.ts --env-interface CloudflareEnv",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "tsx --test tests/**/*.test.ts"
   },
   "dependencies": {
+    "@opennextjs/cloudflare": "^1.19.1",
     "@reactflow/background": "^11.3.14",
     "@reactflow/controls": "^11.2.14",
     "@reactflow/core": "^11.11.4",
     "@reactflow/minimap": "^11.7.14",
     "framer-motion": "^12.38.0",
-    "next": "16.2.1",
+    "next": "^16.2.3",
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "reactflow": "^11.11.4"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260418.1",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
-    "eslint-config-next": "16.2.1",
+    "eslint-config-next": "^16.2.3",
     "tailwindcss": "^4",
-    "typescript": "^5"
+    "tsx": "^4.20.6",
+    "typescript": "^5",
+    "wrangler": "^4.83.0"
   }
 }

@@ -47,11 +47,13 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
   queueContactNotifications(context, {
     contactId: savedContact.id,
+    isNew: savedContact.isNew,
     token,
     cardLabel: card.label || token,
     source: 'manual',
     name,
     email,
+    linkedinUrl: linkedinUrl ?? null,
     followUpUrl: `${origin}/hi/${token}`,
   });
 
