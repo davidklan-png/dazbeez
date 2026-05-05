@@ -1,0 +1,17 @@
+{
+  "name": "dazbeez-email-reply-capture",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev"
+  },
+  "dependencies": {
+    "postal-mime": "^2.4.3"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260418.1",
+    "typescript": "^5",
+    "wrangler": "^4.83.0"
+  }
+}

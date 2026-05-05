@@ -178,4 +178,4 @@ greeting
 | Ollama chatbot integration | Container reserved (`llm` profile); inquiry flow has hook |
 | Admin dashboard live data | Replace seed data with real inquiry/lead sources |
 | Networking card analytics | Tap counts by country/city visible in D1 but not surfaced in admin |
-| Middleware deprecation cleanup | Move admin auth back to `proxy.ts` once OpenNext supports Node middleware for Next 16 |
+| Middleware deprecation cleanup | Blocked: Next.js 16 deprecates `middleware.ts`, but the current OpenNext Cloudflare build still rejects `proxy.ts` as unsupported Node middleware |

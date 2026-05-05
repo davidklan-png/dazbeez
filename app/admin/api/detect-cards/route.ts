@@ -1,15 +1,7 @@
 import { NextResponse } from "next/server";
 import { detectBusinessCardsFromImage } from "@/lib/crm-provider";
 import { assertAdminPageAccessFromHeaders } from "@/lib/admin-page-auth";
-
-function toDataUrl(bytes: Uint8Array, mimeType: string): string {
-  let binary = "";
-  for (const byte of bytes) {
-    binary += String.fromCharCode(byte);
-  }
-
-  return `data:${mimeType};base64,${btoa(binary)}`;
-}
+import { getImageSizeValidationError } from "@/lib/crm-upload-limits";
 
 export async function POST(request: Request) {
   try {
@@ -22,11 +14,29 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Image file is required." }, { status: 400 });
     }
 
+    const sizeError = getImageSizeValidationError({
+      fileSize: file.size,
+      label: "The composite image",
+    });
+    if (sizeError) {
+      return NextResponse.json({ error: sizeError }, { status: 413 });
+    }
+
     const bytes = new Uint8Array(await file.arrayBuffer());
     const detections = await detectBusinessCardsFromImage({
-      imageDataUrl: toDataUrl(bytes, file.type || "image/png"),
+      imageBytes: Array.from(bytes),
       expectedCount,
     });
+
+    if (detections.length === 0) {
+      return NextResponse.json(
+        {
+          error:
+            "No business cards were detected in this image. Reframe the photo, reduce glare, or split the cards into smaller groups and try again.",
+        },
+        { status: 422 },
+      );
+    }
 
     return NextResponse.json({ detections }, { status: 200 });
   } catch (error) {

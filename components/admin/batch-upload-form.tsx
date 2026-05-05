@@ -3,6 +3,11 @@
 import { useState } from "react";
 import { polygonToBounds } from "@/lib/crm-card-geometry";
 import type { CardDetectionCandidate } from "@/lib/crm-types";
+import {
+  MAX_BATCH_AI_IMAGE_BYTES,
+  formatFileSize,
+  getImageSizeValidationError,
+} from "@/lib/crm-upload-limits";
 
 type CropResult = {
   file: File;
@@ -82,12 +87,44 @@ export function BatchUploadForm() {
   const [detectedCount, setDetectedCount] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  function handleImageChange(file: File | null) {
+    setDetectedCount(null);
+
+    if (!file) {
+      setImageFile(null);
+      return;
+    }
+
+    const sizeError = getImageSizeValidationError({
+      fileSize: file.size,
+      label: "The composite image",
+    });
+
+    if (sizeError) {
+      setImageFile(null);
+      setError(sizeError);
+      return;
+    }
+
+    setImageFile(file);
+    setError(null);
+  }
+
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError(null);
 
     if (!imageFile) {
       setError("Select a composite image before starting the batch.");
+      return;
+    }
+
+    const sizeError = getImageSizeValidationError({
+      fileSize: imageFile.size,
+      label: "The composite image",
+    });
+    if (sizeError) {
+      setError(sizeError);
       return;
     }
 
@@ -113,7 +150,29 @@ export function BatchUploadForm() {
 
       setDetectedCount(detectionPayload.detections.length);
 
+      if (detectionPayload.detections.length === 0) {
+        throw new Error(
+          "No business cards were detected in this image. Reframe the photo, reduce glare, or split the cards into smaller groups and try again.",
+        );
+      }
+
       const crops = await cropDetectedCards(imageFile, detectionPayload.detections);
+      const oversizedCrop = crops.find((crop, index) =>
+        getImageSizeValidationError({
+          fileSize: crop.file.size,
+          label: `Cropped card ${index + 1}`,
+        }),
+      );
+      if (oversizedCrop) {
+        const cropIndex = crops.indexOf(oversizedCrop) + 1;
+        throw new Error(
+          getImageSizeValidationError({
+            fileSize: oversizedCrop.file.size,
+            label: `Cropped card ${cropIndex}`,
+          }) ?? "A cropped card image is too large.",
+        );
+      }
+
       const uploadForm = new FormData();
       uploadForm.set("compositeImage", imageFile);
       uploadForm.set("eventName", eventName);
@@ -170,9 +229,12 @@ export function BatchUploadForm() {
           <input
             type="file"
             accept=".jpg,.jpeg,.png,image/jpeg,image/png"
-            onChange={(event) => setImageFile(event.target.files?.[0] ?? null)}
+            onChange={(event) => handleImageChange(event.target.files?.[0] ?? null)}
             className="mt-2 block w-full rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900"
           />
+          <span className="mt-2 block text-xs text-gray-500">
+            Max upload size: {formatFileSize(MAX_BATCH_AI_IMAGE_BYTES)}.
+          </span>
         </label>
         <label className="block">
           <span className="text-sm font-medium text-gray-700">Expected card count</span>

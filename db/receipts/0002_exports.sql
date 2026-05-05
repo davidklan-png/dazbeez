@@ -1,0 +1,2 @@
+-- Receipt Module: reserved for schema evolution
+-- This file is intentionally empty in the initial release.

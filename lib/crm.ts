@@ -1,4 +1,4 @@
-import { getCrmDb } from "@/lib/cloudflare-runtime";
+import { getCrmDb, getCrmImagesBucket } from "@/lib/cloudflare-runtime";
 import { buildDuplicateCandidates, type DedupeComparableContact } from "@/lib/crm-dedupe";
 import { enrichFromOfficialWebsite } from "@/lib/crm-enrichment";
 import { parseJsonValue, stringifyJson } from "@/lib/crm-json";
@@ -385,10 +385,22 @@ async function insertImage(args: {
   storageKey: string;
 }): Promise<number> {
   const db = getCrmDb();
+  const bucket = getCrmImagesBucket();
   const metadataJson = args.file.metadata ? stringifyJson(args.file.metadata) : null;
+  let blobData: Uint8Array = args.file.bytes;
+
+  if (bucket) {
+    await bucket.put(args.storageKey, args.file.bytes, {
+      httpMetadata: {
+        contentType: args.file.mimeType,
+      },
+    });
+    blobData = new Uint8Array();
+  }
+
   const result = await db
     .prepare(
-      `INSERT INTO business_card_images
+      `INSERT INTO business_card_images_v2
         (batch_id, batch_card_id, image_role, storage_key, mime_type, width, height, byte_size, blob_data, metadata_json)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
@@ -401,12 +413,24 @@ async function insertImage(args: {
       args.file.width ?? null,
       args.file.height ?? null,
       args.file.bytes.byteLength,
-      args.file.bytes,
+      blobData,
       metadataJson,
     )
     .run();
 
-  return Number(result.meta.last_row_id ?? 0);
+  const imageId = Number(result.meta.last_row_id ?? 0);
+
+  if (bucket) {
+    await db
+      .prepare(
+        `INSERT OR REPLACE INTO business_card_image_objects_v2 (image_id, r2_object_key, created_at)
+         VALUES (?, ?, ?)`,
+      )
+      .bind(imageId, args.storageKey, nowIso())
+      .run();
+  }
+
+  return imageId;
 }
 
 function mapDedupeContactRow(row: {
@@ -672,17 +696,12 @@ export async function createBusinessCardBatch(input: BatchUploadInput): Promise<
     .run();
 
   const batchId = Number(batchResult.meta.last_row_id ?? 0);
-  const originalImageId = await insertImage({
+  await insertImage({
     batchId,
     role: "batch_original",
     storageKey: `batch/${batchId}/original/${input.compositeImage.fileName}`,
     file: input.compositeImage,
   });
-
-  await db
-    .prepare("UPDATE contact_batches SET original_image_id = ? WHERE id = ?")
-    .bind(originalImageId, batchId)
-    .run();
 
   let needsReviewCount = 0;
   let errorCount = 0;
@@ -730,18 +749,13 @@ export async function createBusinessCardBatch(input: BatchUploadInput): Promise<
 
     const batchCardId = Number(batchCardResult.meta.last_row_id ?? 0);
 
-    const croppedImageId = await insertImage({
+    await insertImage({
       batchId,
       batchCardId,
       role: "cropped_card",
       storageKey: `batch/${batchId}/card/${String(index + 1).padStart(2, "0")}.png`,
       file: crop.image,
     });
-
-    await db
-      .prepare("UPDATE batch_cards SET cropped_image_id = ? WHERE id = ?")
-      .bind(croppedImageId, batchCardId)
-      .run();
 
     if (review.needsReview) {
       needsReviewCount += 1;
@@ -942,7 +956,14 @@ export async function getBatchDetail(batchId: number): Promise<BatchDetail | nul
               updated_contacts_count,
               needs_review_count,
               error_count,
-              original_image_id,
+              (
+                SELECT id
+                FROM business_card_images_v2
+                WHERE batch_id = contact_batches.id
+                  AND image_role = 'batch_original'
+                ORDER BY id DESC
+                LIMIT 1
+              ) AS original_image_id,
               processing_diagnostics_json,
               created_at,
               completed_at
@@ -982,8 +1003,22 @@ export async function getBatchDetail(batchId: number): Promise<BatchDetail | nul
               contact_id,
               company_id,
               source_contact_id,
-              cropped_image_id,
-              enhanced_image_id,
+              (
+                SELECT id
+                FROM business_card_images_v2
+                WHERE batch_card_id = batch_cards.id
+                  AND image_role = 'cropped_card'
+                ORDER BY id DESC
+                LIMIT 1
+              ) AS cropped_image_id,
+              (
+                SELECT id
+                FROM business_card_images_v2
+                WHERE batch_card_id = batch_cards.id
+                  AND image_role = 'enhanced_card'
+                ORDER BY id DESC
+                LIMIT 1
+              ) AS enhanced_image_id,
               detection_label,
               detection_confidence,
               detection_box_json,
@@ -1647,14 +1682,14 @@ async function upsertContactFromCard(args: {
 
     await db
       .prepare(
-        `INSERT INTO contact_events
+      `INSERT INTO contact_events_v2
           (contact_id, batch_id, batch_card_id, company_id, source, event_type, name, email, summary, payload_json, created_at)
          VALUES (?, ?, ?, ?, 'paper_card_batch_upload', 'contact_captured', ?, ?, ?, ?, ?)`,
       )
       .bind(
         existingId,
         args.batchId,
-        args.batchCardId,
+        null,
         companyId,
         normalized.full_name ?? normalized.company_name ?? "Imported contact",
         normalized.email ?? null,
@@ -1718,14 +1753,14 @@ async function upsertContactFromCard(args: {
 
   await db
     .prepare(
-      `INSERT INTO contact_events
+      `INSERT INTO contact_events_v2
         (contact_id, batch_id, batch_card_id, company_id, source, event_type, name, email, summary, payload_json, created_at)
        VALUES (?, ?, ?, ?, 'paper_card_batch_upload', 'contact_captured', ?, ?, ?, ?, ?)`,
     )
     .bind(
       contactId,
       args.batchId,
-      args.batchCardId,
+      null,
       companyId,
       normalized.full_name ?? normalized.company_name ?? "Imported contact",
       normalized.email ?? null,
@@ -2089,7 +2124,7 @@ export async function getContactDetail(contactId: number): Promise<ContactDetail
     db
       .prepare(
         `SELECT id, source, event_type, summary, created_at
-         FROM contact_events
+         FROM contact_events_v2
          WHERE contact_id = ?
          ORDER BY created_at DESC, id DESC`,
       )
@@ -2103,10 +2138,17 @@ export async function getContactDetail(contactId: number): Promise<ContactDetail
       }>(),
     db
       .prepare(
-        `SELECT id, image_role, batch_id, batch_card_id
-         FROM business_card_images
-         WHERE batch_card_id IN (SELECT id FROM batch_cards WHERE contact_id = ?)
-         ORDER BY created_at DESC, id DESC`,
+        `SELECT DISTINCT business_card_images_v2.id,
+                business_card_images_v2.image_role,
+                business_card_images_v2.batch_id,
+                business_card_images_v2.batch_card_id
+         FROM business_card_images_v2
+         WHERE business_card_images_v2.batch_card_id IN (
+           SELECT id
+           FROM batch_cards
+           WHERE contact_id = ?
+         )
+         ORDER BY business_card_images_v2.created_at DESC, business_card_images_v2.id DESC`,
       )
       .bind(contactId)
       .all<{
@@ -2371,7 +2413,7 @@ export async function savePublicContactSubmissionToCrm(args: {
 
   await db
     .prepare(
-      `INSERT INTO contact_events
+      `INSERT INTO contact_events_v2
         (contact_id, company_id, source, event_type, name, email, summary, payload_json, created_at)
        VALUES (?, ?, 'manual_form', 'contact_form_submission', ?, ?, ?, ?, ?)`,
     )
@@ -2399,11 +2441,42 @@ export async function getImageBlob(imageId: number): Promise<{
 } | null> {
   const db = getCrmDb();
   const row = await db
-    .prepare("SELECT mime_type, blob_data FROM business_card_images WHERE id = ?")
+    .prepare(
+      `SELECT business_card_images_v2.mime_type,
+              business_card_images_v2.blob_data,
+              business_card_image_objects_v2.r2_object_key
+       FROM business_card_images_v2
+       LEFT JOIN business_card_image_objects_v2
+         ON business_card_image_objects_v2.image_id = business_card_images_v2.id
+       WHERE business_card_images_v2.id = ?`,
+    )
     .bind(imageId)
-    .first<{ mime_type: string; blob_data: ArrayBuffer | Uint8Array }>();
+    .first<{
+      mime_type: string;
+      blob_data: ArrayBuffer | Uint8Array | null;
+      r2_object_key: string | null;
+    }>();
 
   if (!row) {
+    return null;
+  }
+
+  if (row.r2_object_key) {
+    const bucket = getCrmImagesBucket();
+    if (!bucket) {
+      throw new Error("CRM image bucket binding is not configured.");
+    }
+
+    const object = await bucket.get(row.r2_object_key);
+    if (object) {
+      return {
+        mimeType: row.mime_type,
+        blob: new Uint8Array(await object.arrayBuffer()),
+      };
+    }
+  }
+
+  if (!row.blob_data) {
     return null;
   }
 

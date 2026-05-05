@@ -351,7 +351,7 @@ SELECT
   CASE
     WHEN source = 'google' THEN 'google_oauth'
     WHEN source = 'linkedin' THEN 'linkedin_oauth'
-    ELSE 'manual'
+    ELSE source
   END,
   'approved',
   cf_country,
@@ -373,7 +373,7 @@ SELECT
   CASE
     WHEN method = 'google' THEN 'google_oauth'
     WHEN method = 'linkedin' THEN 'linkedin_oauth'
-    ELSE 'manual'
+    ELSE method
   END,
   created_at
 FROM contact_methods_old;
@@ -395,7 +395,7 @@ SELECT
   CASE
     WHEN source = 'google' THEN 'google_oauth'
     WHEN source = 'linkedin' THEN 'linkedin_oauth'
-    ELSE 'manual'
+    ELSE source
   END,
   'contact_captured',
   name,

@@ -7,6 +7,10 @@
     "nodejs_compat",
     "global_fetch_strictly_public"
   ],
+  // Manual secret setup:
+  // npx wrangler secret put RESEND_API_KEY
+  "workers_dev": true,
+  "preview_urls": true,
   "assets": {
     "directory": ".open-next/assets",
     "binding": "ASSETS"
@@ -31,17 +35,36 @@
       "binding": "CRM_DB",
       "database_name": "dazbeez-networking",
       "database_id": "4ce69aa7-efac-4739-8ed1-43c9d1a1db4c"
+    },
+    {
+      "binding": "RECEIPTS_DB",
+      "database_name": "dazbeez-receipts",
+      "database_id": "8dffd78f-b9aa-490d-822d-4f413e52aeba",
+      "migrations_dir": "db/receipts"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "CRM_IMAGES",
+      "bucket_name": "dazbeez-crm-images"
+    },
+    {
+      "binding": "RECEIPTS_BUCKET",
+      "bucket_name": "dazbeez-receipts"
+    },
+    {
+      "binding": "RECEIPTS_ARCHIVE_BUCKET",
+      "bucket_name": "dazbeez-receipts-archive"
+    }
+  ],
+  "routes": [
+    {
+      "pattern": "dazbeez.com/*",
+      "zone_name": "dazbeez.com"
+    },
+    {
+      "pattern": "www.dazbeez.com/*",
+      "zone_name": "dazbeez.com"
     }
   ]
-  // Add custom domains after validating the workers.dev deployment:
-  // "routes": [
-  //   {
-  //     "pattern": "dazbeez.com",
-  //     "custom_domain": true
-  //   },
-  //   {
-  //     "pattern": "www.dazbeez.com",
-  //     "custom_domain": true
-  //   }
-  // ]
 }
