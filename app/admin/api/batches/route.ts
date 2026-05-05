@@ -3,15 +3,7 @@ import { assertAdminPageAccessFromHeaders, getAdminPageUsernameFromHeaders } fro
 import { createBusinessCardBatch } from "@/lib/crm";
 import { extractBusinessCardDetails } from "@/lib/crm-provider";
 import type { CardDetectionCandidate } from "@/lib/crm-types";
-
-function toDataUrl(bytes: Uint8Array, mimeType: string): string {
-  let binary = "";
-  for (const byte of bytes) {
-    binary += String.fromCharCode(byte);
-  }
-
-  return `data:${mimeType};base64,${btoa(binary)}`;
-}
+import { getImageSizeValidationError } from "@/lib/crm-upload-limits";
 
 type CropManifestEntry = {
   fieldName: string;
@@ -37,6 +29,34 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Composite image is required." }, { status: 400 });
     }
 
+    if (detections.length === 0 || manifest.length === 0) {
+      return NextResponse.json(
+        {
+          error:
+            "No detected cards were attached to this batch. Run detection again and verify the image before creating the batch.",
+        },
+        { status: 422 },
+      );
+    }
+
+    if (manifest.length !== detections.length) {
+      return NextResponse.json(
+        {
+          error:
+            "Detected cards and cropped cards are out of sync. Run detection again before creating the batch.",
+        },
+        { status: 422 },
+      );
+    }
+
+    const compositeSizeError = getImageSizeValidationError({
+      fileSize: compositeImage.size,
+      label: "The composite image",
+    });
+    if (compositeSizeError) {
+      return NextResponse.json({ error: compositeSizeError }, { status: 413 });
+    }
+
     const compositeBytes = new Uint8Array(await compositeImage.arrayBuffer());
     const crops = [];
 
@@ -46,9 +66,17 @@ export async function POST(request: Request) {
         continue;
       }
 
+      const cropSizeError = getImageSizeValidationError({
+        fileSize: cropFile.size,
+        label: `Cropped card ${entry.label}`,
+      });
+      if (cropSizeError) {
+        return NextResponse.json({ error: cropSizeError }, { status: 413 });
+      }
+
       const cropBytes = new Uint8Array(await cropFile.arrayBuffer());
       const extracted = await extractBusinessCardDetails({
-        imageDataUrl: toDataUrl(cropBytes, cropFile.type || "image/png"),
+        imageBytes: Array.from(cropBytes),
         eventContext: [formData.get("eventName"), formData.get("eventLocation")]
           .filter(Boolean)
           .join(" / "),

@@ -5,7 +5,7 @@ export default function robots(): MetadataRoute.Robots {
     rules: {
       userAgent: "*",
       allow: "/",
-      disallow: ["/admin/", "/api/"],
+      disallow: ["/admin/", "/receipts/", "/api/"],
     },
     host: "https://dazbeez.com",
     sitemap: "https://dazbeez.com/sitemap.xml",

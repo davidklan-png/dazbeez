@@ -1,5 +1,6 @@
 import { getAiBinding } from "@/lib/cloudflare-runtime";
 import { extractJsonBlock } from "@/lib/crm-json";
+import { formatFileSize, MAX_BATCH_AI_IMAGE_BYTES } from "@/lib/crm-upload-limits";
 import type {
   CardDetectionCandidate,
   EnrichmentFactInput,
@@ -7,6 +8,9 @@ import type {
 } from "@/lib/crm-types";
 
 const DEFAULT_VISION_MODEL = "@cf/meta/llama-3.2-11b-vision-instruct";
+const FALLBACK_VISION_MODELS = [
+  "@cf/llava-hf/llava-1.5-7b-hf",
+];
 const DEFAULT_TEXT_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 
 function assertAiBinding(): Ai {
@@ -20,6 +24,83 @@ function assertAiBinding(): Ai {
 
 function clamp01(value: number): number {
   return Math.max(0, Math.min(1, value));
+}
+
+function isVisionLicenseError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  return (
+    error.message.includes("5016:") ||
+    error.message.includes("submit the prompt 'agree'") ||
+    error.message.includes("Community License")
+  );
+}
+
+function isVisionRequestTooLargeError(error: unknown): boolean {
+  return error instanceof Error && error.message.includes("3006: Request is too large");
+}
+
+function extractVisionResponseText(response: unknown): string {
+  if (typeof response === "string") {
+    return response;
+  }
+
+  if (!response || typeof response !== "object") {
+    return "";
+  }
+
+  if ("response" in response) {
+    return String((response as { response?: unknown }).response ?? "");
+  }
+
+  if ("description" in response) {
+    return String((response as { description?: unknown }).description ?? "");
+  }
+
+  return "";
+}
+
+async function runVisionModel(input: {
+  prompt: string;
+  image: number[];
+  max_tokens: number;
+  temperature: number;
+}) {
+  const ai = assertAiBinding();
+
+  try {
+    return await ai.run(DEFAULT_VISION_MODEL, input);
+  } catch (error) {
+    if (isVisionRequestTooLargeError(error)) {
+      throw new Error(
+        `The uploaded image is too large for card detection or extraction. Maximum allowed size is ${formatFileSize(MAX_BATCH_AI_IMAGE_BYTES)}. Resize or compress the image before uploading.`,
+      );
+    }
+
+    if (!isVisionLicenseError(error)) {
+      throw error;
+    }
+
+    for (const model of FALLBACK_VISION_MODELS) {
+      try {
+        return await ai.run(model, input);
+      } catch (fallbackError) {
+        if (isVisionRequestTooLargeError(fallbackError)) {
+          throw new Error(
+            `The uploaded image is too large for card detection or extraction. Maximum allowed size is ${formatFileSize(MAX_BATCH_AI_IMAGE_BYTES)}. Resize or compress the image before uploading.`,
+          );
+        }
+
+        if (model === FALLBACK_VISION_MODELS.at(-1)) {
+          throw fallbackError;
+        }
+      }
+    }
+
+    throw error;
+  }
 }
 
 function normalizeDetectionCandidates(value: unknown): CardDetectionCandidate[] {
@@ -98,11 +179,10 @@ function normalizeDetectionCandidates(value: unknown): CardDetectionCandidate[] 
 }
 
 export async function detectBusinessCardsFromImage(args: {
-  imageDataUrl: string;
+  imageBytes: number[];
   expectedCount?: number;
 }): Promise<CardDetectionCandidate[]> {
-  const ai = assertAiBinding();
-  const response = await ai.run(DEFAULT_VISION_MODEL, {
+  const response = await runVisionModel({
     prompt: [
       "You detect paper business cards in a single composite photo.",
       "Return only JSON with this shape:",
@@ -114,15 +194,12 @@ export async function detectBusinessCardsFromImage(args: {
       "- do not invent cards that are not visible",
       `- expected count is about ${args.expectedCount ?? 9}`,
     ].join("\n"),
-    image: args.imageDataUrl,
+    image: args.imageBytes,
     max_tokens: 1400,
     temperature: 0.1,
   });
 
-  const rawText =
-    typeof response === "object" && response && "response" in response
-      ? String(response.response ?? "")
-      : "";
+  const rawText = extractVisionResponseText(response);
 
   return normalizeDetectionCandidates(extractJsonBlock(rawText, { cards: [] }));
 }
@@ -161,11 +238,10 @@ function createExtractionFallback(): ExtractedCardPayload {
 }
 
 export async function extractBusinessCardDetails(args: {
-  imageDataUrl: string;
+  imageBytes: number[];
   eventContext?: string | null;
 }): Promise<ExtractedCardPayload> {
-  const ai = assertAiBinding();
-  const response = await ai.run(DEFAULT_VISION_MODEL, {
+  const response = await runVisionModel({
     prompt: [
       "You are extracting a bilingual business card into structured JSON.",
       "Return only JSON with keys fields, confidence, languageHint.",
@@ -175,15 +251,12 @@ export async function extractBusinessCardDetails(args: {
       "Preserve Japanese text when present. Prefer null over guessing.",
       `Event context: ${args.eventContext ?? "none"}`,
     ].join("\n"),
-    image: args.imageDataUrl,
+    image: args.imageBytes,
     max_tokens: 2200,
     temperature: 0.1,
   });
 
-  const rawText =
-    typeof response === "object" && response && "response" in response
-      ? String(response.response ?? "")
-      : "";
+  const rawText = extractVisionResponseText(response);
 
   return extractJsonBlock(rawText, createExtractionFallback());
 }
