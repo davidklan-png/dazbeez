@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
 import { assertReceiptsAccessFromHeaders, getReceiptsActor } from "@/lib/receipts/auth";
 import { updateAmexLineCategory } from "@/lib/receipts/db";
+import { isCanonicalCode } from "@/lib/receipts/categories";
 import type {
-  AmexExpenseCategory,
   AmexCategoryStatus,
   AmexReceiptStatus,
   AmexBusinessTripStatus,
@@ -18,16 +18,26 @@ export async function PATCH(request: Request, { params }: RouteContext) {
 
     const body = (await request.json()) as {
       expenseCategory?: string;
+      expenseCategoryCode?: string;
       categoryStatus?: string;
       receiptStatus?: string;
       receiptMissingReason?: string | null;
       businessTripStatus?: string;
     };
 
+    // Validate canonical category code if provided
+    if (body.expenseCategoryCode && !isCanonicalCode(body.expenseCategoryCode)) {
+      return NextResponse.json(
+        { error: `Invalid expense category code: ${body.expenseCategoryCode}` },
+        { status: 400 },
+      );
+    }
+
     await updateAmexLineCategory(
       id,
       {
-        expenseCategory: body.expenseCategory as AmexExpenseCategory | undefined,
+        expenseCategory: body.expenseCategory as Parameters<typeof updateAmexLineCategory>[1]["expenseCategory"],
+        expenseCategoryCode: body.expenseCategoryCode ?? undefined,
         categoryStatus: body.categoryStatus as AmexCategoryStatus | undefined,
         receiptStatus: body.receiptStatus as AmexReceiptStatus | undefined,
         receiptMissingReason: body.receiptMissingReason,

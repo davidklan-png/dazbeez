@@ -2,26 +2,13 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import type { AmexStatementLine, ReceiptRecord, AmexExpenseCategory } from "@/lib/receipts/types";
+import type { AmexStatementLine, ReceiptRecord } from "@/lib/receipts/types";
 import type { ReconciliationMatch } from "@/lib/receipts/types";
-
-const EXPENSE_CATEGORIES: { value: AmexExpenseCategory; label: string }[] = [
-  { value: "unknown", label: "— Select category —" },
-  { value: "meeting_no_alcohol", label: "Meeting (no alcohol)" },
-  { value: "entertainment_alcohol", label: "Entertainment (alcohol)" },
-  { value: "transportation", label: "Transportation" },
-  { value: "travel", label: "Travel" },
-  { value: "business_trip", label: "Business trip" },
-  { value: "books", label: "Books" },
-  { value: "research", label: "Research" },
-  { value: "software", label: "Software" },
-  { value: "telecom", label: "Telecom" },
-  { value: "office_supplies", label: "Office supplies" },
-  { value: "insurance", label: "Insurance" },
-  { value: "misc", label: "Miscellaneous" },
-];
-
-const ATTENDEE_REQUIRED: AmexExpenseCategory[] = ["meeting_no_alcohol", "entertainment_alcohol"];
+import {
+  EXPENSE_CATEGORIES,
+  requiresAttendees as categoryRequiresAttendees,
+  formatCategoryLabel,
+} from "@/lib/receipts/categories";
 
 interface ReconciliationTableProps {
   amexLines: AmexStatementLine[];
@@ -70,13 +57,13 @@ export function ReconciliationTable({
     }
   }
 
-  async function updateCategory(lineId: string, expenseCategory: AmexExpenseCategory) {
+  async function updateCategory(lineId: string, expenseCategoryCode: string) {
     setCategoryBusy(lineId);
     try {
       await fetch(`/api/receipts/amex/lines/${lineId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ expenseCategory }),
+        body: JSON.stringify({ expenseCategoryCode }),
       });
       router.refresh();
     } catch {
@@ -124,24 +111,26 @@ export function ReconciliationTable({
   }
 
   function CategoryRow({ line }: { line: AmexStatementLine }) {
-    const needsAttendees = ATTENDEE_REQUIRED.includes(line.expense_category);
+    const needsAttendees = categoryRequiresAttendees(line.expense_category_code);
+    const hasCategory = !!line.expense_category_code;
     return (
       <div className="mt-2 flex flex-wrap items-center gap-2">
         <select
-          value={line.expense_category}
+          value={line.expense_category_code ?? ""}
           disabled={categoryBusy === line.id}
-          onChange={(e) => updateCategory(line.id, e.target.value as AmexExpenseCategory)}
+          onChange={(e) => updateCategory(line.id, e.target.value)}
           className={`rounded-lg border px-2 py-1 text-xs focus:border-amber-500 focus:outline-none ${
-            line.expense_category === "unknown"
+            !hasCategory
               ? "border-amber-300 bg-amber-50 text-amber-700"
               : "border-gray-200 bg-white text-gray-700"
           }`}
         >
+          <option value="">— Select category —</option>
           {EXPENSE_CATEGORIES.map((c) => (
-            <option key={c.value} value={c.value}>{c.label}</option>
+            <option key={c.code} value={c.code}>{formatCategoryLabel(c.code)}</option>
           ))}
         </select>
-        {line.expense_category !== "unknown" && line.category_status !== "confirmed" && (
+        {hasCategory && line.category_status !== "confirmed" && (
           <span className="text-xs text-gray-400">suggested</span>
         )}
         {needsAttendees && (
@@ -299,19 +288,20 @@ export function ReconciliationTable({
                       <td className="px-4 py-3 text-gray-600">{formatAmount(line)}</td>
                       <td className="px-4 py-3">
                         <select
-                          value={line.expense_category}
+                          value={line.expense_category_code ?? ""}
                           disabled={categoryBusy === line.id}
                           onChange={(e) =>
-                            updateCategory(line.id, e.target.value as AmexExpenseCategory)
+                            updateCategory(line.id, e.target.value)
                           }
                           className={`rounded-lg border px-2 py-0.5 text-xs focus:border-amber-500 focus:outline-none ${
-                            line.expense_category === "unknown"
+                            !line.expense_category_code
                               ? "border-amber-300 bg-amber-50 text-amber-700"
                               : "border-gray-200 text-gray-700"
                           }`}
                         >
+                          <option value="">— Select —</option>
                           {EXPENSE_CATEGORIES.map((c) => (
-                            <option key={c.value} value={c.value}>{c.label}</option>
+                            <option key={c.code} value={c.code}>{formatCategoryLabel(c.code)}</option>
                           ))}
                         </select>
                       </td>
@@ -343,19 +333,20 @@ export function ReconciliationTable({
                     <td className="px-4 py-3 text-gray-600">{formatAmount(line)}</td>
                     <td className="px-4 py-3">
                       <select
-                        value={line.expense_category}
+                        value={line.expense_category_code ?? ""}
                         disabled={categoryBusy === line.id}
                         onChange={(e) =>
-                          updateCategory(line.id, e.target.value as AmexExpenseCategory)
+                          updateCategory(line.id, e.target.value)
                         }
                         className={`rounded-lg border px-2 py-0.5 text-xs focus:border-amber-500 focus:outline-none ${
-                          line.expense_category === "unknown"
+                          !line.expense_category_code
                             ? "border-amber-300 bg-amber-50 text-amber-700"
                             : "border-gray-200 text-gray-700"
                         }`}
                       >
+                        <option value="">— Select —</option>
                         {EXPENSE_CATEGORIES.map((c) => (
-                          <option key={c.value} value={c.value}>{c.label}</option>
+                          <option key={c.code} value={c.code}>{formatCategoryLabel(c.code)}</option>
                         ))}
                       </select>
                     </td>

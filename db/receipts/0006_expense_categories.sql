@@ -6,7 +6,9 @@ CREATE TABLE IF NOT EXISTS expense_categories (
   requires_attendees INTEGER NOT NULL DEFAULT 0,
   default_business_trip_eligible INTEGER NOT NULL DEFAULT 0,
   display_order     INTEGER NOT NULL DEFAULT 0,
-  created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+  is_active         INTEGER NOT NULL DEFAULT 1,
+  created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+  updated_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 
 INSERT OR IGNORE INTO expense_categories (code, ja_name, en_name, requires_attendees, default_business_trip_eligible, display_order) VALUES

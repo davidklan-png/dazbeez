@@ -395,6 +395,9 @@ export interface ExportRow {
   amountMinor: number | null;
   currency: string;
   expenseType: ExpenseType;
+  expenseCategoryCode: string | null;
+  expenseCategoryJa: string | null;
+  expenseCategoryEn: string | null;
   paymentPath: PaymentPath;
   businessPurpose: string | null;
   attendees: string[];

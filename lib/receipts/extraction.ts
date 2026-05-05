@@ -1,5 +1,5 @@
 import { getAiBinding } from "@/lib/cloudflare-runtime";
-import { isCanonicalCode, mapLegacyCategory } from "@/lib/receipts/categories";
+import { isCanonicalCode, mapLegacyCategory, EXPENSE_CATEGORIES } from "@/lib/receipts/categories";
 import type { ExtractionResult, ExpenseType } from "@/lib/receipts/types";
 
 // ─── Provider interface ───────────────────────────────────────────────────────
@@ -28,20 +28,24 @@ function parseAmountToMinor(raw: unknown, currency: string): number | null {
   return currency === "JPY" ? Math.round(n) : Math.round(n * 100);
 }
 
-const KNOWN_EXPENSE_TYPES = new Set<ExpenseType>([
-  "meeting-no-alcohol",
-  "entertainment-alcohol",
-  "transportation",
-  "books",
-  "research",
-  "insurance",
-  "misc",
-]);
+const CANONICAL_CODES_LIST = EXPENSE_CATEGORIES.map((c) => c.code).join("|");
 
 function normalizeExpenseType(raw: unknown): ExpenseType | null {
   if (typeof raw !== "string") return null;
   const lower = raw.toLowerCase().replace(/\s+/g, "-");
-  if (KNOWN_EXPENSE_TYPES.has(lower as ExpenseType)) return lower as ExpenseType;
+  // Try mapping through legacy first
+  const mapped = mapLegacyCategory(lower);
+  if (!mapped.ambiguous && mapped.code) {
+    // Convert canonical back to legacy for the expenseType field
+    const legacyMap: Record<string, ExpenseType> = {
+      meeting: "meeting-no-alcohol",
+      entertainment: "entertainment-alcohol",
+      travel_transportation: "transportation",
+      newspapers_books: "books",
+      insurance: "insurance",
+    };
+    return legacyMap[mapped.code] ?? "misc";
+  }
   if (lower.includes("transport") || lower.includes("taxi") || lower.includes("train")) return "transportation";
   if (lower.includes("meal") || lower.includes("restaurant") || lower.includes("dining")) return "entertainment-alcohol";
   if (lower.includes("book")) return "books";
@@ -71,7 +75,7 @@ Return ONLY valid JSON with this exact shape:
   "merchant": "string or null",
   "amount": "number as string (e.g. '1500') or null",
   "currency": "JPY or USD or EUR or null",
-  "expense_type": "transportation|books|research|insurance|misc|meeting-no-alcohol|entertainment-alcohol or null",
+  "expense_category_code": "${CANONICAL_CODES_LIST} or null",
   "business_purpose": "string or null",
   "attendees": ["name1", "name2"],
   "raw_text": "full text visible on the receipt"
@@ -81,6 +85,7 @@ Rules:
 - Set null for any field you cannot determine from the image.
 - amount must be the total charge (not subtotal, not tax separately).
 - For JPY, return whole yen (no decimal).
+- expense_category_code must be one of the listed values or null. Do not invent values.
 - attendees should only be extracted if names are visible on the receipt.
 - Do not guess. Only return data you can read from the image.`;
 
