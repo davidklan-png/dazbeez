@@ -3,8 +3,10 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { getAdminActor } from "@/lib/admin-page-auth-request";
+import { getCrmDb } from "@/lib/cloudflare-runtime";
+import { sendApprovedDraft } from "@/lib/crm-email-sender";
 import { processApprovedBatch, updateBatchCardReview, updateSetting } from "@/lib/crm";
-import { parseJsonValue } from "@/lib/crm-json";
+import { parseJsonValue, stringifyJson } from "@/lib/crm-json";
 import type { ExtractedContactFields } from "@/lib/crm-types";
 
 function toNullable(value: FormDataEntryValue | null) {
@@ -18,6 +20,92 @@ function parseSettingsPayload(formData: FormData) {
   } catch {
     throw new Error("Settings were not saved — the JSON is invalid. Fix the syntax and try again.");
   }
+}
+
+function parseDraftContent(formData: FormData) {
+  const subjectLine = String(formData.get("subjectLine") ?? "").trim();
+  const plainTextBody = String(formData.get("plainTextBody") ?? "").replace(/\r\n/g, "\n").trim();
+
+  if (!subjectLine) {
+    throw new Error("Draft subject is required.");
+  }
+
+  if (!plainTextBody) {
+    throw new Error("Draft body is required.");
+  }
+
+  return { subjectLine, plainTextBody };
+}
+
+async function updateDraftContent(args: {
+  draftId: number;
+  actor: string;
+  subjectLine: string;
+  plainTextBody: string;
+}) {
+  const db = getCrmDb();
+  const draft = await db
+    .prepare(
+      `SELECT contact_id, status, subject_line, plain_text_body
+       FROM email_drafts
+       WHERE id = ?
+       LIMIT 1`,
+    )
+    .bind(args.draftId)
+    .first<{
+      contact_id: number;
+      status: string;
+      subject_line: string;
+      plain_text_body: string;
+    }>();
+
+  if (!draft) {
+    throw new Error(`Email draft ${args.draftId} was not found.`);
+  }
+
+  if (draft.status === "approved") {
+    throw new Error(`Email draft ${args.draftId} has already been sent and can no longer be edited.`);
+  }
+
+  if (draft.status === "archived") {
+    throw new Error(`Email draft ${args.draftId} is archived and cannot be edited.`);
+  }
+
+  await db
+    .prepare(
+      `UPDATE email_drafts
+       SET subject_line = ?,
+           plain_text_body = ?,
+           updated_at = datetime('now')
+       WHERE id = ?`,
+    )
+    .bind(args.subjectLine, args.plainTextBody, args.draftId)
+    .run();
+
+  await db
+    .prepare(
+      `INSERT INTO audit_logs (actor, action, entity_type, entity_id, before_json, after_json)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(
+      args.actor,
+      "email_draft.updated",
+      "email_draft",
+      args.draftId,
+      stringifyJson({
+        subject_line: draft.subject_line,
+        plain_text_body: draft.plain_text_body,
+      }),
+      stringifyJson({
+        subject_line: args.subjectLine,
+        plain_text_body: args.plainTextBody,
+      }),
+    )
+    .run();
+
+  return {
+    contactId: draft.contact_id,
+  };
 }
 
 export async function saveBatchCardReviewAction(formData: FormData) {
@@ -82,6 +170,41 @@ export async function processApprovedBatchAction(formData: FormData) {
   revalidatePath("/admin/companies");
   revalidatePath("/admin/drafts");
   redirect(`/admin/batches/${batchId}`);
+}
+
+export async function updateDraftEmailAction(formData: FormData) {
+  const actor = await getAdminActor();
+  const draftId = Number(formData.get("draftId") ?? 0);
+  const { subjectLine, plainTextBody } = parseDraftContent(formData);
+  const draft = await updateDraftContent({
+    draftId,
+    actor,
+    subjectLine,
+    plainTextBody,
+  });
+
+  revalidatePath(`/admin/contacts/${draft.contactId}`);
+  revalidatePath("/admin/contacts");
+  revalidatePath("/admin/drafts");
+  redirect(`/admin/contacts/${draft.contactId}`);
+}
+
+export async function sendDraftEmailAction(formData: FormData) {
+  const actor = await getAdminActor();
+  const draftId = Number(formData.get("draftId") ?? 0);
+  const { subjectLine, plainTextBody } = parseDraftContent(formData);
+  const draft = await updateDraftContent({
+    draftId,
+    actor,
+    subjectLine,
+    plainTextBody,
+  });
+
+  await sendApprovedDraft({ draftId, actor });
+  revalidatePath(`/admin/contacts/${draft.contactId}`);
+  revalidatePath("/admin/contacts");
+  revalidatePath("/admin/drafts");
+  redirect(`/admin/contacts/${draft.contactId}`);
 }
 
 export async function updateProfileSettingsAction(formData: FormData) {

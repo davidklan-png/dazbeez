@@ -1,0 +1,21 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "dazbeez-email-reply-capture",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-08-01",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  // Destination to forward all mail on after we attempt to capture it.
+  // Must be verified in Cloudflare Email Routing > Destination addresses.
+  "vars": {
+    "FORWARD_TO": "david.klan@gmail.com"
+  },
+  "d1_databases": [
+    {
+      "binding": "CRM_DB",
+      "database_name": "dazbeez-networking",
+      "database_id": "4ce69aa7-efac-4739-8ed1-43c9d1a1db4c"
+    }
+  ]
+}

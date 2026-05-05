@@ -13,12 +13,6 @@ const nextConfig: NextConfig = {
         destination: "/contact",
         permanent: true,
       },
-      {
-        source: "/:path*",
-        has: [{ type: "host", value: "www.dazbeez.com" }],
-        destination: "https://dazbeez.com/:path*",
-        permanent: true,
-      },
     ];
   },
   async headers() {
