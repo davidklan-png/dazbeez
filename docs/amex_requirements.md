@@ -1194,7 +1194,7 @@ Official references used for these requirements:
 
 ```text
 Netアンサー information / login:
-https://www.saisoncard.co.jp/customer-support/netanswer/
+https://api.saisoncard.co.jp/auth/screen/na/authorize?response_type=code&client_id=ZC001&state=&scope=openid
 
 Web明細 PDF/CSV download FAQ:
 https://faq.saisoncard.co.jp/saison/detail?id=1970
