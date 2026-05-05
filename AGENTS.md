@@ -69,6 +69,46 @@ app/
 - `Dockerfile` and `docker-compose.yml` are kept only for local/reference workflows.
 - The `llm` Compose profile is local-only and does not participate in production.
 
+## Receipts Module — Development Split (PC vs Mac)
+
+The receipts module (`app/(receipt-system)/receipts/`, `app/api/receipts/`, `lib/receipts/`) is developed across two machines with strict separation of duties.
+
+### PC (this machine) — Code Only
+
+The PC writes, tests, and commits code. It has **no access** to production infrastructure.
+
+**Do:**
+- Write pages, components, API routes, lib modules, tests, and SQL migrations
+- Use a stub/mock layer for Cloudflare bindings (D1, R2, AI) — see `lib/cloudflare-runtime.ts` for the pattern
+- Run `npm run build` to type-check and catch compile errors
+- Run unit tests with mocked bindings
+- Commit and push to `origin`
+
+**Do NOT:**
+- Attempt to bind or connect to D1 databases (`RECEIPTS_DB`, `CRM_DB`)
+- Attempt to access R2 buckets (`RECEIPTS_BUCKET`, `RECEIPTS_ARCHIVE_BUCKET`)
+- Configure or test Cloudflare Access JWT auth flows
+- Modify `wrangler.jsonc` bindings (Mac owns the deployed config)
+- Run `wrangler dev`, `npm run cf:dev`, or `npm run deploy`
+- Start Docker containers or the dev server expecting live bindings
+- Generate or rotate any auth keys, tokens, or credentials
+
+### Mac M4 — Hosting, Auth, and Deployment
+
+The Mac runs production and owns all infrastructure configuration.
+
+- Holds Cloudflare Tunnel config, auth keys, and deployed `wrangler.jsonc`
+- Creates D1 databases and R2 buckets, then adds bindings
+- Runs SQL migrations against live D1
+- Enables Cloudflare Access on receipt routes
+- Runs `npm run cf:dev` for end-to-end testing with real bindings
+- Deploys via `npm run deploy`
+
+### Handoff Workflow
+
+1. PC: implement + unit-test + `npm run build` passes → push to `origin`
+2. Mac: pull → add D1/R2 bindings to `wrangler.jsonc` → run migrations → `npm run cf:dev` → verify → `npm run deploy`
+
 ## Verification
 1. Run `npm run build:cf` before shipping deployment changes
 2. For Cloudflare runtime checks, run `npm run cf:dev`

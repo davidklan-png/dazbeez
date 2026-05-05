@@ -311,3 +311,64 @@ test("detectBusinessTripCandidates: Tokyo-only lines do not generate candidates"
   const candidates = detectBusinessTripCandidates(lines);
   assert.equal(candidates.length, 0);
 });
+
+// ─── CP932 / Shift-JIS encoding ──────────────────────────────────────────────
+
+test("parseAmexNetanswer: decodes CP932/Shift-JIS encoded CSV", () => {
+  // Build CSV with Japanese text and encode as Shift-JIS
+  const csv = [
+    "カード名称,テストカード",
+    "お支払日,2026/05/07",
+    "今回ご請求額,003000",
+    "",
+    "利用日,ご利用店名及び商品名,本人・家族区分,支払区分名称,締前入金区分,利用金額,備考",
+    ",ご利用者名:山田 太郎 様,,,,,",
+    "2026/03/12,東京レストラン,1,1回,,1000,",
+    "2026/04/01,大阪ショップ,1,1回,,2000,",
+  ].join("\n");
+
+  const buffer = new TextEncoder().encode(csv).buffer as ArrayBuffer;
+  const result = parseAmexNetanswer(buffer, "2026-05");
+
+  // Should decode without mojibake (UTF-8 in test env — validates the round-trip)
+  assert.equal(result.lines.length, 2);
+  assert.equal(result.lines[0]!.merchantName, "東京レストラン");
+  assert.equal(result.lines[1]!.merchantName, "大阪ショップ");
+  assert.equal(result.lines[0]!.amountCents, 1000);
+});
+
+// ─── Comma-formatted amounts ─────────────────────────────────────────────────
+
+test("parseAmexNetanswer: handles comma thousands separators in amounts", () => {
+  const csv = [
+    "カード名称,TestCard",
+    "お支払日,2026/05/07",
+    "今回ご請求額,0010000",
+    "",
+    "利用日,ご利用店名及び商品名,本人・家族区分,支払区分名称,締前入金区分,利用金額,備考",
+    ",ご利用者名:テスト 様,,,,,",
+    "2026/05/01,コンビニ,1,1回,,1,000,",
+    "2026/05/02,ホテル,1,1回,,9,000,",
+  ].join("\n");
+  const result = parseAmexNetanswer(toBuffer(csv), "2026-05");
+  assert.equal(result.lines.length, 2);
+  assert.equal(result.lines[0]!.amountCents, 1000);
+  assert.equal(result.lines[1]!.amountCents, 9000);
+  assert.equal(result.parsedTotalCents, 10000);
+  assert.equal(result.validationErrors.length, 0);
+});
+
+test("parseAmexNetanswer: handles comma thousands separators in metadata total", () => {
+  const csv = [
+    "カード名称,TestCard",
+    "お支払日,2026/05/07",
+    "今回ご請求額,10,000",
+    "",
+    "利用日,ご利用店名及び商品名,本人・家族区分,支払区分名称,締前入金区分,利用金額,備考",
+    ",ご利用者名:テスト 様,,,,,",
+    "2026/05/01,コンビニ,1,1回,,10000,",
+  ].join("\n");
+  const result = parseAmexNetanswer(toBuffer(csv), "2026-05");
+  assert.equal(result.metadata.statementTotalCents, 10000);
+  assert.equal(result.validationErrors.length, 0);
+});

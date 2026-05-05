@@ -199,24 +199,59 @@ export interface NetanswerParseResult {
 }
 
 function decodeAmexBuffer(buffer: ArrayBuffer): { text: string; encoding: string } {
-  // Try UTF-8 first (fatal: true throws on invalid byte sequences)
+  const bytes = new Uint8Array(buffer);
+
+  // Detect CP932/Shift-JIS by scanning for high-byte patterns that are
+  // invalid in UTF-8 but valid in Shift-JIS:
+  //   Lead bytes:  0x81–0x9F, 0xE0–0xFC  (followed by trail byte 0x40–0x7E or 0x80–0xFC)
+  //   Katakana:    0xA1–0xDF  (standalone, these are UTF-8 continuation bytes → invalid standalone)
+  // UTF-8 fatal mode can silently accept some CP932 sequences (producing mojibake),
+  // so we must detect CP932 explicitly and decode with shift_jis FIRST.
+  let looksLikeShiftJis = false;
+  const scanLen = Math.min(bytes.length, 4096);
+
+  for (let i = 0; i < scanLen; i++) {
+    const b = bytes[i]!;
+    if ((b >= 0x81 && b <= 0x9F) || (b >= 0xE0 && b <= 0xFC)) {
+      if (i + 1 < bytes.length) {
+        const t = bytes[i + 1]!;
+        if ((t >= 0x40 && t <= 0x7E) || (t >= 0x80 && t <= 0xFC)) {
+          looksLikeShiftJis = true;
+          break;
+        }
+      }
+    } else if (b >= 0xA1 && b <= 0xDF) {
+      looksLikeShiftJis = true;
+      break;
+    }
+  }
+
+  if (looksLikeShiftJis) {
+    try {
+      const text = new TextDecoder("shift_jis", { fatal: true }).decode(buffer);
+      return { text, encoding: "shift_jis" };
+    } catch {
+      // Fall through to UTF-8
+    }
+  }
+
   try {
     const text = new TextDecoder("utf-8", { fatal: true }).decode(buffer);
     // Strip UTF-8 BOM if present
-    return { text: text.replace(/^﻿/, ""), encoding: "utf-8" };
+    return { text: text.replace(/^\uFEFF/, ""), encoding: "utf-8" };
   } catch {
     // fall through
   }
-  // Try Shift-JIS (CP932-compatible for Netアンサー files)
+
+  // Last resort: try shift_jis even without byte-pattern match
   try {
-    const text = new TextDecoder("shift_jis", { fatal: true }).decode(buffer);
+    const text = new TextDecoder("shift_jis").decode(buffer);
     return { text, encoding: "shift_jis" };
   } catch {
-    // fall through
+    throw new Error(
+      "Could not read this CSV. Netアンサー files are usually CP932/Shift-JIS. Please upload the original CSV file.",
+    );
   }
-  throw new Error(
-    "Could not read this CSV. Netアンサー files are usually CP932/Shift-JIS. Please upload the original CSV file.",
-  );
 }
 
 // Known outside-Tokyo location signals
@@ -287,7 +322,8 @@ export function parseAmexNetanswer(
       continue;
     }
     if (col0 === "今回ご請求額") {
-      const raw_amount = (fields[1] ?? "").trim().replace(/[^0-9]/g, "");
+      // Total may contain comma thousands separators that split across fields
+      const raw_amount = fields.slice(1).join("").replace(/[^0-9]/g, "");
       if (raw_amount) metadata.statementTotalCents = parseInt(raw_amount, 10);
       continue;
     }
@@ -321,8 +357,23 @@ export function parseAmexNetanswer(
     const txCardholderFlag = fields[2]?.trim() || null;
     const paymentType = fields[3]?.trim() || null;
     const prepaymentFlag = fields[4]?.trim() || null;
-    const amountRaw = (fields[5] ?? "").replace(/[^0-9]/g, "");
-    const memo = fields[6]?.trim() || null;
+
+    // Amount may span multiple fields if it contains comma thousands separators.
+    // Expected layout (7 fields with trailing comma): date, merchant, flag, payment, prepay, amount, memo
+    // With comma in amount (8+ fields): the amount is split across fields[5..n-1], memo is last field.
+    let amountRaw: string;
+    let memoField: string | null;
+
+    if (fields.length > 7) {
+      // Comma-formatted amount — rejoin and strip
+      amountRaw = fields.slice(5, -1).join("").replace(/[^0-9]/g, "");
+      memoField = fields[fields.length - 1]?.trim() || null;
+    } else {
+      amountRaw = (fields[5] ?? "").replace(/[^0-9]/g, "");
+      memoField = fields[6]?.trim() || null;
+    }
+
+    const memo = memoField;
 
     if (!amountRaw) continue;
     const amountCents = parseInt(amountRaw, 10);

@@ -5,6 +5,7 @@ import {
   listAttendees,
   createExport,
   finalizeExport,
+  listAmexLines,
 } from "@/lib/receipts/db";
 import {
   buildMonthlyExportCsv,
@@ -14,6 +15,7 @@ import {
   buildManifestCsv,
 } from "@/lib/receipts/export";
 import { archiveBundle, archiveManifest } from "@/lib/receipts/storage";
+import { getCategoryByCode, requiresAttendees } from "@/lib/receipts/categories";
 import type { ExportRow } from "@/lib/receipts/types";
 
 export async function POST(request: Request) {
@@ -51,19 +53,58 @@ export async function POST(request: Request) {
     }
 
     // Build export rows
-    const exportRows: ExportRow[] = receipts.map((r) => ({
-      receiptId: r.id,
-      transactionDate: r.transaction_date,
-      merchant: r.merchant,
-      amountMinor: r.amount_minor,
-      currency: r.currency,
-      expenseType: r.expense_type,
-      paymentPath: r.payment_path,
-      businessPurpose: r.business_purpose,
-      attendees: attendeeMap.get(r.id) ?? [],
-      status: r.status,
-      originalR2Key: r.original_r2_key,
-    }));
+    const exportRows: ExportRow[] = receipts.map((r) => {
+      const cat = getCategoryByCode(r.expense_category_code);
+      return {
+        receiptId: r.id,
+        transactionDate: r.transaction_date,
+        merchant: r.merchant,
+        amountMinor: r.amount_minor,
+        currency: r.currency,
+        expenseType: r.expense_type,
+        expenseCategoryCode: r.expense_category_code ?? null,
+        expenseCategoryJa: cat?.jaName ?? null,
+        expenseCategoryEn: cat?.enName ?? null,
+        paymentPath: r.payment_path,
+        businessPurpose: r.business_purpose,
+        attendees: attendeeMap.get(r.id) ?? [],
+        status: r.status,
+        originalR2Key: r.original_r2_key,
+      };
+    });
+
+    // Export blocking validation — check AMEX lines before finalizing
+    if (body.finalize) {
+      const amexLines = await listAmexLines(month);
+      const blockers: string[] = [];
+
+      for (const line of amexLines) {
+        if (!line.expense_category_code) {
+          blockers.push(`Line ${line.id}: missing expense category`);
+        }
+        if (line.receipt_status === "missing_receipt" && !line.receipt_missing_reason) {
+          blockers.push(`Line ${line.id}: missing receipt without reason`);
+        }
+        if (requiresAttendees(line.expense_category_code)) {
+          const linkedReceipt = line.matched_receipt_id
+            ? attendeeMap.get(line.matched_receipt_id)
+            : null;
+          if (!linkedReceipt || linkedReceipt.length === 0) {
+            blockers.push(`Line ${line.id}: ${getCategoryByCode(line.expense_category_code)?.jaName ?? line.expense_category_code} requires attendees`);
+          }
+        }
+        if (line.business_trip_status === "candidate") {
+          blockers.push(`Line ${line.id}: unresolved business trip candidate`);
+        }
+      }
+
+      if (blockers.length > 0) {
+        return NextResponse.json(
+          { error: "Export blocked — resolve these issues first.", blockers },
+          { status: 422 },
+        );
+      }
+    }
 
     // Generate CSV and hash
     const csv = buildMonthlyExportCsv(exportRows, attendeeMap);

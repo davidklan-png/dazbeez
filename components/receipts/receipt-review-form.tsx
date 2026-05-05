@@ -5,16 +5,11 @@ import { useRouter } from "next/navigation";
 import { AttendeeEditor } from "@/components/receipts/attendee-editor";
 import { ReceiptImageViewer } from "@/components/receipts/receipt-image-viewer";
 import type { ReceiptRecord, ReceiptAttendee, ExtractionResult } from "@/lib/receipts/types";
-
-const EXPENSE_TYPES = [
-  { value: "meeting-no-alcohol", label: "Meeting (no alcohol)" },
-  { value: "entertainment-alcohol", label: "Entertainment (alcohol)" },
-  { value: "transportation", label: "Transportation" },
-  { value: "books", label: "Books" },
-  { value: "research", label: "Research" },
-  { value: "insurance", label: "Insurance" },
-  { value: "misc", label: "Miscellaneous" },
-] as const;
+import {
+  EXPENSE_CATEGORIES,
+  requiresAttendees as categoryRequiresAttendees,
+  formatCategoryLabel,
+} from "@/lib/receipts/categories";
 
 const PAYMENT_PATHS = [
   { value: "AMEX", label: "AMEX" },
@@ -23,13 +18,6 @@ const PAYMENT_PATHS = [
 ] as const;
 
 const CURRENCIES = ["JPY", "USD", "EUR", "GBP", "AUD", "CNY"] as const;
-
-type ExpenseType = (typeof EXPENSE_TYPES)[number]["value"];
-
-const ATTENDEE_REQUIRED_TYPES: ExpenseType[] = [
-  "meeting-no-alcohol",
-  "entertainment-alcohol",
-];
 
 interface ReceiptReviewFormProps {
   receipt: ReceiptRecord;
@@ -44,6 +32,9 @@ export function ReceiptReviewForm({
 
   const [paymentPath, setPaymentPath] = useState(receipt.payment_path);
   const [expenseType, setExpenseType] = useState(receipt.expense_type);
+  const [expenseCategoryCode, setExpenseCategoryCode] = useState(
+    receipt.expense_category_code ?? "",
+  );
   const [transactionDate, setTransactionDate] = useState(
     receipt.transaction_date ?? "",
   );
@@ -74,9 +65,7 @@ export function ReceiptReviewForm({
 
   const [extraction, setExtraction] = useState<ExtractionPhase>({ phase: "idle" });
 
-  const needsAttendees = ATTENDEE_REQUIRED_TYPES.includes(
-    expenseType as ExpenseType,
-  );
+  const needsAttendees = categoryRequiresAttendees(expenseCategoryCode);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -104,6 +93,7 @@ export function ReceiptReviewForm({
         body: JSON.stringify({
           paymentPath,
           expenseType,
+          expenseCategoryCode: expenseCategoryCode || null,
           transactionDate: transactionDate || null,
           merchant: merchant.trim() || null,
           amountMinor,
@@ -238,19 +228,20 @@ export function ReceiptReviewForm({
             </div>
           </div>
 
-          {/* Expense type */}
+          {/* Expense category */}
           <div className="mb-4">
             <label className="block text-sm font-medium text-gray-700">
-              Expense type
+              Expense category
             </label>
             <select
-              value={expenseType}
-              onChange={(e) => setExpenseType(e.target.value as typeof receipt.expense_type)}
+              value={expenseCategoryCode}
+              onChange={(e) => setExpenseCategoryCode(e.target.value)}
               className="mt-2 block w-full rounded-xl border border-gray-300 px-3 py-2 text-sm focus:border-amber-500 focus:outline-none"
             >
-              {EXPENSE_TYPES.map((t) => (
-                <option key={t.value} value={t.value}>
-                  {t.label}
+              <option value="">— Select category —</option>
+              {EXPENSE_CATEGORIES.map((c) => (
+                <option key={c.code} value={c.code}>
+                  {formatCategoryLabel(c.code)}
                 </option>
               ))}
             </select>
