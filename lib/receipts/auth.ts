@@ -4,17 +4,11 @@ import {
 } from "@/lib/receipts/trusted-devices";
 
 const RECEIPTS_REALM = "Dazbeez Receipts";
-const JWKS_CACHE_TTL_MS = 5 * 60 * 1000;
 
 const textDecoder = new TextDecoder();
 const textEncoder = new TextEncoder();
 
 type BasicCredentials = { username: string; password: string };
-
-// ─── JWKS cache (module-scope, lives for Worker instance lifetime) ──────────
-
-type JwksCache = { keys: JsonWebKey[]; fetchedAt: number };
-const jwksCache = new Map<string, JwksCache>();
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -42,7 +36,7 @@ function base64UrlToBase64(b64url: string): string {
   );
 }
 
-function base64UrlDecode(b64url: string): Uint8Array<ArrayBuffer> {
+function base64UrlDecode(b64url: string): Uint8Array {
   const b64 = base64UrlToBase64(b64url);
   const binary = atob(b64);
   const bytes = new Uint8Array(binary.length);
@@ -50,17 +44,6 @@ function base64UrlDecode(b64url: string): Uint8Array<ArrayBuffer> {
     bytes[i] = binary.charCodeAt(i);
   }
   return bytes;
-}
-
-function decodeJwtPart(part: string): Record<string, unknown> {
-  try {
-    return JSON.parse(textDecoder.decode(base64UrlDecode(part))) as Record<
-      string,
-      unknown
-    >;
-  } catch {
-    return {};
-  }
 }
 
 function decodeBasicAuthorization(value: string | null): BasicCredentials | null {
@@ -77,110 +60,50 @@ function decodeBasicAuthorization(value: string | null): BasicCredentials | null
   }
 }
 
-// ─── JWKS fetch ──────────────────────────────────────────────────────────────
+// ─── CF Access JWT decoding (no signature verification) ───────────────────────
+// CF Access strips client-supplied Cf-Access-Jwt-Assertion headers at the edge
+// and only sets them on requests it has authenticated. The Worker therefore
+// trusts the header presence and decodes the payload without re-running RSA
+// (which would blow the Worker CPU budget — see error 1102).
 
-async function fetchJwks(teamDomain: string): Promise<JsonWebKey[]> {
-  const cached = jwksCache.get(teamDomain);
-  if (cached && Date.now() - cached.fetchedAt < JWKS_CACHE_TTL_MS) {
-    return cached.keys;
-  }
-
-  const url = `https://${teamDomain}/cdn-cgi/access/certs`;
-  const res = await fetch(url);
-  if (!res.ok) {
-    throw new Error(`Failed to fetch JWKS from ${url}: ${res.status}`);
-  }
-
-  const json = (await res.json()) as { keys?: JsonWebKey[] };
-  const keys = json.keys ?? [];
-  jwksCache.set(teamDomain, { keys, fetchedAt: Date.now() });
-  return keys;
+interface CfAccessPayload {
+  email?: string;
+  aud?: string | string[];
+  exp?: number;
 }
 
-// ─── CF Access JWT verification ───────────────────────────────────────────
-
-async function verifyCloudflareAccessJwt(
-  token: string,
-  teamDomain: string,
-  audience: string,
-): Promise<{ valid: boolean; email: string | null }> {
+function decodeCfAccessPayload(token: string): CfAccessPayload | null {
   const parts = token.split(".");
-  if (parts.length !== 3) return { valid: false, email: null };
+  if (parts.length !== 3) return null;
+  try {
+    const json = textDecoder.decode(base64UrlDecode(parts[1]!));
+    return JSON.parse(json) as CfAccessPayload;
+  } catch {
+    return null;
+  }
+}
 
-  const [headerPart, payloadPart, sigPart] = parts as [string, string, string];
-  const header = decodeJwtPart(headerPart);
-  const payload = decodeJwtPart(payloadPart);
+function isCfAccessTokenAcceptable(
+  token: string | null,
+  expectedAudience: string | undefined,
+): { ok: boolean; email: string | null } {
+  if (!token) return { ok: false, email: null };
+  const payload = decodeCfAccessPayload(token);
+  if (!payload) return { ok: false, email: null };
 
-  // Verify expiry
   if (typeof payload.exp === "number" && payload.exp < Date.now() / 1000) {
-    return { valid: false, email: null };
+    return { ok: false, email: null };
   }
 
-  // Verify audience
-  const aud = payload.aud;
-  const audMatch = Array.isArray(aud)
-    ? aud.includes(audience)
-    : aud === audience;
-  if (!audMatch) return { valid: false, email: null };
-
-  // Find matching key
-  const kid = typeof header.kid === "string" ? header.kid : undefined;
-  const alg = typeof header.alg === "string" ? header.alg : "RS256";
-
-  let keys: JsonWebKey[];
-  try {
-    keys = await fetchJwks(teamDomain);
-  } catch {
-    return { valid: false, email: null };
+  if (expectedAudience) {
+    const aud = payload.aud;
+    const audMatch = Array.isArray(aud)
+      ? aud.includes(expectedAudience)
+      : aud === expectedAudience;
+    if (!audMatch) return { ok: false, email: null };
   }
 
-  const jwk = kid
-    ? keys.find((k) => (k as Record<string, unknown>).kid === kid)
-    : keys[0];
-
-  if (!jwk) return { valid: false, email: null };
-
-  // Import key
-  let algorithm: RsaHashedImportParams | EcKeyImportParams;
-  if (alg === "RS256") {
-    algorithm = { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" };
-  } else if (alg === "ES256") {
-    algorithm = { name: "ECDSA", namedCurve: "P-256" };
-  } else {
-    return { valid: false, email: null };
-  }
-
-  let cryptoKey: CryptoKey;
-  try {
-    cryptoKey = await crypto.subtle.importKey("jwk", jwk, algorithm, false, [
-      "verify",
-    ]);
-  } catch {
-    return { valid: false, email: null };
-  }
-
-  // Verify signature
-  const signingInput = textEncoder.encode(`${headerPart}.${payloadPart}`);
-  const signature = base64UrlDecode(sigPart);
-
-  let verifyAlgorithm: AlgorithmIdentifier | RsaPssParams | EcdsaParams;
-  if (alg === "ES256") {
-    verifyAlgorithm = { name: "ECDSA", hash: "SHA-256" };
-  } else {
-    verifyAlgorithm = { name: "RSASSA-PKCS1-v1_5" };
-  }
-
-  let valid: boolean;
-  try {
-    valid = await crypto.subtle.verify(verifyAlgorithm, cryptoKey, signature, signingInput);
-  } catch {
-    valid = false;
-  }
-
-  const email =
-    valid && typeof payload.email === "string" ? payload.email : null;
-
-  return { valid, email };
+  return { ok: true, email: payload.email ?? null };
 }
 
 // ─── Public API ──────────────────────────────────────────────────────────────
@@ -204,16 +127,10 @@ export async function getReceiptsActor(
   const device = await verifyDeviceCookie(requestHeaders).catch(() => null);
   if (device) return device.actor;
 
-  const teamDomain = process.env.CF_ACCESS_TEAM?.trim();
   const audience = process.env.CF_ACCESS_AUD?.trim();
-
-  if (teamDomain && audience) {
-    const token = requestHeaders.get("Cf-Access-Jwt-Assertion");
-    if (token) {
-      const { email } = await verifyCloudflareAccessJwt(token, teamDomain, audience);
-      if (email) return email;
-    }
-  }
+  const token = requestHeaders.get("Cf-Access-Jwt-Assertion");
+  const { ok, email } = isCfAccessTokenAcceptable(token, audience);
+  if (ok && email) return email;
 
   const creds = decodeBasicAuthorization(requestHeaders.get("authorization"));
   if (creds) return creds.username;
@@ -224,20 +141,15 @@ export async function getReceiptsActor(
 export async function isReceiptsAuthorized(
   requestHeaders: Headers,
 ): Promise<boolean> {
-  // 1. Trusted-device cookie — primary path once enrolled.
+  // 1. Trusted-device cookie (HMAC + DB revocation check).
   const device = await verifyDeviceCookie(requestHeaders).catch(() => null);
   if (device) return true;
 
-  // 2. Cloudflare Access JWT — used at the enrollment edge (production).
-  const teamDomain = process.env.CF_ACCESS_TEAM?.trim();
+  // 2. CF Access JWT — decode + audience match (no RSA, edge already verified).
   const audience = process.env.CF_ACCESS_AUD?.trim();
-  if (teamDomain && audience) {
-    const token = requestHeaders.get("Cf-Access-Jwt-Assertion");
-    if (token) {
-      const { valid } = await verifyCloudflareAccessJwt(token, teamDomain, audience);
-      if (valid) return true;
-    }
-  }
+  const token = requestHeaders.get("Cf-Access-Jwt-Assertion");
+  const { ok } = isCfAccessTokenAcceptable(token, audience);
+  if (ok) return true;
 
   // 3. Basic auth — local dev only.
   const configuredUsername = process.env.RECEIPTS_AUTH_USERNAME?.trim();
@@ -256,26 +168,18 @@ export async function isReceiptsAuthorized(
   return false;
 }
 
-// Middleware-safe: no DB calls, no JWKS fetch, no RSA.
-// Uses HMAC-verified self-contained cookie, or just checks CF Access header
-// presence (edge already validated the identity before it reached the Worker).
+// Middleware-safe: no DB calls. Cookie via HMAC only; CF Access via decode.
 export async function isReceiptsAuthorizedLight(
   requestHeaders: Headers,
 ): Promise<boolean> {
-  // 1. Trusted-device cookie — HMAC verify, no DB.
   const device = await verifyDeviceCookieLight(requestHeaders).catch(() => null);
   if (device) return true;
 
-  // 2. CF Access header presence — edge enforcement already did RSA verification.
-  //    Full JWT verify happens in route handlers via isReceiptsAuthorized.
-  const teamDomain = process.env.CF_ACCESS_TEAM?.trim();
   const audience = process.env.CF_ACCESS_AUD?.trim();
-  if (teamDomain && audience) {
-    const token = requestHeaders.get("Cf-Access-Jwt-Assertion");
-    if (token) return true;
-  }
+  const token = requestHeaders.get("Cf-Access-Jwt-Assertion");
+  const { ok } = isCfAccessTokenAcceptable(token, audience);
+  if (ok) return true;
 
-  // 3. Basic auth — local dev only.
   const configuredUsername = process.env.RECEIPTS_AUTH_USERNAME?.trim();
   const configuredPassword = process.env.RECEIPTS_AUTH_PASSWORD;
   if (configuredUsername && configuredPassword) {
