@@ -7,7 +7,7 @@ import {
 } from "@/lib/admin-page-auth";
 import {
   getReceiptsAuthChallengeHeaders,
-  isReceiptsAuthorized,
+  isReceiptsAuthorizedLight,
 } from "@/lib/receipts/auth";
 
 const NOINDEX = { "X-Robots-Tag": "noindex, nofollow" } as const;
@@ -22,13 +22,28 @@ export async function middleware(request: NextRequest) {
     return NextResponse.redirect(url, 308);
   }
 
-  // Receipt module — Cloudflare Access JWT (prod) or basic auth (local dev)
+  // Receipt module — trusted-device cookie (primary), CF Access JWT
+  // (enrollment), or basic auth (local dev). Browsers without a valid
+  // session are redirected to /receipts/enroll so Cloudflare Access (which
+  // protects only the enroll route at the edge) can issue an identity.
   if (
     pathname.startsWith("/receipts") ||
     pathname.startsWith("/api/receipts")
   ) {
-    const authorized = await isReceiptsAuthorized(request.headers);
+    const authorized = await isReceiptsAuthorizedLight(request.headers);
     if (!authorized) {
+      const isEnrollPath =
+        pathname === "/receipts/enroll" ||
+        pathname.startsWith("/api/receipts/devices/enroll");
+      const wantsHtml =
+        !isEnrollPath &&
+        (request.headers.get("accept") ?? "").includes("text/html");
+      if (wantsHtml) {
+        const url = request.nextUrl.clone();
+        url.pathname = "/receipts/enroll";
+        url.search = `?next=${encodeURIComponent(pathname + request.nextUrl.search)}`;
+        return NextResponse.redirect(url, 302);
+      }
       return new NextResponse("Authentication required.", {
         status: 401,
         headers: { ...getReceiptsAuthChallengeHeaders(), ...NOINDEX },

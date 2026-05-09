@@ -1,3 +1,8 @@
+import {
+  verifyDeviceCookie,
+  verifyDeviceCookieLight,
+} from "@/lib/receipts/trusted-devices";
+
 const RECEIPTS_REALM = "Dazbeez Receipts";
 const JWKS_CACHE_TTL_MS = 5 * 60 * 1000;
 
@@ -181,6 +186,13 @@ async function verifyCloudflareAccessJwt(
 // ─── Public API ──────────────────────────────────────────────────────────────
 
 export function getReceiptsAuthChallengeHeaders(): Record<string, string> {
+  // Only advertise Basic auth when Basic is actually configured (local dev).
+  // In production CF Access handles the challenge at the edge — sending a
+  // Basic header here triggers a useless browser popup.
+  const hasBasic =
+    !!process.env.RECEIPTS_AUTH_USERNAME?.trim() &&
+    !!process.env.RECEIPTS_AUTH_PASSWORD;
+  if (!hasBasic) return {};
   return {
     "WWW-Authenticate": `Basic realm="${RECEIPTS_REALM}", charset="UTF-8"`,
   };
@@ -189,6 +201,9 @@ export function getReceiptsAuthChallengeHeaders(): Record<string, string> {
 export async function getReceiptsActor(
   requestHeaders: Headers,
 ): Promise<string> {
+  const device = await verifyDeviceCookie(requestHeaders).catch(() => null);
+  if (device) return device.actor;
+
   const teamDomain = process.env.CF_ACCESS_TEAM?.trim();
   const audience = process.env.CF_ACCESS_AUD?.trim();
 
@@ -209,33 +224,72 @@ export async function getReceiptsActor(
 export async function isReceiptsAuthorized(
   requestHeaders: Headers,
 ): Promise<boolean> {
+  // 1. Trusted-device cookie — primary path once enrolled.
+  const device = await verifyDeviceCookie(requestHeaders).catch(() => null);
+  if (device) return true;
+
+  // 2. Cloudflare Access JWT — used at the enrollment edge (production).
   const teamDomain = process.env.CF_ACCESS_TEAM?.trim();
   const audience = process.env.CF_ACCESS_AUD?.trim();
-
-  // CF Access JWT path (production)
   if (teamDomain && audience) {
     const token = requestHeaders.get("Cf-Access-Jwt-Assertion");
-    if (!token) return false;
-    const { valid } = await verifyCloudflareAccessJwt(token, teamDomain, audience);
-    return valid;
+    if (token) {
+      const { valid } = await verifyCloudflareAccessJwt(token, teamDomain, audience);
+      if (valid) return true;
+    }
   }
 
-  // Basic auth fallback (local dev only)
+  // 3. Basic auth — local dev only.
   const configuredUsername = process.env.RECEIPTS_AUTH_USERNAME?.trim();
   const configuredPassword = process.env.RECEIPTS_AUTH_PASSWORD;
-
-  if (!configuredUsername || !configuredPassword) {
-    // Neither auth method configured — fail closed
-    return false;
+  if (configuredUsername && configuredPassword) {
+    const provided = decodeBasicAuthorization(requestHeaders.get("authorization"));
+    if (
+      provided &&
+      safeEqual(provided.username, configuredUsername) &&
+      safeEqual(provided.password, configuredPassword)
+    ) {
+      return true;
+    }
   }
 
-  const provided = decodeBasicAuthorization(requestHeaders.get("authorization"));
-  if (!provided) return false;
+  return false;
+}
 
-  return (
-    safeEqual(provided.username, configuredUsername) &&
-    safeEqual(provided.password, configuredPassword)
-  );
+// Middleware-safe: no DB calls, no JWKS fetch, no RSA.
+// Uses HMAC-verified self-contained cookie, or just checks CF Access header
+// presence (edge already validated the identity before it reached the Worker).
+export async function isReceiptsAuthorizedLight(
+  requestHeaders: Headers,
+): Promise<boolean> {
+  // 1. Trusted-device cookie — HMAC verify, no DB.
+  const device = await verifyDeviceCookieLight(requestHeaders).catch(() => null);
+  if (device) return true;
+
+  // 2. CF Access header presence — edge enforcement already did RSA verification.
+  //    Full JWT verify happens in route handlers via isReceiptsAuthorized.
+  const teamDomain = process.env.CF_ACCESS_TEAM?.trim();
+  const audience = process.env.CF_ACCESS_AUD?.trim();
+  if (teamDomain && audience) {
+    const token = requestHeaders.get("Cf-Access-Jwt-Assertion");
+    if (token) return true;
+  }
+
+  // 3. Basic auth — local dev only.
+  const configuredUsername = process.env.RECEIPTS_AUTH_USERNAME?.trim();
+  const configuredPassword = process.env.RECEIPTS_AUTH_PASSWORD;
+  if (configuredUsername && configuredPassword) {
+    const provided = decodeBasicAuthorization(requestHeaders.get("authorization"));
+    if (
+      provided &&
+      safeEqual(provided.username, configuredUsername) &&
+      safeEqual(provided.password, configuredPassword)
+    ) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 export async function assertReceiptsAccessFromHeaders(
