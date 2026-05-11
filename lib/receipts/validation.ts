@@ -101,72 +101,6 @@ export function parseCsvLine(line: string): string[] {
   return fields;
 }
 
-// ─── Legacy simple AMEX CSV parser (kept for backward compat) ─────────────
-
-export function parseAmexCsv(
-  text: string,
-  statementMonth: string,
-): ImportAmexLineInput[] {
-  const lines = text
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter((l) => l.length > 0);
-
-  if (lines.length < 2) return [];
-
-  // Skip header row
-  const rows = lines.slice(1);
-  const results: ImportAmexLineInput[] = [];
-
-  for (const line of rows) {
-    const fields = parseCsvLine(line);
-    if (fields.length < 3) continue;
-
-    let transactionDateRaw: string;
-    let postDateRaw: string | undefined;
-    let merchantRaw: string;
-    let amountRaw: string;
-
-    const field0IsDate = parseAmexDate(fields[0] ?? "") !== null;
-    const field1IsDate = parseAmexDate(fields[1] ?? "") !== null;
-
-    if (field0IsDate && field1IsDate) {
-      transactionDateRaw = fields[0] ?? "";
-      postDateRaw = fields[1];
-      merchantRaw = fields[2] ?? "";
-      amountRaw = fields[3] ?? "";
-    } else {
-      transactionDateRaw = fields[0] ?? "";
-      merchantRaw = fields[1] ?? "";
-      amountRaw = fields[2] ?? "";
-    }
-
-    const transactionDate = parseAmexDate(transactionDateRaw);
-    if (!transactionDate) continue;
-
-    const postingDate = postDateRaw ? parseAmexDate(postDateRaw) ?? undefined : undefined;
-
-    const merchant = merchantRaw.trim();
-    if (!merchant) continue;
-
-    const amountFloat = parseFloat(amountRaw.replace(/[^0-9.-]/g, ""));
-    if (isNaN(amountFloat)) continue;
-
-    const amountMinor = Math.round(Math.abs(amountFloat) * 100);
-
-    results.push({
-      statementMonth,
-      transactionDate,
-      postingDate,
-      merchant,
-      amountMinor,
-      rawJson: JSON.stringify({ fields }),
-    });
-  }
-
-  return results;
-}
-
 // ─── Netアンサー CSV parser ────────────────────────────────────────────────
 
 export interface NetanswerMetadata {
@@ -190,9 +124,15 @@ export interface NetanswerParsedLine {
   rawFields: string[];
 }
 
+export interface SkippedLineInfo {
+  lineNumber: number;
+  reason: string;
+}
+
 export interface NetanswerParseResult {
   metadata: NetanswerMetadata;
   lines: NetanswerParsedLine[];
+  skippedLines: SkippedLineInfo[];
   validationErrors: string[];
   parsedTotalCents: number;
   rowCount: number;
@@ -298,6 +238,7 @@ export function parseAmexNetanswer(
   let currentCardholder: string | null = null;
   let currentCardholderFlag: string | null = null;
   const lines: NetanswerParsedLine[] = [];
+  const skippedLines: SkippedLineInfo[] = [];
   const validationErrors: string[] = [];
   let headerFound = false;
   let totalRowCount = 0;
@@ -347,12 +288,20 @@ export function parseAmexNetanswer(
     // Skip subtotal / total rows
     if (col1 === "【小計】" || col1 === "【合計】") continue;
 
-    // Transaction row: col0 matches date
+    // Transaction row: col0 matches date. A non-date col0 here means the row
+    // is not a transaction — silently skip (it's expected to hit header /
+    // metadata / blank rows that fell through the explicit handlers above).
     const txDate = parseAmexDate(col0);
     if (!txDate) continue;
 
+    // From here on the row is shaped like a transaction (date-led). If we
+    // bail out below we record the line + reason so the import surfaces
+    // partial data loss instead of silently dropping rows.
     const merchantName = col1;
-    if (!merchantName) continue;
+    if (!merchantName) {
+      skippedLines.push({ lineNumber: i + 1, reason: "missing merchant" });
+      continue;
+    }
 
     const txCardholderFlag = fields[2]?.trim() || null;
     const paymentType = fields[3]?.trim() || null;
@@ -381,9 +330,18 @@ export function parseAmexNetanswer(
     // statement-total reconciliation.
     const isNegative = /[-−△▲]/.test(amountRaw);
     const digits = amountRaw.replace(/[^0-9]/g, "");
-    if (!digits) continue;
+    if (!digits) {
+      skippedLines.push({ lineNumber: i + 1, reason: "missing amount" });
+      continue;
+    }
     const magnitude = parseInt(digits, 10);
-    if (isNaN(magnitude)) continue;
+    if (isNaN(magnitude)) {
+      skippedLines.push({
+        lineNumber: i + 1,
+        reason: `unparseable amount: ${amountRaw.slice(0, 30)}`,
+      });
+      continue;
+    }
     const amountCents = isNegative ? -magnitude : magnitude;
 
     lines.push({
@@ -427,6 +385,7 @@ export function parseAmexNetanswer(
   return {
     metadata,
     lines,
+    skippedLines,
     validationErrors,
     parsedTotalCents,
     rowCount: totalRowCount,

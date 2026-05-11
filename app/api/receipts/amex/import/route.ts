@@ -91,8 +91,14 @@ export async function POST(request: Request) {
     }
 
     // ── Parse CSV ───────────────────────────────────────────────────────────
-    const { metadata, lines, validationErrors, parsedTotalCents, rowCount } =
-      parseAmexNetanswer(buffer, statementMonth);
+    const {
+      metadata,
+      lines,
+      skippedLines,
+      validationErrors,
+      parsedTotalCents,
+      rowCount,
+    } = parseAmexNetanswer(buffer, statementMonth);
 
     const importStatus = validationErrors.length > 0 ? "failed" : "parsed";
 
@@ -129,6 +135,7 @@ export async function POST(request: Request) {
           statementMonth,
           importStatus: "failed",
           validationErrors,
+          skippedLines,
           transactionCount: 0,
           imported: 0,
           skipped: 0,
@@ -202,6 +209,7 @@ export async function POST(request: Request) {
         transactionCount: lines.length,
         imported,
         skipped,
+        skippedLines,
         replaced: previousArtifact !== null,
         businessTripCandidates: businessTripCandidatesCount,
       },
