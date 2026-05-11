@@ -19,6 +19,23 @@ function makeAmexLine(overrides: Partial<AmexStatementLine> = {}): AmexStatement
     match_status: "unmatched",
     raw_json: "{}",
     created_at: "2024-01-15T00:00:00Z",
+    statement_artifact_id: null,
+    cardholder_name: null,
+    cardholder_flag: null,
+    payment_type: null,
+    prepayment_flag: null,
+    memo: null,
+    raw_csv_line_number: null,
+    source_file_sha256: null,
+    imported_at: null,
+    expense_category: "unknown",
+    category_status: "uncategorized",
+    receipt_status: "missing_receipt",
+    receipt_missing_reason: null,
+    business_trip_id: null,
+    business_trip_status: "not_applicable",
+    expense_category_code: null,
+    updated_at: null,
     ...overrides,
   };
 }
@@ -49,6 +66,10 @@ function makeReceipt(overrides: Partial<ReceiptRecord> = {}): ReceiptRecord {
     extraction_json: null,
     legacy: 0,
     exported_month: null,
+    expense_category_code: null,
+    deleted_at: null,
+    deleted_by: null,
+    delete_reason: null,
     created_at: "2024-01-15T10:00:00Z",
     updated_at: "2024-01-15T10:00:00Z",
     ...overrides,
@@ -141,4 +162,62 @@ test("multiple receipts — best match is selected", () => {
   const matches = matchAmexToReceipts(lines, receipts);
   assert.equal(matches.length, 1);
   assert.equal(matches[0]!.receiptId, "r-1", "exact amount match should win");
+});
+
+test("currency mismatch (USD receipt vs JPY line) is not matched", () => {
+  // ¥500 line and $5.00 receipt both have amount_minor = 500 but represent
+  // very different values; the matcher must reject this.
+  const lines = [makeAmexLine({ amount_minor: 500, currency: "JPY" })];
+  const receipts = [makeReceipt({ amount_minor: 500, currency: "USD" })];
+  const matches = matchAmexToReceipts(lines, receipts);
+  assert.equal(matches.length, 0, "currency must match before amount comparison");
+});
+
+test("currency match is case-insensitive", () => {
+  const lines = [makeAmexLine({ currency: "JPY" })];
+  const receipts = [makeReceipt({ currency: "jpy" })];
+  const matches = matchAmexToReceipts(lines, receipts);
+  assert.equal(matches.length, 1);
+});
+
+test("refund line (-1000) matches refund receipt (-1000) exactly", () => {
+  const lines = [
+    makeAmexLine({
+      id: "amex-refund-1",
+      amount_minor: -1000,
+      merchant: "返金",
+      transaction_date: "2024-01-15",
+    }),
+  ];
+  const receipts = [
+    makeReceipt({
+      id: "r-refund-1",
+      amount_minor: -1000,
+      merchant: "返金",
+      transaction_date: "2024-01-15",
+    }),
+  ];
+  const matches = matchAmexToReceipts(lines, receipts);
+  assert.equal(matches.length, 1);
+  assert.equal(matches[0]!.receiptId, "r-refund-1");
+  assert.ok(matches[0]!.matchReasons.includes("exact amount"));
+});
+
+test("refund line does not greedily match unrelated positive receipts", () => {
+  // Pre-fix bug: `Math.abs(diff) < amexMinor * 0.01` with amexMinor=-1000
+  // produces `< -10`, which is false for the diff but the whole conditional
+  // was nonsensical — could yield spurious approximate matches when paired
+  // with the date filter. Using Math.abs(amexMinor) makes the threshold
+  // meaningful.
+  const lines = [makeAmexLine({ amount_minor: -1000 })];
+  const receipts = [makeReceipt({ amount_minor: 5000 })];
+  const matches = matchAmexToReceipts(lines, receipts);
+  assert.equal(matches.length, 0);
+});
+
+test("soft-deleted receipts are excluded from matching (defense-in-depth)", () => {
+  const lines = [makeAmexLine()];
+  const receipts = [makeReceipt({ deleted_at: "2024-01-20T00:00:00Z" })];
+  const matches = matchAmexToReceipts(lines, receipts);
+  assert.equal(matches.length, 0, "soft-deleted receipts must not be matched");
 });

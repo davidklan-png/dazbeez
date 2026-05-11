@@ -36,7 +36,10 @@ export function matchAmexToReceipts(
   receipts: ReceiptRecord[],
 ): ReconciliationMatch[] {
   const eligibleReceipts = receipts.filter(
-    (r) => r.status !== "archived" && r.status !== "exported",
+    (r) =>
+      r.deleted_at === null &&
+      r.status !== "archived" &&
+      r.status !== "exported",
   );
 
   const matches: ReconciliationMatch[] = [];
@@ -51,12 +54,19 @@ export function matchAmexToReceipts(
     for (const receipt of eligibleReceipts) {
       if (receipt.payment_path !== "AMEX") continue;
 
+      // Amount comparison only makes sense when both sides are denominated in
+      // the same currency. amount_minor for JPY is yen units and for USD/EUR
+      // is cents — comparing across currencies silently matches e.g. ¥500
+      // (line.amount_minor 500) to $5.00 (receipt.amount_minor 500).
+      if (
+        line.currency.toUpperCase() !== receipt.currency.toUpperCase()
+      ) {
+        continue;
+      }
+
       const reasons: string[] = [];
       let score = 0;
 
-      // Exact amount match (receipt and AMEX store amounts differently)
-      // AMEX amount_minor is in cents (amount * 100), receipt amount_minor is in native units
-      // For JPY both are the same integer; for USD/EUR both are * 100
       const amexMinor = line.amount_minor;
       const receiptMinor = receipt.amount_minor;
 
@@ -65,7 +75,10 @@ export function matchAmexToReceipts(
         reasons.push("exact amount");
       } else if (
         receiptMinor !== null &&
-        Math.abs(amexMinor - receiptMinor) < amexMinor * 0.01
+        // Use abs() on the reference value so the threshold works for refunds
+        // (negative amount_minor) — otherwise `< negative` is always true and
+        // any receipt would pass.
+        Math.abs(amexMinor - receiptMinor) < Math.abs(amexMinor) * 0.01
       ) {
         score += 0.2;
         reasons.push("approximate amount");
