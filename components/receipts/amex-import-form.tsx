@@ -53,14 +53,38 @@ export function AmexImportForm() {
       formData.append("statementMonth", statementMonth);
       if (replaceConfirmed) formData.append("replaceConfirmed", "true");
 
-      const res = await fetch("/api/receipts/amex/import", {
-        method: "POST",
-        body: formData,
-      });
+      let res: Response;
+      try {
+        res = await fetch("/api/receipts/amex/import", {
+          method: "POST",
+          body: formData,
+        });
+      } catch {
+        setError("Network error — please try again.");
+        return;
+      }
 
-      const json = (await res.json()) as ImportResult;
+      let rawBody: string;
+      try {
+        rawBody = await res.text();
+      } catch {
+        setError("Network error while reading the server response — please try again.");
+        return;
+      }
+      let json: ImportResult | null = null;
+      try {
+        json = rawBody ? (JSON.parse(rawBody) as ImportResult) : null;
+      } catch {
+        const snippet = rawBody.trim().slice(0, 200);
+        setError(
+          `Server returned a non-JSON response (HTTP ${res.status}${res.statusText ? ` ${res.statusText}` : ""})${
+            snippet ? `: ${snippet}` : "."
+          }`,
+        );
+        return;
+      }
 
-      if (res.status === 409 && json.needsReplaceConfirm) {
+      if (res.status === 409 && json?.needsReplaceConfirm) {
         setPendingReplace({
           existingArtifactId: json.existingArtifactId ?? "",
           statementMonth: json.statementMonth,
@@ -68,21 +92,24 @@ export function AmexImportForm() {
         return;
       }
 
-      if (res.status === 422 && json.validationErrors) {
+      if (res.status === 422 && json?.validationErrors) {
         setError(json.validationErrors[0] ?? "Validation failed.");
         return;
       }
 
       if (!res.ok) {
-        setError(json.error ?? "Import failed.");
+        setError(json?.error ?? `Import failed (HTTP ${res.status}).`);
+        return;
+      }
+
+      if (!json) {
+        setError("Server returned an empty response.");
         return;
       }
 
       setResult(json);
       setPendingReplace(null);
       router.refresh();
-    } catch {
-      setError("Network error — please try again.");
     } finally {
       setSubmitting(false);
     }
