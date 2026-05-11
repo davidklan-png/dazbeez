@@ -19,17 +19,21 @@ export async function uploadOriginal(
 ): Promise<void> {
   const bucket = getReceiptsBucket();
 
-  // Never overwrite an existing original
-  const existing = await bucket.head(key);
-  if (existing !== null) {
+  // Conditional put — succeed only if no object exists at this key.
+  // Replaces the previous head() + put() pair, which had a TOCTOU window
+  // where two concurrent uploads could both observe "no object" and then
+  // both put, with the second silently winning. With onlyIf the precondition
+  // is evaluated atomically by R2 and the put returns null on conflict.
+  const result = await bucket.put(key, data, {
+    httpMetadata: { contentType },
+    onlyIf: { etagDoesNotMatch: "*" },
+  });
+
+  if (result === null) {
     throw new Error(
       `R2 key collision: refusing to overwrite existing object at key "${key}".`,
     );
   }
-
-  await bucket.put(key, data, {
-    httpMetadata: { contentType },
-  });
 }
 
 export async function getReceiptFile(
