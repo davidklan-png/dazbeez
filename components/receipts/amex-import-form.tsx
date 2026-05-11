@@ -5,6 +5,18 @@ import { useRouter } from "next/navigation";
 
 const NETANSWER_URL = "https://www.saisoncard.co.jp/customer-support/netanswer/";
 
+// Netアンサー downloads are named like "SAISON_2603.csv" where 2603 = YYMM
+// (26 → 2026, 03 → March). Extracts "2026-03" so the user doesn't have to
+// retype the month every upload.
+function extractStatementMonthFromFilename(filename: string): string | null {
+  const match = filename.match(/_(\d{2})(\d{2})\.csv$/i);
+  if (!match) return null;
+  const yy = parseInt(match[1]!, 10);
+  const mm = parseInt(match[2]!, 10);
+  if (mm < 1 || mm > 12) return null;
+  return `20${match[1]}-${match[2]}`;
+}
+
 interface ImportResult {
   ok: boolean;
   duplicate?: boolean;
@@ -199,7 +211,14 @@ export function AmexImportForm() {
             <input
               type="file"
               accept=".csv,text/csv"
-              onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+              onChange={(e) => {
+                const selected = e.target.files?.[0] ?? null;
+                setFile(selected);
+                if (selected && !statementMonth) {
+                  const inferred = extractStatementMonthFromFilename(selected.name);
+                  if (inferred) setStatementMonth(inferred);
+                }
+              }}
               className="mt-2 block w-full rounded-xl border border-gray-300 px-3 py-2 text-sm focus:border-amber-500 focus:outline-none focus:ring-1 focus:ring-amber-500"
             />
           </div>
