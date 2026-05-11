@@ -292,24 +292,24 @@ export async function importAmexLines(
   actor: string,
 ): Promise<{ imported: number; skipped: number }> {
   const db = getReceiptsDb();
-  let imported = 0;
-  let skipped = 0;
   const now = nowIso();
+  let imported = 0;
 
-  for (const row of rows) {
-    const id = newUuid();
-    const result = await db
-      .prepare(
-        `INSERT OR IGNORE INTO amex_statement_lines
-          (id, statement_month, transaction_date, posting_date, merchant,
-           amount_minor, currency, amex_reference, match_status, raw_json,
-           statement_artifact_id, cardholder_name, cardholder_flag, payment_type,
-           prepayment_flag, memo, raw_csv_line_number, source_file_sha256, imported_at,
-           created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'unmatched', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .bind(
-        id,
+  // Chunked multi-row INSERTs. Each row binds 19 params (the 20th column,
+  // match_status, is the SQL literal 'unmatched'), so a chunk of 50 sends ~950
+  // params per query — well under D1's per-query limits and ~50x cheaper
+  // than the previous one-INSERT-per-row loop that was tripping Worker 1102.
+  const CHUNK_SIZE = 50;
+  const rowPlaceholder =
+    "(?, ?, ?, ?, ?, ?, ?, ?, 'unmatched', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+
+  for (let i = 0; i < rows.length; i += CHUNK_SIZE) {
+    const chunk = rows.slice(i, i + CHUNK_SIZE);
+    const placeholders = chunk.map(() => rowPlaceholder).join(",");
+    const binds: unknown[] = [];
+    for (const row of chunk) {
+      binds.push(
+        newUuid(),
         row.statementMonth,
         row.transactionDate,
         row.postingDate ?? null,
@@ -328,15 +328,24 @@ export async function importAmexLines(
         row.sourceFileSha256 ?? null,
         now,
         now,
-      )
-      .run();
-
-    if ((result.meta.changes ?? 0) > 0) {
-      imported++;
-    } else {
-      skipped++;
+      );
     }
+    const result = await db
+      .prepare(
+        `INSERT OR IGNORE INTO amex_statement_lines
+          (id, statement_month, transaction_date, posting_date, merchant,
+           amount_minor, currency, amex_reference, match_status, raw_json,
+           statement_artifact_id, cardholder_name, cardholder_flag, payment_type,
+           prepayment_flag, memo, raw_csv_line_number, source_file_sha256,
+           imported_at, created_at)
+         VALUES ${placeholders}`,
+      )
+      .bind(...binds)
+      .run();
+    imported += result.meta.changes ?? 0;
   }
+
+  const skipped = rows.length - imported;
 
   await createAuditEntry(db, {
     actor,
@@ -666,44 +675,61 @@ export async function createBusinessTripReports(
 
   for (const candidate of candidates) {
     const tripId = newUuid();
-    await db
-      .prepare(
-        `INSERT INTO business_trip_reports
-          (id, cardholder_name, start_date, end_date, primary_location,
-           status, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, 'candidate', ?, ?)`,
-      )
-      .bind(
+
+    // One D1 batch per candidate: trip INSERT + bulk line-links INSERT +
+    // bulk line UPDATE. Previously this was 1 + 2N sequential awaits per
+    // candidate (e.g. 41 D1 calls for a 20-line trip), which compounded the
+    // import-route CPU budget on top of the row inserts.
+    const stmts = [
+      db
+        .prepare(
+          `INSERT INTO business_trip_reports
+            (id, cardholder_name, start_date, end_date, primary_location,
+             status, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, 'candidate', ?, ?)`,
+        )
+        .bind(
+          tripId,
+          candidate.cardholderName,
+          candidate.startDate,
+          candidate.endDate,
+          candidate.primaryLocation,
+          now,
+          now,
+        ),
+    ];
+
+    if (candidate.lineIds.length > 0) {
+      const linkPlaceholders = candidate.lineIds.map(() => "(?, ?, ?, ?)").join(",");
+      const linkBinds = candidate.lineIds.flatMap((lineId) => [
+        newUuid(),
         tripId,
-        candidate.cardholderName,
-        candidate.startDate,
-        candidate.endDate,
-        candidate.primaryLocation,
+        lineId,
         now,
-        now,
-      )
-      .run();
+      ]);
+      stmts.push(
+        db
+          .prepare(
+            `INSERT OR IGNORE INTO business_trip_report_lines
+              (id, business_trip_report_id, amex_statement_line_id, created_at)
+             VALUES ${linkPlaceholders}`,
+          )
+          .bind(...linkBinds),
+      );
 
-    // Link statement lines to this trip
-    for (const lineId of candidate.lineIds) {
-      await db
-        .prepare(
-          `INSERT OR IGNORE INTO business_trip_report_lines
-            (id, business_trip_report_id, amex_statement_line_id, created_at)
-           VALUES (?, ?, ?, ?)`,
-        )
-        .bind(newUuid(), tripId, lineId, now)
-        .run();
-
-      await db
-        .prepare(
-          `UPDATE amex_statement_lines
-           SET business_trip_id = ?, business_trip_status = 'candidate', updated_at = ?
-           WHERE id = ?`,
-        )
-        .bind(tripId, now, lineId)
-        .run();
+      const idPlaceholders = candidate.lineIds.map(() => "?").join(",");
+      stmts.push(
+        db
+          .prepare(
+            `UPDATE amex_statement_lines
+             SET business_trip_id = ?, business_trip_status = 'candidate', updated_at = ?
+             WHERE id IN (${idPlaceholders})`,
+          )
+          .bind(tripId, now, ...candidate.lineIds),
+      );
     }
+
+    await db.batch(stmts);
 
     await createAuditEntry(db, {
       actor,
