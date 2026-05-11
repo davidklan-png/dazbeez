@@ -378,30 +378,81 @@ export async function updateAmexReconciliation(
   actor: string,
 ): Promise<void> {
   const db = getReceiptsDb();
+  const now = nowIso();
 
-  await db
+  // Capture previous state for two reasons:
+  //   1. Audit log records the transition (oldValueJson), so a
+  //      confirmed → unmatched transition no longer silently orphans the
+  //      previously-matched receipt from the audit trail.
+  //   2. Demote logic below: when we unwind a confirmed match, the
+  //      previously-matched receipt was promoted to 'reconciled' — it
+  //      needs to go back to 'needs_review' so it doesn't sit stuck as
+  //      reconciled with no AMEX line claiming it.
+  const previous = await db
     .prepare(
-      `UPDATE amex_statement_lines
-       SET matched_receipt_id = ?, match_status = ?
-       WHERE id = ?`,
+      `SELECT matched_receipt_id, match_status
+       FROM amex_statement_lines
+       WHERE id = ?
+       LIMIT 1`,
     )
-    .bind(receiptId, matchStatus, amexLineId)
-    .run();
+    .bind(amexLineId)
+    .first<{ matched_receipt_id: string | null; match_status: AmexMatchStatus }>();
 
-  if (receiptId && matchStatus === "confirmed") {
-    await db
+  const previousReceiptId = previous?.matched_receipt_id ?? null;
+  const previousStatus: AmexMatchStatus = previous?.match_status ?? "unmatched";
+
+  const statements = [
+    db
       .prepare(
-        `UPDATE receipt_records SET status = 'reconciled', updated_at = ? WHERE id = ?`,
+        `UPDATE amex_statement_lines
+         SET matched_receipt_id = ?, match_status = ?
+         WHERE id = ?`,
       )
-      .bind(nowIso(), receiptId)
-      .run();
+      .bind(receiptId, matchStatus, amexLineId),
+  ];
+
+  // Promote the newly-linked receipt.
+  if (receiptId && matchStatus === "confirmed") {
+    statements.push(
+      db
+        .prepare(
+          `UPDATE receipt_records SET status = 'reconciled', updated_at = ? WHERE id = ?`,
+        )
+        .bind(now, receiptId),
+    );
   }
+
+  // Demote the previously-linked receipt if we're unwinding its confirmation
+  // (either dropping the link entirely or switching to a different receipt).
+  // Guard with `status = 'reconciled'` so we don't clobber a status another
+  // process may have advanced this receipt to in the meantime.
+  const wasConfirmed = previousStatus === "confirmed";
+  if (wasConfirmed && previousReceiptId && previousReceiptId !== receiptId) {
+    statements.push(
+      db
+        .prepare(
+          `UPDATE receipt_records
+           SET status = 'needs_review', updated_at = ?
+           WHERE id = ? AND status = 'reconciled'`,
+        )
+        .bind(now, previousReceiptId),
+    );
+  }
+
+  // Single batched round-trip so the AMEX line update, the new-receipt
+  // promotion, and the old-receipt demotion either all succeed or all fail.
+  // Previously these were three independent awaits with no rollback path.
+  await db.batch(statements);
 
   await createAuditEntry(db, {
     actor,
     action: "amex.reconciled",
     objectType: "amex_line",
     objectId: amexLineId,
+    oldValueJson: stringifyJson({
+      receiptId: previousReceiptId,
+      matchStatus: previousStatus,
+    }),
     newValueJson: stringifyJson({ receiptId, matchStatus }),
   });
 }
