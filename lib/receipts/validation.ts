@@ -365,19 +365,26 @@ export function parseAmexNetanswer(
     let memoField: string | null;
 
     if (fields.length > 7) {
-      // Comma-formatted amount — rejoin and strip
-      amountRaw = fields.slice(5, -1).join("").replace(/[^0-9]/g, "");
+      // Comma-formatted amount — rejoin
+      amountRaw = fields.slice(5, -1).join("");
       memoField = fields[fields.length - 1]?.trim() || null;
     } else {
-      amountRaw = (fields[5] ?? "").replace(/[^0-9]/g, "");
+      amountRaw = fields[5] ?? "";
       memoField = fields[6]?.trim() || null;
     }
 
     const memo = memoField;
 
-    if (!amountRaw) continue;
-    const amountCents = parseInt(amountRaw, 10);
-    if (isNaN(amountCents) || amountCents < 0) continue;
+    // Capture sign before stripping non-digits. Netアンサー uses ASCII "-" and
+    // sometimes the Japanese "△" / "▲" symbols to mark refunds; without this
+    // they would be silently imported as positive charges and break the
+    // statement-total reconciliation.
+    const isNegative = /[-−△▲]/.test(amountRaw);
+    const digits = amountRaw.replace(/[^0-9]/g, "");
+    if (!digits) continue;
+    const magnitude = parseInt(digits, 10);
+    if (isNaN(magnitude)) continue;
+    const amountCents = isNegative ? -magnitude : magnitude;
 
     lines.push({
       lineNumber: i + 1,
