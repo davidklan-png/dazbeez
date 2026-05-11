@@ -358,6 +358,62 @@ test("parseAmexNetanswer: handles comma thousands separators in amounts", () => 
   assert.equal(result.validationErrors.length, 0);
 });
 
+test("parseAmexNetanswer: refunds (-) keep their sign so totals reconcile", () => {
+  const csv = [
+    "カード名称,TestCard",
+    "お支払日,2026/05/07",
+    "今回ご請求額,000900",
+    "",
+    "利用日,ご利用店名及び商品名,本人・家族区分,支払区分名称,締前入金区分,利用金額,備考",
+    ",ご利用者名:テスト 様,,,,,",
+    "2026/05/01,コンビニ,1,1回,,1000,",
+    "2026/05/02,返金,1,1回,,-100,",
+  ].join("\n");
+  const result = parseAmexNetanswer(toBuffer(csv), "2026-05");
+  assert.equal(result.lines.length, 2);
+  assert.equal(result.lines[0]!.amountCents, 1000);
+  assert.equal(result.lines[1]!.amountCents, -100);
+  assert.equal(result.parsedTotalCents, 900);
+  assert.equal(result.validationErrors.length, 0);
+});
+
+test("parseAmexNetanswer: refunds with comma thousands separators keep their sign", () => {
+  const csv = [
+    "カード名称,TestCard",
+    "お支払日,2026/05/07",
+    "今回ご請求額,008800",
+    "",
+    "利用日,ご利用店名及び商品名,本人・家族区分,支払区分名称,締前入金区分,利用金額,備考",
+    ",ご利用者名:テスト 様,,,,,",
+    "2026/05/01,コンビニ,1,1回,,10,000,",
+    "2026/05/02,返金,1,1回,,-1,200,",
+  ].join("\n");
+  const result = parseAmexNetanswer(toBuffer(csv), "2026-05");
+  assert.equal(result.lines.length, 2);
+  assert.equal(result.lines[0]!.amountCents, 10000);
+  assert.equal(result.lines[1]!.amountCents, -1200);
+  assert.equal(result.parsedTotalCents, 8800);
+  assert.equal(result.validationErrors.length, 0);
+});
+
+test("parseAmexNetanswer: △ (Japanese negative marker) is treated as a refund", () => {
+  const csv = [
+    "カード名称,TestCard",
+    "お支払日,2026/05/07",
+    "今回ご請求額,000900",
+    "",
+    "利用日,ご利用店名及び商品名,本人・家族区分,支払区分名称,締前入金区分,利用金額,備考",
+    ",ご利用者名:テスト 様,,,,,",
+    "2026/05/01,コンビニ,1,1回,,1000,",
+    "2026/05/02,返金,1,1回,,△100,",
+  ].join("\n");
+  const result = parseAmexNetanswer(toBuffer(csv), "2026-05");
+  assert.equal(result.lines.length, 2);
+  assert.equal(result.lines[1]!.amountCents, -100);
+  assert.equal(result.parsedTotalCents, 900);
+  assert.equal(result.validationErrors.length, 0);
+});
+
 test("parseAmexNetanswer: handles comma thousands separators in metadata total", () => {
   const csv = [
     "カード名称,TestCard",
