@@ -358,6 +358,54 @@ test("parseAmexNetanswer: handles comma thousands separators in amounts", () => 
   assert.equal(result.validationErrors.length, 0);
 });
 
+test("parseAmexNetanswer: tracks skipped date-rows with missing merchant", () => {
+  const csv = [
+    "カード名称,TestCard",
+    "お支払日,2026/05/07",
+    "今回ご請求額,001000",
+    "",
+    "利用日,ご利用店名及び商品名,本人・家族区分,支払区分名称,締前入金区分,利用金額,備考",
+    ",ご利用者名:テスト 様,,,,,",
+    "2026/05/01,コンビニ,1,1回,,1000,",
+    "2026/05/02,,1,1回,,500,",
+  ].join("\n");
+  const result = parseAmexNetanswer(toBuffer(csv), "2026-05");
+  assert.equal(result.lines.length, 1);
+  assert.equal(result.skippedLines.length, 1);
+  assert.match(result.skippedLines[0]!.reason, /missing merchant/);
+});
+
+test("parseAmexNetanswer: tracks skipped date-rows with missing amount", () => {
+  const csv = [
+    "カード名称,TestCard",
+    "お支払日,2026/05/07",
+    "今回ご請求額,001000",
+    "",
+    "利用日,ご利用店名及び商品名,本人・家族区分,支払区分名称,締前入金区分,利用金額,備考",
+    ",ご利用者名:テスト 様,,,,,",
+    "2026/05/01,コンビニ,1,1回,,1000,",
+    "2026/05/02,スターバックス,1,1回,,,",
+  ].join("\n");
+  const result = parseAmexNetanswer(toBuffer(csv), "2026-05");
+  assert.equal(result.lines.length, 1);
+  assert.equal(result.skippedLines.length, 1);
+  assert.match(result.skippedLines[0]!.reason, /missing amount/);
+});
+
+test("parseAmexNetanswer: skippedLines is empty array for clean CSVs", () => {
+  const csv = [
+    "カード名称,TestCard",
+    "お支払日,2026/05/07",
+    "今回ご請求額,001000",
+    "",
+    "利用日,ご利用店名及び商品名,本人・家族区分,支払区分名称,締前入金区分,利用金額,備考",
+    ",ご利用者名:テスト 様,,,,,",
+    "2026/05/01,コンビニ,1,1回,,1000,",
+  ].join("\n");
+  const result = parseAmexNetanswer(toBuffer(csv), "2026-05");
+  assert.deepEqual(result.skippedLines, []);
+});
+
 test("parseAmexNetanswer: refunds (-) keep their sign so totals reconcile", () => {
   const csv = [
     "カード名称,TestCard",
