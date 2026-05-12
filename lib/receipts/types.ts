@@ -123,6 +123,9 @@ export interface ReceiptRecord {
   legacy: number;
   exported_month: string | null;
   expense_category_code: string | null;
+  deleted_at: string | null;
+  deleted_by: string | null;
+  delete_reason: string | null;
   created_at: string;
   updated_at: string;
 }
