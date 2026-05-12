@@ -32,11 +32,17 @@ interface ImportResult {
   transactionCount?: number;
   imported?: number;
   skipped?: number;
+  skippedLines?: SkippedLineInfo[];
   replaced?: boolean;
   businessTripCandidates?: number;
   message?: string;
   validationErrors?: string[];
   error?: string;
+}
+
+interface SkippedLineInfo {
+  lineNumber: number;
+  reason: string;
 }
 
 export function AmexImportForm() {
@@ -292,6 +298,27 @@ function ImportResultSummary({ result }: { result: ImportResult }) {
           {result.businessTripCandidates} business trip candidate
           {result.businessTripCandidates !== 1 ? "s" : ""} detected.
         </p>
+      )}
+      {(result.skippedLines?.length ?? 0) > 0 && (
+        <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+          <p className="font-semibold">
+            {result.skippedLines!.length} row
+            {result.skippedLines!.length !== 1 ? "s" : ""} could not be parsed
+            and were skipped:
+          </p>
+          <ul className="mt-1 list-disc pl-5">
+            {result.skippedLines!.slice(0, 5).map((s) => (
+              <li key={s.lineNumber}>
+                Line {s.lineNumber}: {s.reason}
+              </li>
+            ))}
+            {result.skippedLines!.length > 5 && (
+              <li className="italic opacity-70">
+                + {result.skippedLines!.length - 5} more
+              </li>
+            )}
+          </ul>
+        </div>
       )}
     </div>
   );

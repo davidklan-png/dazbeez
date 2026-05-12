@@ -82,6 +82,7 @@ export type AuditAction =
   | "receipt.extracted"
   | "receipt.extraction_requested"
   | "receipt.extraction_completed"
+  | "receipt.extraction_denied"
   | "receipt.extraction_failed"
   | "receipt.reconciled"
   | "receipt.exported"

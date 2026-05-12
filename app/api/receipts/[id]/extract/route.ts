@@ -18,11 +18,27 @@ export async function POST(request: Request, { params }: RouteContext) {
     const { id } = await params;
 
     const receipt = await getReceiptRecord(id);
+    const db = getReceiptsDb();
+
     if (!receipt) {
+      await createAuditEntry(db, {
+        actor,
+        action: "receipt.extraction_denied",
+        objectType: "receipt",
+        objectId: id,
+        newValueJson: stringifyJson({ reason: "not_found" }),
+      });
       return NextResponse.json({ error: "Receipt not found." }, { status: 404 });
     }
 
     if (receipt.status === "exported" || receipt.status === "archived") {
+      await createAuditEntry(db, {
+        actor,
+        action: "receipt.extraction_denied",
+        objectType: "receipt",
+        objectId: id,
+        newValueJson: stringifyJson({ reason: "locked", status: receipt.status }),
+      });
       return NextResponse.json(
         { error: `Receipt is ${receipt.status} and cannot be re-extracted.` },
         { status: 409 },
@@ -30,6 +46,17 @@ export async function POST(request: Request, { params }: RouteContext) {
     }
 
     if (receipt.original_size_bytes > EXTRACTION_MAX_BYTES) {
+      await createAuditEntry(db, {
+        actor,
+        action: "receipt.extraction_denied",
+        objectType: "receipt",
+        objectId: id,
+        newValueJson: stringifyJson({
+          reason: "file_too_large",
+          sizeBytes: receipt.original_size_bytes,
+          limitBytes: EXTRACTION_MAX_BYTES,
+        }),
+      });
       return NextResponse.json(
         {
           error:
@@ -38,8 +65,6 @@ export async function POST(request: Request, { params }: RouteContext) {
         { status: 413 },
       );
     }
-
-    const db = getReceiptsDb();
 
     await createAuditEntry(db, {
       actor,
