@@ -1,5 +1,6 @@
 import { getAiBinding } from "@/lib/cloudflare-runtime";
 import { isCanonicalCode, mapLegacyCategory, EXPENSE_CATEGORIES } from "@/lib/receipts/categories";
+import { ALLOWED_CURRENCIES } from "@/lib/receipts/validation";
 import type { ExtractionResult, ExpenseType } from "@/lib/receipts/types";
 
 // ─── Provider interface ───────────────────────────────────────────────────────
@@ -112,7 +113,17 @@ class CloudflareAiExtractionProvider implements ExtractionProvider {
         : (response as { response?: string }).response ?? "";
 
     const parsed = extractJsonBlock(rawText);
-    const currency = (parsed.currency as string | null) ?? "JPY";
+    // Normalize and clamp the LLM-reported currency to the allowed set so we
+    // can't end up storing junk like "XXX" or "yen" in the DB. parseAmountToMinor
+    // below depends on a JPY/non-JPY distinction, so an invalid currency would
+    // also misinterpret the amount magnitude.
+    const rawCurrency =
+      typeof parsed.currency === "string"
+        ? parsed.currency.toUpperCase().trim()
+        : "";
+    const currency = ALLOWED_CURRENCIES.includes(rawCurrency)
+      ? rawCurrency
+      : "JPY";
     const expenseType = normalizeExpenseType(parsed.expense_type);
 
     return {
