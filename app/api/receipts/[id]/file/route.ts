@@ -1,4 +1,4 @@
-import { assertReceiptsAccessFromHeaders } from "@/lib/receipts/auth";
+import { requireReceiptsActor } from "@/lib/receipts/auth";
 import { getReceiptRecord } from "@/lib/receipts/db";
 import { getReceiptsBucket } from "@/lib/cloudflare-runtime";
 
@@ -35,7 +35,7 @@ function buildFileHeaders(
 
 export async function GET(request: Request, { params }: RouteContext) {
   try {
-    await assertReceiptsAccessFromHeaders(request.headers);
+    await requireReceiptsActor(request.headers);
     const { id } = await params;
 
     const receipt = await getReceiptRecord(id);
@@ -66,7 +66,7 @@ export async function GET(request: Request, { params }: RouteContext) {
 
 export async function HEAD(request: Request, { params }: RouteContext) {
   try {
-    await assertReceiptsAccessFromHeaders(request.headers);
+    await requireReceiptsActor(request.headers);
     const { id } = await params;
 
     const receipt = await getReceiptRecord(id);

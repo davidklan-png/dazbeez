@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { assertReceiptsAccessFromHeaders, getReceiptsActor } from "@/lib/receipts/auth";
+import { requireReceiptsActor } from "@/lib/receipts/auth";
 import {
   parseAmexNetanswer,
   netanswerLinesToImportInputs,
@@ -25,8 +25,7 @@ const MAX_CSV_BYTES = 5 * 1024 * 1024;
 
 export async function POST(request: Request) {
   try {
-    await assertReceiptsAccessFromHeaders(request.headers);
-    const actor = await getReceiptsActor(request.headers);
+    const actor = await requireReceiptsActor(request.headers);
 
     const formData = await request.formData();
     const file = formData.get("file");

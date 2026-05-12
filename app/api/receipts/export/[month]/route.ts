@@ -1,12 +1,12 @@
 import { NextResponse } from "next/server";
-import { assertReceiptsAccessFromHeaders, getReceiptsActor } from "@/lib/receipts/auth";
+import { requireReceiptsActor } from "@/lib/receipts/auth";
 import { getExport, finalizeExport } from "@/lib/receipts/db";
 
 type RouteContext = { params: Promise<{ month: string }> };
 
 export async function GET(request: Request, { params }: RouteContext) {
   try {
-    await assertReceiptsAccessFromHeaders(request.headers);
+    await requireReceiptsActor(request.headers);
     const { month } = await params;
 
     const exportRecord = await getExport(month);
@@ -26,8 +26,7 @@ export async function GET(request: Request, { params }: RouteContext) {
 
 export async function POST(request: Request, { params }: RouteContext) {
   try {
-    await assertReceiptsAccessFromHeaders(request.headers);
-    const actor = await getReceiptsActor(request.headers);
+    const actor = await requireReceiptsActor(request.headers);
     const { month } = await params;
 
     const exportRecord = await getExport(month);

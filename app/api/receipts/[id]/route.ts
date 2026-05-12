@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { assertReceiptsAccessFromHeaders, getReceiptsActor } from "@/lib/receipts/auth";
+import { requireReceiptsActor } from "@/lib/receipts/auth";
 import { getReceiptRecord, updateReceiptRecord, listAttendees, createAttendees, softDeleteReceipt } from "@/lib/receipts/db";
 import type { CreateAttendeeInput, ExpenseType, PaymentPath, ReceiptStatus } from "@/lib/receipts/types";
 
@@ -7,7 +7,7 @@ type RouteContext = { params: Promise<{ id: string }> };
 
 export async function GET(request: Request, { params }: RouteContext) {
   try {
-    await assertReceiptsAccessFromHeaders(request.headers);
+    await requireReceiptsActor(request.headers);
     const { id } = await params;
 
     const receipt = await getReceiptRecord(id);
@@ -28,8 +28,7 @@ export async function GET(request: Request, { params }: RouteContext) {
 
 export async function PATCH(request: Request, { params }: RouteContext) {
   try {
-    await assertReceiptsAccessFromHeaders(request.headers);
-    const actor = await getReceiptsActor(request.headers);
+    const actor = await requireReceiptsActor(request.headers);
     const { id } = await params;
 
     const receipt = await getReceiptRecord(id);
@@ -95,8 +94,7 @@ export async function PATCH(request: Request, { params }: RouteContext) {
 
 export async function DELETE(request: Request, { params }: RouteContext) {
   try {
-    await assertReceiptsAccessFromHeaders(request.headers);
-    const actor = await getReceiptsActor(request.headers);
+    const actor = await requireReceiptsActor(request.headers);
     const { id } = await params;
 
     await softDeleteReceipt(id, actor);

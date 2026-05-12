@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { getMissingStatementAlerts } from "@/lib/receipts/db";
-import { assertReceiptsAccessFromHeaders } from "@/lib/receipts/auth";
+import { requireReceiptsActor } from "@/lib/receipts/auth";
 import { headers } from "next/headers";
 import { AmexMissingStatementAlert } from "@/components/receipts/amex-missing-statement-alert";
 
@@ -9,9 +9,7 @@ export const dynamic = "force-dynamic";
 export default async function ReceiptsDashboardPage() {
   let missingAlerts: Awaited<ReturnType<typeof getMissingStatementAlerts>> = [];
   try {
-    const hdrs = await headers();
-    await assertReceiptsAccessFromHeaders(hdrs);
-    const actor = hdrs.get("cf-access-authenticated-user-email") ?? "user";
+    const actor = await requireReceiptsActor(await headers());
     missingAlerts = await getMissingStatementAlerts(actor);
   } catch {
     // Non-fatal — alerts are optional

@@ -1,8 +1,5 @@
 import { NextResponse } from "next/server";
-import {
-  assertReceiptsAccessFromHeaders,
-  getReceiptsActor,
-} from "@/lib/receipts/auth";
+import { requireReceiptsActor } from "@/lib/receipts/auth";
 import {
   buildClearDeviceCookie,
   getCurrentDeviceId,
@@ -14,8 +11,7 @@ export async function POST(
   context: { params: Promise<{ id: string }> },
 ) {
   try {
-    await assertReceiptsAccessFromHeaders(request.headers);
-    const actor = await getReceiptsActor(request.headers);
+    const actor = await requireReceiptsActor(request.headers);
     const { id } = await context.params;
     if (!id) {
       return NextResponse.json({ error: "Device id required." }, { status: 400 });

@@ -121,23 +121,6 @@ export function getReceiptsAuthChallengeHeaders(): Record<string, string> {
   };
 }
 
-export async function getReceiptsActor(
-  requestHeaders: Headers,
-): Promise<string> {
-  const device = await verifyDeviceCookie(requestHeaders).catch(() => null);
-  if (device) return device.actor;
-
-  const audience = process.env.CF_ACCESS_AUD?.trim();
-  const token = requestHeaders.get("Cf-Access-Jwt-Assertion");
-  const { ok, email } = isCfAccessTokenAcceptable(token, audience);
-  if (ok && email) return email;
-
-  const creds = decodeBasicAuthorization(requestHeaders.get("authorization"));
-  if (creds) return creds.username;
-
-  return "receipts";
-}
-
 export async function isReceiptsAuthorized(
   requestHeaders: Headers,
 ): Promise<boolean> {
@@ -196,11 +179,36 @@ export async function isReceiptsAuthorizedLight(
   return false;
 }
 
-export async function assertReceiptsAccessFromHeaders(
+// Single-pass: verifies auth and returns the actor. Replaces the previous
+// assertReceiptsAccessFromHeaders + getReceiptsActor pair that every receipts
+// route called, which performed verifyDeviceCookie (HMAC + D1 lookup for
+// revocation) twice per request.
+export async function requireReceiptsActor(
   requestHeaders: Headers,
-): Promise<void> {
-  const authorized = await isReceiptsAuthorized(requestHeaders);
-  if (!authorized) {
-    throw new Error("Unauthorized receipts request.");
+): Promise<string> {
+  // 1. Trusted-device cookie (HMAC + DB revocation check).
+  const device = await verifyDeviceCookie(requestHeaders).catch(() => null);
+  if (device) return device.actor;
+
+  // 2. CF Access JWT (edge already validated the signature).
+  const audience = process.env.CF_ACCESS_AUD?.trim();
+  const token = requestHeaders.get("Cf-Access-Jwt-Assertion");
+  const { ok, email } = isCfAccessTokenAcceptable(token, audience);
+  if (ok) return email ?? "receipts";
+
+  // 3. Basic auth — local dev only.
+  const configuredUsername = process.env.RECEIPTS_AUTH_USERNAME?.trim();
+  const configuredPassword = process.env.RECEIPTS_AUTH_PASSWORD;
+  if (configuredUsername && configuredPassword) {
+    const provided = decodeBasicAuthorization(requestHeaders.get("authorization"));
+    if (
+      provided &&
+      safeEqual(provided.username, configuredUsername) &&
+      safeEqual(provided.password, configuredPassword)
+    ) {
+      return provided.username;
+    }
   }
+
+  throw new Error("Unauthorized receipts request.");
 }

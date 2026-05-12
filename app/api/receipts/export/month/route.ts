@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { assertReceiptsAccessFromHeaders, getReceiptsActor } from "@/lib/receipts/auth";
+import { requireReceiptsActor } from "@/lib/receipts/auth";
 import {
   listReceiptRecords,
   listAttendees,
@@ -20,8 +20,7 @@ import type { ExportRow } from "@/lib/receipts/types";
 
 export async function POST(request: Request) {
   try {
-    await assertReceiptsAccessFromHeaders(request.headers);
-    const actor = await getReceiptsActor(request.headers);
+    const actor = await requireReceiptsActor(request.headers);
 
     const body = (await request.json()) as { month?: string; finalize?: boolean };
     const month = body.month?.trim();

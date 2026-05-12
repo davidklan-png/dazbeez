@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { assertReceiptsAccessFromHeaders, getReceiptsActor } from "@/lib/receipts/auth";
+import { requireReceiptsActor } from "@/lib/receipts/auth";
 import { updateAmexReconciliation } from "@/lib/receipts/db";
 import type { AmexMatchStatus } from "@/lib/receipts/types";
 
@@ -12,8 +12,7 @@ const VALID_STATUSES: AmexMatchStatus[] = [
 
 export async function POST(request: Request) {
   try {
-    await assertReceiptsAccessFromHeaders(request.headers);
-    const actor = await getReceiptsActor(request.headers);
+    const actor = await requireReceiptsActor(request.headers);
 
     const body = (await request.json()) as {
       amexLineId?: string;

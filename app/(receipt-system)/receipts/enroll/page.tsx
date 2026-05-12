@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import { headers } from "next/headers";
-import { getReceiptsActor } from "@/lib/receipts/auth";
+import { requireReceiptsActor } from "@/lib/receipts/auth";
 import { EnrollDeviceForm } from "@/components/receipts/enroll-device-form";
 
 export const metadata: Metadata = {
@@ -14,7 +14,7 @@ interface PageProps {
 
 export default async function EnrollDevicePage({ searchParams }: PageProps) {
   const requestHeaders = await headers();
-  const actor = await getReceiptsActor(requestHeaders);
+  const actor = await requireReceiptsActor(requestHeaders);
   const { next } = await searchParams;
   const safeNext = next && next.startsWith("/receipts") ? next : "/receipts";
 
