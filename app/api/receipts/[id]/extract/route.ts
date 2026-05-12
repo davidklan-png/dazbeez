@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { assertReceiptsAccessFromHeaders, getReceiptsActor } from "@/lib/receipts/auth";
+import { requireReceiptsActor } from "@/lib/receipts/auth";
 import { getReceiptRecord, updateReceiptRecord } from "@/lib/receipts/db";
 import { getReceiptFile } from "@/lib/receipts/storage";
 import { extractReceiptData } from "@/lib/receipts/extraction";
@@ -13,8 +13,7 @@ type RouteContext = { params: Promise<{ id: string }> };
 
 export async function POST(request: Request, { params }: RouteContext) {
   try {
-    await assertReceiptsAccessFromHeaders(request.headers);
-    const actor = await getReceiptsActor(request.headers);
+    const actor = await requireReceiptsActor(request.headers);
     const { id } = await params;
 
     const receipt = await getReceiptRecord(id);

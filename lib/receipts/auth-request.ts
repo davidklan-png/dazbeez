@@ -1,8 +1,7 @@
 import { headers } from "next/headers";
 import {
-  getReceiptsActor,
   isReceiptsAuthorizedLight,
-  isReceiptsAuthorized,
+  requireReceiptsActor,
 } from "@/lib/receipts/auth";
 
 // Used by the layout on every receipts page render. Keeps to cheap checks
@@ -15,10 +14,8 @@ export async function assertReceiptsPageAccess(): Promise<void> {
 }
 
 // Used by pages that need to know who is acting (actor shown in UI,
-// written to audit log). Runs the full check including DB revocation.
+// written to audit log). Runs the full check including DB revocation —
+// single pass, one verifyDeviceCookie round-trip.
 export async function getReceiptsPageActor(): Promise<string> {
-  const requestHeaders = await headers();
-  const ok = await isReceiptsAuthorized(requestHeaders);
-  if (!ok) throw new Error("Unauthorized receipts request.");
-  return getReceiptsActor(requestHeaders);
+  return requireReceiptsActor(await headers());
 }

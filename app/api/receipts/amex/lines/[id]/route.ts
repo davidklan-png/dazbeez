@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { assertReceiptsAccessFromHeaders, getReceiptsActor } from "@/lib/receipts/auth";
+import { requireReceiptsActor } from "@/lib/receipts/auth";
 import { updateAmexLineCategory } from "@/lib/receipts/db";
 import { isCanonicalCode } from "@/lib/receipts/categories";
 import type {
@@ -12,8 +12,7 @@ type RouteContext = { params: Promise<{ id: string }> };
 
 export async function PATCH(request: Request, { params }: RouteContext) {
   try {
-    await assertReceiptsAccessFromHeaders(request.headers);
-    const actor = await getReceiptsActor(request.headers);
+    const actor = await requireReceiptsActor(request.headers);
     const { id } = await params;
 
     const body = (await request.json()) as {

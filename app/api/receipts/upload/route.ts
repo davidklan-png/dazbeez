@@ -1,8 +1,5 @@
 import { NextResponse } from "next/server";
-import {
-  assertReceiptsAccessFromHeaders,
-  getReceiptsActor,
-} from "@/lib/receipts/auth";
+import { requireReceiptsActor } from "@/lib/receipts/auth";
 import { validateReceiptFile } from "@/lib/receipts/validation";
 import { generateR2Key, uploadOriginal } from "@/lib/receipts/storage";
 import { createReceiptRecord } from "@/lib/receipts/db";
@@ -20,8 +17,7 @@ const VALID_PAYMENT_PATHS: PaymentPath[] = ["AMEX", "CASH", "DIGITAL", "UNKNOWN"
 
 export async function POST(request: Request) {
   try {
-    await assertReceiptsAccessFromHeaders(request.headers);
-    const actor = await getReceiptsActor(request.headers);
+    const actor = await requireReceiptsActor(request.headers);
 
     const formData = await request.formData();
     const file = formData.get("file");

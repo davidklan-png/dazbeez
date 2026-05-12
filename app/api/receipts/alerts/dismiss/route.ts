@@ -1,11 +1,10 @@
 import { NextResponse } from "next/server";
-import { assertReceiptsAccessFromHeaders, getReceiptsActor } from "@/lib/receipts/auth";
+import { requireReceiptsActor } from "@/lib/receipts/auth";
 import { dismissAlert } from "@/lib/receipts/db";
 
 export async function POST(request: Request) {
   try {
-    await assertReceiptsAccessFromHeaders(request.headers);
-    const actor = await getReceiptsActor(request.headers);
+    const actor = await requireReceiptsActor(request.headers);
 
     const body = (await request.json()) as {
       alertType?: string;

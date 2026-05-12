@@ -1,9 +1,6 @@
 import type { Metadata } from "next";
 import { headers } from "next/headers";
-import {
-  assertReceiptsAccessFromHeaders,
-  getReceiptsActor,
-} from "@/lib/receipts/auth";
+import { requireReceiptsActor } from "@/lib/receipts/auth";
 import {
   listDevicesForActor,
   getCurrentDeviceId,
@@ -17,8 +14,7 @@ export const metadata: Metadata = {
 
 export default async function DevicesPage() {
   const requestHeaders = await headers();
-  await assertReceiptsAccessFromHeaders(requestHeaders);
-  const actor = await getReceiptsActor(requestHeaders);
+  const actor = await requireReceiptsActor(requestHeaders);
   const devices = await listDevicesForActor(actor);
   const currentDeviceId = await getCurrentDeviceId(requestHeaders);
 

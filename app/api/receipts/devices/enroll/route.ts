@@ -1,14 +1,10 @@
 import { NextResponse } from "next/server";
-import {
-  assertReceiptsAccessFromHeaders,
-  getReceiptsActor,
-} from "@/lib/receipts/auth";
+import { requireReceiptsActor } from "@/lib/receipts/auth";
 import { enrollDevice } from "@/lib/receipts/trusted-devices";
 
 export async function POST(request: Request) {
   try {
-    await assertReceiptsAccessFromHeaders(request.headers);
-    const actor = await getReceiptsActor(request.headers);
+    const actor = await requireReceiptsActor(request.headers);
 
     const body = (await request.json().catch(() => ({}))) as { label?: string };
     const label = body.label?.trim();

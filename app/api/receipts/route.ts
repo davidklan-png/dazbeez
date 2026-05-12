@@ -1,10 +1,10 @@
 import { NextResponse } from "next/server";
-import { assertReceiptsAccessFromHeaders } from "@/lib/receipts/auth";
+import { requireReceiptsActor } from "@/lib/receipts/auth";
 import { listReceiptRecords } from "@/lib/receipts/db";
 
 export async function GET(request: Request) {
   try {
-    await assertReceiptsAccessFromHeaders(request.headers);
+    await requireReceiptsActor(request.headers);
 
     const url = new URL(request.url);
     const status = url.searchParams.get("status") ?? undefined;
