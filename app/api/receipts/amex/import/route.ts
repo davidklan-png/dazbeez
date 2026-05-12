@@ -44,6 +44,28 @@ export async function POST(request: Request) {
       );
     }
 
+    // Sanity-bound the statement month. The regex accepts 2099-12 / 1900-01
+    // etc. which would land junk months in D1 and corrupt UIs that group by
+    // month. Allow the current month plus one (Netアンサー sometimes posts the
+    // upcoming statement a few days before the closing date) and 5 years back.
+    {
+      const now = new Date();
+      const maxYearMonth = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 2).padStart(2, "0")}`;
+      const minYearMonth = `${now.getUTCFullYear() - 5}-01`;
+      // Normalize 13 → next-year-01 for the max comparison.
+      const maxNormalized = now.getUTCMonth() + 2 > 12
+        ? `${now.getUTCFullYear() + 1}-01`
+        : maxYearMonth;
+      if (statementMonth < minYearMonth || statementMonth > maxNormalized) {
+        return NextResponse.json(
+          {
+            error: `statementMonth ${statementMonth} is outside the accepted range (${minYearMonth} … ${maxNormalized}).`,
+          },
+          { status: 400 },
+        );
+      }
+    }
+
     if (file.size > MAX_CSV_BYTES) {
       return NextResponse.json(
         { error: "CSV file too large (max 5 MB)." },
