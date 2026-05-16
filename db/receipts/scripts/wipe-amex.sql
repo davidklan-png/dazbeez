@@ -1,30 +1,31 @@
 -- Wipe ALL AMEX statement data so files can be re-imported with fresh code.
 -- Receipts (receipt_records) are NOT touched.
 --
--- Run on the Mac:
---   wrangler d1 execute RECEIPTS_DB --remote --file db/receipts/scripts/wipe-amex.sql
--- Or against local D1:
---   wrangler d1 execute RECEIPTS_DB --local  --file db/receipts/scripts/wipe-amex.sql
+-- Run on the Mac (one statement at a time to avoid multi-statement parser issues):
+--   wrangler d1 execute RECEIPTS_DB --remote --command "UPDATE receipt_records SET status = 'needs_review' WHERE status = 'reconciled' AND payment_path = 'AMEX'"
+--   wrangler d1 execute RECEIPTS_DB --remote --command "DELETE FROM business_trip_report_lines"
+--   wrangler d1 execute RECEIPTS_DB --remote --command "DELETE FROM business_trip_reports"
+--   wrangler d1 execute RECEIPTS_DB --remote --command "DELETE FROM amex_line_attendees"
+--   wrangler d1 execute RECEIPTS_DB --remote --command "DELETE FROM amex_statement_lines"
+--   wrangler d1 execute RECEIPTS_DB --remote --command "DELETE FROM amex_statement_artifacts"
+--   wrangler d1 execute RECEIPTS_DB --remote --command "DELETE FROM receipt_audit_log WHERE action IN ('amex.artifact_created','amex.business_trip_detected','amex.imported','amex.line_categorized','amex.reconciled')"
 
--- 1. Detach any receipts from AMEX lines (lines are about to be deleted)
 UPDATE receipt_records
-SET    status = 'needs_review',
-       updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+SET    status = 'needs_review'
 WHERE  status = 'reconciled'
   AND  payment_path = 'AMEX';
 
--- 2. AMEX-derived business trip data
 DELETE FROM business_trip_report_lines;
 DELETE FROM business_trip_reports;
-
--- 3. Per-line attendees (also CASCADE-deleted by step 4, but explicit for clarity)
 DELETE FROM amex_line_attendees;
-
--- 4. The statement lines themselves
 DELETE FROM amex_statement_lines;
-
--- 5. Upload artifacts (this clears the "already been uploaded" guard)
 DELETE FROM amex_statement_artifacts;
 
--- 6. Audit log entries for AMEX activity (optional — keeps the log focused on receipts)
-DELETE FROM receipt_audit_log WHERE action LIKE 'amex.%';
+DELETE FROM receipt_audit_log
+WHERE action IN (
+  'amex.artifact_created',
+  'amex.business_trip_detected',
+  'amex.imported',
+  'amex.line_categorized',
+  'amex.reconciled'
+);

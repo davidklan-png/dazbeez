@@ -296,10 +296,9 @@ export async function importAmexLines(
   let imported = 0;
 
   // Chunked multi-row INSERTs. Each row binds 19 params (the 20th column,
-  // match_status, is the SQL literal 'unmatched'), so a chunk of 50 sends ~950
-  // params per query — well under D1's per-query limits and ~50x cheaper
-  // than the previous one-INSERT-per-row loop that was tripping Worker 1102.
-  const CHUNK_SIZE = 50;
+  // match_status, is the SQL literal 'unmatched'). D1's variable limit is
+  // empirically ~500; 20 rows × 19 params = 380, safely under that ceiling.
+  const CHUNK_SIZE = 20;
   const rowPlaceholder =
     "(?, ?, ?, ?, ?, ?, ?, ?, 'unmatched', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
