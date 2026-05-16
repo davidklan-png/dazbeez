@@ -59,30 +59,42 @@ export function ReconciliationTable({
 
   async function updateCategory(lineId: string, expenseCategoryCode: string) {
     setCategoryBusy(lineId);
+    setError(null);
     try {
-      await fetch(`/api/receipts/amex/lines/${lineId}`, {
+      const res = await fetch(`/api/receipts/amex/lines/${lineId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ expenseCategoryCode }),
       });
+      if (!res.ok) {
+        const json = (await res.json().catch(() => ({}))) as { error?: string };
+        setError(json.error ?? "Could not save category.");
+        return;
+      }
       router.refresh();
     } catch {
-      // silently fail — not critical
+      setError("Network error while saving category.");
     } finally {
       setCategoryBusy(null);
     }
   }
 
   async function updateReceiptStatus(lineId: string, receiptStatus: string, reason?: string) {
+    setError(null);
     try {
-      await fetch(`/api/receipts/amex/lines/${lineId}`, {
+      const res = await fetch(`/api/receipts/amex/lines/${lineId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ receiptStatus, receiptMissingReason: reason ?? null }),
       });
+      if (!res.ok) {
+        const json = (await res.json().catch(() => ({}))) as { error?: string };
+        setError(json.error ?? "Could not save receipt status.");
+        return;
+      }
       router.refresh();
     } catch {
-      // silently fail
+      setError("Network error while saving receipt status.");
     }
   }
 
