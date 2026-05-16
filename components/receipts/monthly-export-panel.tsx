@@ -16,20 +16,30 @@ export function MonthlyExportPanel({
   const router = useRouter();
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [blockers, setBlockers] = useState<string[]>([]);
 
   const currentExport = exports.find((e) => e.export_month === currentMonth);
 
   async function handleGenerate() {
     setBusy("generate");
     setError(null);
+    setBlockers([]);
     try {
       const res = await fetch("/api/receipts/export/month", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ month: currentMonth }),
       });
-      const json = (await res.json()) as { error?: string; sha256?: string };
-      if (!res.ok) { setError(json.error ?? "Generation failed."); return; }
+      const json = (await res.json()) as {
+        error?: string;
+        blockers?: string[];
+        sha256?: string;
+      };
+      if (!res.ok) {
+        setError(json.error ?? "Generation failed.");
+        setBlockers(json.blockers ?? []);
+        return;
+      }
       router.refresh();
     } catch {
       setError("Network error.");
@@ -41,12 +51,17 @@ export function MonthlyExportPanel({
   async function handleFinalize(month: string) {
     setBusy(`finalize-${month}`);
     setError(null);
+    setBlockers([]);
     try {
       const res = await fetch(`/api/receipts/export/${month}`, {
         method: "POST",
       });
-      const json = (await res.json()) as { error?: string };
-      if (!res.ok) { setError(json.error ?? "Finalization failed."); return; }
+      const json = (await res.json()) as { error?: string; blockers?: string[] };
+      if (!res.ok) {
+        setError(json.error ?? "Finalization failed.");
+        setBlockers(json.blockers ?? []);
+        return;
+      }
       router.refresh();
     } catch {
       setError("Network error.");
@@ -58,8 +73,15 @@ export function MonthlyExportPanel({
   return (
     <div className="space-y-6">
       {error && (
-        <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-          {error}
+        <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+          <p className="font-semibold">{error}</p>
+          {blockers.length > 0 && (
+            <ul className="mt-2 list-disc space-y-0.5 pl-5 text-xs">
+              {blockers.map((b, i) => (
+                <li key={i}>{b}</li>
+              ))}
+            </ul>
+          )}
         </div>
       )}
 
