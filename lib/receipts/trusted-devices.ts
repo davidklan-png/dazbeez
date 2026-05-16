@@ -56,6 +56,12 @@ function bytesToHex(bytes: Uint8Array): string {
   return hex;
 }
 
+function copyToArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  return copy.buffer;
+}
+
 function constantTimeEqual(a: string, b: string): boolean {
   if (a.length !== b.length) return false;
   let m = 0;
@@ -65,10 +71,10 @@ function constantTimeEqual(a: string, b: string): boolean {
 
 async function hmacHex(secret: string, message: Uint8Array): Promise<string> {
   const key = await crypto.subtle.importKey(
-    "raw", textEncoder.encode(secret),
+    "raw", copyToArrayBuffer(textEncoder.encode(secret)),
     { name: "HMAC", hash: "SHA-256" }, false, ["sign"],
   );
-  const sig = await crypto.subtle.sign("HMAC", key, message);
+  const sig = await crypto.subtle.sign("HMAC", key, copyToArrayBuffer(message));
   return bytesToHex(new Uint8Array(sig));
 }
 

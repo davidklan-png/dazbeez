@@ -11,7 +11,7 @@ interface Env {
   FORWARD_TO: string;
 }
 
-export default {
+const worker = {
   async email(message: ForwardableEmailMessage, env: Env, ctx: ExecutionContext): Promise<void> {
     const forwardTo = env.FORWARD_TO;
 
@@ -38,6 +38,8 @@ export default {
     }
   },
 };
+
+export default worker;
 
 async function captureAndLog(
   db: D1Database,

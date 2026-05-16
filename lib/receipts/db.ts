@@ -370,6 +370,30 @@ export async function listAmexLines(
   return result.results ?? [];
 }
 
+export async function listAmexLineAttendeeNamesByMonth(
+  statementMonth: string,
+): Promise<Record<string, string[]>> {
+  const db = getReceiptsDb();
+  const result = await db
+    .prepare(
+      `SELECT ala.amex_statement_line_id, ala.attendee_name
+       FROM amex_line_attendees ala
+       JOIN amex_statement_lines asl ON asl.id = ala.amex_statement_line_id
+       WHERE asl.statement_month = ?
+       ORDER BY ala.created_at ASC`,
+    )
+    .bind(statementMonth)
+    .all<{ amex_statement_line_id: string; attendee_name: string }>();
+
+  const attendeesByLine: Record<string, string[]> = {};
+  for (const row of result.results ?? []) {
+    attendeesByLine[row.amex_statement_line_id] ??= [];
+    attendeesByLine[row.amex_statement_line_id]!.push(row.attendee_name);
+  }
+
+  return attendeesByLine;
+}
+
 export async function updateAmexReconciliation(
   amexLineId: string,
   receiptId: string | null,
@@ -670,8 +694,6 @@ export async function getAlertDismissal(
 export async function getMissingStatementAlerts(
   actor: string,
 ): Promise<MissingStatementAlert[]> {
-  const db = getReceiptsDb();
-
   // Collect the last 3 months that should have statements ready
   const alerts: MissingStatementAlert[] = [];
   const today = new Date();

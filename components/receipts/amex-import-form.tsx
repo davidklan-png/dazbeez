@@ -11,7 +11,6 @@ const NETANSWER_URL = "https://www.saisoncard.co.jp/customer-support/netanswer/"
 function extractStatementMonthFromFilename(filename: string): string | null {
   const match = filename.match(/_(\d{2})(\d{2})\.csv$/i);
   if (!match) return null;
-  const yy = parseInt(match[1]!, 10);
   const mm = parseInt(match[2]!, 10);
   if (mm < 1 || mm > 12) return null;
   return `20${match[1]}-${match[2]}`;

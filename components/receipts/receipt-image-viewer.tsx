@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import { useState } from "react";
 
 const ZOOM_STEP = 0.25;
@@ -86,9 +87,12 @@ export function ReceiptImageViewer({ receiptId, contentType }: ReceiptImageViewe
           // Scale the wrapper width so the scroll container sees the full zoomed
           // layout size, enabling correct horizontal and vertical panning.
           <div style={{ width: `${zoom * 100}%` }}>
-            <img
+            <Image
               src={src}
               alt="Receipt"
+              width={1200}
+              height={1600}
+              unoptimized
               className="block h-auto w-full"
             />
           </div>

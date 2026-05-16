@@ -81,7 +81,7 @@ export default async function ExportPage() {
             {missingReason > 0 && (
               <li>
                 • {missingReason} line{missingReason !== 1 ? "s" : ""} marked
-                "missing receipt" without a reason —{" "}
+                &quot;missing receipt&quot; without a reason —{" "}
                 <Link
                   href="/receipts/reconcile"
                   className="font-semibold underline"

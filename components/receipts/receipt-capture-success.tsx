@@ -3,14 +3,12 @@
 import Link from "next/link";
 
 interface ReceiptCaptureSuccessProps {
-  receiptId: string;
   reviewUrl: string;
   rapidMode: boolean;
   onAddAnother: () => void;
 }
 
 export function ReceiptCaptureSuccess({
-  receiptId: _receiptId,
   reviewUrl,
   rapidMode,
   onAddAnother,

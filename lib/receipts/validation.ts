@@ -223,8 +223,9 @@ export function isOutsideTokyo(merchantName: string): boolean {
 
 export function parseAmexNetanswer(
   buffer: ArrayBuffer,
-  statementMonth: string,
+  _statementMonth: string,
 ): NetanswerParseResult {
+  void _statementMonth;
   const { text, encoding } = decodeAmexBuffer(buffer);
   const rawLines = text.split(/\r?\n/);
 

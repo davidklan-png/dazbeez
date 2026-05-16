@@ -40,7 +40,6 @@ export function ReceiptCaptureForm({
     <div className="space-y-4">
       {state.phase === "success" ? (
         <ReceiptCaptureSuccess
-          receiptId={state.receiptId}
           reviewUrl={state.reviewUrl}
           rapidMode={rapidMode}
           onAddAnother={handleAddAnother}

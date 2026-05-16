@@ -53,7 +53,7 @@ export async function POST(request: Request) {
 
     // Build export rows
     const exportRows: ExportRow[] = receipts.map((r) => {
-      const cat = getCategoryByCode(r.expense_category_code);
+      const cat = getCategoryByCode(r.expense_category_code ?? "");
       return {
         receiptId: r.id,
         transactionDate: r.transaction_date,
@@ -89,7 +89,7 @@ export async function POST(request: Request) {
             ? attendeeMap.get(line.matched_receipt_id)
             : null;
           if (!linkedReceipt || linkedReceipt.length === 0) {
-            blockers.push(`Line ${line.id}: ${getCategoryByCode(line.expense_category_code)?.jaName ?? line.expense_category_code} requires attendees`);
+            blockers.push(`Line ${line.id}: ${getCategoryByCode(line.expense_category_code ?? "")?.jaName ?? line.expense_category_code} requires attendees`);
           }
         }
         if (line.business_trip_status === "candidate") {

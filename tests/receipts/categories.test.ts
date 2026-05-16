@@ -8,7 +8,6 @@ import {
   isCanonicalCode,
   formatCategoryLabel,
   mapLegacyCategory,
-  LEGACY_CATEGORY_MAP,
 } from "@/lib/receipts/categories";
 
 // ─── Category seed ───────────────────────────────────────────────────────────
