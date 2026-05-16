@@ -1,9 +1,12 @@
 import { listReceiptRecords } from "@/lib/receipts/db";
 import { ReceiptReviewTable } from "@/components/receipts/receipt-review-table";
+import { assertReceiptsPageAccess } from "@/lib/receipts/auth-request";
 
 export const dynamic = "force-dynamic";
 
 export default async function ReviewPage() {
+  await assertReceiptsPageAccess();
+
   const receipts = await listReceiptRecords({ limit: 50 });
 
   return (

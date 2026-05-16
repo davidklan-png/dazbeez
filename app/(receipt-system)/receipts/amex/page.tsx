@@ -1,5 +1,6 @@
 import { listAmexLines, listAmexArtifacts } from "@/lib/receipts/db";
 import { AmexImportForm } from "@/components/receipts/amex-import-form";
+import { assertReceiptsPageAccess } from "@/lib/receipts/auth-request";
 
 export const dynamic = "force-dynamic";
 
@@ -10,6 +11,8 @@ export default async function AmexPage({
 }: {
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
+  await assertReceiptsPageAccess();
+
   const params = await searchParams;
   const month = String(params.month ?? new Date().toISOString().slice(0, 7));
 

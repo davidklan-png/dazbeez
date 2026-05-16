@@ -5,11 +5,14 @@ import {
   listAmexLines,
 } from "@/lib/receipts/db";
 import { requiresAttendees } from "@/lib/receipts/categories";
+import { assertReceiptsPageAccess } from "@/lib/receipts/auth-request";
 import { MonthlyExportPanel } from "@/components/receipts/monthly-export-panel";
 
 export const dynamic = "force-dynamic";
 
 export default async function ExportPage() {
+  await assertReceiptsPageAccess();
+
   const currentMonth = new Date().toISOString().slice(0, 7);
 
   const [exports, monthReceipts, monthLines] = await Promise.all([

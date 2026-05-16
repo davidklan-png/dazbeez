@@ -1,6 +1,7 @@
 import { notFound } from "next/navigation";
 import { getReceiptRecord, listAttendees } from "@/lib/receipts/db";
 import { ReceiptReviewForm } from "@/components/receipts/receipt-review-form";
+import { assertReceiptsPageAccess } from "@/lib/receipts/auth-request";
 
 export const dynamic = "force-dynamic";
 
@@ -9,6 +10,8 @@ export default async function ReviewReceiptPage({
 }: {
   params: Promise<{ id: string }>;
 }) {
+  await assertReceiptsPageAccess();
+
   const { id } = await params;
   const receipt = await getReceiptRecord(id);
   if (!receipt) notFound();

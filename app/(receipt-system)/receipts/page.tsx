@@ -1,12 +1,15 @@
 import Link from "next/link";
 import { getMissingStatementAlerts } from "@/lib/receipts/db";
 import { requireReceiptsActor } from "@/lib/receipts/auth";
+import { assertReceiptsPageAccess } from "@/lib/receipts/auth-request";
 import { headers } from "next/headers";
 import { AmexMissingStatementAlert } from "@/components/receipts/amex-missing-statement-alert";
 
 export const dynamic = "force-dynamic";
 
 export default async function ReceiptsDashboardPage() {
+  await assertReceiptsPageAccess();
+
   let missingAlerts: Awaited<ReturnType<typeof getMissingStatementAlerts>> = [];
   try {
     const actor = await requireReceiptsActor(await headers());

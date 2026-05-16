@@ -12,6 +12,12 @@ const nextConfig: NextConfig = {
   async redirects() {
     return [
       {
+        source: "/:path*",
+        has: [{ type: "host", value: "www.dazbeez.com" }],
+        destination: "https://dazbeez.com/:path*",
+        permanent: true,
+      },
+      {
         source: "/inquiry",
         destination: "/contact",
         permanent: true,
@@ -33,6 +39,12 @@ const nextConfig: NextConfig = {
       },
       {
         source: "/admin/:path*",
+        headers: [
+          { key: "X-Robots-Tag", value: "noindex, nofollow" },
+        ],
+      },
+      {
+        source: "/receipts/:path*",
         headers: [
           { key: "X-Robots-Tag", value: "noindex, nofollow" },
         ],

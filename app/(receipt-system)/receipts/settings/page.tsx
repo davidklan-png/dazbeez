@@ -1,8 +1,11 @@
 import Link from "next/link";
+import { assertReceiptsPageAccess } from "@/lib/receipts/auth-request";
 
 export const dynamic = "force-dynamic";
 
-export default function ReceiptsSettingsPage() {
+export default async function ReceiptsSettingsPage() {
+  await assertReceiptsPageAccess();
+
   return (
     <div className="space-y-6">
       <div>

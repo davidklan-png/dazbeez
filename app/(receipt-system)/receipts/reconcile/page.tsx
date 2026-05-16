@@ -1,6 +1,7 @@
 import { listAmexLines, listReceiptRecords } from "@/lib/receipts/db";
 import { matchAmexToReceipts } from "@/lib/receipts/reconciliation";
 import { ReconciliationTable } from "@/components/receipts/reconciliation-table";
+import { assertReceiptsPageAccess } from "@/lib/receipts/auth-request";
 
 export const dynamic = "force-dynamic";
 
@@ -9,6 +10,8 @@ export default async function ReconcilePage({
 }: {
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
+  await assertReceiptsPageAccess();
+
   const params = await searchParams;
   const month = String(params.month ?? new Date().toISOString().slice(0, 7));
 

@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { ReceiptCaptureForm } from "@/components/receipts/receipt-capture-form";
 import type { PaymentChip } from "@/components/receipts/receipt-drop-button";
+import { assertReceiptsPageAccess } from "@/lib/receipts/auth-request";
 
 export const dynamic = "force-dynamic";
 
@@ -14,6 +15,8 @@ export default async function CapturePage({
 }: {
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
+  await assertReceiptsPageAccess();
+
   const params = await searchParams;
   const rawPayment = String(params.payment ?? "").toUpperCase();
   const initialPayment: PaymentChip =
