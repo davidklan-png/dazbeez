@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { AttendeeEditor } from "@/components/receipts/attendee-editor";
 import { ReceiptImageViewer } from "@/components/receipts/receipt-image-viewer";
 import type { ReceiptRecord, ReceiptAttendee, ExtractionResult } from "@/lib/receipts/types";
+import { RECEIPT_ATTENDEE_DIRECTORY } from "@/lib/receipts/attendee-directory";
 import {
   EXPENSE_CATEGORIES,
   requiresAttendees as categoryRequiresAttendees,
@@ -320,12 +321,16 @@ export function ReceiptReviewForm({
                 Attendees <span className="text-red-500">*</span>
               </label>
               <div className="mt-2">
-                <AttendeeEditor attendees={attendees} onChange={setAttendees} />
+                <AttendeeEditor
+                  attendees={attendees}
+                  onChange={setAttendees}
+                  directory={RECEIPT_ATTENDEE_DIRECTORY}
+                />
               </div>
             </div>
           )}
 
-          {/* AI extraction */}
+          {/* OCR extraction */}
           <div className="mb-4">
             <button
               type="button"
@@ -333,7 +338,7 @@ export function ReceiptReviewForm({
               disabled={extraction.phase === "extracting" || saving}
               className="w-full rounded-xl border border-amber-300 bg-amber-50 px-4 py-2.5 text-sm font-medium text-amber-700 hover:bg-amber-100 disabled:opacity-60"
             >
-              {extraction.phase === "extracting" ? "Extracting…" : "Extract details with AI"}
+              {extraction.phase === "extracting" ? "Extracting…" : "Extract details with OCR"}
             </button>
 
             {extraction.phase === "done" && extraction.filled > 0 && (
@@ -344,13 +349,13 @@ export function ReceiptReviewForm({
 
             {extraction.phase === "done" && extraction.filled === 0 && Object.keys(extraction.suggestions).length === 0 && (
               <p className="mt-1.5 text-center text-xs text-gray-500">
-                AI could not read details from this image. Fill in manually.
+                OCR could not read details from this image. Fill in manually.
               </p>
             )}
 
             {extraction.phase === "done" && Object.keys(extraction.suggestions).length > 0 && (
               <div className="mt-2 rounded-xl border border-yellow-200 bg-yellow-50 px-3 py-2 text-xs text-yellow-800">
-                <p className="mb-1 font-semibold">AI suggestions (your values were kept):</p>
+                <p className="mb-1 font-semibold">OCR suggestions (your values were kept):</p>
                 {Object.entries(extraction.suggestions).map(([field, value]) => (
                   <p key={field}>{field}: <span className="font-mono">{value}</span></p>
                 ))}

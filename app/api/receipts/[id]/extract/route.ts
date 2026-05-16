@@ -59,7 +59,7 @@ export async function POST(request: Request, { params }: RouteContext) {
       return NextResponse.json(
         {
           error:
-            "Receipt image is too large for AI extraction (max 5 MB). Please resize and re-upload.",
+            "Receipt image is too large for OCR extraction (max 5 MB). Please resize and re-upload.",
         },
         { status: 413 },
       );

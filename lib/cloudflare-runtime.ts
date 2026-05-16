@@ -27,6 +27,20 @@ export function getAiBinding(): Ai | null {
   return env.AI ?? null;
 }
 
+export function getGoogleCloudVisionApiKey(): string {
+  const env = getCloudflareEnv() as CloudflareEnv & {
+    GOOGLE_CLOUD_VISION_API_KEY?: string;
+  };
+  const apiKey =
+    env.GOOGLE_CLOUD_VISION_API_KEY ?? process.env.GOOGLE_CLOUD_VISION_API_KEY;
+
+  if (!apiKey) {
+    throw new Error("GOOGLE_CLOUD_VISION_API_KEY is not configured.");
+  }
+
+  return apiKey;
+}
+
 export function getCrmImagesBucket(): R2Bucket | null {
   const env = getCloudflareEnv();
   return env.CRM_IMAGES ?? null;
