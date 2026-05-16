@@ -9,6 +9,7 @@
   ],
   // Manual secret setup:
   // npx wrangler secret put RESEND_API_KEY
+  // npx wrangler secret put GOOGLE_CLOUD_VISION_API_KEY
   "workers_dev": true,
   "preview_urls": true,
   "assets": {
