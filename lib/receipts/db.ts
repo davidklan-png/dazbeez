@@ -296,9 +296,10 @@ export async function importAmexLines(
   let imported = 0;
 
   // Chunked multi-row INSERTs. Each row binds 19 params (the 20th column,
-  // match_status, is the SQL literal 'unmatched'). D1's variable limit is
-  // empirically ~500; 20 rows × 19 params = 380, safely under that ceiling.
-  const CHUNK_SIZE = 20;
+  // match_status, is the SQL literal 'unmatched'). D1's hard limit is 100
+  // bind variables per statement, so 5 rows × 19 = 95 is the largest chunk
+  // that stays under the ceiling.
+  const CHUNK_SIZE = 5;
   const rowPlaceholder =
     "(?, ?, ?, ?, ?, ?, ?, ?, 'unmatched', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
@@ -748,10 +749,12 @@ export async function createBusinessTripReports(
   for (const candidate of candidates) {
     const tripId = newUuid();
 
-    // One D1 batch per candidate: trip INSERT + bulk line-links INSERT +
-    // bulk line UPDATE. Previously this was 1 + 2N sequential awaits per
-    // candidate (e.g. 41 D1 calls for a 20-line trip), which compounded the
-    // import-route CPU budget on top of the row inserts.
+    // One D1 batch per candidate: trip INSERT + chunked line-links INSERTs +
+    // chunked line UPDATEs. D1's 100-bind-variable per-statement limit means
+    // we can't put all line links in one statement (4 params each = 25 lines
+    // max), so we chunk both the inserts (20 lines × 4 = 80 binds) and the
+    // updates (2 + 20 ids = 22 binds).
+    const TRIP_CHUNK = 20;
     const stmts = [
       db
         .prepare(
@@ -771,9 +774,10 @@ export async function createBusinessTripReports(
         ),
     ];
 
-    if (candidate.lineIds.length > 0) {
-      const linkPlaceholders = candidate.lineIds.map(() => "(?, ?, ?, ?)").join(",");
-      const linkBinds = candidate.lineIds.flatMap((lineId) => [
+    for (let j = 0; j < candidate.lineIds.length; j += TRIP_CHUNK) {
+      const chunkIds = candidate.lineIds.slice(j, j + TRIP_CHUNK);
+      const linkPlaceholders = chunkIds.map(() => "(?, ?, ?, ?)").join(",");
+      const linkBinds = chunkIds.flatMap((lineId) => [
         newUuid(),
         tripId,
         lineId,
@@ -789,7 +793,7 @@ export async function createBusinessTripReports(
           .bind(...linkBinds),
       );
 
-      const idPlaceholders = candidate.lineIds.map(() => "?").join(",");
+      const idPlaceholders = chunkIds.map(() => "?").join(",");
       stmts.push(
         db
           .prepare(
@@ -797,7 +801,7 @@ export async function createBusinessTripReports(
              SET business_trip_id = ?, business_trip_status = 'candidate', updated_at = ?
              WHERE id IN (${idPlaceholders})`,
           )
-          .bind(tripId, now, ...candidate.lineIds),
+          .bind(tripId, now, ...chunkIds),
       );
     }
 
