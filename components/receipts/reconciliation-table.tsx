@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import type { AmexStatementLine, ReceiptRecord } from "@/lib/receipts/types";
 import type { ReconciliationMatch } from "@/lib/receipts/types";
@@ -39,7 +39,9 @@ export function ReconciliationTable({
   const [focusIndex, setFocusIndex] = useState<number | null>(null);
   const [showHelp, setShowHelp] = useState(false);
   const cardRefs = useRef<(HTMLDivElement | null)[]>([]);
-  const handlerRef = useRef<(e: KeyboardEvent) => void>(() => {});
+
+  // Unified lock: any in-flight mutation disables all interactive controls
+  const locked = busy !== null || bulkProgress !== null || signoffBusy || !!finalized;
 
   const matchMap = new Map<string, ReconciliationMatch>(
     autoMatches.map((m) => [m.amexLineId, m]),
@@ -185,15 +187,15 @@ export function ReconciliationTable({
   const unmatched = amexLines.filter(
     (l) => l.match_status === "unmatched" || l.match_status === "matched",
   );
-  const confirmed = amexLines.filter((l) => l.match_status === "confirmed");
+  const confirmedLines = amexLines.filter((l) => l.match_status === "confirmed");
   const noReceipt = amexLines.filter((l) => l.match_status === "no_receipt");
   const highConfidenceMatches = autoMatches.filter(
     (m) => m.confidenceScore >= confidenceThreshold,
   );
 
-  // Keyboard navigation over Pending cards
+  // Keyboard navigation — useEffect with proper deps, no render-time ref writes
   const unmatchedCount = unmatched.length;
-  handlerRef.current = (e: KeyboardEvent) => {
+  const handleKeydown = useCallback((e: KeyboardEvent) => {
     const tag = (e.target as HTMLElement).tagName;
     if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
     if ((e.target as HTMLElement).isContentEditable) return;
@@ -225,13 +227,12 @@ export function ReconciliationTable({
     } else if (e.key === "?") {
       setShowHelp((prev) => !prev);
     }
-  };
+  }, [busy, finalized, focusIndex, unmatchedCount, unmatched, matchMap, receiptMap]);
 
   useEffect(() => {
-    const handler = (e: KeyboardEvent) => handlerRef.current(e);
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, []);
+    window.addEventListener("keydown", handleKeydown);
+    return () => window.removeEventListener("keydown", handleKeydown);
+  }, [handleKeydown]);
 
   useEffect(() => {
     if (focusIndex === null) return;
@@ -267,7 +268,7 @@ export function ReconciliationTable({
       <div className="mt-2 flex flex-wrap items-center gap-2">
         <select
           value={line.expense_category_code ?? ""}
-          disabled={categoryBusy === line.id}
+          disabled={locked || categoryBusy === line.id}
           onChange={(e) => updateCategory(line.id, e.target.value)}
           className={`rounded-lg border px-2 py-1 text-xs focus:border-amber-500 focus:outline-none ${
             !hasCategory
@@ -297,6 +298,13 @@ export function ReconciliationTable({
     );
   }
 
+  // Sort orphan receipts: dateless first
+  const sortedOrphanReceipts = [...orphanReceipts].sort((a, b) => {
+    if (!a.transaction_date && b.transaction_date) return -1;
+    if (a.transaction_date && !b.transaction_date) return 1;
+    return 0;
+  });
+
   return (
     <div className="space-y-6">
       {error && (
@@ -305,11 +313,18 @@ export function ReconciliationTable({
         </div>
       )}
 
+      {/* Finalized banner */}
+      {finalized && (
+        <div className="rounded-xl border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-600">
+          This reconciliation is signed off — edits are blocked.
+        </div>
+      )}
+
       {/* Bulk auto-confirm */}
       {!finalized && highConfidenceMatches.length > 0 && (
         <div className="flex flex-wrap items-center gap-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2">
           <button
-            disabled={busy !== null || bulkProgress !== null || signoffBusy}
+            disabled={locked}
             onClick={bulkConfirm}
             className="rounded-xl bg-amber-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-amber-600 disabled:opacity-50 disabled:cursor-not-allowed"
           >
@@ -323,7 +338,7 @@ export function ReconciliationTable({
               setConfidenceThreshold(Number(e.target.value));
               setBulkResult(null);
             }}
-            disabled={bulkProgress !== null}
+            disabled={locked}
             className="rounded-lg border border-amber-300 bg-white px-2 py-1 text-xs text-gray-700 focus:border-amber-500 focus:outline-none"
           >
             <option value={0.8}>80%</option>
@@ -363,7 +378,7 @@ export function ReconciliationTable({
             <h3 className="text-sm font-semibold text-gray-700">
               Pending ({unmatched.length})
             </h3>
-            <span className="text-xs text-gray-400">Press ? for shortcuts</span>
+            {!finalized && <span className="text-xs text-gray-400">Press ? for shortcuts</span>}
           </div>
           <div className="space-y-3">
             {unmatched.map((line, i) => {
@@ -397,7 +412,7 @@ export function ReconciliationTable({
                     </div>
                     <div className="flex gap-2">
                       <button
-                        disabled={busy === line.id}
+                        disabled={locked || busy === line.id}
                         onClick={() => {
                           reconcile(line.id, null, "no_receipt");
                           updateReceiptStatus(line.id, "no_receipt_required");
@@ -426,12 +441,12 @@ export function ReconciliationTable({
                         const lAmt = line.amount_minor;
                         if (rAmt !== lAmt) {
                           const diff = lAmt - rAmt;
-                          const sign = diff > 0 ? "+" : "";
+                          const sign = diff > 0 ? "+" : "−";
                           badges.push({
                             key: "amt",
                             label: line.currency === "JPY"
-                              ? `Δ ¥${Math.abs(diff).toLocaleString()}`
-                              : `Δ ${(Math.abs(diff) / 100).toFixed(2)} ${line.currency}`,
+                              ? `Δ ${sign}¥${Math.abs(diff).toLocaleString()}`
+                              : `Δ ${sign}${(Math.abs(diff) / 100).toFixed(2)} ${line.currency}`,
                           });
                         }
                         if (line.merchant && suggestedReceipt.merchant &&
@@ -465,7 +480,7 @@ export function ReconciliationTable({
                       )}
                       <div className="mt-2 flex items-center gap-2">
                         <button
-                          disabled={busy === line.id}
+                          disabled={locked || busy === line.id}
                           onClick={() =>
                             reconcile(line.id, suggestedReceipt.id, "confirmed")
                           }
@@ -475,7 +490,7 @@ export function ReconciliationTable({
                         </button>
                         <span className="text-[10px] text-gray-400">AMEX merchant overrides receipt on confirm</span>
                         <button
-                          disabled={busy === line.id}
+                          disabled={locked || busy === line.id}
                           onClick={() =>
                             reconcile(line.id, suggestedReceipt.id, "matched")
                           }
@@ -490,8 +505,9 @@ export function ReconciliationTable({
                   {/* Manual receipt selector */}
                   <div className="mt-3">
                     <select
-                      className="block w-full rounded-xl border border-gray-300 px-3 py-2 text-xs text-gray-700 focus:border-amber-500 focus:outline-none"
+                      className="block w-full rounded-xl border border-gray-300 px-3 py-2 text-xs text-gray-700 focus:border-amber-500 focus:outline-none disabled:opacity-50"
                       defaultValue=""
+                      disabled={locked}
                       onChange={(e) => {
                         if (e.target.value) {
                           reconcile(line.id, e.target.value, "confirmed");
@@ -516,15 +532,15 @@ export function ReconciliationTable({
       )}
 
       {/* Confirmed */}
-      {confirmed.length > 0 && (
+      {confirmedLines.length > 0 && (
         <div>
           <h3 className="mb-3 text-sm font-semibold text-gray-700">
-            Confirmed ({confirmed.length})
+            Confirmed ({confirmedLines.length})
           </h3>
           <div className="overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-sm">
             <table className="min-w-full text-xs">
               <tbody className="divide-y divide-gray-100">
-                {confirmed.map((line) => {
+                {confirmedLines.map((line) => {
                   const r = line.matched_receipt_id
                     ? receiptMap.get(line.matched_receipt_id)
                     : null;
@@ -541,7 +557,7 @@ export function ReconciliationTable({
                       <td className="px-4 py-3">
                         <select
                           value={line.expense_category_code ?? ""}
-                          disabled={categoryBusy === line.id}
+                          disabled={locked || categoryBusy === line.id}
                           onChange={(e) =>
                             updateCategory(line.id, e.target.value)
                           }
@@ -586,7 +602,7 @@ export function ReconciliationTable({
                     <td className="px-4 py-3">
                       <select
                         value={line.expense_category_code ?? ""}
-                        disabled={categoryBusy === line.id}
+                        disabled={locked || categoryBusy === line.id}
                         onChange={(e) =>
                           updateCategory(line.id, e.target.value)
                         }
@@ -603,7 +619,7 @@ export function ReconciliationTable({
                       </select>
                     </td>
                     <td className="px-4 py-3">
-                      <NoReceiptReasonCell line={line} onUpdate={updateReceiptStatus} />
+                      <NoReceiptReasonCell line={line} onUpdate={updateReceiptStatus} disabled={locked} />
                     </td>
                   </tr>
                 ))}
@@ -614,23 +630,31 @@ export function ReconciliationTable({
       )}
 
       {/* Orphan receipts */}
-      {orphanReceipts.length > 0 && (
+      {sortedOrphanReceipts.length > 0 && (
         <div>
           <h3 className="mb-3 text-sm font-semibold text-gray-700">
-            Orphan receipts ({orphanReceipts.length})
+            Orphan receipts ({sortedOrphanReceipts.length})
           </h3>
           <div className="space-y-3">
-            {orphanReceipts.map((r) => (
+            {sortedOrphanReceipts.map((r) => (
               <div
                 key={r.id}
                 className="rounded-2xl border border-orange-200 bg-orange-50 p-4 shadow-sm"
               >
-                <p className="text-sm text-gray-700">{receiptLabel(r)}</p>
-                {unmatched.length > 0 && (
+                <div className="flex items-center gap-2">
+                  <p className="text-sm text-gray-700">{receiptLabel(r)}</p>
+                  {!r.transaction_date && (
+                    <span className="rounded-full bg-orange-200 px-2 py-0.5 text-xs text-orange-800">
+                      no date
+                    </span>
+                  )}
+                </div>
+                {!finalized && unmatched.length > 0 && (
                   <div className="mt-2">
                     <select
-                      className="block w-full rounded-xl border border-orange-300 bg-white px-3 py-2 text-xs text-gray-700 focus:border-amber-500 focus:outline-none"
+                      className="block w-full rounded-xl border border-orange-300 bg-white px-3 py-2 text-xs text-gray-700 focus:border-amber-500 focus:outline-none disabled:opacity-50"
                       defaultValue=""
+                      disabled={locked}
                       onChange={(e) => {
                         if (e.target.value) {
                           reconcile(e.target.value, r.id, "confirmed");
@@ -652,7 +676,7 @@ export function ReconciliationTable({
         </div>
       )}
 
-      {unmatched.length === 0 && confirmed.length === 0 && noReceipt.length === 0 && (
+      {unmatched.length === 0 && confirmedLines.length === 0 && noReceipt.length === 0 && (
         <p className="text-sm text-gray-500">
           No AMEX lines found. Import a statement CSV first.
         </p>
@@ -662,7 +686,7 @@ export function ReconciliationTable({
       {!finalized && amexLines.length > 0 && (
         <div className="flex items-center gap-3">
           <button
-            disabled={signoffBusy || unmatched.length > 0}
+            disabled={locked || unmatched.length > 0}
             onClick={signoff}
             className="rounded-xl bg-green-600 px-4 py-2 text-sm font-semibold text-white hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
             title={
@@ -703,16 +727,21 @@ export function ReconciliationTable({
 function NoReceiptReasonCell({
   line,
   onUpdate,
+  disabled,
 }: {
   line: AmexStatementLine;
   onUpdate: (id: string, status: string, reason?: string) => void;
+  disabled?: boolean;
 }) {
   const [reason, setReason] = useState(line.receipt_missing_reason ?? "");
   const [editing, setEditing] = useState(false);
 
   if (!editing) {
     return (
-      <span className="text-gray-400 hover:underline cursor-pointer" onClick={() => setEditing(true)}>
+      <span
+        className={`text-gray-400 ${disabled ? "" : "hover:underline cursor-pointer"}`}
+        onClick={() => { if (!disabled) setEditing(true); }}
+      >
         {line.receipt_missing_reason ?? "Add reason"}
       </span>
     );
