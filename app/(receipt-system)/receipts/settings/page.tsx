@@ -7,9 +7,9 @@ export default async function ReceiptsSettingsPage() {
   await assertReceiptsPageAccess();
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 px-8 py-8">
       <div>
-        <h2 className="text-2xl font-semibold text-gray-900">Settings</h2>
+        <h2 className="text-[26px] font-bold text-gray-900">Settings</h2>
         <p className="mt-1 text-sm text-gray-500">
           Category and export settings — coming in a future milestone.
         </p>

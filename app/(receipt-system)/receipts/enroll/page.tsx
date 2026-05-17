@@ -19,7 +19,7 @@ export default async function EnrollDevicePage({ searchParams }: PageProps) {
   const safeNext = next && next.startsWith("/receipts") ? next : "/receipts";
 
   return (
-    <div className="mx-auto max-w-lg rounded-2xl border border-gray-200 bg-white p-6 shadow-sm">
+    <div className="mx-auto my-12 max-w-lg rounded-2xl border border-gray-200 bg-white p-6 shadow-sm">
       <p className="text-xs font-semibold uppercase tracking-[0.24em] text-amber-600">
         Trusted device
       </p>

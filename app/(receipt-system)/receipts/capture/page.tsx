@@ -1,7 +1,7 @@
-import Link from "next/link";
 import { ReceiptCaptureForm } from "@/components/receipts/receipt-capture-form";
-import type { PaymentChip } from "@/components/receipts/receipt-drop-button";
 import { assertReceiptsPageAccess } from "@/lib/receipts/auth-request";
+import { listReceiptRecords } from "@/lib/receipts/db";
+import type { PaymentPath } from "@/lib/receipts/types";
 
 export const dynamic = "force-dynamic";
 
@@ -19,32 +19,35 @@ export default async function CapturePage({
 
   const params = await searchParams;
   const rawPayment = String(params.payment ?? "").toUpperCase();
-  const initialPayment: PaymentChip =
-    rawPayment === "AMEX" ? "AMEX" : rawPayment === "CASH" ? "CASH" : null;
+  const initialPayment: PaymentPath | null =
+    rawPayment === "AMEX"
+      ? "AMEX"
+      : rawPayment === "CASH"
+        ? "CASH"
+        : rawPayment === "DIGITAL"
+          ? "DIGITAL"
+          : null;
   const rapidMode = String(params.mode ?? "") === "rapid";
 
+  const todayCount = await countCapturedToday();
+
   return (
-    <div className="mx-auto max-w-sm space-y-6">
-      <div className="text-center">
-        <h2 className="text-2xl font-semibold text-gray-900">Capture Receipt</h2>
-        <p className="mt-1 text-sm text-gray-400">
-          Take the picture now — add details later.
-        </p>
-      </div>
-
-      <ReceiptCaptureForm
-        initialPayment={initialPayment}
-        rapidMode={rapidMode}
-      />
-
-      <div className="text-center">
-        <Link
-          href="/receipts/review"
-          className="text-xs text-gray-400 underline hover:text-gray-600"
-        >
-          View review queue
-        </Link>
-      </div>
-    </div>
+    <ReceiptCaptureForm
+      initialPayment={initialPayment}
+      rapidMode={rapidMode}
+      todayCount={todayCount}
+    />
   );
+}
+
+async function countCapturedToday(): Promise<number> {
+  try {
+    const rows = await listReceiptRecords({ limit: 200 });
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
+    const startIso = startOfDay.toISOString();
+    return rows.filter((r) => r.captured_at >= startIso).length;
+  } catch {
+    return 0;
+  }
 }
