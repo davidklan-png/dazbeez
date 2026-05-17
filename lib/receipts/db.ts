@@ -1284,6 +1284,7 @@ export async function createReconciliationDraft(
   matchedCount: number,
   noReceiptCount: number,
   actor: string,
+  artifactId: string | null,
 ): Promise<string> {
   const db = getReceiptsDb();
   const id = newUuid();
@@ -1292,10 +1293,10 @@ export async function createReconciliationDraft(
   await db
     .prepare(
       `INSERT INTO amex_reconciliations
-        (id, statement_month, status, line_count, matched_count, no_receipt_count, created_by, created_at)
-       VALUES (?, ?, 'draft', ?, ?, ?, ?, ?)`,
+        (id, statement_month, statement_artifact_id, status, line_count, matched_count, no_receipt_count, created_by, created_at)
+       VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, ?)`,
     )
-    .bind(id, month, lineCount, matchedCount, noReceiptCount, actor, now)
+    .bind(id, month, artifactId, lineCount, matchedCount, noReceiptCount, actor, now)
     .run();
 
   return id;

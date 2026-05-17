@@ -3,6 +3,7 @@ import { requireReceiptsActor } from "@/lib/receipts/auth";
 import {
   createReconciliationDraft,
   finalizeReconciliation,
+  getAmexArtifactByMonth,
   getFinalizedReconciliationForMonth,
   listAmexLineAttendeeNamesByMonth,
   listAmexLines,
@@ -43,6 +44,8 @@ export async function POST(request: Request) {
         { status: 400 },
       );
     }
+
+    const activeArtifact = await getAmexArtifactByMonth(month);
 
     // Validate: all lines must be resolved
     const blockers: string[] = [];
@@ -104,13 +107,23 @@ export async function POST(request: Request) {
     }
 
     // Build manifest CSV
-    const manifestCsv = buildReconciliationManifestCsv(
+    let manifestCsv = buildReconciliationManifestCsv(
       amexLines,
       receipts,
       amexAttendees,
       Object.fromEntries(receiptAttendeeMap),
     );
     const manifestSha256 = await hashCsvContent(manifestCsv);
+
+    // Prepend header comments with self-hash and source artifact
+    const headerLines: string[] = [
+      `# manifest_sha256: ${manifestSha256}`,
+    ];
+    if (activeArtifact) {
+      headerLines.push(`# source_artifact_id: ${activeArtifact.id}`);
+      headerLines.push(`# source_artifact_sha256: ${activeArtifact.sha256_hash}`);
+    }
+    manifestCsv = headerLines.join("\n") + "\n" + manifestCsv;
 
     const matchedCount = amexLines.filter((l) => l.match_status === "confirmed").length;
     const noReceiptCount = amexLines.filter((l) => l.match_status === "no_receipt").length;
@@ -121,6 +134,7 @@ export async function POST(request: Request) {
       matchedCount,
       noReceiptCount,
       actor,
+      activeArtifact?.id ?? null,
     );
 
     const manifestR2Key = `reconciliations/${month}/${reconciliationId}-manifest.csv`;
