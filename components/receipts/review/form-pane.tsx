@@ -344,16 +344,16 @@ export function FormPane(props: FormPaneProps) {
   }
 
   const transactionLabel = useMemo(() => {
-    const date = receipt.transaction_date || receipt.captured_at.slice(0, 10);
-    try {
-      return new Date(date).toLocaleDateString("en-US", {
-        month: "short",
-        day: "numeric",
-        year: "numeric",
-      });
-    } catch {
-      return date;
-    }
+    const captured = receipt.captured_at ?? "";
+    const date = receipt.transaction_date || captured.slice(0, 10);
+    if (!date) return "—";
+    const parsed = new Date(date);
+    if (Number.isNaN(parsed.getTime())) return date;
+    return parsed.toLocaleDateString("en-US", {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+    });
   }, [receipt.transaction_date, receipt.captured_at]);
 
   return (
