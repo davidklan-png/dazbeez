@@ -26,11 +26,12 @@ export function buildQueueItems(receipts: ReceiptRecord[]): QueueItem[] {
   return receipts.map((r) => {
     const code = r.expense_category_code ?? "";
     const cat = getCategoryByCode(code);
+    const captured = r.captured_at ?? "";
     return {
       id: r.id,
       merchant: r.merchant?.trim() || "Unnamed receipt",
       amountLabel: formatAmount(r.amount_minor, r.currency),
-      dateLabel: formatDate(r.transaction_date ?? r.captured_at.slice(0, 10)),
+      dateLabel: formatDate(r.transaction_date ?? captured.slice(0, 10)),
       categoryLabel: cat ? cat.enName : code ? code : "Uncategorized",
       status: r.status,
       needs: needsFlag(r, code),
@@ -60,12 +61,10 @@ function formatAmount(amount: number | null, currency: string | null) {
 }
 
 function formatDate(d: string) {
-  try {
-    const date = new Date(d);
-    return date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
-  } catch {
-    return d.slice(0, 10);
-  }
+  if (!d) return "—";
+  const date = new Date(d);
+  if (Number.isNaN(date.getTime())) return d.slice(0, 10);
+  return date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
 
 export function QueueRail({
