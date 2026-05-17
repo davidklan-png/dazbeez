@@ -6,6 +6,7 @@ import {
   getFinalizedReconciliationForMonth,
   listAmexLineAttendeeNamesByMonth,
   listAmexLines,
+  listAttendees,
   listReceiptRecords,
 } from "@/lib/receipts/db";
 import { hashCsvContent } from "@/lib/receipts/export";
@@ -48,10 +49,14 @@ export async function POST(request: Request) {
     const amexAttendees = await listAmexLineAttendeeNamesByMonth(month);
     const receipts = await listReceiptRecords({ paymentPath: "AMEX", limit: 200 });
     const receiptAttendeeMap = new Map<string, string[]>();
-    for (const r of receipts) {
-      const { listAttendees } = await import("@/lib/receipts/db");
-      const att = await listAttendees(r.id);
-      if (att.length > 0) receiptAttendeeMap.set(r.id, att.map((a) => a.attendee_name));
+    const attendeeResults = await Promise.all(
+      receipts.map(async (r) => {
+        const att = await listAttendees(r.id);
+        return att.length > 0 ? [r.id, att.map((a) => a.attendee_name)] as const : null;
+      }),
+    );
+    for (const entry of attendeeResults) {
+      if (entry) receiptAttendeeMap.set(entry[0], entry[1]);
     }
 
     for (const line of amexLines) {
