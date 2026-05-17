@@ -268,13 +268,13 @@ test("contested receipt goes to higher-confidence line; loser gets no suggestion
       id: "line-a",
       amount_minor: 380000,
       transaction_date: "2024-01-15",
-      merchant: null,
+      merchant: "",
     }),
     makeAmexLine({
       id: "line-b",
       amount_minor: 380000,
       transaction_date: "2024-01-13",
-      merchant: null,
+      merchant: "",
     }),
   ];
   const receipts = [
@@ -282,13 +282,13 @@ test("contested receipt goes to higher-confidence line; loser gets no suggestion
       id: "r-x",
       amount_minor: 380000,
       transaction_date: "2024-01-15",
-      merchant: null,
+      merchant: "",
     }),
     makeReceipt({
       id: "r-y",
       amount_minor: 381000,
       transaction_date: "2024-01-18",
-      merchant: null,
+      merchant: "",
     }),
   ];
   const matches = matchAmexToReceipts(lines, receipts);
@@ -325,8 +325,8 @@ test("2-day delta scores between 0-day and 6-day", () => {
     const base = "2024-01-15";
     const target = new Date(Date.UTC(2024, 0, 15 + days));
     const targetStr = target.toISOString().slice(0, 10);
-    const lines = [makeAmexLine({ transaction_date: base, merchant: null })];
-    const receipts = [makeReceipt({ transaction_date: targetStr, merchant: null })];
+    const lines = [makeAmexLine({ transaction_date: base, merchant: "" })];
+    const receipts = [makeReceipt({ transaction_date: targetStr, merchant: "" })];
     const matches = matchAmexToReceipts(lines, receipts);
     assert.equal(matches.length, 1, `expected a match at ${days} days`);
     return matches[0]!.confidenceScore;
@@ -341,7 +341,7 @@ test("2-day delta scores between 0-day and 6-day", () => {
 });
 
 test("8-day delta is rejected (> 7-day window)", () => {
-  const lines = [makeAmexLine({ transaction_date: "2024-01-15", merchant: null })];
+  const lines = [makeAmexLine({ transaction_date: "2024-01-15", merchant: "" })];
   const receipts = [makeReceipt({ transaction_date: "2024-01-23", merchant: null })];
   const matches = matchAmexToReceipts(lines, receipts);
   assert.equal(matches.length, 0, "8-day gap should fall outside the 7-day window");
