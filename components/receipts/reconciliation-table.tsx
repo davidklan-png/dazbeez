@@ -315,6 +315,13 @@ export function ReconciliationTable({
 
   return (
     <div className="space-y-6">
+      {stmtWindow && (
+        <p className="text-xs text-gray-500">
+          Statement window: {stmtWindow.start} → {stmtWindow.end}
+          {stmtWindow.source === "fallback" && " (estimated — no lines imported)"}
+        </p>
+      )}
+
       {error && (
         <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
           {error}
