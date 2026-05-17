@@ -24,12 +24,15 @@ const MANIFEST_HEADERS = [
   "expense_category_code",
   "cardholder_name",
   "source_file_sha256",
+  "attendees_amex",
+  "attendees_receipt",
 ];
 
 export function buildReconciliationManifestCsv(
   lines: AmexStatementLine[],
   receipts: ReceiptRecord[],
-  attendeeMap: Record<string, string[]>,
+  amexAttendeeMap: Record<string, string[]>,
+  receiptAttendeeMap: Record<string, string[]>,
 ): string {
   const receiptMap = new Map(receipts.map((r) => [r.id, r]));
 
@@ -43,6 +46,11 @@ export function buildReconciliationManifestCsv(
     const amount = line.currency === "JPY"
       ? String(line.amount_minor)
       : (line.amount_minor / 100).toFixed(2);
+
+    const amexAtts = amexAttendeeMap[line.id] ?? [];
+    const receiptAtts = receipt?.id
+      ? (receiptAttendeeMap[receipt.id] ?? [])
+      : [];
 
     rows.push(
       [
@@ -60,6 +68,8 @@ export function buildReconciliationManifestCsv(
         csvEscape(line.expense_category_code),
         csvEscape(line.cardholder_name),
         csvEscape(line.source_file_sha256),
+        csvEscape(amexAtts.join("; ")),
+        csvEscape(receiptAtts.join("; ")),
       ].join(","),
     );
   }

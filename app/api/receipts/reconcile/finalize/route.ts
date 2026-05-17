@@ -103,6 +103,7 @@ export async function POST(request: Request) {
       amexLines,
       receipts,
       amexAttendees,
+      Object.fromEntries(receiptAttendeeMap),
     );
     const manifestSha256 = await hashCsvContent(manifestCsv);
 
