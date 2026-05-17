@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { requireReceiptsActor } from "@/lib/receipts/auth";
 import {
   createReconciliationDraft,
+  deleteDraftReconciliation,
   finalizeReconciliation,
   getAmexArtifactByMonth,
   getFinalizedReconciliationForMonth,
@@ -12,7 +13,7 @@ import {
 } from "@/lib/receipts/db";
 import { hashCsvContent } from "@/lib/receipts/export";
 import { buildReconciliationManifestCsv } from "@/lib/receipts/reconciliation-signoff";
-import { archiveManifest } from "@/lib/receipts/storage";
+import { archiveManifest, deleteArchiveObject } from "@/lib/receipts/storage";
 import { requiresAttendees } from "@/lib/receipts/categories";
 
 export async function POST(request: Request) {
@@ -139,16 +140,35 @@ export async function POST(request: Request) {
 
     const manifestR2Key = `reconciliations/${month}/${reconciliationId}-manifest.csv`;
 
-    // Upload manifest to archive bucket
-    const encoder = new TextEncoder();
-    await archiveManifest(manifestR2Key, encoder.encode(manifestCsv).buffer as ArrayBuffer);
+    try {
+      // Upload manifest to archive bucket
+      const encoder = new TextEncoder();
+      await archiveManifest(manifestR2Key, encoder.encode(manifestCsv).buffer as ArrayBuffer);
 
-    await finalizeReconciliation(
-      reconciliationId,
-      manifestR2Key,
-      manifestSha256,
-      actor,
-    );
+      await finalizeReconciliation(
+        reconciliationId,
+        manifestR2Key,
+        manifestSha256,
+        actor,
+      );
+    } catch (finalizeError) {
+      // Unique constraint violation means another request finalized first
+      if (
+        finalizeError instanceof Error &&
+        (finalizeError.message.includes("CONSTRAINT") ||
+          finalizeError.message.includes("UNIQUE"))
+      ) {
+        // Clean up draft row and uploaded manifest
+        await deleteDraftReconciliation(reconciliationId).catch(() => {});
+        await deleteArchiveObject(manifestR2Key).catch(() => {});
+
+        return NextResponse.json(
+          { error: `Reconciliation for ${month} was finalized by another request.` },
+          { status: 409 },
+        );
+      }
+      throw finalizeError;
+    }
 
     return NextResponse.json(
       {

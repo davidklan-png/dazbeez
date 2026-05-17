@@ -1302,6 +1302,14 @@ export async function createReconciliationDraft(
   return id;
 }
 
+export async function deleteDraftReconciliation(id: string): Promise<void> {
+  const db = getReceiptsDb();
+  await db
+    .prepare(`DELETE FROM amex_reconciliations WHERE id = ? AND status = 'draft'`)
+    .bind(id)
+    .run();
+}
+
 export async function finalizeReconciliation(
   reconciliationId: string,
   manifestR2Key: string,
