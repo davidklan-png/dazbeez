@@ -16,7 +16,6 @@ interface GoogleVisionError {
 interface GoogleVisionResponse {
   responses?: Array<{
     fullTextAnnotation?: { text?: string };
-    textAnnotations?: Array<{ description?: string }>;
     error?: GoogleVisionError;
   }>;
   error?: GoogleVisionError;
@@ -230,20 +229,33 @@ class GoogleVisionOcrExtractionProvider implements ExtractionProvider {
     }
 
     const apiKey = getGoogleCloudVisionApiKey();
+
+    // Build the body, then drop our local references to the image bytes and
+    // base64 string. The fetch+JSON.parse round-trip is hundreds of ms of
+    // network wait — without this, the original Uint8Array (~3-5 MB), the
+    // base64 string (~4-7 MB), and the JSON body (~4-7 MB) all stay pinned
+    // through the entire round-trip and through `response.json()`, which is
+    // exactly the heap pressure that trips Worker 1102 after a few requests.
+    let bodyImage: string | null = bytesToBase64(imageBytes);
+    const body = JSON.stringify({
+      requests: [
+        {
+          image: { content: bodyImage },
+          features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
+          imageContext: { languageHints: ["ja", "en"] },
+        },
+      ],
+    });
+    bodyImage = null;
+    // The caller's Uint8Array is still alive in the route handler, but our
+    // local reference (and the base64 string above) are now free to collect.
+
     const response = await fetch(
       `https://vision.googleapis.com/v1/images:annotate?key=${encodeURIComponent(apiKey)}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          requests: [
-            {
-              image: { content: bytesToBase64(imageBytes) },
-              features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
-              imageContext: { languageHints: ["ja", "en"] },
-            },
-          ],
-        }),
+        body,
       },
     );
 
@@ -257,10 +269,10 @@ class GoogleVisionOcrExtractionProvider implements ExtractionProvider {
       throw new Error(annotation.error.message ?? "Google Vision OCR failed.");
     }
 
-    const rawText =
-      annotation?.fullTextAnnotation?.text ??
-      annotation?.textAnnotations?.[0]?.description ??
-      "";
+    // DOCUMENT_TEXT_DETECTION populates fullTextAnnotation.text whenever it
+    // returns anything at all — the per-word textAnnotations array is large
+    // and never needed for our parse.
+    const rawText = annotation?.fullTextAnnotation?.text ?? "";
     const parsed = parseReceiptOcrText(rawText);
 
     return {

@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useState } from "react";
+import { maybeResizeImage } from "@/lib/receipts/client-image";
 
 export type PaymentChip = "AMEX" | "CASH" | null;
 
@@ -39,8 +40,12 @@ export function ReceiptDropButton({
     onError("");
 
     try {
+      // Downscale 3-12 MB phone photos to ~200-500 KB before upload. Keeps
+      // the worker's CPU budget under control during OCR extraction.
+      const uploadFile = await maybeResizeImage(file);
+
       const formData = new FormData();
-      formData.append("file", file);
+      formData.append("file", uploadFile);
       formData.append("source", "mobile_capture");
       if (paymentChip) formData.append("paymentPath", paymentChip);
 

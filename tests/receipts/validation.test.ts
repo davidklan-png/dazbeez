@@ -33,14 +33,14 @@ test("validateReceiptFile: unsupported MIME type is rejected", () => {
   assert.match(err!, /not allowed/i);
 });
 
-test("validateReceiptFile: file over 10 MiB is rejected", () => {
+test("validateReceiptFile: file over MAX_RECEIPT_FILE_BYTES is rejected", () => {
   const file = makeFile("big.jpg", "image/jpeg", MAX_RECEIPT_FILE_BYTES + 1);
   const err = validateReceiptFile(file);
   assert.ok(err !== null, "expected an error for oversized file");
   assert.match(err!, /too large/i);
 });
 
-test("validateReceiptFile: file exactly at 10 MiB limit passes", () => {
+test("validateReceiptFile: file at MAX_RECEIPT_FILE_BYTES limit passes", () => {
   const file = makeFile("max.jpg", "image/jpeg", MAX_RECEIPT_FILE_BYTES);
   assert.equal(validateReceiptFile(file), null);
 });

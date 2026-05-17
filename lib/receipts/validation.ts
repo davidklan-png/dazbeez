@@ -17,14 +17,18 @@ export const ALLOWED_RECEIPT_EXTENSIONS = [
   ".pdf",
 ];
 
-export const MAX_RECEIPT_FILE_BYTES = 10 * 1024 * 1024; // 10 MiB
+// 5 MiB cap on both upload and extraction. The Google Vision request body
+// is base64-encoded (≈ 1.33× the raw size) and JSON.stringified — anything
+// larger pins enough heap in the worker to trip 1102 during back-to-back
+// extractions. Clients should resize before upload (see client-image.ts).
+export const MAX_RECEIPT_FILE_BYTES = 5 * 1024 * 1024; // 5 MiB
 
 export const ALLOWED_CURRENCIES = ["JPY", "USD", "EUR", "GBP", "AUD", "CNY"];
 
 export function validateReceiptFile(file: File): string | null {
   if (file.size > MAX_RECEIPT_FILE_BYTES) {
     const mb = (file.size / (1024 * 1024)).toFixed(1);
-    return `File is too large (${mb} MB). Maximum allowed size is 10 MB.`;
+    return `File is too large (${mb} MB). Maximum allowed size is 5 MB.`;
   }
 
   const ext = `.${file.name.split(".").pop()?.toLowerCase() ?? ""}`;
