@@ -216,6 +216,29 @@ test("refund line does not greedily match unrelated positive receipts", () => {
   assert.equal(matches.length, 0);
 });
 
+test("reconciled receipts are excluded from matching", () => {
+  const lines = [makeAmexLine()];
+  const receipts = [makeReceipt({ status: "reconciled" })];
+  const matches = matchAmexToReceipts(lines, receipts);
+  assert.equal(matches.length, 0, "reconciled receipts must not be matched");
+});
+
+test("needs_review and captured receipts remain eligible", () => {
+  const lines = [
+    makeAmexLine({ id: "line-a", transaction_date: "2024-01-15" }),
+  ];
+  const receipts = [
+    makeReceipt({ id: "r-needs", status: "needs_review", transaction_date: "2024-01-15" }),
+    makeReceipt({ id: "r-captured", status: "captured", transaction_date: "2024-01-15" }),
+  ];
+  const matches = matchAmexToReceipts(lines, receipts);
+  assert.equal(matches.length, 1, "one of the eligible receipts should match");
+  assert.ok(
+    matches[0]!.receiptId === "r-needs" || matches[0]!.receiptId === "r-captured",
+    "matched receipt should be either needs_review or captured",
+  );
+});
+
 test("soft-deleted receipts are excluded from matching (defense-in-depth)", () => {
   const lines = [makeAmexLine()];
   const receipts = [makeReceipt({ deleted_at: "2024-01-20T00:00:00Z" })];
