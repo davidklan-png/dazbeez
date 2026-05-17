@@ -6,8 +6,9 @@ import { extractReceiptData } from "@/lib/receipts/extraction";
 import { createAuditEntry } from "@/lib/receipts/audit";
 import { nowIso, stringifyJson } from "@/lib/receipts/db-utils";
 import { getReceiptsDb } from "@/lib/cloudflare-runtime";
+import { MAX_RECEIPT_FILE_BYTES } from "@/lib/receipts/validation";
 
-const EXTRACTION_MAX_BYTES = 5 * 1024 * 1024; // 5 MB
+const EXTRACTION_MAX_BYTES = MAX_RECEIPT_FILE_BYTES;
 
 type RouteContext = { params: Promise<{ id: string }> };
 
