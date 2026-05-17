@@ -79,7 +79,8 @@ export function matchAmexToReceipts(
     (r) =>
       r.deleted_at === null &&
       r.status !== "archived" &&
-      r.status !== "exported",
+      r.status !== "exported" &&
+      r.status !== "reconciled",
   );
 
   // Phase 1: compute best candidate per AMEX line

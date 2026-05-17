@@ -4,6 +4,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import type { AmexStatementLine, ReceiptRecord } from "@/lib/receipts/types";
 import type { ReconciliationMatch } from "@/lib/receipts/types";
+import type { StatementWindow } from "@/lib/receipts/statement-window";
 import {
   EXPENSE_CATEGORIES,
   requiresAttendees as categoryRequiresAttendees,
@@ -18,6 +19,8 @@ interface ReconciliationTableProps {
   orphanReceipts: ReceiptRecord[];
   month: string;
   finalized?: boolean;
+  window?: StatementWindow;
+  receiptsInWindow?: ReceiptRecord[];
 }
 
 export function ReconciliationTable({
@@ -27,6 +30,8 @@ export function ReconciliationTable({
   orphanReceipts,
   month,
   finalized,
+  window: stmtWindow,
+  receiptsInWindow,
 }: ReconciliationTableProps) {
   const router = useRouter();
   const [busy, setBusy] = useState<string | null>(null);
@@ -305,8 +310,18 @@ export function ReconciliationTable({
     return 0;
   });
 
+  // Receipts available in the manual selector — scoped to window
+  const selectorReceipts = receiptsInWindow ?? receipts;
+
   return (
     <div className="space-y-6">
+      {stmtWindow && (
+        <p className="text-xs text-gray-500">
+          Statement window: {stmtWindow.start} → {stmtWindow.end}
+          {stmtWindow.source === "fallback" && " (estimated — no lines imported)"}
+        </p>
+      )}
+
       {error && (
         <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
           {error}
@@ -515,7 +530,7 @@ export function ReconciliationTable({
                       }}
                     >
                       <option value="">— Manually link a receipt —</option>
-                      {receipts
+                      {selectorReceipts
                         .filter((r) => r.payment_path === "AMEX")
                         .map((r) => (
                           <option key={r.id} value={r.id}>

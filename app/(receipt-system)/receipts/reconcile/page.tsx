@@ -4,6 +4,7 @@ import {
   getReconciliationForMonth,
 } from "@/lib/receipts/db";
 import { matchAmexToReceipts } from "@/lib/receipts/reconciliation";
+import { deriveStatementWindow, isReceiptInWindow } from "@/lib/receipts/statement-window";
 import { ReconciliationTable } from "@/components/receipts/reconciliation-table";
 import { assertReceiptsPageAccess } from "@/lib/receipts/auth-request";
 import type { AmexReconciliation } from "@/lib/receipts/types";
@@ -26,9 +27,12 @@ export default async function ReconcilePage({
     getReconciliationForMonth(month),
   ]);
 
+  const window = deriveStatementWindow(amexLines, month);
+  const receiptsInWindow = receipts.filter((r) => isReceiptInWindow(r, window));
+
   const autoMatches = reconciliation?.status === "finalized"
     ? [] // No auto-matching when finalized
-    : matchAmexToReceipts(amexLines, receipts);
+    : matchAmexToReceipts(amexLines, receiptsInWindow);
 
   const linkedReceiptIds = new Set(
     amexLines
@@ -36,13 +40,13 @@ export default async function ReconcilePage({
       .filter((id): id is string => !!id),
   );
   const suggestedReceiptIds = new Set(autoMatches.map((m) => m.receiptId));
-  const orphanReceipts = receipts.filter(
+  const orphanReceipts = receiptsInWindow.filter(
     (r) =>
       r.payment_path === "AMEX" &&
       r.status !== "archived" &&
       r.status !== "exported" &&
+      r.status !== "reconciled" &&
       !r.deleted_at &&
-      (!r.transaction_date || r.transaction_date.startsWith(month)) &&
       !linkedReceiptIds.has(r.id) &&
       !suggestedReceiptIds.has(r.id),
   );
@@ -86,6 +90,8 @@ export default async function ReconcilePage({
         orphanReceipts={orphanReceipts}
         month={month}
         finalized={reconciliation?.status === "finalized"}
+        window={window}
+        receiptsInWindow={receiptsInWindow}
       />
     </div>
   );
