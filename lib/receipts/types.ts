@@ -176,6 +176,7 @@ export interface AmexStatementLine {
   business_trip_id: string | null;
   business_trip_status: AmexBusinessTripStatus;
   expense_category_code: string | null;
+  re_review_needed: 0 | 1;
   updated_at: string | null;
 }
 

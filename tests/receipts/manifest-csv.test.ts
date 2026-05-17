@@ -33,6 +33,7 @@ function makeLine(overrides: Partial<AmexStatementLine> = {}): AmexStatementLine
     business_trip_id: null,
     business_trip_status: "not_applicable",
     expense_category_code: "office_supplies",
+    re_review_needed: 0,
     updated_at: null,
     ...overrides,
   };

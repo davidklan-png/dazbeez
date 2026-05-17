@@ -549,6 +549,11 @@ export function ReconciliationTable({
                       <td className="px-4 py-3 text-gray-700">{line.transaction_date}</td>
                       <td className="px-4 py-3 font-medium text-gray-900">
                         {line.merchant}
+                        {line.re_review_needed === 1 && (
+                          <span className="ml-1.5 inline-block rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">
+                            Re-review
+                          </span>
+                        )}
                         {line.cardholder_name && (
                           <span className="ml-1 text-gray-400">({line.cardholder_name})</span>
                         )}

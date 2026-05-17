@@ -436,7 +436,15 @@ export async function importAmexLines(
            source_file_sha256 = excluded.source_file_sha256,
            statement_artifact_id = excluded.statement_artifact_id,
            imported_at = excluded.imported_at,
-           raw_json = excluded.raw_json`,
+           raw_json = excluded.raw_json,
+           re_review_needed = CASE
+             WHEN match_status = 'confirmed'
+               AND (transaction_date IS NOT excluded.transaction_date
+                 OR merchant IS NOT excluded.merchant
+                 OR amount_minor IS NOT excluded.amount_minor)
+             THEN 1
+             ELSE re_review_needed
+           END`,
       )
       .bind(...binds)
       .run();
