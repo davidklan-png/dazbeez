@@ -329,7 +329,12 @@ export async function importAmexLines(
   >();
   for (const r of existingResult.results) {
     if (r.amex_reference) {
-      existingMap.set(`${r.amex_reference}|${r.cardholder_name ?? ""}`, r);
+      existingMap.set(`ref|${r.amex_reference}|${r.cardholder_name ?? ""}`, r);
+    } else {
+      existingMap.set(
+        `noref|${r.transaction_date}|${r.amount_minor}|${r.merchant}|${r.cardholder_name ?? ""}`,
+        r,
+      );
     }
   }
 
@@ -339,7 +344,7 @@ export async function importAmexLines(
 
   for (const row of rows) {
     if (row.amexReference) {
-      const key = `${row.amexReference}|${row.cardholderName ?? ""}`;
+      const key = `ref|${row.amexReference}|${row.cardholderName ?? ""}`;
       const ex = existingMap.get(key);
       if (!ex) {
         inserted++;
@@ -357,7 +362,20 @@ export async function importAmexLines(
         updated++;
       }
     } else {
-      inserted++;
+      const key = `noref|${row.transactionDate}|${row.amountMinor}|${row.merchant}|${row.cardholderName ?? ""}`;
+      const ex = existingMap.get(key);
+      if (!ex) {
+        inserted++;
+      } else if (
+        (ex.posting_date ?? "") === (row.postingDate ?? "") &&
+        ex.currency === (row.currency ?? "JPY") &&
+        (ex.memo ?? "") === (row.memo ?? "") &&
+        ex.raw_json === row.rawJson
+      ) {
+        unchanged++;
+      } else {
+        updated++;
+      }
     }
   }
 
@@ -424,7 +442,7 @@ export async function importAmexLines(
       .run();
   }
 
-  // ── INSERT OR IGNORE for rows without amex_reference (rare edge case) ───
+  // ── Upsert for rows without amex_reference (rare edge case) ───
   for (let i = 0; i < withoutRef.length; i += CHUNK_SIZE) {
     const chunk = withoutRef.slice(i, i + CHUNK_SIZE);
     const placeholders = chunk.map(() => rowPlaceholder).join(",");
@@ -454,13 +472,24 @@ export async function importAmexLines(
     }
     await db
       .prepare(
-        `INSERT OR IGNORE INTO amex_statement_lines
+        `INSERT INTO amex_statement_lines
           (id, statement_month, transaction_date, posting_date, merchant,
            amount_minor, currency, amex_reference, match_status, raw_json,
            statement_artifact_id, cardholder_name, cardholder_flag, payment_type,
            prepayment_flag, memo, raw_csv_line_number, source_file_sha256,
            imported_at, created_at)
-         VALUES ${placeholders}`,
+         VALUES ${placeholders}
+         ON CONFLICT (statement_month, transaction_date, amount_minor, merchant, cardholder_name)
+           WHERE amex_reference IS NULL
+         DO UPDATE SET
+           posting_date = excluded.posting_date,
+           currency = excluded.currency,
+           memo = excluded.memo,
+           raw_csv_line_number = excluded.raw_csv_line_number,
+           source_file_sha256 = excluded.source_file_sha256,
+           statement_artifact_id = excluded.statement_artifact_id,
+           imported_at = excluded.imported_at,
+           raw_json = excluded.raw_json`,
       )
       .bind(...binds)
       .run();
