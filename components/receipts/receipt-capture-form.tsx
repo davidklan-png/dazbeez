@@ -1,74 +1,122 @@
 "use client";
 
-import { useState } from "react";
-import { ReceiptDropButton, type PaymentChip } from "@/components/receipts/receipt-drop-button";
-import { ReceiptCaptureSuccess } from "@/components/receipts/receipt-capture-success";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useIsMobile } from "@/lib/receipts/use-viewport";
+import {
+  useReceiptUpload,
+  type CapturePhase,
+} from "@/components/receipts/capture/use-receipt-upload";
+import { CaptureMobile } from "@/components/receipts/capture/capture-mobile";
+import {
+  CaptureDesktop,
+  type SessionUpload,
+} from "@/components/receipts/capture/capture-desktop";
+import type { PaymentPath } from "@/lib/receipts/types";
 
-interface ReceiptCaptureFormProps {
+// Back-compat alias; old callers may import PaymentChip from receipt-drop-button.
+export type PaymentChip = PaymentPath | null;
+
+export interface ReceiptCaptureFormProps {
   initialPayment?: PaymentChip;
   rapidMode?: boolean;
+  todayCount?: number;
 }
 
-type UploadState =
-  | { phase: "idle" }
-  | { phase: "uploading" }
-  | { phase: "success"; receiptId: string; reviewUrl: string }
-  | { phase: "error"; message: string };
-
 export function ReceiptCaptureForm({
-  initialPayment,
+  initialPayment = null,
   rapidMode = false,
+  todayCount = 0,
 }: ReceiptCaptureFormProps) {
-  const [state, setState] = useState<UploadState>({ phase: "idle" });
+  const isMobile = useIsMobile();
+  const { phase, upload, reset, cancel } = useReceiptUpload();
+  const [sessionUploads, setSessionUploads] = useState<SessionUpload[]>([]);
+  const activeIdRef = useRef<string | null>(null);
 
-  function handleSuccess(receiptId: string, reviewUrl: string) {
-    setState({ phase: "success", receiptId, reviewUrl });
+  const onPickFile = useCallback(
+    async (file: File) => {
+      if (isMobile) {
+        await upload(file, initialPayment);
+        return;
+      }
+      // Desktop: register a session upload row immediately
+      const id = crypto.randomUUID();
+      activeIdRef.current = id;
+      setSessionUploads((prev) => [
+        {
+          id,
+          fileName: file.name,
+          fileSizeBytes: file.size,
+          state: "uploading",
+          pct: 5,
+        },
+        ...prev,
+      ]);
+      await upload(file, initialPayment);
+    },
+    [isMobile, upload, initialPayment],
+  );
+
+  // Mirror upload phase into the active session upload row (desktop only).
+  useEffect(() => {
+    if (isMobile) return;
+    const activeId = activeIdRef.current;
+    if (!activeId) return;
+    setSessionUploads((prev) =>
+      prev.map((u) =>
+        u.id === activeId ? applyPhaseToUpload(u, phase) : u,
+      ),
+    );
+  }, [phase, isMobile]);
+
+  if (isMobile) {
+    return (
+      <CaptureMobile
+        initialPayment={initialPayment}
+        rapidMode={rapidMode}
+        todayCount={todayCount}
+        phase={phase}
+        onPickFile={onPickFile}
+        onCancel={cancel}
+        onReset={reset}
+      />
+    );
   }
-
-  function handleError(message: string) {
-    if (message) setState({ phase: "error", message });
-    else setState({ phase: "idle" });
-  }
-
-  function handleAddAnother() {
-    setState({ phase: "idle" });
-  }
-
-  const uploading = state.phase === "uploading";
 
   return (
-    <div className="space-y-4">
-      {state.phase === "success" ? (
-        <ReceiptCaptureSuccess
-          reviewUrl={state.reviewUrl}
-          rapidMode={rapidMode}
-          onAddAnother={handleAddAnother}
-        />
-      ) : (
-        <>
-          <ReceiptDropButton
-            initialPayment={initialPayment}
-            onSuccess={handleSuccess}
-            onError={handleError}
-            uploading={uploading}
-            setUploading={(v) =>
-              setState(v ? { phase: "uploading" } : { phase: "idle" })
-            }
-          />
-
-          {state.phase === "uploading" && (
-            <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-center text-sm text-amber-700">
-              Photo captured. Uploading receipt…
-            </div>
-          )}
-
-          {state.phase === "error" && (
-            <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-              {state.message}
-            </div>
-          )}
-        </>
-      )}
-    </div>
+    <CaptureDesktop
+      initialPayment={initialPayment}
+      phase={phase}
+      onPickFile={onPickFile}
+      sessionUploads={sessionUploads}
+    />
   );
+}
+
+function applyPhaseToUpload(
+  u: SessionUpload,
+  phase: CapturePhase,
+): SessionUpload {
+  if (phase.kind === "uploading") {
+    return { ...u, state: "uploading", pct: phase.pct };
+  }
+  if (phase.kind === "saved") {
+    const e = phase.extracted;
+    const amountLabel =
+      e?.amount != null
+        ? `${e.currency === "JPY" || !e.currency ? "¥" : ""}${e.amount.toLocaleString()}`
+        : "";
+    return {
+      ...u,
+      state: phase.ocrStatus === "done" ? "ready" : "review",
+      pct: 100,
+      receiptId: phase.receiptId,
+      merchant: e?.merchant ?? undefined,
+      amount: amountLabel || undefined,
+      date: e?.transactionDate ?? undefined,
+    };
+  }
+  if (phase.kind === "error") {
+    return { ...u, state: "error", pct: 100, errorMessage: phase.message };
+  }
+  return u;
 }

@@ -7,6 +7,7 @@
   --bee-yellow-light: #FBBF24;
   --bee-black: #1F2937;
   --bee-charcoal: #111827;
+  --gray-150: #ECEEF2;
 }
 
 @theme inline {
@@ -16,7 +17,19 @@
   --color-bee-yellow-light: #FBBF24;
   --color-bee-black: #1F2937;
   --color-bee-charcoal: #111827;
+  --color-gray-150: #ECEEF2;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
 }
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400 500;
+  font-display: swap;
+  src: url('https://fonts.gstatic.com/s/jetbrainsmono/v18/tDbY2o-flEEny0FZhsfKu5WU4zr3E_BX0PnT8RD8yKxjPVmUsaaDhw.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
 
 * {
   box-sizing: border-box;

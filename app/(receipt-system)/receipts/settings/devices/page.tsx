@@ -19,12 +19,12 @@ export default async function DevicesPage() {
   const currentDeviceId = await getCurrentDeviceId(requestHeaders);
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 px-8 py-8">
       <div>
         <p className="text-xs font-semibold uppercase tracking-[0.24em] text-amber-600">
           Settings
         </p>
-        <h1 className="mt-2 text-2xl font-semibold text-gray-900">
+        <h1 className="mt-2 text-[26px] font-bold text-gray-900">
           Trusted devices
         </h1>
         <p className="mt-1 text-sm text-gray-600">

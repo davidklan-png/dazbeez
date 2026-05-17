@@ -1,7 +1,17 @@
 import { notFound } from "next/navigation";
-import { getReceiptRecord, listAttendees } from "@/lib/receipts/db";
-import { ReceiptReviewForm } from "@/components/receipts/receipt-review-form";
+import {
+  getReceiptRecord,
+  listAttendees,
+  listReceiptRecords,
+} from "@/lib/receipts/db";
 import { assertReceiptsPageAccess } from "@/lib/receipts/auth-request";
+import { ReviewLayout } from "@/components/receipts/review/review-layout";
+import {
+  QueueRail,
+  buildQueueItems,
+} from "@/components/receipts/review/queue-rail";
+import { ImagePane } from "@/components/receipts/review/image-pane";
+import { FormPane } from "@/components/receipts/review/form-pane";
 
 export const dynamic = "force-dynamic";
 
@@ -13,20 +23,57 @@ export default async function ReviewReceiptPage({
   await assertReceiptsPageAccess();
 
   const { id } = await params;
-  const receipt = await getReceiptRecord(id);
+  const [receipt, attendees, all] = await Promise.all([
+    getReceiptRecord(id),
+    listAttendees(id),
+    listReceiptRecords({ limit: 200 }),
+  ]);
   if (!receipt) notFound();
 
-  const attendees = await listAttendees(id);
+  const queueItems = buildQueueItems(all);
+  const activeIndex = queueItems.findIndex((q) => q.id === id);
+  const nextReceiptId = queueItems[activeIndex + 1]?.id ?? null;
+  const prevReceiptId = queueItems[activeIndex - 1]?.id ?? null;
+
+  const needsAttention = all.filter(
+    (r) => r.status === "needs_review" || r.status === "captured",
+  ).length;
+
+  const shortId = `R-${receipt.id.slice(0, 8)}`;
 
   return (
-    <div className="space-y-6">
-      <div>
-        <h2 className="text-2xl font-semibold text-gray-900">Review Receipt</h2>
-        <p className="mt-1 text-sm text-gray-500">
-          Verify and correct the receipt details before export.
-        </p>
-      </div>
-      <ReceiptReviewForm receipt={receipt} initialAttendees={attendees} />
-    </div>
+    <ReviewLayout
+      needsAttention={needsAttention}
+      capturedThisMonth={all.length}
+      queueRail={
+        <QueueRail
+          items={queueItems}
+          activeId={id}
+          totalUnreviewed={needsAttention}
+          totalCaptured={all.length}
+        />
+      }
+      imagePane={
+        <ImagePane
+          receiptId={receipt.id}
+          receiptDisplayId={shortId}
+          filename={receipt.original_filename}
+          fileSizeBytes={receipt.original_size_bytes}
+          contentType={receipt.original_content_type}
+          hasExtraction={Boolean(receipt.extraction_json)}
+        />
+      }
+      formPane={
+        <FormPane
+          receipt={receipt}
+          initialAttendees={attendees}
+          queueIndex={Math.max(1, activeIndex + 1)}
+          queueTotal={queueItems.length}
+          nextReceiptId={nextReceiptId}
+          prevReceiptId={prevReceiptId}
+          hasAmexMatch={false}
+        />
+      }
+    />
   );
 }

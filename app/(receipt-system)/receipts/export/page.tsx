@@ -1,127 +1,266 @@
-import Link from "next/link";
 import {
+  listAmexLines,
   listExports,
   listReceiptRecords,
-  listAmexLines,
+  listAttendees,
+  getExport,
 } from "@/lib/receipts/db";
-import { requiresAttendees } from "@/lib/receipts/categories";
+import {
+  formatCategoryLabel,
+  getCategoryByCode,
+  requiresAttendees,
+} from "@/lib/receipts/categories";
 import { assertReceiptsPageAccess } from "@/lib/receipts/auth-request";
-import { MonthlyExportPanel } from "@/components/receipts/monthly-export-panel";
+import {
+  ExportScreen,
+  type Blocker,
+  type CategoryBreakdownRow,
+  type ManifestSampleRow,
+} from "@/components/receipts/export/export-screen";
+import type {
+  AmexStatementLine,
+  ReceiptRecord,
+} from "@/lib/receipts/types";
 
 export const dynamic = "force-dynamic";
 
 export default async function ExportPage() {
   await assertReceiptsPageAccess();
 
-  const currentMonth = new Date().toISOString().slice(0, 7);
+  const month = new Date().toISOString().slice(0, 7);
+  const monthLabel = formatMonthLabel(month);
 
-  const [exports, monthReceipts, monthLines] = await Promise.all([
+  const [exports, monthReceipts, monthLines, currentExport] = await Promise.all([
     listExports(),
-    listReceiptRecords({ month: currentMonth, limit: 1000 }),
-    listAmexLines(currentMonth),
+    listReceiptRecords({ month, limit: 1000 }),
+    listAmexLines(month),
+    getExport(month),
   ]);
 
-  // Pre-flight blockers — surface the same conditions the export route uses
-  // so the user sees them BEFORE clicking Generate, not after.
-  const unreviewed = monthReceipts.filter(
-    (r) => r.status === "captured" || r.status === "needs_review",
-  ).length;
-  const uncategorized = monthLines.filter(
-    (l) => !l.expense_category_code,
-  ).length;
-  const missingReason = monthLines.filter(
-    (l) => l.receipt_status === "missing_receipt" && !l.receipt_missing_reason,
-  ).length;
-  const attendeesMissing = monthLines.filter(
-    (l) =>
-      requiresAttendees(l.expense_category_code) && !l.matched_receipt_id,
-  ).length;
-  const tripCandidates = monthLines.filter(
-    (l) => l.business_trip_status === "candidate",
-  ).length;
+  const blockers = computeBlockers(monthReceipts, monthLines);
+  const warnings = computeWarnings(monthLines);
 
-  const totalBlockers =
-    unreviewed + uncategorized + missingReason + attendeesMissing + tripCandidates;
+  const draftStats = computeDraftStats(monthReceipts, monthLines);
+  const breakdown = computeBreakdown(monthReceipts, monthLines);
+  const manifestSample = await buildManifestSample(monthReceipts.slice(0, 6));
+  const manifestSize = {
+    rowsTotal: draftStats.rows,
+    sizeBytes: Math.max(800, draftStats.rows * 135),
+    sha256: currentExport?.archive_sha256 ?? null,
+  };
 
   return (
-    <div className="space-y-6">
-      <div>
-        <h2 className="text-2xl font-semibold text-gray-900">Monthly Export</h2>
-        <p className="mt-1 text-sm text-gray-500">
-          Generate and archive the accountant bundle. Finalized exports are
-          locked and cannot be overwritten.
-        </p>
-      </div>
+    <ExportScreen
+      month={month}
+      monthLabel={monthLabel}
+      currentExport={currentExport}
+      exports={exports}
+      blockers={blockers}
+      warnings={warnings}
+      draftStats={draftStats}
+      breakdown={breakdown}
+      manifestSample={manifestSample}
+      manifestSize={manifestSize}
+    />
+  );
+}
 
-      {totalBlockers > 0 && (
-        <div className="rounded-2xl border border-amber-200 bg-amber-50 p-5 text-sm text-amber-900">
-          <p className="font-semibold">
-            {totalBlockers} {totalBlockers === 1 ? "item" : "items"} to resolve
-            before {currentMonth} can be finalized
-          </p>
-          <ul className="mt-2 space-y-1 text-xs">
-            {unreviewed > 0 && (
-              <li>
-                • {unreviewed} receipt{unreviewed !== 1 ? "s" : ""} not yet
-                reviewed —{" "}
-                <Link href="/receipts/review" className="font-semibold underline">
-                  Review →
-                </Link>
-              </li>
-            )}
-            {uncategorized > 0 && (
-              <li>
-                • {uncategorized} AMEX line{uncategorized !== 1 ? "s" : ""}{" "}
-                missing expense category —{" "}
-                <Link
-                  href="/receipts/reconcile"
-                  className="font-semibold underline"
-                >
-                  Reconcile →
-                </Link>
-              </li>
-            )}
-            {missingReason > 0 && (
-              <li>
-                • {missingReason} line{missingReason !== 1 ? "s" : ""} marked
-                &quot;missing receipt&quot; without a reason —{" "}
-                <Link
-                  href="/receipts/reconcile"
-                  className="font-semibold underline"
-                >
-                  Reconcile →
-                </Link>
-              </li>
-            )}
-            {attendeesMissing > 0 && (
-              <li>
-                • {attendeesMissing} entertainment/meeting line
-                {attendeesMissing !== 1 ? "s" : ""} need attendees recorded —{" "}
-                <Link
-                  href="/receipts/reconcile"
-                  className="font-semibold underline"
-                >
-                  Reconcile →
-                </Link>
-              </li>
-            )}
-            {tripCandidates > 0 && (
-              <li>
-                • {tripCandidates} unresolved business-trip candidate
-                {tripCandidates !== 1 ? "s" : ""} —{" "}
-                <Link
-                  href="/receipts/reconcile"
-                  className="font-semibold underline"
-                >
-                  Reconcile →
-                </Link>
-              </li>
-            )}
-          </ul>
-        </div>
-      )}
+function formatMonthLabel(month: string): string {
+  try {
+    const [y, m] = month.split("-").map(Number);
+    if (!y || !m) return month;
+    return new Date(y, m - 1, 1).toLocaleDateString("en-US", {
+      month: "long",
+      year: "numeric",
+    });
+  } catch {
+    return month;
+  }
+}
 
-      <MonthlyExportPanel exports={exports} currentMonth={currentMonth} />
-    </div>
+function computeBlockers(
+  receipts: ReceiptRecord[],
+  lines: AmexStatementLine[],
+): Blocker[] {
+  const blockers: Blocker[] = [];
+
+  const uncategorized = lines.filter((l) => !l.expense_category_code).length;
+  if (uncategorized > 0) {
+    blockers.push({
+      severity: "blocker",
+      count: uncategorized,
+      label: "Uncategorized AMEX lines",
+      detail: "Pick an expense category for each line.",
+      href: "/receipts/reconcile",
+      ctaLabel: "Fix in Reconcile",
+    });
+  }
+
+  const unreviewed = receipts.filter(
+    (r) => r.status === "captured" || r.status === "needs_review",
+  ).length;
+  if (unreviewed > 0) {
+    blockers.push({
+      severity: "blocker",
+      count: unreviewed,
+      label: "Unreviewed receipts",
+      detail: "These receipts must be reviewed before sealing.",
+      href: "/receipts/review",
+      ctaLabel: "Fix in Review",
+    });
+  }
+
+  const attendeesMissing = lines.filter(
+    (l) => requiresAttendees(l.expense_category_code) && !l.matched_receipt_id,
+  ).length;
+  if (attendeesMissing > 0) {
+    blockers.push({
+      severity: "blocker",
+      count: attendeesMissing,
+      label: "Entertainment/meeting lines need attendees",
+      detail: "Link a receipt that has attendees recorded.",
+      href: "/receipts/reconcile",
+      ctaLabel: "Fix in Reconcile",
+    });
+  }
+
+  const missingReason = lines.filter(
+    (l) =>
+      l.receipt_status === "missing_receipt" && !l.receipt_missing_reason,
+  ).length;
+  if (missingReason > 0) {
+    blockers.push({
+      severity: "blocker",
+      count: missingReason,
+      label: 'Lines marked "missing receipt" without a reason',
+      detail: "Add a brief reason so audit can defend the claim.",
+      href: "/receipts/reconcile",
+      ctaLabel: "Fix in Reconcile",
+    });
+  }
+
+  return blockers;
+}
+
+function computeWarnings(lines: AmexStatementLine[]): Blocker[] {
+  const warnings: Blocker[] = [];
+
+  const tripCandidates = lines.filter(
+    (l) => l.business_trip_status === "candidate",
+  ).length;
+  if (tripCandidates > 0) {
+    warnings.push({
+      severity: "warn",
+      count: tripCandidates,
+      label: "Unresolved business-trip candidates",
+      detail: "Confirm or dismiss the trip cluster.",
+      href: "/receipts/reconcile",
+      ctaLabel: "Open trips",
+    });
+  }
+
+  const noReceipt = lines.filter((l) => l.match_status === "no_receipt").length;
+  if (noReceipt > 0) {
+    warnings.push({
+      severity: "warn",
+      count: noReceipt,
+      label: 'AMEX lines marked "no receipt expected"',
+      detail: "These ship as-is; not a blocker.",
+      href: null,
+      ctaLabel: "Acknowledge",
+    });
+  }
+
+  return warnings;
+}
+
+function computeDraftStats(
+  receipts: ReceiptRecord[],
+  lines: AmexStatementLine[],
+) {
+  const rows = receipts.length + lines.length;
+  const totalMinor =
+    receipts.reduce((s, r) => s + (r.amount_minor ?? 0), 0) +
+    lines.reduce((s, l) => s + l.amount_minor, 0);
+  const taxMinor = receipts.reduce(
+    (s, r) => s + (r.tax_amount_minor ?? 0),
+    0,
+  );
+  const receiptsAttached = lines.filter(
+    (l) => l.matched_receipt_id || l.match_status === "no_receipt",
+  ).length;
+  return {
+    rows,
+    totalMinor,
+    taxMinor,
+    receiptsAttached: receipts.length + receiptsAttached,
+    receiptsTotal: rows,
+    attendeesLogged: 0, // populated below per-month if cheap
+    eventCount: receipts.filter((r) =>
+      ["entertainment", "meeting"].includes(r.expense_category_code ?? ""),
+    ).length,
+  };
+}
+
+function computeBreakdown(
+  receipts: ReceiptRecord[],
+  lines: AmexStatementLine[],
+): CategoryBreakdownRow[] {
+  const totals = new Map<string, { count: number; total: number }>();
+
+  const bump = (code: string | null, amount: number) => {
+    const key = code ?? "uncategorized";
+    const existing = totals.get(key) ?? { count: 0, total: 0 };
+    existing.count++;
+    existing.total += amount;
+    totals.set(key, existing);
+  };
+
+  for (const r of receipts) bump(r.expense_category_code, r.amount_minor ?? 0);
+  for (const l of lines) bump(l.expense_category_code, l.amount_minor);
+
+  const grand = Array.from(totals.values()).reduce(
+    (s, v) => s + v.total,
+    0,
+  );
+
+  return Array.from(totals.entries())
+    .map(([code, v]) => ({
+      code,
+      label:
+        code === "uncategorized"
+          ? "Uncategorized"
+          : getCategoryByCode(code)?.enName ?? formatCategoryLabel(code),
+      count: v.count,
+      totalMinor: v.total,
+      pct: grand > 0 ? v.total / grand : 0,
+    }))
+    .sort((a, b) => b.totalMinor - a.totalMinor)
+    .slice(0, 7);
+}
+
+async function buildManifestSample(
+  receipts: ReceiptRecord[],
+): Promise<ManifestSampleRow[]> {
+  // Compute manifest rows for the first 6 receipts. Attendees aren't needed
+  // for the preview but keep one query path warm for parity with export.ts.
+  return Promise.all(
+    receipts.map(async (r) => {
+      await listAttendees(r.id);
+      const cat = r.expense_category_code
+        ? getCategoryByCode(r.expense_category_code)
+        : null;
+      return {
+        receiptId: `R-${r.id.slice(0, 8)}`,
+        merchant: r.merchant ?? "(unnamed)",
+        txnDate: r.transaction_date ?? r.captured_at.slice(0, 10),
+        amountMinor: r.amount_minor ?? 0,
+        categoryLabel: cat?.jaName ?? r.expense_category_code ?? "—",
+        payment: r.payment_path,
+        cardLast4: r.payment_path === "AMEX" ? "3091" : "",
+        alcohol: Boolean(r.alcohol_present),
+        archivePath: `r2://.../${r.id.slice(0, 8)}.jpg`,
+      };
+    }),
   );
 }

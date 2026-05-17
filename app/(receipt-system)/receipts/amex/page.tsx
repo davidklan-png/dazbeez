@@ -36,10 +36,10 @@ export default async function AmexPage({
   const recentArtifacts = artifacts.slice(0, 6);
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 px-8 py-8">
       <div className="flex items-start justify-between">
         <div>
-          <h2 className="text-2xl font-semibold text-gray-900">AMEX Import</h2>
+          <h2 className="text-[26px] font-bold text-gray-900">AMEX Import</h2>
           <p className="mt-1 text-sm text-gray-500">
             Download from{" "}
             <a
