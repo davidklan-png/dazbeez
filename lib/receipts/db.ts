@@ -1286,6 +1286,65 @@ export async function getReconciliationForMonth(
     .first<AmexReconciliation>();
 }
 
+export async function listReconciliationStatusByMonth(): Promise<
+  Map<string, "draft" | "finalized">
+> {
+  const db = getReceiptsDb();
+  const result = await db
+    .prepare(
+      `SELECT statement_month, status FROM amex_reconciliations
+       WHERE status = 'finalized'
+       UNION
+       SELECT statement_month, MAX(status) AS status FROM amex_reconciliations
+       WHERE status = 'draft'
+       GROUP BY statement_month`,
+    )
+    .all<{ statement_month: string; status: "draft" | "finalized" }>();
+  const map = new Map<string, "draft" | "finalized">();
+  for (const r of result.results ?? []) {
+    const prev = map.get(r.statement_month);
+    if (prev === "finalized") continue;
+    map.set(r.statement_month, r.status);
+  }
+  return map;
+}
+
+export async function listAmexLineCountsByMonth(): Promise<
+  Map<string, { total: number; confirmed: number; unmatched: number; noReceipt: number }>
+> {
+  const db = getReceiptsDb();
+  const result = await db
+    .prepare(
+      `SELECT statement_month,
+              COUNT(*) AS total,
+              SUM(CASE WHEN match_status = 'confirmed' THEN 1 ELSE 0 END) AS confirmed,
+              SUM(CASE WHEN match_status IN ('unmatched','matched') THEN 1 ELSE 0 END) AS unmatched,
+              SUM(CASE WHEN match_status = 'no_receipt' THEN 1 ELSE 0 END) AS noReceipt
+       FROM amex_statement_lines
+       GROUP BY statement_month`,
+    )
+    .all<{
+      statement_month: string;
+      total: number;
+      confirmed: number;
+      unmatched: number;
+      noReceipt: number;
+    }>();
+  const map = new Map<
+    string,
+    { total: number; confirmed: number; unmatched: number; noReceipt: number }
+  >();
+  for (const r of result.results ?? []) {
+    map.set(r.statement_month, {
+      total: r.total,
+      confirmed: r.confirmed,
+      unmatched: r.unmatched,
+      noReceipt: r.noReceipt,
+    });
+  }
+  return map;
+}
+
 export async function createReconciliationDraft(
   month: string,
   lineCount: number,
