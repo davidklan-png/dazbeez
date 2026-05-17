@@ -1290,6 +1290,12 @@ export async function createReconciliationDraft(
   const id = newUuid();
   const now = nowIso();
 
+  // Clear any stale draft rows left by a previous failed sign-off attempt.
+  await db
+    .prepare(`DELETE FROM amex_reconciliations WHERE statement_month = ? AND status = 'draft'`)
+    .bind(month)
+    .run();
+
   await db
     .prepare(
       `INSERT INTO amex_reconciliations
