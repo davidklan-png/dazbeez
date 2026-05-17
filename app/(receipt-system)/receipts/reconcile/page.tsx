@@ -42,7 +42,7 @@ export default async function ReconcilePage({
       r.status !== "archived" &&
       r.status !== "exported" &&
       !r.deleted_at &&
-      r.transaction_date?.startsWith(month) &&
+      (!r.transaction_date || r.transaction_date.startsWith(month)) &&
       !linkedReceiptIds.has(r.id) &&
       !suggestedReceiptIds.has(r.id),
   );
