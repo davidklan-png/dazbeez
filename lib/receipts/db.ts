@@ -1,8 +1,11 @@
 import { getReceiptsDb } from "@/lib/cloudflare-runtime";
 import { createAuditEntry } from "@/lib/receipts/audit";
 import { nowIso, newUuid, stringifyJson } from "@/lib/receipts/db-utils";
+import { shouldOverwriteMerchant } from "@/lib/receipts/reconciliation";
 import type {
   AmexMatchStatus,
+  AmexReceiptStatus,
+  AmexReconciliation,
   AmexStatementLine,
   AmexStatementArtifact,
   BusinessTripReport,
@@ -290,21 +293,103 @@ export async function listAttendees(
 export async function importAmexLines(
   rows: ImportAmexLineInput[],
   actor: string,
-): Promise<{ imported: number; skipped: number }> {
+): Promise<{ inserted: number; updated: number; unchanged: number }> {
   const db = getReceiptsDb();
   const now = nowIso();
-  let imported = 0;
+  const month = rows[0]?.statementMonth;
 
-  // Chunked multi-row INSERTs. Each row binds 19 params (the 20th column,
-  // match_status, is the SQL literal 'unmatched'). D1's hard limit is 100
-  // bind variables per statement, so 5 rows × 19 = 95 is the largest chunk
-  // that stays under the ceiling.
+  if (!month || rows.length === 0) {
+    return { inserted: 0, updated: 0, unchanged: 0 };
+  }
+
+  // ── Pre-query existing lines to classify inserted / updated / unchanged ──
+  const existingResult = await db
+    .prepare(
+      `SELECT amex_reference, cardholder_name, transaction_date, posting_date,
+              merchant, amount_minor, currency, memo, raw_json
+       FROM amex_statement_lines
+       WHERE statement_month = ?`,
+    )
+    .bind(month)
+    .all<{
+      amex_reference: string | null;
+      cardholder_name: string | null;
+      transaction_date: string;
+      posting_date: string | null;
+      merchant: string;
+      amount_minor: number;
+      currency: string;
+      memo: string | null;
+      raw_json: string;
+    }>();
+
+  const existingMap = new Map<
+    string,
+    (typeof existingResult.results)[number]
+  >();
+  for (const r of existingResult.results) {
+    if (r.amex_reference) {
+      existingMap.set(`ref|${r.amex_reference}|${r.cardholder_name ?? ""}`, r);
+    } else {
+      existingMap.set(
+        `noref|${r.transaction_date}|${r.amount_minor}|${r.merchant}|${r.cardholder_name ?? ""}`,
+        r,
+      );
+    }
+  }
+
+  let inserted = 0;
+  let updated = 0;
+  let unchanged = 0;
+
+  for (const row of rows) {
+    if (row.amexReference) {
+      const key = `ref|${row.amexReference}|${row.cardholderName ?? ""}`;
+      const ex = existingMap.get(key);
+      if (!ex) {
+        inserted++;
+      } else if (
+        ex.transaction_date === row.transactionDate &&
+        (ex.posting_date ?? "") === (row.postingDate ?? "") &&
+        ex.merchant === row.merchant &&
+        ex.amount_minor === row.amountMinor &&
+        ex.currency === (row.currency ?? "JPY") &&
+        (ex.memo ?? "") === (row.memo ?? "") &&
+        ex.raw_json === row.rawJson
+      ) {
+        unchanged++;
+      } else {
+        updated++;
+      }
+    } else {
+      const key = `noref|${row.transactionDate}|${row.amountMinor}|${row.merchant}|${row.cardholderName ?? ""}`;
+      const ex = existingMap.get(key);
+      if (!ex) {
+        inserted++;
+      } else if (
+        (ex.posting_date ?? "") === (row.postingDate ?? "") &&
+        ex.currency === (row.currency ?? "JPY") &&
+        (ex.memo ?? "") === (row.memo ?? "") &&
+        ex.raw_json === row.rawJson
+      ) {
+        unchanged++;
+      } else {
+        updated++;
+      }
+    }
+  }
+
+  // ── Chunked INSERT … ON CONFLICT DO UPDATE (with amex_reference) ────────
+  const withRef = rows.filter((r) => !!r.amexReference);
+  const withoutRef = rows.filter((r) => !r.amexReference);
+  // Each row binds 19 params (match_status is the SQL literal 'unmatched').
+  // 19 × 5 = 95 < 100 (D1 bind-variable ceiling).
   const CHUNK_SIZE = 5;
   const rowPlaceholder =
     "(?, ?, ?, ?, ?, ?, ?, ?, 'unmatched', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
-  for (let i = 0; i < rows.length; i += CHUNK_SIZE) {
-    const chunk = rows.slice(i, i + CHUNK_SIZE);
+  for (let i = 0; i < withRef.length; i += CHUNK_SIZE) {
+    const chunk = withRef.slice(i, i + CHUNK_SIZE);
     const placeholders = chunk.map(() => rowPlaceholder).join(",");
     const binds: unknown[] = [];
     for (const row of chunk) {
@@ -330,32 +415,103 @@ export async function importAmexLines(
         now,
       );
     }
-    const result = await db
+    await db
       .prepare(
-        `INSERT OR IGNORE INTO amex_statement_lines
+        `INSERT INTO amex_statement_lines
           (id, statement_month, transaction_date, posting_date, merchant,
            amount_minor, currency, amex_reference, match_status, raw_json,
            statement_artifact_id, cardholder_name, cardholder_flag, payment_type,
            prepayment_flag, memo, raw_csv_line_number, source_file_sha256,
            imported_at, created_at)
-         VALUES ${placeholders}`,
+         VALUES ${placeholders}
+         ON CONFLICT (statement_month, amex_reference, cardholder_name) DO UPDATE SET
+           transaction_date = excluded.transaction_date,
+           posting_date = excluded.posting_date,
+           merchant = excluded.merchant,
+           amount_minor = excluded.amount_minor,
+           currency = excluded.currency,
+           cardholder_name = excluded.cardholder_name,
+           memo = excluded.memo,
+           raw_csv_line_number = excluded.raw_csv_line_number,
+           source_file_sha256 = excluded.source_file_sha256,
+           statement_artifact_id = excluded.statement_artifact_id,
+           imported_at = excluded.imported_at,
+           raw_json = excluded.raw_json,
+           re_review_needed = CASE
+             WHEN match_status = 'confirmed'
+               AND (transaction_date IS NOT excluded.transaction_date
+                 OR merchant IS NOT excluded.merchant
+                 OR amount_minor IS NOT excluded.amount_minor)
+             THEN 1
+             ELSE re_review_needed
+           END`,
       )
       .bind(...binds)
       .run();
-    imported += result.meta.changes ?? 0;
   }
 
-  const skipped = rows.length - imported;
+  // ── Upsert for rows without amex_reference (rare edge case) ───
+  for (let i = 0; i < withoutRef.length; i += CHUNK_SIZE) {
+    const chunk = withoutRef.slice(i, i + CHUNK_SIZE);
+    const placeholders = chunk.map(() => rowPlaceholder).join(",");
+    const binds: unknown[] = [];
+    for (const row of chunk) {
+      binds.push(
+        newUuid(),
+        row.statementMonth,
+        row.transactionDate,
+        row.postingDate ?? null,
+        row.merchant,
+        row.amountMinor,
+        row.currency ?? "JPY",
+        row.amexReference ?? null,
+        row.rawJson,
+        row.statementArtifactId ?? null,
+        row.cardholderName ?? null,
+        row.cardholderFlag ?? null,
+        row.paymentType ?? null,
+        row.prepaymentFlag ?? null,
+        row.memo ?? null,
+        row.rawCsvLineNumber ?? null,
+        row.sourceFileSha256 ?? null,
+        now,
+        now,
+      );
+    }
+    await db
+      .prepare(
+        `INSERT INTO amex_statement_lines
+          (id, statement_month, transaction_date, posting_date, merchant,
+           amount_minor, currency, amex_reference, match_status, raw_json,
+           statement_artifact_id, cardholder_name, cardholder_flag, payment_type,
+           prepayment_flag, memo, raw_csv_line_number, source_file_sha256,
+           imported_at, created_at)
+         VALUES ${placeholders}
+         ON CONFLICT (statement_month, transaction_date, amount_minor, merchant, cardholder_name)
+           WHERE amex_reference IS NULL
+         DO UPDATE SET
+           posting_date = excluded.posting_date,
+           currency = excluded.currency,
+           memo = excluded.memo,
+           raw_csv_line_number = excluded.raw_csv_line_number,
+           source_file_sha256 = excluded.source_file_sha256,
+           statement_artifact_id = excluded.statement_artifact_id,
+           imported_at = excluded.imported_at,
+           raw_json = excluded.raw_json`,
+      )
+      .bind(...binds)
+      .run();
+  }
 
   await createAuditEntry(db, {
     actor,
     action: "amex.imported",
     objectType: "amex_import",
-    objectId: rows[0]?.statementMonth ?? "unknown",
-    newValueJson: stringifyJson({ imported, skipped }),
+    objectId: month,
+    newValueJson: stringifyJson({ inserted, updated, unchanged }),
   });
 
-  return { imported, skipped };
+  return { inserted, updated, unchanged };
 }
 
 export async function listAmexLines(
@@ -414,36 +570,133 @@ export async function updateAmexReconciliation(
   //      reconciled with no AMEX line claiming it.
   const previous = await db
     .prepare(
-      `SELECT matched_receipt_id, match_status
+      `SELECT matched_receipt_id, match_status, receipt_status,
+              merchant, transaction_date, statement_month
        FROM amex_statement_lines
        WHERE id = ?
        LIMIT 1`,
     )
     .bind(amexLineId)
-    .first<{ matched_receipt_id: string | null; match_status: AmexMatchStatus }>();
+    .first<{
+      matched_receipt_id: string | null;
+      match_status: AmexMatchStatus;
+      receipt_status: AmexReceiptStatus;
+      merchant: string | null;
+      transaction_date: string | null;
+      statement_month: string | null;
+    }>();
 
   const previousReceiptId = previous?.matched_receipt_id ?? null;
   const previousStatus: AmexMatchStatus = previous?.match_status ?? "unmatched";
+  const previousReceiptStatus: AmexReceiptStatus = previous?.receipt_status ?? "missing_receipt";
+  const amexMerchant = previous?.merchant ?? null;
+  const amexTransactionDate = previous?.transaction_date ?? null;
+  const statementMonth = previous?.statement_month;
+
+  // Block edits if the month's reconciliation is finalized.
+  if (statementMonth) {
+    await rejectIfFinalized(db, statementMonth);
+  }
+
+  // Derive receipt_status from the new match_status so the two fields stay in
+  // sync. The month-closing validator checks both — drift causes false blockers.
+  const noReceiptKeep = new Set<AmexReceiptStatus>(["no_receipt_required", "receipt_not_available"]);
+  let newReceiptStatus: AmexReceiptStatus;
+  switch (matchStatus) {
+    case "confirmed":
+    case "matched":
+      newReceiptStatus = "matched";
+      break;
+    case "no_receipt":
+      newReceiptStatus = noReceiptKeep.has(previousReceiptStatus) ? previousReceiptStatus : "no_receipt_required";
+      break;
+    case "unmatched":
+      newReceiptStatus = "missing_receipt";
+      break;
+  }
+
+  // Race guard: prevent two AMEX lines from confirming the same receipt.
+  if (matchStatus === "confirmed" && receiptId) {
+    const conflict = await db
+      .prepare(
+        `SELECT id FROM amex_statement_lines
+         WHERE matched_receipt_id = ? AND match_status = 'confirmed' AND id != ?
+         LIMIT 1`,
+      )
+      .bind(receiptId, amexLineId)
+      .first<{ id: string }>();
+    if (conflict) {
+      throw new Error(`Receipt already confirmed against another AMEX line: ${conflict.id}`);
+    }
+  }
 
   const statements = [
     db
       .prepare(
         `UPDATE amex_statement_lines
-         SET matched_receipt_id = ?, match_status = ?
+         SET matched_receipt_id = ?, match_status = ?, receipt_status = ?
          WHERE id = ?`,
       )
-      .bind(receiptId, matchStatus, amexLineId),
+      .bind(receiptId, matchStatus, newReceiptStatus, amexLineId),
   ];
 
-  // Promote the newly-linked receipt.
+  // Promote the newly-linked receipt and adopt AMEX values.
+  let receiptAdoptAudit: {
+    oldMerchant: string | null;
+    newMerchant: string | null;
+    filledDate: string | null;
+  } | null = null;
+
   if (receiptId && matchStatus === "confirmed") {
-    statements.push(
-      db
-        .prepare(
-          `UPDATE receipt_records SET status = 'reconciled', updated_at = ? WHERE id = ?`,
-        )
-        .bind(now, receiptId),
-    );
+    // Read the receipt's current merchant/transaction_date to decide whether
+    // the AMEX override is a no-op (and to populate the audit trail).
+    const receiptRow = await db
+      .prepare(
+        `SELECT merchant, transaction_date FROM receipt_records WHERE id = ? LIMIT 1`,
+      )
+      .bind(receiptId)
+      .first<{ merchant: string | null; transaction_date: string | null }>();
+
+    const receiptMerchant = receiptRow?.merchant ?? null;
+    const receiptDate = receiptRow?.transaction_date ?? null;
+
+    const merchantChanged = shouldOverwriteMerchant(amexMerchant, receiptMerchant);
+
+    const dateFill = !receiptDate && !!amexTransactionDate;
+
+    if (merchantChanged || dateFill) {
+      receiptAdoptAudit = {
+        oldMerchant: receiptMerchant,
+        newMerchant: merchantChanged ? amexMerchant : receiptMerchant,
+        filledDate: dateFill ? amexTransactionDate : null,
+      };
+      statements.push(
+        db
+          .prepare(
+            `UPDATE receipt_records
+             SET merchant = ?,
+                 transaction_date = COALESCE(transaction_date, ?),
+                 status = 'reconciled',
+                 updated_at = ?
+             WHERE id = ?`,
+          )
+          .bind(
+            merchantChanged ? amexMerchant : receiptMerchant,
+            amexTransactionDate,
+            now,
+            receiptId,
+          ),
+      );
+    } else {
+      // No merchant/date change — just promote status.
+      statements.push(
+        db
+          .prepare(
+            `UPDATE receipt_records SET status = 'reconciled', updated_at = ? WHERE id = ?`,
+          )
+          .bind(now, receiptId),
+      );
+    }
   }
 
   // Demote the previously-linked receipt if we're unwinding its confirmation
@@ -476,9 +729,30 @@ export async function updateAmexReconciliation(
     oldValueJson: stringifyJson({
       receiptId: previousReceiptId,
       matchStatus: previousStatus,
+      receiptStatus: previousReceiptStatus,
     }),
-    newValueJson: stringifyJson({ receiptId, matchStatus }),
+    newValueJson: stringifyJson({ receiptId, matchStatus, receiptStatus: newReceiptStatus }),
   });
+
+  // Second audit entry when AMEX values were adopted onto the receipt.
+  if (receiptAdoptAudit && receiptId) {
+    await createAuditEntry(db, {
+      actor,
+      action: "receipt.updated",
+      objectType: "receipt",
+      objectId: receiptId,
+      oldValueJson: stringifyJson({
+        merchant: receiptAdoptAudit.oldMerchant,
+        transactionDateFilled: false,
+      }),
+      newValueJson: stringifyJson({
+        merchant: receiptAdoptAudit.newMerchant,
+        transactionDateFilled: receiptAdoptAudit.filledDate !== null,
+        ...(receiptAdoptAudit.filledDate ? { transactionDate: receiptAdoptAudit.filledDate } : {}),
+        source: "amex_confirm_override",
+      }),
+    });
+  }
 }
 
 // ─── AMEX statement artifacts ────────────────────────────────────────────────
@@ -600,6 +874,15 @@ export async function updateAmexLineCategory(
   actor: string,
 ): Promise<void> {
   const db = getReceiptsDb();
+
+  // Block edits if the month's reconciliation is finalized.
+  const lineMonth = await db
+    .prepare(`SELECT statement_month FROM amex_statement_lines WHERE id = ? LIMIT 1`)
+    .bind(lineId)
+    .first<{ statement_month: string }>();
+  if (lineMonth?.statement_month) {
+    await rejectIfFinalized(db, lineMonth.statement_month);
+  }
 
   const sets: string[] = [];
   const binds: unknown[] = [];
@@ -962,5 +1245,117 @@ export async function finalizeExport(
     objectType: "export",
     objectId: exportId,
     newValueJson: stringifyJson({ archiveR2Key, archiveSha256 }),
+  });
+}
+
+// ─── Reconciliation signoff ────────────────────────────────────────────────
+
+async function rejectIfFinalized(db: D1Database, month: string): Promise<void> {
+  const finalized = await db
+    .prepare(
+      `SELECT id FROM amex_reconciliations WHERE statement_month = ? AND status = 'finalized' LIMIT 1`,
+    )
+    .bind(month)
+    .first<{ id: string }>();
+  if (finalized) {
+    throw new Error(`Reconciliation for ${month} is finalized`);
+  }
+}
+
+export async function getFinalizedReconciliationForMonth(
+  month: string,
+): Promise<AmexReconciliation | null> {
+  const db = getReceiptsDb();
+  return db
+    .prepare(
+      `SELECT * FROM amex_reconciliations WHERE statement_month = ? AND status = 'finalized' LIMIT 1`,
+    )
+    .bind(month)
+    .first<AmexReconciliation>();
+}
+
+export async function getReconciliationForMonth(
+  month: string,
+): Promise<AmexReconciliation | null> {
+  const db = getReceiptsDb();
+  return db
+    .prepare(
+      `SELECT * FROM amex_reconciliations WHERE statement_month = ? ORDER BY created_at DESC LIMIT 1`,
+    )
+    .bind(month)
+    .first<AmexReconciliation>();
+}
+
+export async function createReconciliationDraft(
+  month: string,
+  lineCount: number,
+  matchedCount: number,
+  noReceiptCount: number,
+  actor: string,
+  artifactId: string | null,
+): Promise<string> {
+  const db = getReceiptsDb();
+  const id = newUuid();
+  const now = nowIso();
+
+  // Clear any stale draft rows left by a previous failed sign-off attempt.
+  await db
+    .prepare(`DELETE FROM amex_reconciliations WHERE statement_month = ? AND status = 'draft'`)
+    .bind(month)
+    .run();
+
+  await db
+    .prepare(
+      `INSERT INTO amex_reconciliations
+        (id, statement_month, statement_artifact_id, status, line_count, matched_count, no_receipt_count, created_by, created_at)
+       VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, ?)`,
+    )
+    .bind(id, month, artifactId, lineCount, matchedCount, noReceiptCount, actor, now)
+    .run();
+
+  return id;
+}
+
+export async function deleteDraftReconciliation(id: string): Promise<void> {
+  const db = getReceiptsDb();
+  await db
+    .prepare(`DELETE FROM amex_reconciliations WHERE id = ? AND status = 'draft'`)
+    .bind(id)
+    .run();
+}
+
+export async function finalizeReconciliation(
+  reconciliationId: string,
+  manifestR2Key: string,
+  manifestSha256: string,
+  actor: string,
+): Promise<void> {
+  const db = getReceiptsDb();
+
+  const result = await db
+    .prepare(
+      `UPDATE amex_reconciliations
+       SET status = 'finalized',
+           manifest_r2_key = ?,
+           manifest_sha256 = ?,
+           finalized_by = ?,
+           finalized_at = ?
+       WHERE id = ? AND status = 'draft'`,
+    )
+    .bind(manifestR2Key, manifestSha256, actor, nowIso(), reconciliationId)
+    .run();
+
+  if ((result.meta.changes ?? 0) === 0) {
+    throw new Error(
+      `Reconciliation ${reconciliationId} could not be finalized — it may already be finalized or not found.`,
+    );
+  }
+
+  await createAuditEntry(db, {
+    actor,
+    action: "amex.reconciliation_signed_off",
+    objectType: "amex_reconciliation",
+    objectId: reconciliationId,
+    newValueJson: stringifyJson({ manifestR2Key, manifestSha256 }),
   });
 }

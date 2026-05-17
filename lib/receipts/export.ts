@@ -90,6 +90,11 @@ export function buildManifestCsv(
   archiveSha256: string,
   rowCount: number,
   generatedAt: string,
+  reconciliation?: {
+    id: string;
+    manifestR2Key: string;
+    manifestSha256: string;
+  } | null,
 ): string {
   const lines = [
     "Field,Value",
@@ -100,5 +105,12 @@ export function buildManifestCsv(
     `RowCount,${rowCount}`,
     `GeneratedAt,${csvEscape(generatedAt)}`,
   ];
+  if (reconciliation) {
+    lines.push(
+      `ReconciliationId,${csvEscape(reconciliation.id)}`,
+      `ReconciliationManifestKey,${csvEscape(reconciliation.manifestR2Key)}`,
+      `ReconciliationManifestSha256,${csvEscape(reconciliation.manifestSha256)}`,
+    );
+  }
   return lines.join("\n");
 }

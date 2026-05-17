@@ -108,3 +108,8 @@ export async function computeSha256Hex(buffer: ArrayBuffer): Promise<string> {
   const hashArray = Array.from(new Uint8Array(hashBuffer));
   return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
 }
+
+export async function deleteArchiveObject(key: string): Promise<void> {
+  const bucket = getReceiptsArchiveBucket();
+  await bucket.delete(key);
+}

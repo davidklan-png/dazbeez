@@ -75,6 +75,8 @@ export type BusinessTripStatus =
 
 export type ExportStatus = "draft" | "finalized";
 
+export type AmexReconciliationStatus = "draft" | "finalized";
+
 export type AuditAction =
   | "receipt.uploaded"
   | "receipt.created"
@@ -93,6 +95,8 @@ export type AuditAction =
   | "amex.line_categorized"
   | "amex.reconciled"
   | "amex.business_trip_detected"
+  | "amex.reconciliation_signed_off"
+  | "amex.reconciliation_amended"
   | "export.created"
   | "export.finalized";
 
@@ -172,6 +176,7 @@ export interface AmexStatementLine {
   business_trip_id: string | null;
   business_trip_status: AmexBusinessTripStatus;
   expense_category_code: string | null;
+  re_review_needed: 0 | 1;
   updated_at: string | null;
 }
 
@@ -249,6 +254,22 @@ export interface ReceiptExport {
   archive_sha256: string | null;
   created_by: string;
   created_at: string;
+  finalized_at: string | null;
+}
+
+export interface AmexReconciliation {
+  id: string;
+  statement_month: string;
+  statement_artifact_id: string | null;
+  status: AmexReconciliationStatus;
+  manifest_r2_key: string | null;
+  manifest_sha256: string | null;
+  line_count: number;
+  matched_count: number;
+  no_receipt_count: number;
+  created_by: string;
+  created_at: string;
+  finalized_by: string | null;
   finalized_at: string | null;
 }
 
