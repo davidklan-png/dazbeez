@@ -6,6 +6,7 @@ import {
   listReceiptRecords,
 } from "@/lib/receipts/db";
 import type { ExportRow, ReceiptRecord } from "@/lib/receipts/types";
+import { validateAmexLinesForSignoff } from "@/lib/receipts/reconciliation-signoff";
 
 export interface MonthlyExportDraft {
   receipts: ReceiptRecord[];
@@ -70,40 +71,10 @@ export async function validateMonthReadyForExport(
 
   const amexLines = await listAmexLines(month);
   const amexAttendees = await listAmexLineAttendeeNamesByMonth(month);
-  for (const line of amexLines) {
-    const label = `${line.transaction_date} ${line.merchant}`;
-    if (!line.expense_category_code) {
-      blockers.push(`AMEX ${label}: missing expense category`);
-    }
-    if (
-      line.receipt_status === "matched" &&
-      (!line.matched_receipt_id || line.match_status !== "confirmed")
-    ) {
-      blockers.push(`AMEX ${label}: matched receipt is not confirmed`);
-    }
-    if (
-      line.receipt_status === "missing_receipt" ||
-      ((line.receipt_status === "no_receipt_required" ||
-        line.receipt_status === "receipt_not_available") &&
-        !line.receipt_missing_reason)
-    ) {
-      blockers.push(`AMEX ${label}: missing receipt requires a reason`);
-    }
-    if (requiresAttendees(line.expense_category_code)) {
-      const linkedReceiptAttendees = line.matched_receipt_id
-        ? currentDraft.attendeeMap.get(line.matched_receipt_id) ?? []
-        : [];
-      const directAmexAttendees = amexAttendees[line.id] ?? [];
-      if (linkedReceiptAttendees.length === 0 && directAmexAttendees.length === 0) {
-        blockers.push(
-          `AMEX ${label}: ${getCategoryByCode(line.expense_category_code ?? "")?.jaName ?? line.expense_category_code} requires attendees`,
-        );
-      }
-    }
-    if (line.business_trip_status === "candidate") {
-      blockers.push(`AMEX ${label}: unresolved business trip candidate`);
-    }
-  }
+
+  blockers.push(
+    ...validateAmexLinesForSignoff(amexLines, amexAttendees, currentDraft.attendeeMap),
+  );
 
   return blockers;
 }

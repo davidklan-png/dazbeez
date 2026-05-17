@@ -1,4 +1,5 @@
 import type { AmexStatementLine, ReceiptRecord } from "@/lib/receipts/types";
+import { requiresAttendees } from "@/lib/receipts/categories";
 
 function csvEscape(value: string | null | undefined): string {
   if (value === null || value === undefined) return "";
@@ -75,4 +76,55 @@ export function buildReconciliationManifestCsv(
   }
 
   return rows.join("\n");
+}
+
+/**
+ * Validate that all AMEX lines are ready for sign-off/export.
+ * Returns an array of human-readable blocker strings (empty = ready).
+ */
+export function validateAmexLinesForSignoff(
+  amexLines: AmexStatementLine[],
+  amexAttendees: Record<string, string[]>,
+  receiptAttendeeMap: Map<string, string[]>,
+): string[] {
+  const blockers: string[] = [];
+
+  for (const line of amexLines) {
+    const label = `${line.transaction_date} ${line.merchant}`;
+
+    if (line.match_status === "unmatched" || line.match_status === "matched") {
+      blockers.push(`AMEX ${label}: unresolved match status (${line.match_status})`);
+    }
+    if (!line.expense_category_code) {
+      blockers.push(`AMEX ${label}: missing expense category`);
+    }
+    if (
+      line.receipt_status === "matched" &&
+      (!line.matched_receipt_id || line.match_status !== "confirmed")
+    ) {
+      blockers.push(`AMEX ${label}: matched receipt is not confirmed`);
+    }
+    if (
+      line.receipt_status === "missing_receipt" ||
+      ((line.receipt_status === "no_receipt_required" ||
+        line.receipt_status === "receipt_not_available") &&
+        !line.receipt_missing_reason)
+    ) {
+      blockers.push(`AMEX ${label}: missing receipt requires a reason`);
+    }
+    if (requiresAttendees(line.expense_category_code)) {
+      const linkedReceiptAttendees = line.matched_receipt_id
+        ? receiptAttendeeMap.get(line.matched_receipt_id) ?? []
+        : [];
+      const directAmexAttendees = amexAttendees[line.id] ?? [];
+      if (linkedReceiptAttendees.length === 0 && directAmexAttendees.length === 0) {
+        blockers.push(`AMEX ${label}: requires attendees`);
+      }
+    }
+    if (line.business_trip_status === "candidate") {
+      blockers.push(`AMEX ${label}: unresolved business trip candidate`);
+    }
+  }
+
+  return blockers;
 }
