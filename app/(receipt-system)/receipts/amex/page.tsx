@@ -79,7 +79,7 @@ export default async function AmexPage({
           </dl>
           <div className="mt-4 text-center">
             <a
-              href="/receipts/reconcile"
+              href={`/receipts/reconcile?month=${month}`}
               className="text-sm text-amber-600 underline hover:text-amber-700"
             >
               Open reconciliation →
