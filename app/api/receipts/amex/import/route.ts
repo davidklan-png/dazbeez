@@ -21,6 +21,23 @@ import {
 } from "@/lib/receipts/storage";
 import { getReceiptsDb } from "@/lib/cloudflare-runtime";
 
+/*
+ * AMEX CSV Import — Dedup Contract
+ * ==================================
+ * AMEX line identity is stable across re-imports. The dedup key is:
+ *   (statement_month, amex_reference, cardholder_name)  — when amex_reference is present
+ *   (statement_month, transaction_date, amount_minor, merchant, cardholder_name)  — fallback
+ *
+ * On re-upload for the same month, INSERT … ON CONFLICT DO UPDATE preserves
+ * the row PK (id) and all reconciliation state (matched_receipt_id,
+ * match_status, receipt_status, expense_category_code, business_trip_status,
+ * category_status, receipt_missing_reason, business_trip_id) while refreshing
+ * CSV-sourced fields (dates, merchant, amount, raw_json, etc.).
+ *
+ * Prior artifact records are marked import_status='replaced' after a
+ * successful re-import.
+ */
+
 const MAX_CSV_BYTES = 5 * 1024 * 1024;
 
 export async function POST(request: Request) {
@@ -85,8 +102,9 @@ export async function POST(request: Request) {
           artifactId: existingBySha.id,
           statementMonth: existingBySha.statement_month,
           message: "This AMEX statement file has already been uploaded.",
-          imported: 0,
-          skipped: 0,
+          inserted: 0,
+          updated: 0,
+          unchanged: 0,
           transactionCount: existingBySha.transaction_count ?? 0,
           statementTotalCents: existingBySha.statement_total_amount_cents,
           cardName: existingBySha.card_name,
@@ -158,16 +176,12 @@ export async function POST(request: Request) {
           validationErrors,
           skippedLines,
           transactionCount: 0,
-          imported: 0,
-          skipped: 0,
+          inserted: 0,
+          updated: 0,
+          unchanged: 0,
         },
         { status: 422 },
       );
-    }
-
-    // ── Mark previous artifact replaced ────────────────────────────────────
-    if (previousArtifact) {
-      await markPreviousArtifactsReplaced(statementMonth, savedArtifactId);
     }
 
     // ── Import line items ───────────────────────────────────────────────────
@@ -178,9 +192,14 @@ export async function POST(request: Request) {
       sha256,
     );
 
-    const { imported, skipped } = await importAmexLines(importInputs, actor);
+    const { inserted, updated, unchanged } = await importAmexLines(importInputs, actor);
 
     await updateAmexArtifactStatus(savedArtifactId, "parsed");
+
+    // ── Mark previous artifact replaced (after successful import) ──────────
+    if (previousArtifact) {
+      await markPreviousArtifactsReplaced(statementMonth, savedArtifactId);
+    }
 
     // ── Business trip candidate detection ───────────────────────────────────
     let businessTripCandidatesCount = 0;
@@ -228,8 +247,9 @@ export async function POST(request: Request) {
         statementTotalCents: metadata.statementTotalCents,
         parsedTotalCents,
         transactionCount: lines.length,
-        imported,
-        skipped,
+        inserted,
+        updated,
+        unchanged,
         skippedLines,
         replaced: previousArtifact !== null,
         businessTripCandidates: businessTripCandidatesCount,

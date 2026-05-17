@@ -31,10 +31,24 @@ export async function POST(request: Request) {
       );
     }
 
+    const status = body.matchStatus as AmexMatchStatus;
+    if ((status === "confirmed" || status === "matched") && !body.receiptId) {
+      return NextResponse.json(
+        { error: "receiptId is required for confirmed/matched" },
+        { status: 400 },
+      );
+    }
+    if ((status === "unmatched" || status === "no_receipt") && body.receiptId) {
+      return NextResponse.json(
+        { error: "receiptId must be null for unmatched/no_receipt" },
+        { status: 400 },
+      );
+    }
+
     await updateAmexReconciliation(
       body.amexLineId,
       body.receiptId ?? null,
-      body.matchStatus as AmexMatchStatus,
+      status,
       actor,
     );
 
@@ -42,6 +56,14 @@ export async function POST(request: Request) {
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("Unauthorized")) {
       return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
+    }
+    // 409: receipt already confirmed against a different AMEX line (race guard in db.ts)
+    if (error instanceof Error && error.message.startsWith("Receipt already confirmed against another AMEX line")) {
+      return NextResponse.json({ error: error.message }, { status: 409 });
+    }
+    // 409: month's reconciliation is finalized — edits blocked
+    if (error instanceof Error && error.message.includes("is finalized")) {
+      return NextResponse.json({ error: error.message }, { status: 409 });
     }
     console.error("[api/receipts/reconcile] failed", error);
     return NextResponse.json(

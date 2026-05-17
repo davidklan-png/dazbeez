@@ -5,6 +5,7 @@ import {
   listAttendees,
   createExport,
   finalizeExport,
+  getFinalizedReconciliationForMonth,
   listAmexLines,
 } from "@/lib/receipts/db";
 import {
@@ -72,8 +73,16 @@ export async function POST(request: Request) {
       };
     });
 
-    // Export blocking validation — check AMEX lines before finalizing
+    // Export blocking validation — check AMEX lines and reconciliation before finalizing
     if (body.finalize) {
+      const reconciliation = await getFinalizedReconciliationForMonth(month);
+      if (!reconciliation) {
+        return NextResponse.json(
+          { error: `Cannot finalize export: no finalized reconciliation for ${month}. Sign off the reconciliation first.`, blockers: [`No finalized reconciliation for ${month}`] },
+          { status: 422 },
+        );
+      }
+
       const amexLines = await listAmexLines(month);
       const blockers: string[] = [];
 
@@ -118,6 +127,11 @@ export async function POST(request: Request) {
     const encoder = new TextEncoder();
     await archiveBundle(archiveKey, encoder.encode(csv).buffer as ArrayBuffer);
 
+    // When finalizing, include reconciliation manifest reference in the export manifest
+    const reconciliation = body.finalize
+      ? await getFinalizedReconciliationForMonth(month)
+      : null;
+
     // Generate and upload manifest
     const manifest = buildManifestCsv(
       exportId,
@@ -126,6 +140,13 @@ export async function POST(request: Request) {
       sha256,
       exportRows.length,
       new Date().toISOString(),
+      reconciliation
+        ? {
+            id: reconciliation.id,
+            manifestR2Key: reconciliation.manifest_r2_key ?? "",
+            manifestSha256: reconciliation.manifest_sha256 ?? "",
+          }
+        : null,
     );
     await archiveManifest(manifestKey, encoder.encode(manifest).buffer as ArrayBuffer);
 

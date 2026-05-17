@@ -97,12 +97,12 @@ test("exact amount + same date produces high confidence match", () => {
   assert.equal(matches.length, 1);
   assert.ok(matches[0]!.confidenceScore >= 0.8, "expected high confidence for exact match");
   assert.ok(matches[0]!.matchReasons.includes("exact amount"));
-  assert.ok(matches[0]!.matchReasons.includes("same date"));
+  assert.ok(matches[0]!.matchReasons.includes("0-day window"));
 });
 
-test("no match when date is more than 3 days apart", () => {
+test("no match when date is more than 7 days apart", () => {
   const lines = [makeAmexLine({ transaction_date: "2024-01-15" })];
-  const receipts = [makeReceipt({ transaction_date: "2024-01-20" })];
+  const receipts = [makeReceipt({ transaction_date: "2024-01-24" })];
   const matches = matchAmexToReceipts(lines, receipts);
   assert.equal(matches.length, 0);
 });
@@ -296,4 +296,144 @@ test("contested receipt goes to higher-confidence line; loser gets no suggestion
   assert.equal(matches[0]!.amexLineId, "line-a");
   assert.equal(matches[0]!.receiptId, "r-x");
   assert.ok(matches[0]!.confidenceScore >= 0.8);
+});
+
+// ─── Null transaction_date handling ──────────────────────────────────────────
+
+test("null transaction_date + exact amount → match possible but capped at 0.5", () => {
+  const lines = [makeAmexLine({ transaction_date: "2024-01-15" })];
+  const receipts = [makeReceipt({ transaction_date: null, merchant: null })];
+  const matches = matchAmexToReceipts(lines, receipts);
+  assert.equal(matches.length, 1, "dateless receipt with matching amount should still be a candidate");
+  assert.ok(matches[0]!.confidenceScore <= 0.5, "confidence must be capped at 0.5 without a date");
+  assert.ok(matches[0]!.matchReasons.includes("no date on receipt"));
+});
+
+test("both dates present + same amount → unchanged high confidence", () => {
+  const lines = [makeAmexLine({ transaction_date: "2024-01-15" })];
+  const receipts = [makeReceipt({ transaction_date: "2024-01-15" })];
+  const matches = matchAmexToReceipts(lines, receipts);
+  assert.equal(matches.length, 1);
+  assert.ok(matches[0]!.confidenceScore >= 0.8, "full-date match should retain high confidence");
+  assert.ok(!matches[0]!.matchReasons.includes("no date on receipt"));
+});
+
+// ─── Date gradient scoring ───────────────────────────────────────────────────
+
+test("2-day delta scores between 0-day and 6-day", () => {
+  const scoreForDays = (days: number) => {
+    const base = "2024-01-15";
+    const target = new Date(Date.UTC(2024, 0, 15 + days));
+    const targetStr = target.toISOString().slice(0, 10);
+    const lines = [makeAmexLine({ transaction_date: base, merchant: null })];
+    const receipts = [makeReceipt({ transaction_date: targetStr, merchant: null })];
+    const matches = matchAmexToReceipts(lines, receipts);
+    assert.equal(matches.length, 1, `expected a match at ${days} days`);
+    return matches[0]!.confidenceScore;
+  };
+
+  const score0 = scoreForDays(0);
+  const score2 = scoreForDays(2);
+  const score6 = scoreForDays(6);
+
+  assert.ok(score0 > score2, `0-day score (${score0}) should exceed 2-day (${score2})`);
+  assert.ok(score2 > score6, `2-day score (${score2}) should exceed 6-day (${score6})`);
+});
+
+test("8-day delta is rejected (> 7-day window)", () => {
+  const lines = [makeAmexLine({ transaction_date: "2024-01-15", merchant: null })];
+  const receipts = [makeReceipt({ transaction_date: "2024-01-23", merchant: null })];
+  const matches = matchAmexToReceipts(lines, receipts);
+  assert.equal(matches.length, 0, "8-day gap should fall outside the 7-day window");
+});
+
+// ─── Unicode-aware normalizeDescription ───────────────────────────────────────
+
+test("normalizeDescription: preserves Japanese characters, strips punctuation", () => {
+  assert.equal(normalizeDescription("セブン-イレブン"), "セブン イレブン");
+});
+
+// ─── Tightened descriptionContains (merchant matching) ────────────────────────
+
+test("Japanese merchant: セブンイレブン渋谷 matches セブンイレブン", () => {
+  const lines = [
+    makeAmexLine({
+      merchant: "セブンイレブン渋谷",
+      amount_minor: 1500,
+      transaction_date: "2024-01-15",
+    }),
+  ];
+  const receipts = [
+    makeReceipt({
+      merchant: "セブンイレブン",
+      amount_minor: 1500,
+      transaction_date: "2024-01-15",
+    }),
+  ];
+  const matches = matchAmexToReceipts(lines, receipts);
+  assert.equal(matches.length, 1);
+  assert.ok(matches[0]!.matchReasons.includes("merchant match"));
+});
+
+test("single-token AMAZON matches multi-token AMAZON PRIME VIDEO", () => {
+  const lines = [
+    makeAmexLine({
+      merchant: "AMAZON PRIME VIDEO",
+      amount_minor: 1500,
+      transaction_date: "2024-01-15",
+    }),
+  ];
+  const receipts = [
+    makeReceipt({
+      merchant: "AMAZON",
+      amount_minor: 1500,
+      transaction_date: "2024-01-15",
+    }),
+  ];
+  const matches = matchAmexToReceipts(lines, receipts);
+  assert.equal(matches.length, 1);
+  assert.ok(matches[0]!.matchReasons.includes("merchant match"));
+});
+
+test("single-token AMAZON matches AMAZON MARKETPLACE", () => {
+  const lines = [
+    makeAmexLine({
+      merchant: "AMAZON MARKETPLACE",
+      amount_minor: 380000,
+      transaction_date: "2024-01-15",
+    }),
+  ];
+  const receipts = [
+    makeReceipt({
+      merchant: "AMAZON",
+      amount_minor: 380000,
+      transaction_date: "2024-01-15",
+    }),
+  ];
+  const matches = matchAmexToReceipts(lines, receipts);
+  assert.equal(matches.length, 1);
+  assert.ok(matches[0]!.matchReasons.includes("merchant match"));
+});
+
+test("STAR does not match STARBUCKS (substring too short for single-token rule)", () => {
+  // "STAR" (len 4) is a substring of "STARBUCKS" but not an exact token, and
+  // the substring-containment rule requires the shorter token to have len ≥ 5.
+  const lines = [
+    makeAmexLine({
+      merchant: "STARBUCKS",
+      amount_minor: 600,
+      transaction_date: "2024-01-15",
+    }),
+  ];
+  const receipts = [
+    makeReceipt({
+      merchant: "STAR",
+      amount_minor: 600,
+      transaction_date: "2024-01-15",
+    }),
+  ];
+  const matches = matchAmexToReceipts(lines, receipts);
+  // Match still occurs on amount+date, but merchant match must NOT be credited
+  assert.equal(matches.length, 1);
+  assert.ok(!matches[0]!.matchReasons.includes("merchant match"));
 });
