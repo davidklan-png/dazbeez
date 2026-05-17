@@ -221,3 +221,79 @@ test("soft-deleted receipts are excluded from matching (defense-in-depth)", () =
   const matches = matchAmexToReceipts(lines, receipts);
   assert.equal(matches.length, 0, "soft-deleted receipts must not be matched");
 });
+
+// ─── Collision resolution ────────────────────────────────────────────────────
+
+test("collision: two lines competing for one receipt — only one match returned", () => {
+  const lines = [
+    makeAmexLine({ id: "line-a", amount_minor: 380000, transaction_date: "2024-01-15" }),
+    makeAmexLine({ id: "line-b", amount_minor: 380000, transaction_date: "2024-01-15" }),
+  ];
+  const receipts = [
+    makeReceipt({ id: "r-1", amount_minor: 380000, transaction_date: "2024-01-15" }),
+  ];
+  const matches = matchAmexToReceipts(lines, receipts);
+  assert.equal(matches.length, 1, "one receipt cannot satisfy two lines");
+  // Tied on score and dateDelta → lexicographic line id wins: "line-a" < "line-b"
+  assert.equal(matches[0]!.amexLineId, "line-a");
+  assert.equal(matches[0]!.receiptId, "r-1");
+});
+
+test("no collision: two lines with distinct receipts — both matched", () => {
+  const lines = [
+    makeAmexLine({ id: "line-a", amount_minor: 380000, transaction_date: "2024-01-15" }),
+    makeAmexLine({ id: "line-b", amount_minor: 200000, transaction_date: "2024-01-16" }),
+  ];
+  const receipts = [
+    makeReceipt({ id: "r-x", amount_minor: 380000, transaction_date: "2024-01-15" }),
+    makeReceipt({ id: "r-y", amount_minor: 200000, transaction_date: "2024-01-16" }),
+  ];
+  const matches = matchAmexToReceipts(lines, receipts);
+  assert.equal(matches.length, 2, "no collision — both lines should be matched");
+  const matchA = matches.find((m) => m.amexLineId === "line-a");
+  const matchB = matches.find((m) => m.amexLineId === "line-b");
+  assert.ok(matchA, "line-a should have a match");
+  assert.ok(matchB, "line-b should have a match");
+  assert.equal(matchA!.receiptId, "r-x");
+  assert.equal(matchB!.receiptId, "r-y");
+});
+
+test("contested receipt goes to higher-confidence line; loser gets no suggestion", () => {
+  // line-a (2024-01-15) ↔ receipt X (2024-01-15): exact amount + same date = 0.85
+  // line-b (2024-01-13) ↔ receipt X (2024-01-15): exact amount + 2-day window = 0.70
+  // line-a also matches receipt Y at lower score, but its best is still X.
+  // line-b cannot match receipt Y (date 5 days apart → rejected).
+  const lines = [
+    makeAmexLine({
+      id: "line-a",
+      amount_minor: 380000,
+      transaction_date: "2024-01-15",
+      merchant: null,
+    }),
+    makeAmexLine({
+      id: "line-b",
+      amount_minor: 380000,
+      transaction_date: "2024-01-13",
+      merchant: null,
+    }),
+  ];
+  const receipts = [
+    makeReceipt({
+      id: "r-x",
+      amount_minor: 380000,
+      transaction_date: "2024-01-15",
+      merchant: null,
+    }),
+    makeReceipt({
+      id: "r-y",
+      amount_minor: 381000,
+      transaction_date: "2024-01-18",
+      merchant: null,
+    }),
+  ];
+  const matches = matchAmexToReceipts(lines, receipts);
+  assert.equal(matches.length, 1, "receipt X goes to line-a; line-b unmatched");
+  assert.equal(matches[0]!.amexLineId, "line-a");
+  assert.equal(matches[0]!.receiptId, "r-x");
+  assert.ok(matches[0]!.confidenceScore >= 0.8);
+});

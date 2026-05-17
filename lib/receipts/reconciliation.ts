@@ -42,14 +42,15 @@ export function matchAmexToReceipts(
       r.status !== "exported",
   );
 
-  const matches: ReconciliationMatch[] = [];
+  // Phase 1: compute best candidate per AMEX line
+  const candidates: Array<{ match: ReconciliationMatch; dateDelta: number }> = [];
 
   for (const line of amexLines) {
     if (line.match_status === "confirmed" || line.match_status === "no_receipt") {
       continue;
     }
 
-    let bestMatch: ReconciliationMatch | null = null;
+    let best: { match: ReconciliationMatch; dateDelta: number } | null = null;
 
     for (const receipt of eligibleReceipts) {
       if (receipt.payment_path !== "AMEX") continue;
@@ -66,6 +67,7 @@ export function matchAmexToReceipts(
 
       const reasons: string[] = [];
       let score = 0;
+      let dateDelta = Infinity;
 
       const amexMinor = line.amount_minor;
       const receiptMinor = receipt.amount_minor;
@@ -88,13 +90,13 @@ export function matchAmexToReceipts(
 
       // Date proximity
       if (receipt.transaction_date && line.transaction_date) {
-        const days = daysBetween(line.transaction_date, receipt.transaction_date);
-        if (days === 0) {
+        dateDelta = daysBetween(line.transaction_date, receipt.transaction_date);
+        if (dateDelta === 0) {
           score += 0.35;
           reasons.push("same date");
-        } else if (days <= 3) {
+        } else if (dateDelta <= 3) {
           score += 0.2;
-          reasons.push(`${days}-day window`);
+          reasons.push(`${dateDelta}-day window`);
         } else {
           continue; // Too far apart — skip
         }
@@ -108,20 +110,47 @@ export function matchAmexToReceipts(
         }
       }
 
-      if (score > 0 && (!bestMatch || score > bestMatch.confidenceScore)) {
-        bestMatch = {
-          amexLineId: line.id,
-          receiptId: receipt.id,
-          confidenceScore: Math.min(score, 1),
-          matchReasons: reasons,
+      if (score > 0 && (!best || score > best.match.confidenceScore)) {
+        best = {
+          match: {
+            amexLineId: line.id,
+            receiptId: receipt.id,
+            confidenceScore: Math.min(score, 1),
+            matchReasons: reasons,
+          },
+          dateDelta,
         };
       }
     }
 
-    if (bestMatch) {
-      matches.push(bestMatch);
+    if (best) {
+      candidates.push(best);
     }
   }
 
-  return matches;
+  // Phase 2: collision resolution — each receipt maps to at most one line and
+  // each line to at most one receipt. Greedy by descending confidence; ties
+  // broken by smaller date delta, then lexicographic line id.
+  candidates.sort((a, b) => {
+    const scoreDiff = b.match.confidenceScore - a.match.confidenceScore;
+    if (scoreDiff !== 0) return scoreDiff;
+    const deltaDiff = a.dateDelta - b.dateDelta;
+    if (deltaDiff !== 0) return deltaDiff;
+    return a.match.amexLineId.localeCompare(b.match.amexLineId);
+  });
+
+  const assignedReceipts = new Set<string>();
+  const assignedLines = new Set<string>();
+  const resolved: ReconciliationMatch[] = [];
+
+  for (const { match } of candidates) {
+    if (assignedReceipts.has(match.receiptId) || assignedLines.has(match.amexLineId)) {
+      continue;
+    }
+    assignedReceipts.add(match.receiptId);
+    assignedLines.add(match.amexLineId);
+    resolved.push(match);
+  }
+
+  return resolved;
 }
