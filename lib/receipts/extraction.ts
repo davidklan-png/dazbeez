@@ -101,7 +101,11 @@ class CloudflareAiExtractionProvider implements ExtractionProvider {
       "@cf/meta/llama-3.2-11b-vision-instruct",
       {
         prompt: EXTRACTION_PROMPT,
-        image: Array.from(imageBytes),
+        // Pass the Uint8Array directly. The previous Array.from(imageBytes)
+        // allocated 2-3 million boxed Number objects for typical receipt
+        // images and was burning the worker's CPU budget on every call,
+        // triggering 1102 errors after several extractions in a session.
+        image: imageBytes,
         max_tokens: 800,
         temperature: 0.1,
       },
