@@ -69,45 +69,34 @@ app/
 - `Dockerfile` and `docker-compose.yml` are kept only for local/reference workflows.
 - The `llm` Compose profile is local-only and does not participate in production.
 
-## Receipts Module — Development Split (PC vs Mac)
+## Receipts Module — All-Mac Development
 
-The receipts module (`app/(receipt-system)/receipts/`, `app/api/receipts/`, `lib/receipts/`) is developed across two machines with strict separation of duties.
+The receipts module (`app/(receipt-system)/receipts/`, `app/api/receipts/`, `lib/receipts/`) is developed end-to-end on the Mac M4 with live Cloudflare bindings. The previous PC/Mac split has been retired — all coding, building, testing, and deployment happen on the Mac.
 
-### PC (this machine) — Code Only
+### Mac M4 — Single Source of Truth
 
-The PC writes, tests, and commits code. It has **no access** to production infrastructure.
-
-**Do:**
-- Write pages, components, API routes, lib modules, tests, and SQL migrations
-- Use a stub/mock layer for Cloudflare bindings (D1, R2, AI) — see `lib/cloudflare-runtime.ts` for the pattern
-- Run `npm run build` to type-check and catch compile errors
-- Run unit tests with mocked bindings
-- Commit and push to `origin`
-
-**Do NOT:**
-- Attempt to bind or connect to D1 databases (`RECEIPTS_DB`, `CRM_DB`)
-- Attempt to access R2 buckets (`RECEIPTS_BUCKET`, `RECEIPTS_ARCHIVE_BUCKET`)
-- Configure or test Cloudflare Access JWT auth flows
-- Modify `wrangler.jsonc` bindings (Mac owns the deployed config)
-- Run `wrangler dev`, `npm run cf:dev`, or `npm run deploy`
-- Start Docker containers or the dev server expecting live bindings
-- Generate or rotate any auth keys, tokens, or credentials
-
-### Mac M4 — Hosting, Auth, and Deployment
-
-The Mac runs production and owns all infrastructure configuration.
-
-- Holds Cloudflare Tunnel config, auth keys, and deployed `wrangler.jsonc`
-- Creates D1 databases and R2 buckets, then adds bindings
+- Owns `wrangler.jsonc` bindings for D1 (`RECEIPTS_DB`, `CRM_DB`), R2 (`RECEIPTS_BUCKET`, `RECEIPTS_ARCHIVE_BUCKET`), and any AI bindings
+- Holds Cloudflare Tunnel config, Access policies, and auth keys
 - Runs SQL migrations against live D1
-- Enables Cloudflare Access on receipt routes
-- Runs `npm run cf:dev` for end-to-end testing with real bindings
+- Runs `npm run dev` for fast UI iteration and `npm run cf:dev` for end-to-end runtime testing against real bindings
+- Runs `npm run build:cf` to validate production builds
 - Deploys via `npm run deploy`
 
-### Handoff Workflow
+### Workflow
 
-1. PC: implement + unit-test + `npm run build` passes → push to `origin`
-2. Mac: pull → add D1/R2 bindings to `wrangler.jsonc` → run migrations → `npm run cf:dev` → verify → `npm run deploy`
+1. Branch from `main` on the Mac
+2. Implement + run `npm run cf:dev` against real bindings to verify behavior
+3. `npm run build:cf` must pass
+4. Smoke-test with `bash scripts/check-deployment.sh <base-url>` after deploy
+5. Commit, push, open PR, merge, deploy
+
+### Cloud / Remote Sessions
+
+When Claude Code runs in a cloud sandbox (e.g. claude.ai/code web session) the container does **not** have the Mac's credentials, `wrangler.jsonc` secrets, or D1/R2 access. In that environment:
+
+- Treat the session as code-only: edit, `tsc --noEmit`, run unit tests with mocked bindings, commit, push
+- Do not attempt `wrangler dev`, `cf:dev`, or `deploy` — they will fail without bindings
+- For any change that depends on live D1/R2 behavior, hand off to the Mac for verification and deploy
 
 ## Verification
 1. Run `npm run build:cf` before shipping deployment changes
