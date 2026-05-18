@@ -3,10 +3,8 @@ import { redirect } from "next/navigation";
 import { listReceiptRecords } from "@/lib/receipts/db";
 import { assertReceiptsPageAccess } from "@/lib/receipts/auth-request";
 import { ReviewLayout } from "@/components/receipts/review/review-layout";
-import {
-  QueueRail,
-  buildQueueItems,
-} from "@/components/receipts/review/queue-rail";
+import { QueueRail } from "@/components/receipts/review/queue-rail";
+import { buildQueueItems } from "@/lib/receipts/queue-items";
 import {
   InlineServerError,
   isNextInternalError,
