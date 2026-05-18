@@ -12,6 +12,10 @@ import {
 } from "@/components/receipts/review/queue-rail";
 import { ImagePane } from "@/components/receipts/review/image-pane";
 import { FormPane } from "@/components/receipts/review/form-pane";
+import {
+  InlineServerError,
+  isNextInternalError,
+} from "@/components/receipts/review/inline-error";
 
 export const dynamic = "force-dynamic";
 
@@ -20,6 +24,19 @@ export default async function ReviewReceiptPage({
 }: {
   params: Promise<{ id: string }>;
 }) {
+  try {
+    return await renderReceiptPage(params);
+  } catch (err) {
+    if (isNextInternalError(err)) throw err;
+    const { id } = await params.catch(() => ({ id: "?" }));
+    console.error(`[receipts] /receipts/review/${id} render failed`, err);
+    return (
+      <InlineServerError where={`/receipts/review/${id}`} error={err} />
+    );
+  }
+}
+
+async function renderReceiptPage(params: Promise<{ id: string }>) {
   await assertReceiptsPageAccess();
 
   const { id } = await params;

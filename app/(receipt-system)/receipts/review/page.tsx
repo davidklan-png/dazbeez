@@ -7,6 +7,10 @@ import {
   QueueRail,
   buildQueueItems,
 } from "@/components/receipts/review/queue-rail";
+import {
+  InlineServerError,
+  isNextInternalError,
+} from "@/components/receipts/review/inline-error";
 import type { ReceiptRecord } from "@/lib/receipts/types";
 
 export const dynamic = "force-dynamic";
@@ -16,6 +20,18 @@ export default async function ReviewPage({
 }: {
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
+  try {
+    return await renderReviewPage(searchParams);
+  } catch (err) {
+    if (isNextInternalError(err)) throw err;
+    console.error("[receipts] /receipts/review render failed", err);
+    return <InlineServerError where="/receipts/review" error={err} />;
+  }
+}
+
+async function renderReviewPage(
+  searchParams: Promise<Record<string, string | string[] | undefined>>,
+) {
   await assertReceiptsPageAccess();
 
   const params = await searchParams;
@@ -28,7 +44,6 @@ export default async function ReviewPage({
     (r) => r.status === "needs_review" || r.status === "captured",
   ).length;
 
-  // If there's an obvious first item, go straight to it for a faster path.
   if (queueItems.length > 0 && filter === "") {
     redirect(`/receipts/review/${queueItems[0].id}`);
   }
