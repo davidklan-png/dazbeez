@@ -8,6 +8,29 @@ import {
   validateReceiptDate,
 } from "@/lib/receipts/validation";
 import { isCanonicalCode } from "@/lib/receipts/categories";
+import { getReceiptsDb } from "@/lib/cloudflare-runtime";
+import {
+  runComplianceChecksForReceipt,
+  listChecksForObject,
+} from "@/lib/receipts/compliance";
+import { getComplianceSettings } from "@/lib/receipts/settings";
+import {
+  validateInvoiceRegistrationNumber,
+} from "@/lib/receipts/invoice";
+import type {
+  QualifiedInvoiceStatus,
+  SourceType,
+} from "@/lib/receipts/types";
+
+const VALID_SOURCE_TYPES: SourceType[] = [
+  "paper_scanned",
+  "electronic_receipt",
+  "digital_invoice",
+  "credit_card_statement",
+  "email_attachment",
+  "manual_upload",
+  "amex_csv",
+];
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -57,7 +80,8 @@ export async function GET(request: Request, { params }: RouteContext) {
     }
 
     const attendees = await listAttendees(id);
-    return NextResponse.json({ receipt, attendees }, { status: 200 });
+    const checks = await listChecksForObject(getReceiptsDb(), "receipt", id);
+    return NextResponse.json({ receipt, attendees, complianceChecks: checks }, { status: 200 });
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("Unauthorized")) {
       return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
@@ -96,6 +120,11 @@ export async function PATCH(request: Request, { params }: RouteContext) {
       expenseCategoryCode?: string | null;
       status?: string;
       attendees?: string[];
+      // Compliance fields
+      sourceType?: string | null;
+      invoiceRegistrationNumber?: string | null;
+      counterpartyName?: string | null;
+      taxRate?: string | null;
     };
 
     if (
@@ -172,6 +201,44 @@ export async function PATCH(request: Request, { params }: RouteContext) {
     }
     const merchant = normalizeOptionalText(body.merchant, 200);
     const businessPurpose = normalizeOptionalText(body.businessPurpose, 500);
+    const counterpartyName = normalizeOptionalText(body.counterpartyName, 200);
+    const taxRate = normalizeOptionalText(body.taxRate, 16);
+
+    // Validate sourceType if provided.
+    let sourceType: SourceType | null | undefined = undefined;
+    if ("sourceType" in body) {
+      if (body.sourceType === null || body.sourceType === "") {
+        sourceType = null;
+      } else if (
+        typeof body.sourceType === "string" &&
+        VALID_SOURCE_TYPES.includes(body.sourceType as SourceType)
+      ) {
+        sourceType = body.sourceType as SourceType;
+      } else {
+        return NextResponse.json({ error: "Invalid sourceType." }, { status: 400 });
+      }
+    }
+
+    // Invoice number validation drives qualified_invoice_status.
+    let qualifiedInvoiceStatus: QualifiedInvoiceStatus | undefined;
+    let invoiceRegistrationNumber: string | null | undefined = undefined;
+    if ("invoiceRegistrationNumber" in body) {
+      const raw = body.invoiceRegistrationNumber;
+      if (raw === null || (typeof raw === "string" && raw.trim() === "")) {
+        invoiceRegistrationNumber = null;
+        qualifiedInvoiceStatus = "missing_registration_number";
+      } else if (typeof raw === "string") {
+        const v = validateInvoiceRegistrationNumber(raw);
+        if (v.registrationStatus === "format_invalid") {
+          return NextResponse.json(
+            { error: v.message ?? "Invalid invoiceRegistrationNumber." },
+            { status: 400 },
+          );
+        }
+        invoiceRegistrationNumber = v.normalizedNumber;
+        qualifiedInvoiceStatus = v.qualifiedInvoiceStatus;
+      }
+    }
 
     await updateReceiptRecord(
       id,
@@ -186,6 +253,11 @@ export async function PATCH(request: Request, { params }: RouteContext) {
         businessPurpose,
         expenseCategoryCode,
         status: body.status as ReceiptStatus | undefined,
+        sourceType,
+        invoiceRegistrationNumber,
+        counterpartyName,
+        taxRate,
+        qualifiedInvoiceStatus,
       },
       actor,
     );
@@ -195,6 +267,14 @@ export async function PATCH(request: Request, { params }: RouteContext) {
         .filter((name) => typeof name === "string" && name.trim())
         .map((name) => ({ attendeeName: name.trim().slice(0, 120) }));
       await createAttendees(id, attendeeInputs, actor);
+    }
+
+    // Re-run compliance checks so the review UI reflects the new state.
+    try {
+      const settings = await getComplianceSettings();
+      await runComplianceChecksForReceipt(getReceiptsDb(), id, settings);
+    } catch (checkError) {
+      console.error("[api/receipts/[id]] compliance check failed", checkError);
     }
 
     return NextResponse.json({ ok: true }, { status: 200 });

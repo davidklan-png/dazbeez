@@ -3,8 +3,9 @@ import { requireReceiptsActor } from "@/lib/receipts/auth";
 import { validateReceiptFile } from "@/lib/receipts/validation";
 import { generateR2Key, uploadOriginal } from "@/lib/receipts/storage";
 import { createReceiptRecord } from "@/lib/receipts/db";
-import { getReceiptsBucket } from "@/lib/cloudflare-runtime";
-import type { PaymentPath } from "@/lib/receipts/types";
+import { createReceiptFile } from "@/lib/receipts/files";
+import { getReceiptsBucket, getReceiptsDb } from "@/lib/cloudflare-runtime";
+import type { PaymentPath, SourceType } from "@/lib/receipts/types";
 
 async function sha256Hex(data: ArrayBuffer): Promise<string> {
   const hash = await crypto.subtle.digest("SHA-256", data);
@@ -14,6 +15,30 @@ async function sha256Hex(data: ArrayBuffer): Promise<string> {
 }
 
 const VALID_PAYMENT_PATHS: PaymentPath[] = ["AMEX", "CASH", "DIGITAL", "UNKNOWN"];
+const VALID_SOURCE_TYPES: SourceType[] = [
+  "paper_scanned",
+  "electronic_receipt",
+  "digital_invoice",
+  "credit_card_statement",
+  "email_attachment",
+  "manual_upload",
+  "amex_csv",
+];
+
+function deriveSourceType(
+  formValue: string | undefined,
+  source: string,
+  contentType: string,
+): SourceType {
+  if (formValue && VALID_SOURCE_TYPES.includes(formValue as SourceType)) {
+    return formValue as SourceType;
+  }
+  // Heuristic fallback: mobile camera capture → paper scan; PDF →
+  // electronic receipt; anything else → manual upload.
+  if (source === "mobile_capture") return "paper_scanned";
+  if (contentType === "application/pdf") return "electronic_receipt";
+  return "manual_upload";
+}
 
 export async function POST(request: Request) {
   try {
@@ -40,6 +65,12 @@ export async function POST(request: Request) {
 
     const expenseType = formData.get("expenseType")?.toString() || undefined;
     const source = formData.get("source")?.toString() || "mobile_capture";
+    const contentType = file.type || "application/octet-stream";
+    const sourceType = deriveSourceType(
+      formData.get("sourceType")?.toString(),
+      source,
+      contentType,
+    );
 
     const bytes = await file.arrayBuffer();
     const sha256 = await sha256Hex(bytes);
@@ -47,7 +78,7 @@ export async function POST(request: Request) {
     const tempId = crypto.randomUUID();
     const r2Key = generateR2Key(tempId, file.name, new Date().toISOString());
 
-    await uploadOriginal(r2Key, bytes, file.type || "application/octet-stream");
+    await uploadOriginal(r2Key, bytes, contentType);
 
     let receiptId: string;
     try {
@@ -55,12 +86,13 @@ export async function POST(request: Request) {
         {
           capturedBy: actor,
           source,
+          sourceType,
           originalFilename: file.name,
           paymentPath,
           expenseType: expenseType as import("@/lib/receipts/types").ExpenseType | undefined,
           originalR2Key: r2Key,
           originalSha256: sha256,
-          originalContentType: file.type || "application/octet-stream",
+          originalContentType: contentType,
           originalSizeBytes: file.size,
         },
         actor,
@@ -74,11 +106,34 @@ export async function POST(request: Request) {
       throw dbError;
     }
 
+    // Manifest row for the original file. Failure to write the manifest row
+    // does not roll back the upload — the receipt_records row already has the
+    // hash + R2 key; the manifest row is additive metadata that downstream
+    // compliance reports use.
+    try {
+      await createReceiptFile(getReceiptsDb(), {
+        objectType: "receipt",
+        objectId: receiptId,
+        role: "original",
+        r2Bucket: "receipts",
+        r2Key,
+        originalFilename: file.name,
+        contentType,
+        fileSizeBytes: file.size,
+        sha256Hash: sha256,
+        uploadedBy: actor,
+        isOriginal: true,
+      });
+    } catch (fileError) {
+      console.error("[receipts/upload] file manifest write failed", fileError);
+    }
+
     return NextResponse.json(
       {
         ok: true,
         receiptId,
         status: "needs_review",
+        sourceType,
         reviewUrl: `/receipts/review/${receiptId}`,
       },
       { status: 201 },

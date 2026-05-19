@@ -17,6 +17,23 @@ export default async function ReceiptsSettingsPage() {
       <ul className="divide-y divide-gray-100 overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-sm">
         <li>
           <Link
+            href="/receipts/settings/compliance"
+            className="flex items-center justify-between p-4 transition-colors hover:bg-amber-50"
+          >
+            <div>
+              <p className="text-sm font-semibold text-gray-900">
+                Compliance &amp; 税務 settings
+              </p>
+              <p className="mt-1 text-xs text-gray-500">
+                Retention horizon, attendee requirements, qualified-invoice
+                mode, paper-original policy.
+              </p>
+            </div>
+            <span className="text-sm text-amber-700">Configure →</span>
+          </Link>
+        </li>
+        <li>
+          <Link
             href="/receipts/settings/devices"
             className="flex items-center justify-between p-4 transition-colors hover:bg-amber-50"
           >

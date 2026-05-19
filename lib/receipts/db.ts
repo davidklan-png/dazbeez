@@ -37,6 +37,8 @@ export async function createReceiptRecord(
   const paymentPath = input.paymentPath ?? "UNKNOWN";
   const expenseType = input.expenseType ?? "UNKNOWN";
 
+  const sourceType = input.sourceType ?? "manual_upload";
+
   await db
     .prepare(
       `INSERT INTO receipt_records
@@ -45,8 +47,10 @@ export async function createReceiptRecord(
          transaction_date, merchant, amount_minor, currency, tax_amount_minor,
          business_purpose, alcohol_present, attendees_required, status,
          original_r2_key, original_sha256, original_content_type, original_size_bytes,
-         legacy, retention_until, legal_hold, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 1, ?, ?)`,
+         legacy, retention_until, legal_hold,
+         source_type, preservation_status, qualified_invoice_status,
+         created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 1, ?, 'needs_review', 'not_checked', ?, ?)`,
     )
     .bind(
       id,
@@ -73,6 +77,7 @@ export async function createReceiptRecord(
       input.originalContentType,
       input.originalSizeBytes,
       retentionUntilIso(now),
+      sourceType,
       now,
       now,
     )
@@ -131,6 +136,11 @@ export async function updateReceiptRecord(
   if ("extractionJson" in input) { sets.push("extraction_json = ?"); binds.push(input.extractionJson ?? null); }
   if ("exportedMonth" in input) { sets.push("exported_month = ?"); binds.push(input.exportedMonth ?? null); }
   if ("expenseCategoryCode" in input) { sets.push("expense_category_code = ?"); binds.push(input.expenseCategoryCode ?? null); }
+  if ("sourceType" in input) { sets.push("source_type = ?"); binds.push(input.sourceType ?? null); }
+  if ("invoiceRegistrationNumber" in input) { sets.push("invoice_registration_number = ?"); binds.push(input.invoiceRegistrationNumber ?? null); }
+  if ("counterpartyName" in input) { sets.push("counterparty_name = ?"); binds.push(input.counterpartyName ?? null); }
+  if ("taxRate" in input) { sets.push("tax_rate = ?"); binds.push(input.taxRate ?? null); }
+  if ("qualifiedInvoiceStatus" in input) { sets.push("qualified_invoice_status = ?"); binds.push(input.qualifiedInvoiceStatus ?? "not_checked"); }
 
   if (sets.length === 0) return;
 
@@ -178,6 +188,12 @@ export interface ListReceiptsFilter {
   status?: string;
   month?: string;
   paymentPath?: string;
+  sourceType?: string;
+  qualifiedInvoiceStatus?: string;
+  merchant?: string;
+  minAmountMinor?: number;
+  maxAmountMinor?: number;
+  invoiceRegistrationNumber?: string;
   limit?: number;
   offset?: number;
 }
@@ -200,6 +216,30 @@ export async function listReceiptRecords(
   if (filter?.month) {
     conditions.push("transaction_date LIKE ?");
     binds.push(`${filter.month}%`);
+  }
+  if (filter?.sourceType) {
+    conditions.push("source_type = ?");
+    binds.push(filter.sourceType);
+  }
+  if (filter?.qualifiedInvoiceStatus) {
+    conditions.push("qualified_invoice_status = ?");
+    binds.push(filter.qualifiedInvoiceStatus);
+  }
+  if (filter?.merchant) {
+    conditions.push("(merchant LIKE ? OR counterparty_name LIKE ?)");
+    binds.push(`%${filter.merchant}%`, `%${filter.merchant}%`);
+  }
+  if (filter?.minAmountMinor !== undefined) {
+    conditions.push("amount_minor >= ?");
+    binds.push(filter.minAmountMinor);
+  }
+  if (filter?.maxAmountMinor !== undefined) {
+    conditions.push("amount_minor <= ?");
+    binds.push(filter.maxAmountMinor);
+  }
+  if (filter?.invoiceRegistrationNumber) {
+    conditions.push("invoice_registration_number = ?");
+    binds.push(filter.invoiceRegistrationNumber);
   }
 
   const where = `WHERE ${conditions.join(" AND ")}`;
@@ -1243,19 +1283,30 @@ export async function createExport(
 ): Promise<string> {
   const db = getReceiptsDb();
 
-  const existing = await db
+  // Prefer reusing a pending draft. If there's no draft but a finalized
+  // export already exists for the month, callers must explicitly request a
+  // revision via createExportRevision().
+  const draft = await db
     .prepare(
-      `SELECT id, status FROM receipt_exports WHERE export_month = ? LIMIT 1`,
+      `SELECT id FROM receipt_exports
+       WHERE export_month = ? AND status = 'draft'
+       ORDER BY COALESCE(export_revision, 1) DESC LIMIT 1`,
     )
     .bind(month)
-    .first<{ id: string; status: string }>();
+    .first<{ id: string }>();
+  if (draft) return draft.id;
 
-  if (existing?.status === "finalized") {
-    throw new Error(`Export for ${month} is already finalized.`);
-  }
-
-  if (existing) {
-    return existing.id;
+  const finalized = await db
+    .prepare(
+      `SELECT id FROM receipt_exports
+       WHERE export_month = ? AND status = 'finalized' LIMIT 1`,
+    )
+    .bind(month)
+    .first<{ id: string }>();
+  if (finalized) {
+    throw new Error(
+      `Export for ${month} is already finalized. POST /api/receipts/export/${month}?correction=true to create a revision.`,
+    );
   }
 
   const id = newUuid();
@@ -1283,8 +1334,15 @@ export async function createExport(
 
 export async function getExport(month: string): Promise<ReceiptExport | null> {
   const db = getReceiptsDb();
+  // Return the highest-revision row for this month. Drafts and finalized
+  // exports coexist in the table once revisions are introduced.
   return db
-    .prepare(`SELECT * FROM receipt_exports WHERE export_month = ? LIMIT 1`)
+    .prepare(
+      `SELECT * FROM receipt_exports
+       WHERE export_month = ?
+       ORDER BY COALESCE(export_revision, 1) DESC, created_at DESC
+       LIMIT 1`,
+    )
     .bind(month)
     .first<ReceiptExport>();
 }
@@ -1303,8 +1361,10 @@ export async function finalizeExport(
   manifestR2Key: string,
   archiveSha256: string,
   actor: string,
+  manifestSha256?: string,
 ): Promise<void> {
   const db = getReceiptsDb();
+  const now = nowIso();
 
   const result = await db
     .prepare(
@@ -1313,10 +1373,22 @@ export async function finalizeExport(
            archive_r2_key = ?,
            manifest_r2_key = ?,
            archive_sha256 = ?,
+           manifest_sha256 = ?,
+           finalization_hash = ?,
+           finalized_by = ?,
            finalized_at = ?
        WHERE id = ? AND status = 'draft'`,
     )
-    .bind(archiveR2Key, manifestR2Key, archiveSha256, nowIso(), exportId)
+    .bind(
+      archiveR2Key,
+      manifestR2Key,
+      archiveSha256,
+      manifestSha256 ?? null,
+      manifestSha256 ?? archiveSha256,
+      actor,
+      now,
+      exportId,
+    )
     .run();
 
   if ((result.meta.changes ?? 0) === 0) {
@@ -1330,8 +1402,74 @@ export async function finalizeExport(
     action: "export.finalized",
     objectType: "export",
     objectId: exportId,
-    newValueJson: stringifyJson({ archiveR2Key, archiveSha256 }),
+    newValueJson: stringifyJson({
+      archiveR2Key,
+      archiveSha256,
+      manifestSha256: manifestSha256 ?? null,
+    }),
   });
+}
+
+/**
+ * Create a new revision of a previously-finalized export. The prior export
+ * row and its R2 archive are untouched — preservation principle.
+ */
+export async function createExportRevision(
+  month: string,
+  correctionReason: string,
+  actor: string,
+): Promise<{ exportId: string; revision: number; supersedesExportId: string }> {
+  const db = getReceiptsDb();
+  const now = nowIso();
+
+  const prior = await db
+    .prepare(
+      `SELECT id, export_revision FROM receipt_exports
+       WHERE export_month = ? AND status = 'finalized'
+       ORDER BY COALESCE(export_revision, 1) DESC LIMIT 1`,
+    )
+    .bind(month)
+    .first<{ id: string; export_revision: number | null }>();
+
+  if (!prior) {
+    throw new Error(
+      `Cannot create a revision: no finalized export exists for ${month}.`,
+    );
+  }
+
+  const newRevision = (prior.export_revision ?? 1) + 1;
+  const id = newUuid();
+
+  await db
+    .prepare(
+      `INSERT INTO receipt_exports
+        (id, export_month, status, created_by, created_at,
+         export_revision, supersedes_export_id, correction_reason,
+         retention_until, legal_hold)
+       VALUES (?, ?, 'draft', ?, ?, ?, ?, ?, ?, 1)`,
+    )
+    .bind(
+      id,
+      month,
+      actor,
+      now,
+      newRevision,
+      prior.id,
+      correctionReason,
+      retentionUntilIso(now),
+    )
+    .run();
+
+  await createAuditEntry(db, {
+    actor,
+    action: "export.revision_created",
+    objectType: "export",
+    objectId: id,
+    oldValueJson: stringifyJson({ supersedes: prior.id, revision: prior.export_revision ?? 1 }),
+    newValueJson: stringifyJson({ revision: newRevision, correctionReason, month }),
+  });
+
+  return { exportId: id, revision: newRevision, supersedesExportId: prior.id };
 }
 
 // ─── Reconciliation signoff ────────────────────────────────────────────────

@@ -24,6 +24,10 @@ import {
   computeExportBlockers,
   computeExportWarnings,
 } from "@/lib/receipts/blockers";
+import {
+  ACCOUNTANT_DISCLAIMER_EN,
+  ACCOUNTANT_DISCLAIMER_JA,
+} from "@/lib/receipts/settings";
 
 export const dynamic = "force-dynamic";
 
@@ -101,6 +105,11 @@ export default async function ExportPage({
         manifestSample={manifestSample}
         manifestSize={manifestSize}
       />
+      <div className="border-t border-amber-100 bg-amber-50 px-8 py-4 text-xs text-amber-900">
+        <p className="font-semibold">Accountant review boundary</p>
+        <p className="mt-1">{ACCOUNTANT_DISCLAIMER_EN}</p>
+        <p className="mt-2">{ACCOUNTANT_DISCLAIMER_JA}</p>
+      </div>
     </>
   );
 }

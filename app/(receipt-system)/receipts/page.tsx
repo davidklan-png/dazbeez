@@ -14,6 +14,9 @@ import { Pill } from "@/components/ui/pill";
 import { ArrowRightIcon, CameraIcon } from "@/components/ui/icons";
 import { StatTile } from "@/components/receipts/ui/stat-tile";
 import { formatMonth } from "@/lib/receipts/format";
+import { ComplianceSummaryCards } from "@/components/receipts/ComplianceSummaryCards";
+import { summarizeOpenChecksForMonth } from "@/lib/receipts/compliance";
+import { getReceiptsDb } from "@/lib/cloudflare-runtime";
 
 export const dynamic = "force-dynamic";
 
@@ -78,10 +81,17 @@ export default async function ReceiptsDashboardPage() {
     /* alerts optional */
   }
 
-  const [monthReceipts, allLines, exports] = await Promise.all([
+  const [monthReceipts, allLines, exports, complianceSummary] = await Promise.all([
     listReceiptRecords({ month, limit: 1000 }),
     listAmexLineCountsByMonth(),
     listExports(),
+    summarizeOpenChecksForMonth(getReceiptsDb(), month).catch(() => ({
+      blockers: 0,
+      warnings: 0,
+      info: 0,
+      total: 0,
+      byType: {},
+    })),
   ]);
 
   const unreviewed = monthReceipts.filter(
@@ -149,6 +159,10 @@ export default async function ReceiptsDashboardPage() {
               : "Run reconcile + finalize"
           }
         />
+      </div>
+
+      <div className="mt-6">
+        <ComplianceSummaryCards month={month} summary={complianceSummary} />
       </div>
 
       <div className="mt-8 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">

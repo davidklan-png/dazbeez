@@ -15,6 +15,9 @@ import {
   InlineServerError,
   isNextInternalError,
 } from "@/components/receipts/review/inline-error";
+import { CompliancePanel } from "@/components/receipts/CompliancePanel";
+import { listChecksForObject } from "@/lib/receipts/compliance";
+import { getReceiptsDb } from "@/lib/cloudflare-runtime";
 
 export const dynamic = "force-dynamic";
 
@@ -39,10 +42,11 @@ async function renderReceiptPage(params: Promise<{ id: string }>) {
   await assertReceiptsPageAccess();
 
   const { id } = await params;
-  const [receipt, attendees, all] = await Promise.all([
+  const [receipt, attendees, all, complianceChecks] = await Promise.all([
     getReceiptRecord(id),
     listAttendees(id),
     listReceiptRecords({ limit: 200 }),
+    listChecksForObject(getReceiptsDb(), "receipt", id),
   ]);
   if (!receipt) notFound();
 
@@ -90,16 +94,19 @@ async function renderReceiptPage(params: Promise<{ id: string }>) {
         />
       }
       formPane={
-        <FormPane
-          receipt={receipt}
-          initialAttendees={attendees}
-          queueIndex={Math.max(1, activeIndex + 1)}
-          queueTotal={queueItems.length}
-          nextReceiptId={nextReceiptId}
-          prevReceiptId={prevReceiptId}
-          hasAmexMatch={activeFlags?.hasMatch ?? false}
-          reReviewNeeded={activeFlags?.reReviewNeeded ?? false}
-        />
+        <div className="space-y-4">
+          <CompliancePanel checks={complianceChecks} />
+          <FormPane
+            receipt={receipt}
+            initialAttendees={attendees}
+            queueIndex={Math.max(1, activeIndex + 1)}
+            queueTotal={queueItems.length}
+            nextReceiptId={nextReceiptId}
+            prevReceiptId={prevReceiptId}
+            hasAmexMatch={activeFlags?.hasMatch ?? false}
+            reReviewNeeded={activeFlags?.reReviewNeeded ?? false}
+          />
+        </div>
       }
     />
   );
