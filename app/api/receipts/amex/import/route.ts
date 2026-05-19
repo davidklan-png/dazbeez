@@ -21,6 +21,8 @@ import {
   computeSha256Hex,
 } from "@/lib/receipts/storage";
 import { getReceiptsDb } from "@/lib/cloudflare-runtime";
+import { createReceiptFile } from "@/lib/receipts/files";
+import { createAuditEntry } from "@/lib/receipts/audit";
 
 /*
  * AMEX CSV Import — Dedup Contract
@@ -173,6 +175,35 @@ export async function POST(request: Request) {
       validationErrors,
       importStatus,
     });
+
+    // File manifest row for the AMEX CSV — same preservation contract as a
+    // receipt original. Failure here is non-fatal: the artifact row already
+    // carries the hash and key.
+    try {
+      const db = getReceiptsDb();
+      await createReceiptFile(db, {
+        objectType: "amex_statement_artifact",
+        objectId: savedArtifactId,
+        role: "statement",
+        r2Bucket: "receipts",
+        r2Key,
+        originalFilename: file.name,
+        contentType: "text/csv",
+        fileSizeBytes: file.size,
+        sha256Hash: sha256,
+        uploadedBy: actor,
+        isOriginal: true,
+      });
+      await createAuditEntry(db, {
+        actor,
+        action: "amex_statement.uploaded",
+        objectType: "amex_statement_artifact",
+        objectId: savedArtifactId,
+        newValueJson: JSON.stringify({ statementMonth, sha256, fileSize: file.size }),
+      });
+    } catch (manifestErr) {
+      console.error("[amex/import] file manifest write failed", manifestErr);
+    }
 
     // ── Return validation errors without importing lines ────────────────────
     if (validationErrors.length > 0) {

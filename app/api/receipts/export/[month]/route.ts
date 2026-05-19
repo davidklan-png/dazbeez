@@ -1,6 +1,11 @@
 import { NextResponse } from "next/server";
 import { requireReceiptsActor } from "@/lib/receipts/auth";
-import { getExport, finalizeExport, getFinalizedReconciliationForMonth } from "@/lib/receipts/db";
+import {
+  getExport,
+  finalizeExport,
+  getFinalizedReconciliationForMonth,
+  createExportRevision,
+} from "@/lib/receipts/db";
 import { validateMonthReadyForExport } from "@/lib/receipts/month-closing";
 
 type RouteContext = { params: Promise<{ month: string }> };
@@ -29,6 +34,39 @@ export async function POST(request: Request, { params }: RouteContext) {
   try {
     const actor = await requireReceiptsActor(request.headers);
     const { month } = await params;
+
+    const url = new URL(request.url);
+    const isCorrection = url.searchParams.get("correction") === "true";
+
+    if (isCorrection) {
+      // Read correction reason from JSON body. Body is optional only when
+      // not a correction; for revisions the reason is required.
+      let reason = "";
+      try {
+        const body = (await request.json()) as { correctionReason?: string };
+        reason = body.correctionReason?.trim() ?? "";
+      } catch {
+        // No JSON body — fall through with empty reason which fails below.
+      }
+      if (!reason) {
+        return NextResponse.json(
+          { error: "correctionReason is required when creating a revision." },
+          { status: 400 },
+        );
+      }
+      try {
+        const revision = await createExportRevision(month, reason, actor);
+        return NextResponse.json(
+          { ok: true, ...revision, month },
+          { status: 201 },
+        );
+      } catch (err) {
+        return NextResponse.json(
+          { error: err instanceof Error ? err.message : "Revision failed." },
+          { status: 422 },
+        );
+      }
+    }
 
     const exportRecord = await getExport(month);
     if (!exportRecord) {
@@ -73,6 +111,7 @@ export async function POST(request: Request, { params }: RouteContext) {
       exportRecord.manifest_r2_key,
       exportRecord.archive_sha256,
       actor,
+      exportRecord.manifest_sha256 ?? undefined,
     );
 
     return NextResponse.json({ ok: true, month, finalized: true }, { status: 200 });

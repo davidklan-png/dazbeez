@@ -86,10 +86,16 @@ export type AuditAction =
   | "receipt.extraction_completed"
   | "receipt.extraction_denied"
   | "receipt.extraction_failed"
+  | "receipt.reviewed"
   | "receipt.reconciled"
   | "receipt.exported"
   | "receipt.archived"
   | "receipt.deleted"
+  | "receipt.restored"
+  | "receipt.finalized"
+  | "receipt.file_downloaded"
+  | "receipt.search_performed"
+  | "receipt.compliance_checked"
   | "amex.imported"
   | "amex.artifact_created"
   | "amex.line_categorized"
@@ -97,8 +103,82 @@ export type AuditAction =
   | "amex.business_trip_detected"
   | "amex.reconciliation_signed_off"
   | "amex.reconciliation_amended"
+  | "amex_statement.uploaded"
+  | "amex_statement.parsed"
+  | "amex_statement.import_failed"
+  | "amex_statement.line_updated"
+  | "amex_statement.line_reconciled"
   | "export.created"
-  | "export.finalized";
+  | "export.generated"
+  | "export.finalized"
+  | "export.revision_created"
+  | "archive.created"
+  | "settings.updated";
+
+// ─── Compliance: source / preservation / qualified-invoice ────────────────
+
+export type SourceType =
+  | "paper_scanned"
+  | "electronic_receipt"
+  | "digital_invoice"
+  | "credit_card_statement"
+  | "email_attachment"
+  | "manual_upload"
+  | "amex_csv";
+
+export type PreservationStatus =
+  | "captured"
+  | "needs_metadata"
+  | "needs_review"
+  | "reviewed"
+  | "exported"
+  | "archived"
+  | "superseded"
+  | "deleted";
+
+export type QualifiedInvoiceStatus =
+  | "not_checked"
+  | "not_applicable"
+  | "valid"
+  | "invalid"
+  | "missing_registration_number"
+  | "unregistered_counterparty"
+  | "needs_review";
+
+export type InvoiceRegistrationStatus =
+  | "unchecked"
+  | "format_valid"
+  | "format_invalid"
+  | "lookup_skipped"
+  | "lookup_confirmed"
+  | "lookup_failed";
+
+export type ComplianceCheckType =
+  | "missing_transaction_date"
+  | "missing_amount"
+  | "missing_counterparty"
+  | "missing_category"
+  | "missing_receipt"
+  | "missing_attendees"
+  | "missing_invoice_registration_number"
+  | "invoice_registration_invalid"
+  | "missing_tax_rate"
+  | "missing_tax_amount"
+  | "electronic_transaction_missing_original"
+  | "scanner_preservation_metadata_incomplete"
+  | "export_blocker";
+
+export type ComplianceCheckStatus = "open" | "resolved" | "ignored_with_reason";
+export type ComplianceCheckSeverity = "info" | "warning" | "blocker";
+
+export type ReceiptFileRole =
+  | "original"
+  | "processed"
+  | "back_side"
+  | "continuation"
+  | "related_invoice"
+  | "statement"
+  | "export_artifact";
 
 // ─── Database row shapes ───────────────────────────────────────────────────
 
@@ -133,6 +213,18 @@ export interface ReceiptRecord {
   delete_reason: string | null;
   retention_until?: string | null;
   legal_hold?: number;
+  // Compliance metadata (0014_compliance.sql)
+  source_type?: SourceType | null;
+  preservation_status?: PreservationStatus | null;
+  confirmed_at?: string | null;
+  confirmed_by?: string | null;
+  invoice_registration_number?: string | null;
+  invoice_registration_status?: InvoiceRegistrationStatus | null;
+  qualified_invoice_status?: QualifiedInvoiceStatus;
+  tax_rate?: string | null;
+  counterparty_name?: string | null;
+  search_text?: string | null;
+  compliance_warnings_json?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -261,6 +353,74 @@ export interface ReceiptExport {
   finalized_at: string | null;
   retention_until?: string | null;
   legal_hold?: number;
+  // Revisioning + manifest hashing (0014_compliance.sql)
+  export_revision?: number;
+  supersedes_export_id?: string | null;
+  correction_reason?: string | null;
+  finalized_by?: string | null;
+  finalization_hash?: string | null;
+  manifest_sha256?: string | null;
+}
+
+// ─── Compliance row shapes ────────────────────────────────────────────────
+
+export interface ReceiptFile {
+  id: string;
+  object_type: string;
+  object_id: string;
+  role: ReceiptFileRole;
+  r2_bucket: string;
+  r2_key: string;
+  original_filename: string;
+  content_type: string;
+  file_size_bytes: number;
+  sha256_hash: string;
+  uploaded_by: string;
+  uploaded_at: string;
+  is_original: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ComplianceCheck {
+  id: string;
+  object_type: string;
+  object_id: string;
+  check_type: ComplianceCheckType;
+  status: ComplianceCheckStatus;
+  severity: ComplianceCheckSeverity;
+  message: string;
+  details_json: string | null;
+  checked_at: string;
+  resolved_at: string | null;
+  resolved_by: string | null;
+  created_at: string;
+}
+
+export interface ComputedCheck {
+  checkType: ComplianceCheckType;
+  severity: ComplianceCheckSeverity;
+  message: string;
+  details?: Record<string, unknown>;
+}
+
+export type InvoiceNumberRequirementMode = "disabled" | "warning" | "blocker";
+
+export type PaperOriginalDiscardPolicy =
+  | "retain_until_accountant_confirms"
+  | "retain_indefinitely"
+  | "permit_discard_after_scan";
+
+export interface ComplianceSettings {
+  business_name: string;
+  taxpayer_type: string;
+  retention_years: number;
+  require_attendees_for_meeting: boolean;
+  require_attendees_for_entertainment: boolean;
+  invoice_number_requirement_mode: InvoiceNumberRequirementMode;
+  export_block_on_warnings: boolean;
+  paper_original_discard_policy: PaperOriginalDiscardPolicy;
+  statement_expected_day: number;
 }
 
 export interface AmexReconciliation {
@@ -297,6 +457,7 @@ export interface ReceiptAuditEntry {
 export interface CreateReceiptInput {
   capturedBy: string;
   source?: string;
+  sourceType?: SourceType;
   originalFilename?: string;
   paymentPath?: PaymentPath;
   expenseType?: ExpenseType;
@@ -328,6 +489,12 @@ export interface UpdateReceiptInput {
   processedR2Key?: string | null;
   extractionJson?: string | null;
   exportedMonth?: string | null;
+  // Compliance fields (0014_compliance.sql)
+  sourceType?: SourceType | null;
+  invoiceRegistrationNumber?: string | null;
+  counterpartyName?: string | null;
+  taxRate?: string | null;
+  qualifiedInvoiceStatus?: QualifiedInvoiceStatus | null;
 }
 
 export interface CreateAttendeeInput {
@@ -398,6 +565,13 @@ export interface ExtractionResult {
   attendeeNames: string[];
   rawText: string;
   provider: string;
+  // Qualified-invoice (インボイス制度) extraction. Initial providers may
+  // leave these null; the review UI is the source of truth until populated.
+  invoiceRegistrationNumber?: string | null;
+  taxRate?: string | null;
+  taxAmountMinor?: number | null;
+  counterpartyName?: string | null;
+  qualifiedInvoiceStatus?: QualifiedInvoiceStatus | null;
 }
 
 // ─── Reconciliation ────────────────────────────────────────────────────────

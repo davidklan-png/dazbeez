@@ -15,10 +15,15 @@ import {
   buildArchiveKey,
   buildManifestKey,
   buildManifestCsv,
+  buildReadmeKey,
+  buildExportReadme,
 } from "@/lib/receipts/export";
 import { archiveBundle, archiveManifest } from "@/lib/receipts/storage";
 import { getCategoryByCode, requiresAttendees } from "@/lib/receipts/categories";
-import type { ExportRow } from "@/lib/receipts/types";
+import { getReceiptsDb, getReceiptsArchiveBucket } from "@/lib/cloudflare-runtime";
+import { getAmexArtifactByMonth } from "@/lib/receipts/db";
+import { retentionMetadata } from "@/lib/receipts/retention";
+import type { ExportRow, ReceiptFile } from "@/lib/receipts/types";
 
 export async function POST(request: Request) {
   try {
@@ -149,6 +154,30 @@ export async function POST(request: Request) {
       ? await getFinalizedReconciliationForMonth(month)
       : null;
 
+    // Gather all file-manifest entries for receipts included in this export
+    // plus the AMEX statement artifact. This builds the per-file SHA-256
+    // section of the manifest so an accountant can verify every artifact.
+    const db = getReceiptsDb();
+    const includedReceiptIds = receipts.map((r) => r.id);
+    const fileRows: ReceiptFile[] = [];
+    if (includedReceiptIds.length > 0) {
+      const CHUNK_SIZE = 90;
+      for (let i = 0; i < includedReceiptIds.length; i += CHUNK_SIZE) {
+        const chunk = includedReceiptIds.slice(i, i + CHUNK_SIZE);
+        const placeholders = chunk.map(() => "?").join(",");
+        const result = await db
+          .prepare(
+            `SELECT * FROM receipt_files
+             WHERE object_type = 'receipt' AND object_id IN (${placeholders})`,
+          )
+          .bind(...chunk)
+          .all<ReceiptFile>();
+        fileRows.push(...(result.results ?? []));
+      }
+    }
+    const amexArtifact = await getAmexArtifactByMonth(month);
+    const generatedAt = new Date().toISOString();
+
     // Generate and upload manifest
     const manifest = buildManifestCsv(
       exportId,
@@ -156,7 +185,7 @@ export async function POST(request: Request) {
       archiveKey,
       sha256,
       exportRows.length,
-      new Date().toISOString(),
+      generatedAt,
       reconciliation
         ? {
             id: reconciliation.id,
@@ -164,12 +193,51 @@ export async function POST(request: Request) {
             manifestSha256: reconciliation.manifest_sha256 ?? "",
           }
         : null,
+      {
+        files: fileRows,
+        amexArtifact: amexArtifact
+          ? {
+              r2Key: amexArtifact.r2_key,
+              sha256Hash: amexArtifact.sha256_hash,
+              originalFilename: amexArtifact.original_filename ?? "",
+            }
+          : null,
+      },
     );
-    await archiveManifest(manifestKey, encoder.encode(manifest).buffer as ArrayBuffer);
+    const manifestBytes = encoder.encode(manifest);
+    const manifestSha256 = await hashCsvContent(manifest);
+    await archiveManifest(manifestKey, manifestBytes.buffer as ArrayBuffer);
+
+    // README accompanies every bundle. Disclaimer text + revision context.
+    const readme = buildExportReadme({
+      exportId,
+      month,
+      rowCount: exportRows.length,
+      generatedAt,
+      exportRevision: 1,
+      archiveSha256: sha256,
+      manifestSha256,
+    });
+    const readmeKey = buildReadmeKey(month, exportId);
+    await getReceiptsArchiveBucket().put(
+      readmeKey,
+      encoder.encode(readme).buffer as ArrayBuffer,
+      {
+        httpMetadata: { contentType: "text/plain; charset=utf-8" },
+        customMetadata: retentionMetadata(),
+      },
+    );
 
     // Auto-finalize if requested
     if (body.finalize) {
-      await finalizeExport(exportId, archiveKey, manifestKey, sha256, actor);
+      await finalizeExport(
+        exportId,
+        archiveKey,
+        manifestKey,
+        sha256,
+        actor,
+        manifestSha256,
+      );
     }
 
     return NextResponse.json(
@@ -178,8 +246,10 @@ export async function POST(request: Request) {
         month,
         rowCount: exportRows.length,
         sha256,
+        manifestSha256,
         archiveKey,
         manifestKey,
+        readmeKey,
         finalized: body.finalize ?? false,
       },
       { status: 200 },
