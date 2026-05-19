@@ -41,11 +41,12 @@ export function Btn({
   className = "",
   children,
   disabled,
+  type,
   ...rest
 }: BtnProps) {
   return (
     <button
-      type={rest.type ?? "button"}
+      type={type ?? "button"}
       disabled={disabled}
       className={[
         "inline-flex items-center justify-center rounded-lg border font-semibold transition-colors",
@@ -60,7 +61,7 @@ export function Btn({
       {...rest}
     >
       {leftIcon}
-      <span>{children}</span>
+      {children != null && <span>{children}</span>}
       {rightIcon}
     </button>
   );

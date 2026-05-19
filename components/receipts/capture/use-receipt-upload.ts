@@ -148,15 +148,15 @@ async function runOcrAndPoll(
         const data = (await res.json()) as {
           receipt?: {
             merchant?: string | null;
-            amountMinor?: number | null;
+            amount_minor?: number | null;
             currency?: string | null;
-            transactionDate?: string | null;
-            expenseType?: string | null;
-            extractionJson?: string | null;
+            transaction_date?: string | null;
+            expense_type?: string | null;
+            extraction_json?: string | null;
           };
         };
         const r = data.receipt;
-        if (r && (r.merchant || r.amountMinor || r.extractionJson)) {
+        if (r && (r.merchant || r.amount_minor || r.extraction_json)) {
           setPhase({
             kind: "saved",
             receiptId,
@@ -165,10 +165,10 @@ async function runOcrAndPoll(
             capturedAt: started,
             extracted: {
               merchant: r.merchant ?? null,
-              amount: r.amountMinor ?? null,
+              amount: r.amount_minor ?? null,
               currency: r.currency ?? null,
-              transactionDate: r.transactionDate ?? null,
-              expenseType: r.expenseType ?? null,
+              transactionDate: r.transaction_date ?? null,
+              expenseType: r.expense_type ?? null,
             },
           });
           return;

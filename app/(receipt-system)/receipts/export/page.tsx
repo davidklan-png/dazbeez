@@ -24,10 +24,19 @@ import type {
 
 export const dynamic = "force-dynamic";
 
-export default async function ExportPage() {
+export default async function ExportPage({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
   await assertReceiptsPageAccess();
 
-  const month = new Date().toISOString().slice(0, 7);
+  const params = await searchParams;
+  const monthParam =
+    typeof params.month === "string" && /^\d{4}-\d{2}$/.test(params.month)
+      ? params.month
+      : null;
+  const month = monthParam ?? new Date().toISOString().slice(0, 7);
   const monthLabel = formatMonthLabel(month);
 
   const [exports, monthReceipts, monthLines, currentExport] = await Promise.all([

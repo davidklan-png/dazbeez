@@ -11,7 +11,7 @@ export type QueueItem = {
   dateLabel: string;
   categoryLabel: string;
   status: ReceiptRecord["status"];
-  needs: "attendees" | "purpose" | null;
+  needs: "attendees" | "purpose" | "re-review" | null;
 };
 
 export function buildQueueItems(receipts: ReceiptRecord[]): QueueItem[] {
@@ -34,8 +34,9 @@ export function buildQueueItems(receipts: ReceiptRecord[]): QueueItem[] {
 function needsFlag(
   r: ReceiptRecord,
   code: string,
-): "attendees" | "purpose" | null {
+): "attendees" | "purpose" | "re-review" | null {
   if (r.status === "exported" || r.status === "archived") return null;
+  if (r.re_review_needed) return "re-review";
   if (categoryRequiresAttendees(code)) {
     if (!r.business_purpose) return "attendees";
   }
