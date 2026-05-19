@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useEffect, useSyncExternalStore } from "react";
 import { useSearchParams } from "next/navigation";
 import { HoneycombBackdrop } from "@/components/honeycomb-backdrop";
 
@@ -46,17 +46,21 @@ const secondaryActions: SecondaryAction[] = [
 
 const VCARD_HREF = "/api/vcard";
 
+const subscribeNoop = () => () => {};
+const getShareSupport = () =>
+  typeof navigator !== "undefined" && typeof navigator.share === "function";
+
 export function NFCContent() {
   const params = useSearchParams();
   const source = params.get("src") || "direct";
-  const [canShare, setCanShare] = useState(false);
-
-  useEffect(() => {
-    setCanShare(
-      typeof navigator !== "undefined" &&
-        typeof navigator.share === "function",
-    );
-  }, []);
+  // Hydration-safe client-only feature detection: server snapshot is always
+  // false (matches the initial markup), then the client snapshot reads the
+  // real value on the first client render without an effect-driven setState.
+  const canShare = useSyncExternalStore(
+    subscribeNoop,
+    getShareSupport,
+    () => false,
+  );
 
   useEffect(() => {
     if (source === "direct") return;

@@ -20,12 +20,13 @@ import {
 } from "@/lib/receipts/categories";
 import type {
   ExpenseType,
-  ExtractionResult,
   PaymentPath,
   ReceiptAttendee,
   ReceiptRecord,
   ReceiptStatus,
 } from "@/lib/receipts/types";
+import { SaveBadge, type SaveState } from "./save-badge";
+import { useExtraction } from "./use-extraction";
 
 const EXPENSE_TYPES: Array<{ value: ExpenseType; label: string }> = [
   { value: "UNKNOWN", label: "Unknown" },
@@ -56,12 +57,6 @@ export interface FormPaneProps {
   reReviewNeeded: boolean;
 }
 
-type SaveState =
-  | { kind: "idle" }
-  | { kind: "saving" }
-  | { kind: "saved"; at: number }
-  | { kind: "error"; message: string };
-
 export function FormPane(props: FormPaneProps) {
   const router = useRouter();
   const { receipt } = props;
@@ -87,10 +82,40 @@ export function FormPane(props: FormPaneProps) {
     props.initialAttendees.map((a) => a.attendee_name),
   );
   const [save, setSave] = useState<SaveState>({ kind: "idle" });
-  const [extractionBusy, setExtractionBusy] = useState(false);
-  const [extractionFeedback, setExtractionFeedback] = useState<string | null>(
-    null,
-  );
+
+  // ─── OCR extraction (delegated to the useExtraction hook) ───────────
+  const {
+    busy: extractionBusy,
+    feedback: extractionFeedback,
+    run: handleExtract,
+  } = useExtraction(receipt.id, (ex) => {
+    let filled = 0;
+    if (ex.transactionDate && !transactionDate) {
+      setTransactionDate(ex.transactionDate);
+      filled++;
+    }
+    if (ex.merchant && !merchant) {
+      setMerchant(ex.merchant);
+      filled++;
+    }
+    if (ex.currency && ex.currency !== currency && currency === "JPY") {
+      setCurrency(ex.currency);
+      filled++;
+    }
+    if (ex.amountMinor != null && !amountDisplay) {
+      setAmountDisplay(formatAmountInput(ex.amountMinor, ex.currency ?? currency));
+      filled++;
+    }
+    if (ex.expenseType && ex.expenseType !== "UNKNOWN" && expenseType === "UNKNOWN") {
+      setExpenseType(ex.expenseType);
+      filled++;
+    }
+    if (ex.businessPurpose && !businessPurpose) {
+      setBusinessPurpose(ex.businessPurpose);
+      filled++;
+    }
+    return filled;
+  });
 
   const needsAttendees = categoryRequiresAttendees(expenseCategoryCode);
   const category = getCategoryByCode(expenseCategoryCode);
@@ -272,62 +297,6 @@ export function FormPane(props: FormPaneProps) {
       if (input instanceof HTMLInputElement) input.focus();
     },
   });
-
-  // ─── extract helper (button in form) ────────────────────────────────
-  async function handleExtract() {
-    setExtractionBusy(true);
-    setExtractionFeedback(null);
-    try {
-      const res = await fetch(`/api/receipts/${receipt.id}/extract`, {
-        method: "POST",
-      });
-      const json = (await res.json()) as {
-        ok?: boolean;
-        extracted?: ExtractionResult;
-        error?: string;
-      };
-      if (!res.ok || !json.extracted) {
-        setExtractionFeedback(json.error ?? "Extraction failed.");
-        return;
-      }
-      const ex = json.extracted;
-      let filled = 0;
-      if (ex.transactionDate && !transactionDate) {
-        setTransactionDate(ex.transactionDate);
-        filled++;
-      }
-      if (ex.merchant && !merchant) {
-        setMerchant(ex.merchant);
-        filled++;
-      }
-      if (ex.currency && ex.currency !== currency && currency === "JPY") {
-        setCurrency(ex.currency);
-        filled++;
-      }
-      if (ex.amountMinor != null) {
-        const next = formatAmountInput(ex.amountMinor, ex.currency ?? currency);
-        if (!amountDisplay) {
-          setAmountDisplay(next);
-          filled++;
-        }
-      }
-      if (ex.expenseType && ex.expenseType !== "UNKNOWN" && expenseType === "UNKNOWN") {
-        setExpenseType(ex.expenseType);
-        filled++;
-      }
-      if (ex.businessPurpose && !businessPurpose) {
-        setBusinessPurpose(ex.businessPurpose);
-        filled++;
-      }
-      setExtractionFeedback(
-        filled === 0 ? "OCR ran — no new fields filled" : `${filled} field${filled === 1 ? "" : "s"} filled from OCR.`,
-      );
-    } catch {
-      setExtractionFeedback("Network error — extraction failed.");
-    } finally {
-      setExtractionBusy(false);
-    }
-  }
 
   async function handleDelete() {
     if (!window.confirm(`Soft-delete receipt ${receipt.id.slice(0, 8)}…?`))
@@ -562,53 +531,6 @@ export function FormPane(props: FormPaneProps) {
       </div>
     </div>
   );
-}
-
-function SaveBadge({ state }: { state: SaveState }) {
-  const ago = useElapsedSeconds(state.kind === "saved" ? state.at : null);
-
-  if (state.kind === "saving") {
-    return (
-      <span className="flex items-center gap-1.5 text-[11.5px] text-amber-700">
-        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-500" />
-        Saving…
-      </span>
-    );
-  }
-  if (state.kind === "saved") {
-    return (
-      <span className="flex items-center gap-1.5 text-[11.5px] text-green-700">
-        <span className="h-1.5 w-1.5 rounded-full bg-green-500" />
-        Saved · {ago}s ago
-      </span>
-    );
-  }
-  if (state.kind === "error") {
-    return (
-      <span className="flex items-center gap-1.5 text-[11.5px] text-red-600">
-        <span className="h-1.5 w-1.5 rounded-full bg-red-500" />
-        {state.message}
-      </span>
-    );
-  }
-  return null;
-}
-
-function useElapsedSeconds(at: number | null): number {
-  const [now, setNow] = useState<number | null>(at);
-  useEffect(() => {
-    if (at == null) return;
-    const tick = () => setNow(Date.now());
-    const start = setTimeout(tick, 0);
-    const interval = setInterval(tick, 1000);
-    return () => {
-      clearTimeout(start);
-      clearInterval(interval);
-    };
-  }, [at]);
-  return at == null || now == null
-    ? 0
-    : Math.max(1, Math.round((now - at) / 1000));
 }
 
 function formatAmountInput(amount: number | null, currency: string | null) {
