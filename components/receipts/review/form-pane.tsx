@@ -53,6 +53,7 @@ export interface FormPaneProps {
   nextReceiptId: string | null;
   prevReceiptId: string | null;
   hasAmexMatch: boolean;
+  reReviewNeeded: boolean;
 }
 
 type SaveState =
@@ -366,7 +367,7 @@ export function FormPane(props: FormPaneProps) {
               Auto-matched to AMEX
             </Pill>
           )}
-          {receipt.re_review_needed === 1 && (
+          {props.reReviewNeeded && (
             <Pill tone="amber" size="sm" dot>
               Re-review needed
             </Pill>

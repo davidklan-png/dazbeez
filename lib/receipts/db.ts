@@ -576,6 +576,39 @@ export async function listAmexLines(
   return result.results ?? [];
 }
 
+export interface AmexMatchFlags {
+  hasMatch: boolean;
+  reReviewNeeded: boolean;
+}
+
+export async function getAmexMatchFlagsByReceiptIds(
+  receiptIds: string[],
+): Promise<Map<string, AmexMatchFlags>> {
+  const flags = new Map<string, AmexMatchFlags>();
+  if (receiptIds.length === 0) return flags;
+
+  const db = getReceiptsDb();
+  const placeholders = receiptIds.map(() => "?").join(",");
+  const result = await db
+    .prepare(
+      `SELECT matched_receipt_id, re_review_needed
+       FROM amex_statement_lines
+       WHERE matched_receipt_id IN (${placeholders})`,
+    )
+    .bind(...receiptIds)
+    .all<{ matched_receipt_id: string; re_review_needed: 0 | 1 }>();
+
+  for (const row of result.results ?? []) {
+    const existing = flags.get(row.matched_receipt_id);
+    flags.set(row.matched_receipt_id, {
+      hasMatch: true,
+      reReviewNeeded:
+        (existing?.reReviewNeeded ?? false) || row.re_review_needed === 1,
+    });
+  }
+  return flags;
+}
+
 export async function listAmexLineAttendeeNamesByMonth(
   statementMonth: string,
 ): Promise<Record<string, string[]>> {

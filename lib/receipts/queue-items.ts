@@ -14,7 +14,10 @@ export type QueueItem = {
   needs: "attendees" | "purpose" | "re-review" | null;
 };
 
-export function buildQueueItems(receipts: ReceiptRecord[]): QueueItem[] {
+export function buildQueueItems(
+  receipts: ReceiptRecord[],
+  reReviewIds: ReadonlySet<string> = new Set(),
+): QueueItem[] {
   return receipts.map((r) => {
     const code = r.expense_category_code ?? "";
     const cat = getCategoryByCode(code);
@@ -26,7 +29,7 @@ export function buildQueueItems(receipts: ReceiptRecord[]): QueueItem[] {
       dateLabel: formatDate(r.transaction_date ?? captured.slice(0, 10)),
       categoryLabel: cat ? cat.enName : code ? code : "Uncategorized",
       status: r.status,
-      needs: needsFlag(r, code),
+      needs: needsFlag(r, code, reReviewIds.has(r.id)),
     };
   });
 }
@@ -34,9 +37,10 @@ export function buildQueueItems(receipts: ReceiptRecord[]): QueueItem[] {
 function needsFlag(
   r: ReceiptRecord,
   code: string,
+  reReviewNeeded: boolean,
 ): "attendees" | "purpose" | "re-review" | null {
   if (r.status === "exported" || r.status === "archived") return null;
-  if (r.re_review_needed) return "re-review";
+  if (reReviewNeeded) return "re-review";
   if (categoryRequiresAttendees(code)) {
     if (!r.business_purpose) return "attendees";
   }

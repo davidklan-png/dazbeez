@@ -1,5 +1,6 @@
 import { notFound } from "next/navigation";
 import {
+  getAmexMatchFlagsByReceiptIds,
   getReceiptRecord,
   listAttendees,
   listReceiptRecords,
@@ -45,7 +46,17 @@ async function renderReceiptPage(params: Promise<{ id: string }>) {
   ]);
   if (!receipt) notFound();
 
-  const queueItems = buildQueueItems(all);
+  const amexFlags = await getAmexMatchFlagsByReceiptIds(
+    all.map((r) => r.id).concat(all.some((r) => r.id === id) ? [] : [id]),
+  );
+  const reReviewIds = new Set(
+    [...amexFlags.entries()]
+      .filter(([, f]) => f.reReviewNeeded)
+      .map(([rid]) => rid),
+  );
+  const activeFlags = amexFlags.get(id);
+
+  const queueItems = buildQueueItems(all, reReviewIds);
   const activeIndex = queueItems.findIndex((q) => q.id === id);
   const nextReceiptId = queueItems[activeIndex + 1]?.id ?? null;
   const prevReceiptId = queueItems[activeIndex - 1]?.id ?? null;
@@ -86,7 +97,8 @@ async function renderReceiptPage(params: Promise<{ id: string }>) {
           queueTotal={queueItems.length}
           nextReceiptId={nextReceiptId}
           prevReceiptId={prevReceiptId}
-          hasAmexMatch={false}
+          hasAmexMatch={activeFlags?.hasMatch ?? false}
+          reReviewNeeded={activeFlags?.reReviewNeeded ?? false}
         />
       }
     />
