@@ -1,6 +1,9 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
-import { listReceiptRecords } from "@/lib/receipts/db";
+import {
+  getAmexMatchFlagsByReceiptIds,
+  listReceiptRecords,
+} from "@/lib/receipts/db";
 import { assertReceiptsPageAccess } from "@/lib/receipts/auth-request";
 import { ReviewLayout } from "@/components/receipts/review/review-layout";
 import { QueueRail } from "@/components/receipts/review/queue-rail";
@@ -37,7 +40,13 @@ async function renderReviewPage(
 
   const receipts = await listReceiptRecords({ limit: 200 });
   const queue = filterQueue(receipts, filter);
-  const queueItems = buildQueueItems(queue);
+  const amexFlags = await getAmexMatchFlagsByReceiptIds(queue.map((r) => r.id));
+  const reReviewIds = new Set(
+    [...amexFlags.entries()]
+      .filter(([, f]) => f.reReviewNeeded)
+      .map(([rid]) => rid),
+  );
+  const queueItems = buildQueueItems(queue, reReviewIds);
   const needsAttention = queue.filter(
     (r) => r.status === "needs_review" || r.status === "captured",
   ).length;
