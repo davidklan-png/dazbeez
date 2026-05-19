@@ -13,6 +13,7 @@ import {
 import { ReconcileScreen } from "@/components/receipts/reconcile/reconcile-screen";
 import { assertReceiptsPageAccess } from "@/lib/receipts/auth-request";
 import type { MonthOption } from "@/components/receipts/month-switcher";
+import { formatMonth } from "@/lib/receipts/format";
 
 export const dynamic = "force-dynamic";
 
@@ -97,15 +98,3 @@ export default async function ReconcilePage({
   );
 }
 
-function formatMonth(month: string): string {
-  try {
-    const [y, m] = month.split("-").map(Number);
-    if (!y || !m) return month;
-    return new Date(y, m - 1, 1).toLocaleDateString("en-US", {
-      month: "long",
-      year: "numeric",
-    });
-  } catch {
-    return month;
-  }
-}

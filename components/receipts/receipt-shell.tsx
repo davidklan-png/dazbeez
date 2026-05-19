@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { BeeMark } from "@/components/receipts/ui/bee-mark";
+import { ToasterProvider } from "@/components/ui/toaster";
 
 const NAV = [
   { href: "/receipts", label: "Dashboard" },
@@ -25,6 +26,7 @@ export function ReceiptShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname() ?? "";
 
   return (
+    <ToasterProvider>
     <div className="flex min-h-screen flex-col bg-gray-50 text-gray-900">
       <header className="sticky top-0 z-10 flex items-center gap-6 border-b border-gray-200 bg-white px-4 py-3.5 sm:px-8">
         <Link
@@ -69,5 +71,6 @@ export function ReceiptShell({ children }: { children: React.ReactNode }) {
       </header>
       <div className="min-w-0 flex-1">{children}</div>
     </div>
+    </ToasterProvider>
   );
 }

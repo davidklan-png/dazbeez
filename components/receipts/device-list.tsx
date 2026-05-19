@@ -1,6 +1,8 @@
 "use client";
 
 import { useState } from "react";
+import { useToast } from "@/components/ui/toaster";
+import { apiFetch } from "@/lib/use-api-error";
 
 export interface DeviceListItem {
   id: string;
@@ -21,38 +23,38 @@ function formatDate(value: string | null): string {
 export function DeviceList({ devices }: { devices: DeviceListItem[] }) {
   const [items, setItems] = useState(devices);
   const [busyId, setBusyId] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const { toast } = useToast();
 
-  async function revoke(id: string, isCurrent: boolean) {
+  async function revoke(id: string, label: string, isCurrent: boolean) {
     if (
       !confirm(
         isCurrent
           ? "Revoke this device? You'll be signed out and need to re-trust it via Cloudflare Access."
-          : "Revoke this device?",
+          : `Revoke "${label}"?`,
       )
     ) {
       return;
     }
-    setError(null);
     setBusyId(id);
-    try {
-      const res = await fetch(`/api/receipts/devices/${id}/revoke`, {
-        method: "POST",
+    const result = await apiFetch(`/api/receipts/devices/${id}/revoke`, {
+      method: "POST",
+    });
+    setBusyId(null);
+    if (!result.ok) {
+      toast({
+        tone: "error",
+        title: "Revoke failed",
+        body: result.error.message,
       });
-      if (!res.ok) {
-        const body = (await res.json().catch(() => ({}))) as { error?: string };
-        throw new Error(body.error ?? `Revoke failed (${res.status}).`);
-      }
-      if (isCurrent) {
-        window.location.assign("/receipts/enroll");
-        return;
-      }
-      setItems((prev) => prev.filter((d) => d.id !== id));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Revoke failed.");
-    } finally {
-      setBusyId(null);
+      return;
     }
+    if (isCurrent) {
+      toast({ tone: "info", title: "Signing out…" });
+      window.location.assign("/receipts/enroll");
+      return;
+    }
+    setItems((prev) => prev.filter((d) => d.id !== id));
+    toast({ tone: "success", title: "Device revoked", body: label });
   }
 
   if (items.length === 0) {
@@ -65,11 +67,6 @@ export function DeviceList({ devices }: { devices: DeviceListItem[] }) {
 
   return (
     <div className="space-y-3">
-      {error ? (
-        <p className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">
-          {error}
-        </p>
-      ) : null}
       <ul className="divide-y divide-gray-100 overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-sm">
         {items.map((d) => (
           <li
@@ -99,7 +96,7 @@ export function DeviceList({ devices }: { devices: DeviceListItem[] }) {
             </div>
             <button
               type="button"
-              onClick={() => revoke(d.id, d.isCurrent)}
+              onClick={() => revoke(d.id, d.label, d.isCurrent)}
               disabled={busyId === d.id}
               className="self-start rounded-xl border border-red-200 bg-white px-3 py-1.5 text-sm font-medium text-red-700 transition-colors hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50 sm:self-auto"
             >

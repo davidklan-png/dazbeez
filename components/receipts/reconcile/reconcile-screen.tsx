@@ -24,6 +24,7 @@ import {
   WarningIcon,
 } from "@/components/ui/icons";
 import { ReceiptThumb } from "@/components/receipts/ui/receipt-thumb";
+import { KeyboardHintBar } from "@/components/receipts/ui/keyboard-hint-bar";
 import { useKeyboardShortcuts } from "@/lib/receipts/keyboard";
 import {
   EXPENSE_CATEGORIES,
@@ -40,6 +41,12 @@ import type {
 } from "@/lib/receipts/types";
 import type { StatementWindow } from "@/lib/receipts/statement-window";
 import type { MonthOption } from "@/components/receipts/month-switcher";
+import {
+  BAND_DISPLAY,
+  bandForLine,
+  matchExplanation,
+  type ConfidenceBand,
+} from "@/lib/receipts/confidence";
 
 export interface ReconcileScreenProps {
   amexLines: AmexStatementLine[];
@@ -54,25 +61,6 @@ export interface ReconcileScreenProps {
   window: StatementWindow | null;
   receiptsInWindow: ReceiptRecord[];
 }
-
-type ConfidenceBand = "obvious" | "likely" | "review" | "none";
-
-const BAND_THRESHOLDS: Record<ConfidenceBand, [number, number]> = {
-  obvious: [0.92, 1],
-  likely: [0.7, 0.9199],
-  review: [0.01, 0.6999],
-  none: [0, 0],
-};
-
-const BAND_COLORS: Record<
-  ConfidenceBand,
-  { dot: string; label: string; tone: "green" | "amber" | "red" | "gray" }
-> = {
-  obvious: { dot: "bg-green-500", label: "Obvious", tone: "green" },
-  likely: { dot: "bg-amber-500", label: "Likely", tone: "amber" },
-  review: { dot: "bg-red-500", label: "Review", tone: "red" },
-  none: { dot: "bg-gray-300", label: "No match", tone: "gray" },
-};
 
 type Tab = "lines" | "orphans" | "trips";
 
@@ -452,6 +440,16 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
         />
       </div>
 
+      <KeyboardHintBar
+        hints={[
+          ["j / k", "next · prev line"],
+          ["c", "confirm match"],
+          ["n", "no receipt expected"],
+          ["u", "unlink / unmatch"],
+        ]}
+        trailing={locked ? "Month is sealed — read-only" : undefined}
+      />
+
       {/* Finalize modal */}
       {showFinalizeModal && !locked && (
         <FinalizeModal
@@ -664,7 +662,7 @@ function LineRow({
   onClick: () => void;
 }) {
   const { line, band, match } = lwb;
-  const color = BAND_COLORS[band];
+  const color = BAND_DISPLAY[band];
   const receiptId = line.matched_receipt_id ?? match?.receiptId ?? null;
   const confirmed = line.match_status === "confirmed";
   const noReceipt = line.match_status === "no_receipt";
@@ -846,7 +844,7 @@ function DetailPane({
   const { line, band, match } = active;
   const receiptId = line.matched_receipt_id ?? match?.receiptId ?? null;
   const receipt = receiptId ? receiptMap.get(receiptId) ?? null : null;
-  const color = BAND_COLORS[band];
+  const color = BAND_DISPLAY[band];
   const busy = busyLineId === line.id;
   const showNoReceiptFields =
     line.match_status === "no_receipt" ||
@@ -1348,36 +1346,6 @@ function KV({
       </span>
     </div>
   );
-}
-
-function bandForLine(
-  line: AmexStatementLine,
-  match: ReconciliationMatch | undefined,
-): ConfidenceBand {
-  if (!match) {
-    if (line.match_status === "confirmed") return "obvious";
-    return "none";
-  }
-  const s = match.confidenceScore;
-  if (s >= BAND_THRESHOLDS.obvious[0]) return "obvious";
-  if (s >= BAND_THRESHOLDS.likely[0]) return "likely";
-  return "review";
-}
-
-function matchExplanation(
-  line: AmexStatementLine,
-  receipt: ReceiptRecord | null,
-): string {
-  if (!receipt) return "Pick a receipt or mark as no-receipt-expected.";
-  if (line.amount_minor !== (receipt.amount_minor ?? 0))
-    return "Amount differs — verify before confirming.";
-  if (
-    line.transaction_date &&
-    receipt.transaction_date &&
-    line.transaction_date !== receipt.transaction_date
-  )
-    return "Dates differ slightly — common for late captures.";
-  return "Linked match.";
 }
 
 function formatJpy(amount: number, currency: string | null): string {

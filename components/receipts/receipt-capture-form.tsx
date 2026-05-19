@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { useIsMobile } from "@/lib/receipts/use-viewport";
 import {
   useReceiptUpload,
@@ -21,6 +21,60 @@ export interface ReceiptCaptureFormProps {
   todayCount?: number;
 }
 
+const SESSION_QUEUE_KEY = "dazbeez.receipts.captureQueue.v1";
+/** Drop persisted queue entries older than this so the desktop doesn't keep
+ *  showing yesterday's receipts after a coffee break. */
+const SESSION_QUEUE_TTL_MS = 1000 * 60 * 60 * 6;
+/** Stable empty array reference so useSyncExternalStore doesn't tear when
+ *  the server snapshot is read repeatedly. */
+const EMPTY_QUEUE: SessionUpload[] = [];
+
+// useSyncExternalStore requires the snapshot getter to return a
+// referentially-stable value, so we memoise across renders. The cache is
+// invalidated on every successful persistQueue() write below.
+let cachedQueue: SessionUpload[] | null = null;
+
+function readPersistedQueueFresh(): SessionUpload[] {
+  if (typeof window === "undefined") return EMPTY_QUEUE;
+  try {
+    const raw = window.sessionStorage.getItem(SESSION_QUEUE_KEY);
+    if (!raw) return EMPTY_QUEUE;
+    const parsed = JSON.parse(raw) as {
+      savedAt?: number;
+      items?: SessionUpload[];
+    };
+    if (!parsed.items || !Array.isArray(parsed.items)) return EMPTY_QUEUE;
+    if (!parsed.savedAt || Date.now() - parsed.savedAt > SESSION_QUEUE_TTL_MS)
+      return EMPTY_QUEUE;
+    // Don't restore in-flight uploads — the upload was aborted when the page
+    // unloaded, so the row would dangle forever.
+    const filtered = parsed.items.filter((u) => u.state !== "uploading");
+    return filtered.length === 0 ? EMPTY_QUEUE : filtered;
+  } catch {
+    return EMPTY_QUEUE;
+  }
+}
+
+function loadPersistedQueue(): SessionUpload[] {
+  if (cachedQueue == null) cachedQueue = readPersistedQueueFresh();
+  return cachedQueue;
+}
+
+function persistQueue(items: SessionUpload[]) {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.setItem(
+      SESSION_QUEUE_KEY,
+      JSON.stringify({ savedAt: Date.now(), items }),
+    );
+    cachedQueue = items;
+  } catch {
+    /* quota or privacy mode — best-effort */
+  }
+}
+
+const subscribeNoop = () => () => {};
+
 export function ReceiptCaptureForm({
   initialPayment = null,
   rapidMode = false,
@@ -28,8 +82,23 @@ export function ReceiptCaptureForm({
 }: ReceiptCaptureFormProps) {
   const isMobile = useIsMobile();
   const { phase, upload, reset, cancel } = useReceiptUpload();
-  const [sessionUploads, setSessionUploads] = useState<SessionUpload[]>([]);
+  // Seed the queue from sessionStorage on the very first client render
+  // (server snapshot is always empty so hydration matches the empty SSR
+  // markup; the client snapshot reads the persisted queue immediately,
+  // without an effect-driven setState).
+  const persisted = useSyncExternalStore(
+    subscribeNoop,
+    loadPersistedQueue,
+    () => EMPTY_QUEUE,
+  );
+  const [sessionUploads, setSessionUploads] = useState<SessionUpload[]>(persisted);
   const activeIdRef = useRef<string | null>(null);
+
+  // Persist on every change so a hard reload doesn't lose the day's work.
+  useEffect(() => {
+    if (isMobile) return;
+    persistQueue(sessionUploads);
+  }, [sessionUploads, isMobile]);
 
   const onPickFile = useCallback(
     async (file: File) => {

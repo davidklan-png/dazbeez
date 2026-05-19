@@ -12,6 +12,8 @@ import { AmexMissingStatementAlert } from "@/components/receipts/amex-missing-st
 import { Card } from "@/components/ui/card";
 import { Pill } from "@/components/ui/pill";
 import { ArrowRightIcon, CameraIcon } from "@/components/ui/icons";
+import { StatTile } from "@/components/receipts/ui/stat-tile";
+import { formatMonth } from "@/lib/receipts/format";
 
 export const dynamic = "force-dynamic";
 
@@ -212,44 +214,3 @@ export default async function ReceiptsDashboardPage() {
   );
 }
 
-function StatTile({
-  label,
-  value,
-  sub,
-  accent,
-}: {
-  label: string;
-  value: string;
-  sub: string;
-  accent?: boolean;
-}) {
-  return (
-    <Card>
-      <div className="text-[11px] font-bold uppercase tracking-[0.05em] text-gray-500">
-        {label}
-      </div>
-      <div
-        className={[
-          "mt-1.5 text-[26px] font-bold tabular-nums",
-          accent ? "text-amber-700" : "text-gray-900",
-        ].join(" ")}
-      >
-        {value}
-      </div>
-      <div className="mt-0.5 text-[12px] text-gray-500">{sub}</div>
-    </Card>
-  );
-}
-
-function formatMonth(month: string): string {
-  try {
-    const [y, m] = month.split("-").map(Number);
-    if (!y || !m) return month;
-    return new Date(y, m - 1, 1).toLocaleDateString("en-US", {
-      month: "long",
-      year: "numeric",
-    });
-  } catch {
-    return month;
-  }
-}
