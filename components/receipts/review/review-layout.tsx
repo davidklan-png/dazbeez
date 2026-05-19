@@ -45,10 +45,17 @@ export function ReviewLayout({
         capturedThisMonth={capturedThisMonth}
         activeFilter={activeFilter ?? null}
       />
-      <div className="grid min-h-0 flex-1 grid-cols-[300px_minmax(0,1fr)_minmax(0,1fr)]">
-        {queueRail}
-        {imagePane}
-        {formPane}
+      {/* Phone: stack queue → image → form so each pane is full-width and
+          swipable. Tablet+: 2-column with image / form side-by-side and the
+          queue folded into a drawer above. Desktop: classic 3-column.       */}
+      <div className="grid min-h-0 flex-1 grid-cols-1 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:grid-cols-[300px_minmax(0,1fr)_minmax(0,1fr)]">
+        <div className="md:col-span-2 lg:col-span-1 lg:row-span-1 max-h-[40vh] overflow-auto border-b border-gray-200 lg:max-h-none lg:border-b-0 lg:border-r">
+          {queueRail}
+        </div>
+        <div className="min-h-[50vh] lg:min-h-0">{imagePane}</div>
+        <div className="border-t border-gray-200 md:border-l md:border-t-0">
+          {formPane}
+        </div>
       </div>
       <KeyboardHintBar
         hints={REVIEW_HINTS}

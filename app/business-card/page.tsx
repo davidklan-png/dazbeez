@@ -144,12 +144,27 @@ export default function BusinessCardPage() {
               >
                 Open a live example
               </Link>
-              <Link
-                href="/case-studies/networking-card"
-                className="inline-flex items-center justify-center rounded-full border border-white/20 px-6 py-3 text-sm font-semibold text-white transition-colors hover:border-white/40"
+              <a
+                href="/api/vcard"
+                download="david-klan.vcf"
+                className="inline-flex items-center justify-center gap-2 rounded-full bg-white px-6 py-3 text-sm font-semibold text-gray-900 transition-colors hover:bg-gray-100"
               >
-                How it was built
-              </Link>
+                <svg
+                  className="h-4 w-4"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                  aria-hidden="true"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5 5 5-5M12 15V3"
+                  />
+                </svg>
+                Save David&apos;s vCard
+              </a>
               <Link
                 href="/nfc"
                 className="inline-flex items-center justify-center rounded-full border border-white/20 px-6 py-3 text-sm font-semibold text-white transition-colors hover:border-white/40"
@@ -157,6 +172,16 @@ export default function BusinessCardPage() {
                 See the mobile demo
               </Link>
             </div>
+            <p className="mt-4 text-xs text-gray-400">
+              Want the technical write-up?{" "}
+              <Link
+                href="/case-studies/networking-card"
+                className="font-semibold text-amber-300 underline-offset-2 hover:underline"
+              >
+                Read how it was built
+              </Link>
+              .
+            </p>
           </div>
 
           <div className="w-full max-w-md lg:ml-auto">

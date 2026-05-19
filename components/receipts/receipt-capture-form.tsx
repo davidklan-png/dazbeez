@@ -21,6 +21,43 @@ export interface ReceiptCaptureFormProps {
   todayCount?: number;
 }
 
+const SESSION_QUEUE_KEY = "dazbeez.receipts.captureQueue.v1";
+/** Drop persisted queue entries older than this so the desktop doesn't keep
+ *  showing yesterday's receipts after a coffee break. */
+const SESSION_QUEUE_TTL_MS = 1000 * 60 * 60 * 6;
+
+function loadPersistedQueue(): SessionUpload[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.sessionStorage.getItem(SESSION_QUEUE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as {
+      savedAt?: number;
+      items?: SessionUpload[];
+    };
+    if (!parsed.items || !Array.isArray(parsed.items)) return [];
+    if (!parsed.savedAt || Date.now() - parsed.savedAt > SESSION_QUEUE_TTL_MS)
+      return [];
+    // Don't restore in-flight uploads — the upload was aborted when the page
+    // unloaded, so the row would dangle forever.
+    return parsed.items.filter((u) => u.state !== "uploading");
+  } catch {
+    return [];
+  }
+}
+
+function persistQueue(items: SessionUpload[]) {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.setItem(
+      SESSION_QUEUE_KEY,
+      JSON.stringify({ savedAt: Date.now(), items }),
+    );
+  } catch {
+    /* quota or privacy mode — best-effort */
+  }
+}
+
 export function ReceiptCaptureForm({
   initialPayment = null,
   rapidMode = false,
@@ -30,6 +67,20 @@ export function ReceiptCaptureForm({
   const { phase, upload, reset, cancel } = useReceiptUpload();
   const [sessionUploads, setSessionUploads] = useState<SessionUpload[]>([]);
   const activeIdRef = useRef<string | null>(null);
+
+  // Restore queue from sessionStorage on mount (desktop only — mobile uploads
+  // immediately and doesn't keep a visible queue today).
+  useEffect(() => {
+    if (isMobile) return;
+    const restored = loadPersistedQueue();
+    if (restored.length > 0) setSessionUploads(restored);
+  }, [isMobile]);
+
+  // Persist on every change so a hard reload doesn't lose the day's work.
+  useEffect(() => {
+    if (isMobile) return;
+    persistQueue(sessionUploads);
+  }, [sessionUploads, isMobile]);
 
   const onPickFile = useCallback(
     async (file: File) => {

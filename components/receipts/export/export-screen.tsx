@@ -12,15 +12,9 @@ import {
   LockIcon,
 } from "@/components/ui/icons";
 import type { ReceiptExport } from "@/lib/receipts/types";
+import type { Blocker } from "@/lib/receipts/blockers";
 
-export interface Blocker {
-  severity: "blocker" | "warn";
-  count: number;
-  label: string;
-  detail: string;
-  href: string | null;
-  ctaLabel: string;
-}
+export type { Blocker } from "@/lib/receipts/blockers";
 
 export interface CategoryBreakdownRow {
   code: string;
