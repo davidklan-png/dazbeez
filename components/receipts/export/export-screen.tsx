@@ -145,7 +145,6 @@ export function ExportScreen(props: ExportScreenProps) {
         busy={busy === "build"}
       />
       <Pipeline
-        reconciledCount={props.draftStats.rows}
         blockerCount={blockerCount}
         finalized={finalized}
         draftBuilt={draftBuilt}
@@ -286,7 +285,6 @@ function Pipeline({
   finalized,
   draftBuilt,
 }: {
-  reconciledCount: number;
   blockerCount: number;
   finalized: boolean;
   draftBuilt: boolean;
@@ -668,6 +666,7 @@ function FinalizePanel({
   finalized,
   draftBuilt,
   blockers,
+  warnings,
   confirmType,
   setConfirmType,
   onFinalize,
@@ -723,6 +722,12 @@ function FinalizePanel({
               <Bullet>Records signoff in audit log</Bullet>
               <Bullet>Marks AMEX statement as reconciled</Bullet>
             </ul>
+
+            {warnings > 0 && (
+              <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-[11.5px] text-amber-800">
+                {warnings} non-blocking warning{warnings === 1 ? "" : "s"} will ship as-is.
+              </div>
+            )}
 
             <div className="mt-5">
               <div className="mb-1.5 text-[11.5px] text-gray-500">

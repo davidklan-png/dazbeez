@@ -13,7 +13,6 @@ import {
 } from "@/components/receipts/capture/capture-desktop";
 import type { PaymentPath } from "@/lib/receipts/types";
 
-// Back-compat alias; old callers may import PaymentChip from receipt-drop-button.
 export type PaymentChip = PaymentPath | null;
 
 export interface ReceiptCaptureFormProps {

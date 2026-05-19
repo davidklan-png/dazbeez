@@ -399,7 +399,6 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
           setTab={setTab}
           counts={counts}
           orphanReceipts={props.orphanReceipts}
-          receiptMap={receiptMap}
         />
         <DetailPane
           active={active}
@@ -444,7 +443,6 @@ function LinesPane({
   setTab,
   counts,
   orphanReceipts,
-  receiptMap,
 }: {
   linesWithBand: Array<{
     line: AmexStatementLine;
@@ -464,13 +462,21 @@ function LinesPane({
     orphan: number;
   };
   orphanReceipts: ReceiptRecord[];
-  receiptMap: Map<string, ReceiptRecord>;
 }) {
   const groupReview = linesWithBand.filter(
-    (l) => l.band === "review" || l.band === "none",
+    (l) =>
+      (l.band === "review" || l.band === "none") &&
+      l.line.match_status !== "confirmed",
   );
-  const groupLikely = linesWithBand.filter((l) => l.band === "likely");
-  const groupObvious = linesWithBand.filter((l) => l.band === "obvious");
+  const groupLikely = linesWithBand.filter(
+    (l) => l.band === "likely" && l.line.match_status !== "confirmed",
+  );
+  const groupObvious = linesWithBand.filter(
+    (l) => l.band === "obvious" && l.line.match_status !== "confirmed",
+  );
+  const groupConfirmed = linesWithBand.filter(
+    (l) => l.line.match_status === "confirmed",
+  );
 
   return (
     <div className="flex h-full flex-col overflow-hidden border-r border-gray-200 bg-white">
@@ -548,6 +554,21 @@ function LinesPane({
                 onClick={() => setActiveId(l.line.id)}
               />
             ))}
+            {groupConfirmed.length > 0 && (
+              <SectionHeader
+                label="Confirmed"
+                count={groupConfirmed.length}
+                dot="bg-gray-300"
+              />
+            )}
+            {groupConfirmed.map((l) => (
+              <LineRow
+                key={l.line.id}
+                lwb={l}
+                active={activeId === l.line.id}
+                onClick={() => setActiveId(l.line.id)}
+              />
+            ))}
             {linesWithBand.length === 0 && (
               <div className="px-6 py-10 text-center text-sm text-gray-400">
                 No AMEX lines for this month. <br />
@@ -561,9 +582,7 @@ function LinesPane({
             )}
           </>
         )}
-        {tab === "orphans" && (
-          <OrphansList receipts={orphanReceipts} receiptMap={receiptMap} />
-        )}
+        {tab === "orphans" && <OrphansList receipts={orphanReceipts} />}
         {tab === "trips" && (
           <div className="px-6 py-10 text-center text-sm text-gray-400">
             Business trip detection runs at import time. No candidates for this
@@ -698,7 +717,6 @@ function OrphansList({
   receipts,
 }: {
   receipts: ReceiptRecord[];
-  receiptMap: Map<string, ReceiptRecord>;
 }) {
   if (receipts.length === 0) {
     return (

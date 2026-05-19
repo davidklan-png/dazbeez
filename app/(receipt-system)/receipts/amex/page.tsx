@@ -30,7 +30,7 @@ export default async function AmexPage({
     unmatched: lines.filter((l) => l.match_status === "unmatched").length,
     confirmed: lines.filter((l) => l.match_status === "confirmed").length,
     noReceipt: lines.filter((l) => l.match_status === "no_receipt").length,
-    uncategorized: lines.filter((l) => l.expense_category === "unknown").length,
+    uncategorized: lines.filter((l) => !l.expense_category_code).length,
   };
 
   const recentArtifacts = artifacts.slice(0, 6);

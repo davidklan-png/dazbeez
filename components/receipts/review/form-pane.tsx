@@ -137,9 +137,7 @@ export function FormPane(props: FormPaneProps) {
               attendees: attendees.map((a) => a.trim()).filter(Boolean),
               status: (markReviewed
                 ? "reviewed"
-                : receipt.status === "needs_review"
-                  ? receipt.status
-                  : receipt.status) as ReceiptStatus,
+                : receipt.status) as ReceiptStatus,
             }),
             signal: ctrl.signal,
           });
@@ -366,6 +364,11 @@ export function FormPane(props: FormPaneProps) {
           {props.hasAmexMatch && (
             <Pill tone="green" size="sm" dot>
               Auto-matched to AMEX
+            </Pill>
+          )}
+          {receipt.re_review_needed === 1 && (
+            <Pill tone="amber" size="sm" dot>
+              Re-review needed
             </Pill>
           )}
           <span className="flex-1" />
