@@ -7,7 +7,7 @@ type RouteContext = { params: Promise<{ id: string }> };
 function safeFilename(name: string | null): string {
   if (!name) return "receipt";
   // Strip characters that break Content-Disposition header value
-  return name.replace(/[/\\:*?"<>|]/g, "_").slice(0, 200) || "receipt";
+  return name.replace(/[\x00-\x1F\x7F/\\:*?"<>|]/g, "_").slice(0, 200) || "receipt";
 }
 
 function buildFileHeaders(

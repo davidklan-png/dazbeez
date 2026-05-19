@@ -27,6 +27,9 @@ const MANIFEST_HEADERS = [
   "source_file_sha256",
   "attendees_amex",
   "attendees_receipt",
+  "business_trip_status",
+  "business_trip_id",
+  "re_review_needed",
 ];
 
 export function buildReconciliationManifestCsv(
@@ -71,6 +74,9 @@ export function buildReconciliationManifestCsv(
         csvEscape(line.source_file_sha256),
         csvEscape(amexAtts.join("; ")),
         csvEscape(receiptAtts.join("; ")),
+        csvEscape(line.business_trip_status),
+        csvEscape(line.business_trip_id),
+        csvEscape(String(line.re_review_needed)),
       ].join(","),
     );
   }
@@ -123,6 +129,9 @@ export function validateAmexLinesForSignoff(
     }
     if (line.business_trip_status === "candidate") {
       blockers.push(`AMEX ${label}: unresolved business trip candidate`);
+    }
+    if (line.re_review_needed) {
+      blockers.push(`AMEX ${label}: statement line changed after confirmation`);
     }
   }
 

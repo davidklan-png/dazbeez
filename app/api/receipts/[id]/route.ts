@@ -2,8 +2,49 @@ import { NextResponse } from "next/server";
 import { requireReceiptsActor } from "@/lib/receipts/auth";
 import { getReceiptRecord, updateReceiptRecord, listAttendees, createAttendees, softDeleteReceipt } from "@/lib/receipts/db";
 import type { CreateAttendeeInput, ExpenseType, PaymentPath, ReceiptStatus } from "@/lib/receipts/types";
+import {
+  validateAmountMinor,
+  validateCurrency,
+  validateReceiptDate,
+} from "@/lib/receipts/validation";
+import { isCanonicalCode } from "@/lib/receipts/categories";
 
 type RouteContext = { params: Promise<{ id: string }> };
+
+const VALID_PAYMENT_PATHS: PaymentPath[] = ["AMEX", "CASH", "DIGITAL", "UNKNOWN"];
+const VALID_EXPENSE_TYPES: ExpenseType[] = [
+  "meeting-no-alcohol",
+  "entertainment-alcohol",
+  "transportation",
+  "books",
+  "research",
+  "insurance",
+  "software",
+  "telecom",
+  "office_supplies",
+  "travel",
+  "business_trip",
+  "misc",
+  "UNKNOWN",
+];
+const VALID_RECEIPT_STATUSES: ReceiptStatus[] = [
+  "captured",
+  "needs_review",
+  "reviewed",
+  "reconciled",
+  "exported",
+  "archived",
+];
+
+function normalizeOptionalText(
+  value: string | null | undefined,
+  maxLength: number,
+): string | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  const trimmed = value.trim();
+  return trimmed ? trimmed.slice(0, maxLength) : null;
+}
 
 export async function GET(request: Request, { params }: RouteContext) {
   try {
@@ -52,9 +93,85 @@ export async function PATCH(request: Request, { params }: RouteContext) {
       currency?: string;
       taxAmountMinor?: number | null;
       businessPurpose?: string | null;
+      expenseCategoryCode?: string | null;
       status?: string;
       attendees?: string[];
     };
+
+    if (
+      body.paymentPath !== undefined &&
+      !VALID_PAYMENT_PATHS.includes(body.paymentPath as PaymentPath)
+    ) {
+      return NextResponse.json({ error: "Invalid paymentPath." }, { status: 400 });
+    }
+    if (
+      body.expenseType !== undefined &&
+      !VALID_EXPENSE_TYPES.includes(body.expenseType as ExpenseType)
+    ) {
+      return NextResponse.json({ error: "Invalid expenseType." }, { status: 400 });
+    }
+    if (
+      body.status !== undefined &&
+      !VALID_RECEIPT_STATUSES.includes(body.status as ReceiptStatus)
+    ) {
+      return NextResponse.json({ error: "Invalid status." }, { status: 400 });
+    }
+    if (
+      body.transactionDate !== undefined &&
+      body.transactionDate !== null &&
+      !validateReceiptDate(body.transactionDate)
+    ) {
+      return NextResponse.json({ error: "Invalid transactionDate." }, { status: 400 });
+    }
+    if (
+      body.amountMinor !== undefined &&
+      body.amountMinor !== null &&
+      validateAmountMinor(body.amountMinor) === null
+    ) {
+      return NextResponse.json({ error: "Invalid amountMinor." }, { status: 400 });
+    }
+    if (
+      body.taxAmountMinor !== undefined &&
+      body.taxAmountMinor !== null &&
+      validateAmountMinor(body.taxAmountMinor) === null
+    ) {
+      return NextResponse.json({ error: "Invalid taxAmountMinor." }, { status: 400 });
+    }
+    if (
+      body.currency !== undefined &&
+      !validateCurrency(body.currency)
+    ) {
+      return NextResponse.json({ error: "Invalid currency." }, { status: 400 });
+    }
+    const expenseCategoryCode =
+      body.expenseCategoryCode === "" ? null : body.expenseCategoryCode;
+    if (
+      expenseCategoryCode !== undefined &&
+      expenseCategoryCode !== null &&
+      !isCanonicalCode(expenseCategoryCode)
+    ) {
+      return NextResponse.json(
+        { error: "Invalid expenseCategoryCode." },
+        { status: 400 },
+      );
+    }
+
+    if (
+      body.merchant !== undefined &&
+      body.merchant !== null &&
+      typeof body.merchant !== "string"
+    ) {
+      return NextResponse.json({ error: "Invalid merchant." }, { status: 400 });
+    }
+    if (
+      body.businessPurpose !== undefined &&
+      body.businessPurpose !== null &&
+      typeof body.businessPurpose !== "string"
+    ) {
+      return NextResponse.json({ error: "Invalid businessPurpose." }, { status: 400 });
+    }
+    const merchant = normalizeOptionalText(body.merchant, 200);
+    const businessPurpose = normalizeOptionalText(body.businessPurpose, 500);
 
     await updateReceiptRecord(
       id,
@@ -62,11 +179,12 @@ export async function PATCH(request: Request, { params }: RouteContext) {
         paymentPath: body.paymentPath as PaymentPath | undefined,
         expenseType: body.expenseType as ExpenseType | undefined,
         transactionDate: body.transactionDate,
-        merchant: body.merchant,
+        merchant,
         amountMinor: body.amountMinor,
-        currency: body.currency,
+        currency: body.currency?.toUpperCase(),
         taxAmountMinor: body.taxAmountMinor,
-        businessPurpose: body.businessPurpose,
+        businessPurpose,
+        expenseCategoryCode,
         status: body.status as ReceiptStatus | undefined,
       },
       actor,
@@ -75,7 +193,7 @@ export async function PATCH(request: Request, { params }: RouteContext) {
     if (Array.isArray(body.attendees)) {
       const attendeeInputs: CreateAttendeeInput[] = body.attendees
         .filter((name) => typeof name === "string" && name.trim())
-        .map((name) => ({ attendeeName: name.trim() }));
+        .map((name) => ({ attendeeName: name.trim().slice(0, 120) }));
       await createAttendees(id, attendeeInputs, actor);
     }
 
@@ -83,6 +201,9 @@ export async function PATCH(request: Request, { params }: RouteContext) {
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("Unauthorized")) {
       return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
+    }
+    if (error instanceof Error && error.message.includes("finalized reconciliation")) {
+      return NextResponse.json({ error: error.message }, { status: 409 });
     }
     console.error("[api/receipts/[id]] PATCH failed", error);
     return NextResponse.json(

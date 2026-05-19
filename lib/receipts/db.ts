@@ -2,6 +2,7 @@ import { getReceiptsDb } from "@/lib/cloudflare-runtime";
 import { createAuditEntry } from "@/lib/receipts/audit";
 import { nowIso, newUuid, stringifyJson } from "@/lib/receipts/db-utils";
 import { shouldOverwriteMerchant } from "@/lib/receipts/reconciliation";
+import { retentionUntilIso } from "@/lib/receipts/retention";
 import type {
   AmexMatchStatus,
   AmexReceiptStatus,
@@ -44,8 +45,8 @@ export async function createReceiptRecord(
          transaction_date, merchant, amount_minor, currency, tax_amount_minor,
          business_purpose, alcohol_present, attendees_required, status,
          original_r2_key, original_sha256, original_content_type, original_size_bytes,
-         legacy, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+         legacy, retention_until, legal_hold, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 1, ?, ?)`,
     )
     .bind(
       id,
@@ -71,6 +72,7 @@ export async function createReceiptRecord(
       input.originalSha256,
       input.originalContentType,
       input.originalSizeBytes,
+      retentionUntilIso(now),
       now,
       now,
     )
@@ -110,6 +112,7 @@ export async function updateReceiptRecord(
     .first<ReceiptRecord>();
 
   if (!before) throw new Error(`Receipt ${id} not found.`);
+  await rejectIfReceiptInFinalizedReconciliation(db, id);
 
   const sets: string[] = [];
   const binds: unknown[] = [];
@@ -148,6 +151,27 @@ export async function updateReceiptRecord(
     oldValueJson: stringifyJson(before),
     newValueJson: stringifyJson(input),
   });
+}
+
+async function rejectIfReceiptInFinalizedReconciliation(
+  db: D1Database,
+  receiptId: string,
+): Promise<void> {
+  const finalized = await db
+    .prepare(
+      `SELECT ar.id
+       FROM amex_statement_lines asl
+       JOIN amex_reconciliations ar
+         ON ar.statement_month = asl.statement_month
+        AND ar.status = 'finalized'
+       WHERE asl.matched_receipt_id = ?
+       LIMIT 1`,
+    )
+    .bind(receiptId)
+    .first<{ id: string }>();
+  if (finalized) {
+    throw new Error(`Receipt ${receiptId} is locked by a finalized reconciliation.`);
+  }
 }
 
 export interface ListReceiptsFilter {
@@ -191,6 +215,32 @@ export async function listReceiptRecords(
     .all<ReceiptRecord>();
 
   return result.results ?? [];
+}
+
+export async function listReceiptRecordsByIds(
+  ids: string[],
+): Promise<ReceiptRecord[]> {
+  const uniqueIds = [...new Set(ids.filter(Boolean))];
+  if (uniqueIds.length === 0) return [];
+
+  const db = getReceiptsDb();
+  const records: ReceiptRecord[] = [];
+  const CHUNK_SIZE = 90;
+
+  for (let i = 0; i < uniqueIds.length; i += CHUNK_SIZE) {
+    const chunk = uniqueIds.slice(i, i + CHUNK_SIZE);
+    const placeholders = chunk.map(() => "?").join(",");
+    const result = await db
+      .prepare(
+        `SELECT * FROM receipt_records
+         WHERE deleted_at IS NULL AND id IN (${placeholders})`,
+      )
+      .bind(...chunk)
+      .all<ReceiptRecord>();
+    records.push(...(result.results ?? []));
+  }
+
+  return records;
 }
 
 const DELETABLE_STATUSES = new Set(["captured", "needs_review", "reviewed"]);
@@ -239,7 +289,6 @@ export async function createAttendees(
   attendees: CreateAttendeeInput[],
   actor: string,
 ): Promise<void> {
-  if (attendees.length === 0) return;
   const db = getReceiptsDb();
   const now = nowIso();
 
@@ -633,11 +682,14 @@ export async function updateAmexReconciliation(
   const statements = [
     db
       .prepare(
-        `UPDATE amex_statement_lines
-         SET matched_receipt_id = ?, match_status = ?, receipt_status = ?
+      `UPDATE amex_statement_lines
+         SET matched_receipt_id = ?,
+             match_status = ?,
+             receipt_status = ?,
+             re_review_needed = CASE WHEN ? = 'confirmed' THEN 0 ELSE re_review_needed END
          WHERE id = ?`,
       )
-      .bind(receiptId, matchStatus, newReceiptStatus, amexLineId),
+      .bind(receiptId, matchStatus, newReceiptStatus, matchStatus, amexLineId),
   ];
 
   // Promote the newly-linked receipt and adopt AMEX values.
@@ -771,8 +823,8 @@ export async function createAmexArtifact(
          r2_key, encoding, sha256_hash, file_size_bytes, uploaded_by, uploaded_at,
          import_status, row_count, transaction_count,
          statement_total_amount_cents, parsed_total_amount_cents,
-         validation_errors_json, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         validation_errors_json, retention_until, legal_hold, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
     )
     .bind(
       id,
@@ -794,6 +846,7 @@ export async function createAmexArtifact(
       input.validationErrors.length > 0
         ? stringifyJson(input.validationErrors)
         : null,
+      retentionUntilIso(now),
       now,
       now,
     )
@@ -1178,10 +1231,10 @@ export async function createExport(
   await db
     .prepare(
       `INSERT INTO receipt_exports
-        (id, export_month, status, created_by, created_at)
-       VALUES (?, ?, 'draft', ?, ?)`,
+        (id, export_month, status, created_by, created_at, retention_until, legal_hold)
+       VALUES (?, ?, 'draft', ?, ?, ?, 1)`,
     )
-    .bind(id, month, actor, now)
+    .bind(id, month, actor, now, retentionUntilIso(now))
     .run();
 
   await createAuditEntry(db, {
@@ -1366,10 +1419,20 @@ export async function createReconciliationDraft(
   await db
     .prepare(
       `INSERT INTO amex_reconciliations
-        (id, statement_month, statement_artifact_id, status, line_count, matched_count, no_receipt_count, created_by, created_at)
-       VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, ?)`,
+        (id, statement_month, statement_artifact_id, status, line_count, matched_count, no_receipt_count, created_by, created_at, retention_until, legal_hold)
+       VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, 1)`,
     )
-    .bind(id, month, artifactId, lineCount, matchedCount, noReceiptCount, actor, now)
+    .bind(
+      id,
+      month,
+      artifactId,
+      lineCount,
+      matchedCount,
+      noReceiptCount,
+      actor,
+      now,
+      retentionUntilIso(now),
+    )
     .run();
 
   return id;

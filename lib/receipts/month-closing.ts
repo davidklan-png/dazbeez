@@ -4,6 +4,7 @@ import {
   listAmexLines,
   listAttendees,
   listReceiptRecords,
+  listReceiptRecordsByIds,
 } from "@/lib/receipts/db";
 import type { ExportRow, ReceiptRecord } from "@/lib/receipts/types";
 import { validateAmexLinesForSignoff } from "@/lib/receipts/reconciliation-signoff";
@@ -71,6 +72,20 @@ export async function validateMonthReadyForExport(
 
   const amexLines = await listAmexLines(month);
   const amexAttendees = await listAmexLineAttendeeNamesByMonth(month);
+  const matchedReceiptIds = amexLines
+    .map((line) => line.matched_receipt_id)
+    .filter((id): id is string => Boolean(id));
+  const missingMatchedIds = matchedReceiptIds.filter(
+    (id) => !currentDraft.attendeeMap.has(id),
+  );
+  const matchedReceipts = await listReceiptRecordsByIds(missingMatchedIds);
+  for (const receipt of matchedReceipts) {
+    const attendees = await listAttendees(receipt.id);
+    currentDraft.attendeeMap.set(
+      receipt.id,
+      attendees.map((a) => a.attendee_name),
+    );
+  }
 
   blockers.push(
     ...validateAmexLinesForSignoff(amexLines, amexAttendees, currentDraft.attendeeMap),

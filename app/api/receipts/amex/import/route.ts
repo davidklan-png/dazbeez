@@ -10,6 +10,7 @@ import {
   createAmexArtifact,
   getAmexArtifactBySha256,
   getAmexArtifactByMonth,
+  getFinalizedReconciliationForMonth,
   markPreviousArtifactsReplaced,
   updateAmexArtifactStatus,
   createBusinessTripReports,
@@ -86,6 +87,14 @@ export async function POST(request: Request) {
       return NextResponse.json(
         { error: "CSV file too large (max 5 MB)." },
         { status: 413 },
+      );
+    }
+
+    const finalized = await getFinalizedReconciliationForMonth(statementMonth);
+    if (finalized) {
+      return NextResponse.json(
+        { error: `Reconciliation for ${statementMonth} is finalized; AMEX import is locked.` },
+        { status: 409 },
       );
     }
 

@@ -4,6 +4,8 @@ import {
   listReceiptRecords,
   listAttendees,
   getExport,
+  listAmexLineCountsByMonth,
+  listReconciliationStatusByMonth,
 } from "@/lib/receipts/db";
 import {
   formatCategoryLabel,
@@ -21,6 +23,7 @@ import type {
   AmexStatementLine,
   ReceiptRecord,
 } from "@/lib/receipts/types";
+import { MonthSwitcher, type MonthOption } from "@/components/receipts/month-switcher";
 
 export const dynamic = "force-dynamic";
 
@@ -32,11 +35,30 @@ export default async function ExportPage({
   await assertReceiptsPageAccess();
 
   const params = await searchParams;
-  const monthParam =
+  const requestedMonth =
     typeof params.month === "string" && /^\d{4}-\d{2}$/.test(params.month)
       ? params.month
       : null;
-  const month = monthParam ?? new Date().toISOString().slice(0, 7);
+
+  const [lineCountsByMonth, reconciliationStatusByMonth] = await Promise.all([
+    listAmexLineCountsByMonth(),
+    listReconciliationStatusByMonth(),
+  ]);
+
+  const availableMonths: MonthOption[] = [...lineCountsByMonth.entries()]
+    .map(([optionMonth, counts]) => ({
+      month: optionMonth,
+      lineCount: counts.total,
+      unmatchedCount: counts.unmatched,
+      status: reconciliationStatusByMonth.get(optionMonth) ?? null,
+    }))
+    .sort((a, b) => a.month.localeCompare(b.month));
+
+  const month =
+    requestedMonth ??
+    (availableMonths.length > 0
+      ? availableMonths[availableMonths.length - 1]!.month
+      : new Date().toISOString().slice(0, 7));
   const monthLabel = formatMonthLabel(month);
 
   const [exports, monthReceipts, monthLines, currentExport] = await Promise.all([
@@ -59,18 +81,27 @@ export default async function ExportPage({
   };
 
   return (
-    <ExportScreen
-      month={month}
-      monthLabel={monthLabel}
-      currentExport={currentExport}
-      exports={exports}
-      blockers={blockers}
-      warnings={warnings}
-      draftStats={draftStats}
-      breakdown={breakdown}
-      manifestSample={manifestSample}
-      manifestSize={manifestSize}
-    />
+    <>
+      <div className="border-b border-gray-200 bg-gray-50 px-8 py-4">
+        <MonthSwitcher
+          months={availableMonths}
+          activeMonth={month}
+          basePath="/receipts/export"
+        />
+      </div>
+      <ExportScreen
+        month={month}
+        monthLabel={monthLabel}
+        currentExport={currentExport}
+        exports={exports}
+        blockers={blockers}
+        warnings={warnings}
+        draftStats={draftStats}
+        breakdown={breakdown}
+        manifestSample={manifestSample}
+        manifestSize={manifestSize}
+      />
+    </>
   );
 }
 

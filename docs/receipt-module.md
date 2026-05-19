@@ -18,7 +18,7 @@ All routes and `/api/receipts/*` are protected, noindexed, and not linked from t
 
 ## Authentication
 
-**Production:** Cloudflare Access application protecting `dazbeez.com/receipts*` and `dazbeez.com/api/receipts*`. The Worker validates `Cf-Access-Jwt-Assertion` JWT against the JWKS endpoint. Set as Wrangler secrets:
+**Production:** Cloudflare Access application protecting `dazbeez.com/receipts*` and `dazbeez.com/api/receipts*`. The Worker validates `Cf-Access-Jwt-Assertion` JWT signatures against the Access JWKS endpoint, checks issuer, expiry, and audience, and production disables direct `workers.dev` and preview URLs. Set as Wrangler secrets:
 
 ```
 npx wrangler secret put CF_ACCESS_TEAM   # e.g. yourteam.cloudflareaccess.com
@@ -81,6 +81,17 @@ npx wrangler r2 bucket create dazbeez-receipts-archive
 ```
 
 Original receipt images are stored in `RECEIPTS_BUCKET` with a key pattern of `receipts/{YYYY}/{MM}/{id}/{uuid}-{filename}` and are never overwritten. Finalized monthly export bundles go to `RECEIPTS_ARCHIVE_BUCKET`.
+
+## Retention and Audit Posture
+
+Receipt records, AMEX statement artifacts, finalized export records, and reconciliation sign-offs carry conservative 10-year retention metadata (`retention_until`, `legal_hold = 1`). R2 receipt, statement, export, and manifest objects are also written with custom metadata:
+
+- `retentionPolicy=tax-record-10y`
+- `retentionYears=10`
+- `retentionUntil=<ISO timestamp>`
+- `legalHold=true`
+
+The application does not expose hard-delete flows for retained tax records. Soft deletes are limited to pre-reconciliation receipt records and are audit logged. For production compliance, keep Cloudflare D1/R2 backups enabled and document a restore drill with the accountant before treating the archive as the sole statutory copy.
 
 ## lib/receipts namespace
 

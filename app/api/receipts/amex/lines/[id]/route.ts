@@ -59,9 +59,12 @@ export async function PATCH(request: Request, { params }: RouteContext) {
     };
 
     // Validate canonical category code if provided
-    if (body.expenseCategoryCode && !isCanonicalCode(body.expenseCategoryCode)) {
+    const expenseCategoryCode =
+      body.expenseCategoryCode === "" ? null : body.expenseCategoryCode;
+
+    if (expenseCategoryCode && !isCanonicalCode(expenseCategoryCode)) {
       return NextResponse.json(
-        { error: `Invalid expense category code: ${body.expenseCategoryCode}` },
+        { error: `Invalid expense category code: ${expenseCategoryCode}` },
         { status: 400 },
       );
     }
@@ -107,15 +110,31 @@ export async function PATCH(request: Request, { params }: RouteContext) {
         { status: 400 },
       );
     }
+    if (
+      body.receiptMissingReason !== undefined &&
+      body.receiptMissingReason !== null &&
+      typeof body.receiptMissingReason !== "string"
+    ) {
+      return NextResponse.json(
+        { error: "receiptMissingReason must be a string or null." },
+        { status: 400 },
+      );
+    }
+
+    const receiptMissingReason =
+      typeof body.receiptMissingReason === "string"
+        ? body.receiptMissingReason.trim().slice(0, 500) || null
+        : body.receiptMissingReason;
 
     await updateAmexLineCategory(
       id,
       {
         expenseCategory: body.expenseCategory as AmexExpenseCategory | undefined,
-        expenseCategoryCode: body.expenseCategoryCode ?? undefined,
+        expenseCategoryCode:
+          body.expenseCategoryCode === undefined ? undefined : expenseCategoryCode,
         categoryStatus: body.categoryStatus as AmexCategoryStatus | undefined,
         receiptStatus: body.receiptStatus as AmexReceiptStatus | undefined,
-        receiptMissingReason: body.receiptMissingReason,
+        receiptMissingReason,
         businessTripStatus: body.businessTripStatus as AmexBusinessTripStatus | undefined,
       },
       actor,

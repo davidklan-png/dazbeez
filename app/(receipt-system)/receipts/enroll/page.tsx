@@ -14,7 +14,25 @@ interface PageProps {
 
 export default async function EnrollDevicePage({ searchParams }: PageProps) {
   const requestHeaders = await headers();
-  const actor = await requireReceiptsActor(requestHeaders);
+  let actor: string;
+  try {
+    actor = await requireReceiptsActor(requestHeaders);
+  } catch {
+    return (
+      <div className="mx-auto my-12 max-w-lg rounded-2xl border border-gray-200 bg-white p-6 shadow-sm">
+        <p className="text-xs font-semibold uppercase tracking-[0.24em] text-amber-600">
+          Protected receipts
+        </p>
+        <h1 className="mt-2 text-2xl font-semibold text-gray-900">
+          Sign in required
+        </h1>
+        <p className="mt-2 text-sm text-gray-600">
+          Open this module through the protected Dazbeez receipts route, or use
+          the local development credentials configured for this workspace.
+        </p>
+      </div>
+    );
+  }
   const { next } = await searchParams;
   const safeNext = next && next.startsWith("/receipts") ? next : "/receipts";
 

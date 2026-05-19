@@ -9,7 +9,7 @@ import {
   listAmexLineAttendeeNamesByMonth,
   listAmexLines,
   listAttendees,
-  listReceiptRecords,
+  listReceiptRecordsByIds,
 } from "@/lib/receipts/db";
 import { hashCsvContent } from "@/lib/receipts/export";
 import { buildReconciliationManifestCsv, validateAmexLinesForSignoff } from "@/lib/receipts/reconciliation-signoff";
@@ -49,7 +49,10 @@ export async function POST(request: Request) {
 
     // Validate: all lines must be resolved
     const amexAttendees = await listAmexLineAttendeeNamesByMonth(month);
-    const receipts = await listReceiptRecords({ paymentPath: "AMEX", limit: 200 });
+    const receiptIds = amexLines
+      .map((line) => line.matched_receipt_id)
+      .filter((id): id is string => Boolean(id));
+    const receipts = await listReceiptRecordsByIds(receiptIds);
     const receiptAttendeeMap = new Map<string, string[]>();
     const attendeeResults = await Promise.all(
       receipts.map(async (r) => {
@@ -71,23 +74,24 @@ export async function POST(request: Request) {
     }
 
     // Build manifest CSV
-    let manifestCsv = buildReconciliationManifestCsv(
+    const manifestBodyCsv = buildReconciliationManifestCsv(
       amexLines,
       receipts,
       amexAttendees,
       Object.fromEntries(receiptAttendeeMap),
     );
-    const manifestSha256 = await hashCsvContent(manifestCsv);
+    const manifestBodySha256 = await hashCsvContent(manifestBodyCsv);
 
-    // Prepend header comments with self-hash and source artifact
+    // Prepend source metadata, then hash the exact object that is archived.
     const headerLines: string[] = [
-      `# manifest_sha256: ${manifestSha256}`,
+      `# manifest_body_sha256: ${manifestBodySha256}`,
     ];
     if (activeArtifact) {
       headerLines.push(`# source_artifact_id: ${activeArtifact.id}`);
       headerLines.push(`# source_artifact_sha256: ${activeArtifact.sha256_hash}`);
     }
-    manifestCsv = headerLines.join("\n") + "\n" + manifestCsv;
+    const manifestCsv = headerLines.join("\n") + "\n" + manifestBodyCsv;
+    const manifestSha256 = await hashCsvContent(manifestCsv);
 
     const matchedCount = amexLines.filter((l) => l.match_status === "confirmed").length;
     const noReceiptCount = amexLines.filter((l) => l.match_status === "no_receipt").length;
