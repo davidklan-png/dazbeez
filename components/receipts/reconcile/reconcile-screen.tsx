@@ -32,6 +32,8 @@ import {
 } from "@/lib/receipts/categories";
 import { normalizeDescription } from "@/lib/receipts/reconciliation";
 import type {
+  AmexBusinessTripStatus,
+  AmexReceiptStatus,
   AmexStatementLine,
   ReceiptRecord,
   ReconciliationMatch,
@@ -187,6 +189,41 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
             error?: string;
           };
           setError(json.error ?? "Could not save category.");
+          return;
+        }
+        router.refresh();
+      } catch {
+        setError("Network error.");
+      } finally {
+        setBusy(null);
+      }
+    },
+    [locked, router],
+  );
+
+  const updateLineDetails = useCallback(
+    async (
+      lineId: string,
+      body: {
+        receiptStatus?: AmexReceiptStatus;
+        receiptMissingReason?: string | null;
+        businessTripStatus?: AmexBusinessTripStatus;
+      },
+    ) => {
+      if (locked) return;
+      setBusy(lineId);
+      setError(null);
+      try {
+        const res = await fetch(`/api/receipts/amex/lines/${lineId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) {
+          const json = (await res.json().catch(() => ({}))) as {
+            error?: string;
+          };
+          setError(json.error ?? "Could not save line details.");
           return;
         }
         router.refresh();
@@ -411,6 +448,7 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
           onUnlink={(line) => reconcile(line.id, null, "unmatched")}
           onNoReceipt={(line) => reconcile(line.id, null, "no_receipt")}
           onUpdateCategory={updateCategory}
+          onUpdateLineDetails={updateLineDetails}
         />
       </div>
 
@@ -693,6 +731,11 @@ function LineRow({
               confirmed
             </Pill>
           )}
+          {line.re_review_needed ? (
+            <Pill tone="amber" size="sm">
+              re-review
+            </Pill>
+          ) : null}
           {!confirmed && !noReceipt && band === "none" && (
             <Pill tone="red" size="sm" dot>
               no match
@@ -769,6 +812,7 @@ function DetailPane({
   onUnlink,
   onNoReceipt,
   onUpdateCategory,
+  onUpdateLineDetails,
 }: {
   active: {
     line: AmexStatementLine;
@@ -782,6 +826,14 @@ function DetailPane({
   onUnlink: (line: AmexStatementLine) => void;
   onNoReceipt: (line: AmexStatementLine) => void;
   onUpdateCategory: (lineId: string, code: string) => void;
+  onUpdateLineDetails: (
+    lineId: string,
+    body: {
+      receiptStatus?: AmexReceiptStatus;
+      receiptMissingReason?: string | null;
+      businessTripStatus?: AmexBusinessTripStatus;
+    },
+  ) => void;
 }) {
   if (!active) {
     return (
@@ -796,6 +848,10 @@ function DetailPane({
   const receipt = receiptId ? receiptMap.get(receiptId) ?? null : null;
   const color = BAND_COLORS[band];
   const busy = busyLineId === line.id;
+  const showNoReceiptFields =
+    line.match_status === "no_receipt" ||
+    line.receipt_status === "no_receipt_required" ||
+    line.receipt_status === "receipt_not_available";
 
   return (
     <div className="h-full overflow-auto bg-gray-50 p-6">
@@ -905,7 +961,7 @@ function DetailPane({
           )}
 
         <div className="flex flex-wrap items-center gap-2 border-t border-gray-150 px-5 py-4">
-          {receipt && line.match_status !== "confirmed" && !locked && (
+          {receipt && (line.match_status !== "confirmed" || line.re_review_needed) && !locked && (
             <>
               <Btn
                 kind="primary"
@@ -914,7 +970,7 @@ function DetailPane({
                 disabled={busy}
                 leftIcon={<CheckIcon size={14} className="text-white" />}
               >
-                Confirm match
+                {line.re_review_needed ? "Reconfirm match" : "Confirm match"}
               </Btn>
               <span className="text-[11px] text-gray-400">
                 <Kbd>C</Kbd>
@@ -992,6 +1048,14 @@ function DetailPane({
           <Field label="Tax rate">
             <TextInput value="10% (standard)" readOnly />
           </Field>
+          {showNoReceiptFields && (
+            <NoReceiptFields
+              key={line.id}
+              line={line}
+              locked={locked}
+              onUpdateLineDetails={onUpdateLineDetails}
+            />
+          )}
           <Field label="Business purpose" hint="optional unless required">
             <TextInput
               value={line.memo ?? ""}
@@ -1030,11 +1094,35 @@ function DetailPane({
             <div className="text-[13px] font-semibold text-gray-900">
               Part of a candidate business trip
             </div>
-            <div className="mt-0.5 text-[12px] text-gray-600">
+              <div className="mt-0.5 text-[12px] text-gray-600">
               Linked to a trip cluster. Review & confirm the trip to lock the
               window.
             </div>
           </div>
+          {!locked && (
+            <div className="flex gap-2">
+              <Btn
+                kind="primary"
+                size="sm"
+                disabled={busy}
+                onClick={() =>
+                  onUpdateLineDetails(line.id, { businessTripStatus: "confirmed" })
+                }
+              >
+                Confirm
+              </Btn>
+              <Btn
+                kind="ghost"
+                size="sm"
+                disabled={busy}
+                onClick={() =>
+                  onUpdateLineDetails(line.id, { businessTripStatus: "excluded" })
+                }
+              >
+                Exclude
+              </Btn>
+            </div>
+          )}
         </div>
       )}
 
@@ -1060,6 +1148,68 @@ function DetailPane({
         ))}
       </div>
     </div>
+  );
+}
+
+function NoReceiptFields({
+  line,
+  locked,
+  onUpdateLineDetails,
+}: {
+  line: AmexStatementLine;
+  locked: boolean;
+  onUpdateLineDetails: (
+    lineId: string,
+    body: {
+      receiptStatus?: AmexReceiptStatus;
+      receiptMissingReason?: string | null;
+      businessTripStatus?: AmexBusinessTripStatus;
+    },
+  ) => void;
+}) {
+  const [missingReasonDraft, setMissingReasonDraft] = useState(
+    line.receipt_missing_reason ?? "",
+  );
+
+  const saveMissingReason = () => {
+    if (locked || missingReasonDraft === (line.receipt_missing_reason ?? "")) return;
+    onUpdateLineDetails(line.id, {
+      receiptMissingReason: missingReasonDraft.trim() || null,
+    });
+  };
+
+  return (
+    <>
+      <Field label="No-receipt status" required>
+        <SelectInput
+          disabled={locked}
+          value={line.receipt_status}
+          onChange={(e) =>
+            onUpdateLineDetails(line.id, {
+              receiptStatus: e.target.value as AmexReceiptStatus,
+            })
+          }
+          options={[
+            { value: "no_receipt_required", label: "No receipt required" },
+            { value: "receipt_not_available", label: "Receipt unavailable" },
+          ]}
+        />
+      </Field>
+      <Field label="Missing receipt reason" required>
+        <TextInput
+          disabled={locked}
+          value={missingReasonDraft}
+          onChange={(e) => setMissingReasonDraft(e.target.value)}
+          onBlur={saveMissingReason}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.currentTarget.blur();
+            }
+          }}
+          placeholder="e.g. card fee, online charge, receipt lost"
+        />
+      </Field>
+    </>
   );
 }
 

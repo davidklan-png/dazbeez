@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { requireReceiptsActor } from "@/lib/receipts/auth";
 import {
   listReceiptRecords,
+  listReceiptRecordsByIds,
   listAttendees,
   createExport,
   finalizeExport,
@@ -84,6 +85,19 @@ export async function POST(request: Request) {
       }
 
       const amexLines = await listAmexLines(month);
+      const matchedReceipts = await listReceiptRecordsByIds(
+        amexLines
+          .map((line) => line.matched_receipt_id)
+          .filter((id): id is string => Boolean(id)),
+      );
+      const matchedAttendeeMap = new Map(attendeeMap);
+      for (const receipt of matchedReceipts) {
+        if (matchedAttendeeMap.has(receipt.id)) continue;
+        const attendees = await listAttendees(receipt.id);
+        if (attendees.length > 0) {
+          matchedAttendeeMap.set(receipt.id, attendees.map((a) => a.attendee_name));
+        }
+      }
       const blockers: string[] = [];
 
       for (const line of amexLines) {
@@ -95,7 +109,7 @@ export async function POST(request: Request) {
         }
         if (requiresAttendees(line.expense_category_code)) {
           const linkedReceipt = line.matched_receipt_id
-            ? attendeeMap.get(line.matched_receipt_id)
+            ? matchedAttendeeMap.get(line.matched_receipt_id)
             : null;
           if (!linkedReceipt || linkedReceipt.length === 0) {
             blockers.push(`Line ${line.id}: ${getCategoryByCode(line.expense_category_code ?? "")?.jaName ?? line.expense_category_code} requires attendees`);
@@ -103,6 +117,9 @@ export async function POST(request: Request) {
         }
         if (line.business_trip_status === "candidate") {
           blockers.push(`Line ${line.id}: unresolved business trip candidate`);
+        }
+        if (line.re_review_needed) {
+          blockers.push(`Line ${line.id}: statement line changed after confirmation`);
         }
       }
 

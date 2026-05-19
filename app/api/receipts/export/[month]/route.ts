@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { requireReceiptsActor } from "@/lib/receipts/auth";
-import { getExport, finalizeExport } from "@/lib/receipts/db";
+import { getExport, finalizeExport, getFinalizedReconciliationForMonth } from "@/lib/receipts/db";
+import { validateMonthReadyForExport } from "@/lib/receipts/month-closing";
 
 type RouteContext = { params: Promise<{ month: string }> };
 
@@ -45,6 +46,24 @@ export async function POST(request: Request, { params }: RouteContext) {
       return NextResponse.json(
         { error: "Export bundle has not been generated yet. POST to /api/receipts/export/month first." },
         { status: 400 },
+      );
+    }
+
+    const reconciliation = await getFinalizedReconciliationForMonth(month);
+    if (!reconciliation) {
+      return NextResponse.json(
+        {
+          error: `Cannot finalize export: no finalized reconciliation for ${month}.`,
+        },
+        { status: 422 },
+      );
+    }
+
+    const blockers = await validateMonthReadyForExport(month);
+    if (blockers.length > 0) {
+      return NextResponse.json(
+        { error: "Export blocked — resolve these issues first.", blockers },
+        { status: 422 },
       );
     }
 

@@ -1,5 +1,6 @@
 import { getReceiptsBucket, getReceiptsArchiveBucket } from "@/lib/cloudflare-runtime";
 import { newUuid } from "@/lib/receipts/db-utils";
+import { retentionMetadata } from "@/lib/receipts/retention";
 
 export function generateR2Key(
   receiptId: string,
@@ -26,6 +27,7 @@ export async function uploadOriginal(
   // is evaluated atomically by R2 and the put returns null on conflict.
   const result = await bucket.put(key, data, {
     httpMetadata: { contentType },
+    customMetadata: retentionMetadata(),
     onlyIf: { etagDoesNotMatch: "*" },
   });
 
@@ -55,6 +57,7 @@ export async function archiveBundle(
   const bucket = getReceiptsArchiveBucket();
   await bucket.put(key, data, {
     httpMetadata: { contentType: "text/csv; charset=utf-8" },
+    customMetadata: retentionMetadata(),
   });
 }
 
@@ -65,6 +68,7 @@ export async function archiveManifest(
   const bucket = getReceiptsArchiveBucket();
   await bucket.put(key, data, {
     httpMetadata: { contentType: "text/csv; charset=utf-8" },
+    customMetadata: retentionMetadata(),
   });
 }
 
@@ -100,6 +104,7 @@ export async function uploadAmexArtifact(
   const bucket = getReceiptsBucket();
   await bucket.put(key, data, {
     httpMetadata: { contentType: "text/csv" },
+    customMetadata: retentionMetadata(),
   });
 }
 

@@ -149,6 +149,9 @@ export async function POST(request: Request, { params }: RouteContext) {
     if (error instanceof Error && error.message.startsWith("Unauthorized")) {
       return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
     }
+    if (error instanceof Error && error.message.includes("finalized reconciliation")) {
+      return NextResponse.json({ error: error.message }, { status: 409 });
+    }
     console.error("[api/receipts/[id]/extract] failed", error);
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Extraction failed." },

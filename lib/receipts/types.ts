@@ -131,6 +131,8 @@ export interface ReceiptRecord {
   deleted_at: string | null;
   deleted_by: string | null;
   delete_reason: string | null;
+  retention_until?: string | null;
+  legal_hold?: number;
   created_at: string;
   updated_at: string;
 }
@@ -199,6 +201,8 @@ export interface AmexStatementArtifact {
   statement_total_amount_cents: number | null;
   parsed_total_amount_cents: number | null;
   validation_errors_json: string | null;
+  retention_until?: string | null;
+  legal_hold?: number;
   created_at: string;
   updated_at: string;
 }
@@ -255,6 +259,8 @@ export interface ReceiptExport {
   created_by: string;
   created_at: string;
   finalized_at: string | null;
+  retention_until?: string | null;
+  legal_hold?: number;
 }
 
 export interface AmexReconciliation {
@@ -271,6 +277,8 @@ export interface AmexReconciliation {
   created_at: string;
   finalized_by: string | null;
   finalized_at: string | null;
+  retention_until?: string | null;
+  legal_hold?: number;
 }
 
 export interface ReceiptAuditEntry {
