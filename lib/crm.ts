@@ -666,6 +666,122 @@ async function refreshBatchReviewCounts(batchId: number): Promise<void> {
     .run();
 }
 
+export interface InsertBatchCardInput {
+  batchId: number;
+  sortOrder: number;
+  actor: string;
+  label: string;
+  detection: CardDetectionCandidate;
+  image: StoredFileInput;
+  extracted: ExtractedCardPayload;
+  croppedStorageKey: string;
+  createdAt: string;
+}
+
+export interface InsertBatchCardResult {
+  batchCardId: number;
+  needsReview: boolean;
+  duplicateCandidates: DuplicateCandidate[];
+}
+
+// Per-card insertion shared by the admin composite path and the mobile
+// event/batch capture path. Extracts the body of the for loop in
+// createBusinessCardBatch so audit / review-task / dedupe logic does not
+// diverge between the two callers.
+export async function insertBatchCard(
+  input: InsertBatchCardInput,
+  thresholds: CrmThresholdSettings,
+): Promise<InsertBatchCardResult> {
+  const db = getCrmDb();
+  const normalized = normalizeExtractedFields(input.extracted.fields);
+  const duplicateCandidates = buildDuplicateCandidates(
+    normalized,
+    await queryDedupeContactsByKeys(normalized),
+  );
+  const review = assessBatchCardReviewState({
+    normalized,
+    confidence: input.extracted.confidence,
+    duplicateCandidates,
+    thresholds,
+  });
+
+  const batchCardResult = await db
+    .prepare(
+      `INSERT INTO batch_cards
+        (batch_id, sort_order, status, detection_label, detection_confidence, detection_box_json, transform_json, extraction_provider, raw_ocr_text, extracted_json, normalized_json, confidence_json, duplicate_candidates_json, needs_review, notes, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(
+      input.batchId,
+      input.sortOrder,
+      review.needsReview ? "needs_review" : "extracted",
+      input.label,
+      input.detection.confidence,
+      stringifyJson(input.detection.polygon),
+      stringifyJson({ rotationDegrees: input.detection.rotationDegrees ?? 0 }),
+      "cloudflare_ai",
+      normalized.raw_ocr_text,
+      stringifyJson(input.extracted.fields),
+      stringifyJson(normalized),
+      stringifyJson(input.extracted.confidence),
+      stringifyJson(duplicateCandidates),
+      review.needsReview ? 1 : 0,
+      review.reasons.join("; ") || null,
+      input.createdAt,
+      input.createdAt,
+    )
+    .run();
+
+  const batchCardId = Number(batchCardResult.meta.last_row_id ?? 0);
+
+  await insertImage({
+    batchId: input.batchId,
+    batchCardId,
+    role: "cropped_card",
+    storageKey: input.croppedStorageKey,
+    file: input.image,
+  });
+
+  if (review.needsReview) {
+    await createReviewTask({
+      entityType: "batch_card",
+      entityId: batchCardId,
+      batchId: input.batchId,
+      taskType: duplicateCandidates.length > 0 ? "dedupe_review" : "ocr_review",
+      priority: duplicateCandidates.length > 0 ? "high" : "medium",
+      title:
+        duplicateCandidates.length > 0
+          ? `Resolve duplicate candidate for ${normalized.full_name ?? `card ${input.sortOrder + 1}`}`
+          : `Review low-confidence extraction for card ${input.sortOrder + 1}`,
+      detail: {
+        duplicateCandidates,
+        confidence: input.extracted.confidence,
+        normalized,
+        reasons: review.reasons,
+      },
+    });
+  }
+
+  await logAudit({
+    actor: input.actor,
+    action: "batch_card.created",
+    entityType: "batch_card",
+    entityId: batchCardId,
+    batchId: input.batchId,
+    afterJson: stringifyJson({
+      normalized,
+      confidence: input.extracted.confidence,
+      duplicateCandidates,
+    }),
+  });
+
+  return {
+    batchCardId,
+    needsReview: review.needsReview,
+    duplicateCandidates,
+  };
+}
+
 export async function createBusinessCardBatch(input: BatchUploadInput): Promise<number> {
   const db = getCrmDb();
   const thresholds = await getCrmThresholds();
@@ -708,88 +824,21 @@ export async function createBusinessCardBatch(input: BatchUploadInput): Promise<
 
   for (let index = 0; index < input.crops.length; index += 1) {
     const crop = input.crops[index];
-    const normalized = normalizeExtractedFields(crop.extracted.fields);
-    const duplicateCandidates = buildDuplicateCandidates(
-      normalized,
-      await queryDedupeContactsByKeys(normalized),
-    );
-    const review = assessBatchCardReviewState({
-      normalized,
-      confidence: crop.extracted.confidence,
-      duplicateCandidates,
+    const result = await insertBatchCard(
+      {
+        batchId,
+        sortOrder: index,
+        actor: input.actor,
+        label: crop.label,
+        detection: crop.detection,
+        image: crop.image,
+        extracted: crop.extracted,
+        croppedStorageKey: `batch/${batchId}/card/${String(index + 1).padStart(2, "0")}.png`,
+        createdAt,
+      },
       thresholds,
-    });
-
-    const batchCardResult = await db
-      .prepare(
-        `INSERT INTO batch_cards
-          (batch_id, sort_order, status, detection_label, detection_confidence, detection_box_json, transform_json, extraction_provider, raw_ocr_text, extracted_json, normalized_json, confidence_json, duplicate_candidates_json, needs_review, notes, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .bind(
-        batchId,
-        index,
-        review.needsReview ? "needs_review" : "extracted",
-        crop.label,
-        crop.detection.confidence,
-        stringifyJson(crop.detection.polygon),
-        stringifyJson({ rotationDegrees: crop.detection.rotationDegrees ?? 0 }),
-        "cloudflare_ai",
-        normalized.raw_ocr_text,
-        stringifyJson(crop.extracted.fields),
-        stringifyJson(normalized),
-        stringifyJson(crop.extracted.confidence),
-        stringifyJson(duplicateCandidates),
-        review.needsReview ? 1 : 0,
-        review.reasons.join("; ") || null,
-        createdAt,
-        createdAt,
-      )
-      .run();
-
-    const batchCardId = Number(batchCardResult.meta.last_row_id ?? 0);
-
-    await insertImage({
-      batchId,
-      batchCardId,
-      role: "cropped_card",
-      storageKey: `batch/${batchId}/card/${String(index + 1).padStart(2, "0")}.png`,
-      file: crop.image,
-    });
-
-    if (review.needsReview) {
-      needsReviewCount += 1;
-      await createReviewTask({
-        entityType: "batch_card",
-        entityId: batchCardId,
-        batchId,
-        taskType: duplicateCandidates.length > 0 ? "dedupe_review" : "ocr_review",
-        priority: duplicateCandidates.length > 0 ? "high" : "medium",
-        title:
-          duplicateCandidates.length > 0
-            ? `Resolve duplicate candidate for ${normalized.full_name ?? `card ${index + 1}`}`
-            : `Review low-confidence extraction for card ${index + 1}`,
-        detail: {
-          duplicateCandidates,
-          confidence: crop.extracted.confidence,
-          normalized,
-          reasons: review.reasons,
-        },
-      });
-    }
-
-    await logAudit({
-      actor: input.actor,
-      action: "batch_card.created",
-      entityType: "batch_card",
-      entityId: batchCardId,
-      batchId,
-      afterJson: stringifyJson({
-        normalized,
-        confidence: crop.extracted.confidence,
-        duplicateCandidates,
-      }),
-    });
+    );
+    if (result.needsReview) needsReviewCount += 1;
   }
 
   if (input.crops.length === 0) {
@@ -846,6 +895,247 @@ export async function createBusinessCardBatch(input: BatchUploadInput): Promise<
   });
 
   return batchId;
+}
+
+// ─── Mobile capture ──────────────────────────────────────────────────────────
+
+export interface MobileBusinessCardCaptureInput {
+  actor: string;
+  deviceId: string;
+  clientCaptureId: string;
+  capturedAtClient: string | null;
+  appVersion: string | null;
+  note: string | null;
+  // When provided, append to an existing batch. Otherwise create a new batch
+  // using `eventName`.
+  batchId: number | null;
+  eventName: string | null;
+  image: StoredFileInput;
+  extracted: ExtractedCardPayload;
+}
+
+export interface MobileBusinessCardCaptureResult {
+  batchId: number;
+  batchCardId: number;
+  businessCardImageId: number;
+  duplicate: boolean;
+}
+
+// Idempotency: every mobile-captured card image carries (device_id,
+// client_capture_id). A unique index in 0012_mobile_capture.sql enforces
+// at-most-once insertion. On retry we return the existing card.
+async function findMobileBusinessCardImage(
+  deviceId: string,
+  clientCaptureId: string,
+): Promise<{ id: number; batch_card_id: number | null; batch_id: number | null } | null> {
+  const db = getCrmDb();
+  return db
+    .prepare(
+      `SELECT id, batch_card_id, batch_id
+       FROM business_card_images_v2
+       WHERE device_id = ? AND client_capture_id = ?
+       LIMIT 1`,
+    )
+    .bind(deviceId, clientCaptureId)
+    .first<{ id: number; batch_card_id: number | null; batch_id: number | null }>();
+}
+
+async function findOrCreateMobileBatch(
+  input: MobileBusinessCardCaptureInput,
+): Promise<number> {
+  const db = getCrmDb();
+  if (input.batchId) {
+    const row = await db
+      .prepare(`SELECT id FROM contact_batches WHERE id = ? LIMIT 1`)
+      .bind(input.batchId)
+      .first<{ id: number }>();
+    if (!row) {
+      throw new Error(`Batch ${input.batchId} not found.`);
+    }
+    return row.id;
+  }
+
+  const createdAt = nowIso();
+  const insert = await db
+    .prepare(
+      `INSERT INTO contact_batches
+        (status, event_name, source_filename, source_mime_type,
+         detected_card_count, created_by, updated_by, created_at, updated_at)
+       VALUES ('processing', ?, ?, ?, 0, ?, ?, ?, ?)`,
+    )
+    .bind(
+      input.eventName,
+      `mobile-capture/${input.deviceId.slice(0, 8)}`,
+      input.image.mimeType,
+      input.actor,
+      input.actor,
+      createdAt,
+      createdAt,
+    )
+    .run();
+  return Number(insert.meta.last_row_id ?? 0);
+}
+
+async function nextBatchSortOrder(batchId: number): Promise<number> {
+  const db = getCrmDb();
+  const row = await db
+    .prepare(`SELECT MAX(sort_order) AS max_sort FROM batch_cards WHERE batch_id = ?`)
+    .bind(batchId)
+    .first<{ max_sort: number | null }>();
+  return Number(row?.max_sort ?? -1) + 1;
+}
+
+export async function createMobileBusinessCardCapture(
+  input: MobileBusinessCardCaptureInput,
+): Promise<MobileBusinessCardCaptureResult> {
+  const db = getCrmDb();
+
+  const existing = await findMobileBusinessCardImage(
+    input.deviceId,
+    input.clientCaptureId,
+  );
+  if (existing) {
+    return {
+      batchId: existing.batch_id ?? 0,
+      batchCardId: existing.batch_card_id ?? 0,
+      businessCardImageId: existing.id,
+      duplicate: true,
+    };
+  }
+
+  if (!input.batchId && !input.eventName) {
+    throw new Error("event_name is required when no batch_id is provided.");
+  }
+
+  const thresholds = await getCrmThresholds();
+  const createdAt = nowIso();
+  const batchId = await findOrCreateMobileBatch(input);
+  const sortOrder = await nextBatchSortOrder(batchId);
+
+  const detection: CardDetectionCandidate = {
+    label: `mobile-${sortOrder + 1}`,
+    confidence: 1,
+    polygon: {
+      topLeft: { x: 0, y: 0 },
+      topRight: { x: input.image.width ?? 0, y: 0 },
+      bottomRight: { x: input.image.width ?? 0, y: input.image.height ?? 0 },
+      bottomLeft: { x: 0, y: input.image.height ?? 0 },
+    },
+    rotationDegrees: 0,
+  };
+
+  // Insert the card. The idempotency unique index is on
+  // business_card_images_v2(device_id, client_capture_id), so we tag the
+  // image row with those identifiers after insertBatchCard creates it.
+  const result = await insertBatchCard(
+    {
+      batchId,
+      sortOrder,
+      actor: input.actor,
+      label: detection.label,
+      detection,
+      image: {
+        ...input.image,
+        metadata: {
+          ...(input.image.metadata ?? {}),
+          uploadedVia: "mobile",
+          deviceId: input.deviceId,
+          clientCaptureId: input.clientCaptureId,
+          capturedAtClient: input.capturedAtClient,
+          appVersion: input.appVersion,
+          note: input.note,
+        },
+      },
+      extracted: input.extracted,
+      croppedStorageKey: `batch/${batchId}/mobile/${input.clientCaptureId}.jpg`,
+      createdAt,
+    },
+    thresholds,
+  );
+
+  // Tag the image row with mobile metadata so the unique index protects
+  // future retries. If a concurrent retry already tagged a row with this
+  // (device_id, client_capture_id), the UPDATE hits the unique index and
+  // throws; surface that as a duplicate of the prior successful insert.
+  try {
+    const tagResult = await db
+      .prepare(
+        `UPDATE business_card_images_v2
+           SET device_id = ?, client_capture_id = ?, captured_at_client = ?,
+               upload_origin = 'mobile', source_app_version = ?
+         WHERE batch_card_id = ? AND image_role = 'cropped_card'`,
+      )
+      .bind(
+        input.deviceId,
+        input.clientCaptureId,
+        input.capturedAtClient,
+        input.appVersion,
+        result.batchCardId,
+      )
+      .run();
+    const tagChanges = Number(tagResult.meta?.changes ?? 0);
+    if (tagChanges === 0) {
+      throw new Error("Mobile metadata tag failed: no image row updated.");
+    }
+  } catch (err) {
+    const existingAfter = await findMobileBusinessCardImage(
+      input.deviceId,
+      input.clientCaptureId,
+    );
+    if (existingAfter) {
+      return {
+        batchId: existingAfter.batch_id ?? batchId,
+        batchCardId: existingAfter.batch_card_id ?? result.batchCardId,
+        businessCardImageId: existingAfter.id,
+        duplicate: true,
+      };
+    }
+    throw err;
+  }
+
+  const imageRow = await db
+    .prepare(
+      `SELECT id FROM business_card_images_v2
+       WHERE batch_card_id = ? AND image_role = 'cropped_card' LIMIT 1`,
+    )
+    .bind(result.batchCardId)
+    .first<{ id: number }>();
+
+  await db
+    .prepare(
+      `UPDATE contact_batches
+         SET detected_card_count = (
+               SELECT COUNT(*) FROM batch_cards WHERE batch_id = ?
+             ),
+             updated_at = ?
+       WHERE id = ?`,
+    )
+    .bind(batchId, nowIso(), batchId)
+    .run();
+
+  await refreshBatchReviewCounts(batchId);
+
+  await logAudit({
+    actor: input.actor,
+    action: "contact_batch.created",
+    entityType: "contact_batch",
+    entityId: batchId,
+    batchId,
+    afterJson: stringifyJson({
+      uploadedVia: "mobile",
+      deviceId: input.deviceId,
+      clientCaptureId: input.clientCaptureId,
+      eventName: input.eventName,
+      appVersion: input.appVersion,
+    }),
+  });
+
+  return {
+    batchId,
+    batchCardId: result.batchCardId,
+    businessCardImageId: Number(imageRow?.id ?? 0),
+    duplicate: false,
+  };
 }
 
 export async function listBatches(): Promise<BatchListItem[]> {

@@ -19,6 +19,9 @@ export interface TrustedDeviceRow {
   created_at: string;
   last_seen_at: string | null;
   revoked_at: string | null;
+  platform: string | null;
+  app_version: string | null;
+  scopes_json: string | null;
 }
 
 interface DevicePayload {
@@ -26,6 +29,26 @@ interface DevicePayload {
   actor: string;
   exp: number; // unix seconds
 }
+
+// Mobile bearer tokens have no fixed expiry; revocation in trusted_devices is
+// the only control. The token payload still carries id+actor so the route can
+// verify HMAC without a DB hit before doing the revocation lookup.
+interface MobileTokenPayload {
+  id: string;
+  actor: string;
+  iat: number; // unix seconds, informational
+}
+
+export type MobileScope =
+  | "receipt:create"
+  | "business_card:create"
+  | "device:heartbeat";
+
+export const DEFAULT_MOBILE_SCOPES: MobileScope[] = [
+  "receipt:create",
+  "business_card:create",
+  "device:heartbeat",
+];
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
@@ -223,7 +246,8 @@ export async function listDevicesForActor(actor: string): Promise<TrustedDeviceR
   const db = getReceiptsDb();
   const result = await db
     .prepare(
-      `SELECT id, actor, label, user_agent, created_at, last_seen_at, revoked_at
+      `SELECT id, actor, label, user_agent, created_at, last_seen_at, revoked_at,
+              platform, app_version, scopes_json
        FROM trusted_devices WHERE actor = ? AND revoked_at IS NULL ORDER BY created_at DESC`,
     )
     .bind(actor)
@@ -246,4 +270,170 @@ export async function revokeDevice(id: string, actor: string): Promise<void> {
 export async function getCurrentDeviceId(headers: Headers): Promise<string | null> {
   const light = await verifyDeviceCookieLight(headers).catch(() => null);
   return light?.id ?? null;
+}
+
+// ─── Mobile bearer tokens ─────────────────────────────────────────────────────
+//
+// Format: base64url(JSON {id, actor, iat}) + "." + hex(HMAC-SHA256(secret, payload))
+// Stored only on the device. Server keeps no copy; revocation is enforced by
+// the trusted_devices.revoked_at column.
+
+function parseBearerToken(value: string): { raw: Uint8Array; encodedPayload: string; sig: string } | null {
+  return parseCookieValue(value);
+}
+
+function readBearerToken(headers: Headers): string | null {
+  const auth = headers.get("authorization");
+  if (!auth) return null;
+  const m = /^Bearer\s+(.+)$/i.exec(auth.trim());
+  return m ? m[1]!.trim() : null;
+}
+
+export async function enrollMobileDevice(input: {
+  actor: string;
+  label: string;
+  userAgent: string | null;
+  platform: "ios" | "android";
+  appVersion: string | null;
+  scopes: MobileScope[];
+}): Promise<{ id: string; bearerToken: string }> {
+  const secret = getDeviceSecret();
+  if (!secret) {
+    throw new Error("RECEIPTS_DEVICE_SECRET is not configured (must be ≥32 chars).");
+  }
+
+  const id = newUuid();
+  const iat = Math.floor(Date.now() / 1000);
+  const payload: MobileTokenPayload = { id, actor: input.actor, iat };
+  const payloadBytes = textEncoder.encode(JSON.stringify(payload));
+  const sig = await hmacHex(secret, payloadBytes);
+  const bearerToken = encodeCookieValue(payload as unknown as DevicePayload, sig);
+
+  const db = getReceiptsDb();
+  const now = nowIso();
+  await db
+    .prepare(
+      `INSERT INTO trusted_devices
+        (id, actor, label, user_agent, created_at, last_seen_at,
+         platform, app_version, scopes_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(
+      id,
+      input.actor,
+      input.label,
+      input.userAgent,
+      now,
+      now,
+      input.platform,
+      input.appVersion,
+      JSON.stringify(input.scopes),
+    )
+    .run();
+
+  return { id, bearerToken };
+}
+
+interface MobileActor {
+  deviceId: string;
+  actor: string;
+  scopes: MobileScope[];
+  platform: string | null;
+  appVersion: string | null;
+}
+
+export async function verifyBearerDevice(headers: Headers): Promise<MobileActor | null> {
+  const secret = getDeviceSecret();
+  if (!secret) return null;
+  const token = readBearerToken(headers);
+  if (!token) return null;
+  const parsed = parseBearerToken(token);
+  if (!parsed) return null;
+
+  const expected = await hmacHex(secret, parsed.raw);
+  if (!constantTimeEqual(expected, parsed.sig)) return null;
+
+  let payload: MobileTokenPayload;
+  try {
+    payload = JSON.parse(textDecoder.decode(parsed.raw)) as MobileTokenPayload;
+  } catch {
+    return null;
+  }
+  if (!payload.id || !payload.actor) return null;
+
+  const db = getReceiptsDb();
+  const row = await db
+    .prepare(
+      `SELECT revoked_at, last_seen_at, scopes_json, platform, app_version
+       FROM trusted_devices WHERE id = ? LIMIT 1`,
+    )
+    .bind(payload.id)
+    .first<{
+      revoked_at: string | null;
+      last_seen_at: string | null;
+      scopes_json: string | null;
+      platform: string | null;
+      app_version: string | null;
+    }>();
+  if (!row || row.revoked_at) return null;
+
+  let scopes: MobileScope[] = DEFAULT_MOBILE_SCOPES;
+  if (row.scopes_json) {
+    try {
+      const parsedScopes = JSON.parse(row.scopes_json);
+      if (Array.isArray(parsedScopes)) {
+        scopes = parsedScopes.filter(
+          (s): s is MobileScope =>
+            s === "receipt:create" ||
+            s === "business_card:create" ||
+            s === "device:heartbeat",
+        );
+      }
+    } catch {
+      // fall through to default scopes
+    }
+  }
+
+  // last_seen_at throttle, same as cookie path.
+  const now = Date.now();
+  const last = row.last_seen_at ? Date.parse(row.last_seen_at) : 0;
+  if (!Number.isFinite(last) || now - last > LAST_SEEN_THROTTLE_MS) {
+    db.prepare(`UPDATE trusted_devices SET last_seen_at = ? WHERE id = ?`)
+      .bind(new Date(now).toISOString(), payload.id)
+      .run()
+      .catch(() => {});
+  }
+
+  return {
+    deviceId: payload.id,
+    actor: payload.actor,
+    scopes,
+    platform: row.platform,
+    appVersion: row.app_version,
+  };
+}
+
+export async function requireMobileActor(
+  headers: Headers,
+  requiredScope: MobileScope,
+): Promise<MobileActor> {
+  const actor = await verifyBearerDevice(headers);
+  if (!actor) {
+    throw new Error("Unauthorized mobile request.");
+  }
+  if (!actor.scopes.includes(requiredScope)) {
+    throw new Error(`Forbidden: missing scope ${requiredScope}`);
+  }
+  return actor;
+}
+
+export async function updateMobileDeviceAppVersion(
+  deviceId: string,
+  appVersion: string,
+): Promise<void> {
+  const db = getReceiptsDb();
+  await db
+    .prepare(`UPDATE trusted_devices SET app_version = ? WHERE id = ?`)
+    .bind(appVersion, deviceId)
+    .run();
 }

@@ -40,6 +40,8 @@ export default async function DevicesPage() {
           createdAt: d.created_at,
           lastSeenAt: d.last_seen_at,
           isCurrent: currentDeviceId === d.id,
+          platform: d.platform,
+          appVersion: d.app_version,
         }))}
       />
     </div>
