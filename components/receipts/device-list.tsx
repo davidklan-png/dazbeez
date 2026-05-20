@@ -11,6 +11,8 @@ export interface DeviceListItem {
   createdAt: string;
   lastSeenAt: string | null;
   isCurrent: boolean;
+  platform: string | null;
+  appVersion: string | null;
 }
 
 function formatDate(value: string | null): string {
@@ -74,13 +76,19 @@ export function DeviceList({ devices }: { devices: DeviceListItem[] }) {
             className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between"
           >
             <div className="min-w-0">
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <p className="truncate text-sm font-semibold text-gray-900">
                   {d.label}
                 </p>
                 {d.isCurrent ? (
                   <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-amber-800">
                     This device
+                  </span>
+                ) : null}
+                {d.platform === "ios" || d.platform === "android" ? (
+                  <span className="rounded-full bg-gray-900 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-white">
+                    {d.platform === "ios" ? "iPhone" : "Android"}
+                    {d.appVersion ? ` · ${d.appVersion}` : ""}
                   </span>
                 ) : null}
               </div>

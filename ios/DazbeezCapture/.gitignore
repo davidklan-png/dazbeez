@@ -1,0 +1,15 @@
+# Xcode build artifacts (generated locally on the Mac, never committed)
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.xcscmblueprint
+*.xccheckout
+.DS_Store
+
+# Swift Package Manager
+.swiftpm/
+Package.resolved
+
+# Xcode project file is generated locally on the Mac (see README.md)
+DazbeezCapture.xcodeproj/
