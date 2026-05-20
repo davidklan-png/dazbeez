@@ -1,6 +1,6 @@
 Below is a PRD for a **thin Dazbeez Capture iPhone app**. The key design constraint is that the iPhone app should **not** become a second accounting system or CRM. It should be a fast, reliable capture client that sends receipts into the existing receipt module and business cards into the existing CRM/business-card review pipeline.
 
-The receipt system already has a separated `/receipts` module with its own `RECEIPTS_DB`, R2 buckets, auth, upload route, review route, attendees, AMEX reconciliation, exports, and audit log.  The business-card system already shares a CRM spine through `CRM_DB`, with `contact_batches`, `business_card_images`, `batch_cards`, companies, contacts, review tasks, processing jobs, and audit logs; the current admin flow stores original/cropped images, runs OCR-style extraction, and creates reviewable `batch_cards`. 
+The receipt system already has a separated `/receipts` module with its own `RECEIPTS_DB`, R2 buckets, auth, upload route, review route, attendees, AMEX reconciliation, exports, and audit log. The business-card system already shares a CRM spine through `CRM_DB`, with `contact_batches`, `business_card_images_v2`, `batch_cards`, companies, contacts, review tasks, processing jobs, and audit logs; the current admin flow stores original/cropped images, runs OCR-style extraction, and creates reviewable `batch_cards`.
 
 # PRD: Dazbeez Capture iPhone App
 
@@ -46,7 +46,7 @@ Business cards are especially good candidates for native capture because the cur
 5. Retry failed uploads.
 6. Preserve original image files.
 7. Avoid duplicate uploads through idempotency keys.
-8. Show upload history and status.
+8. Show pending/failed upload status without retaining successful-upload history.
 9. Keep all accounting/CRM review in the web app.
 
 ### Non-goals
@@ -120,7 +120,8 @@ As a Dazbeez user, I want to securely pair my iPhone with the Dazbeez backend so
 ```text
 Open app
 → “Pair with Dazbeez”
-→ browser-based auth or QR/device pairing
+→ app shows pairing code
+→ user enters code on browser pairing page behind Cloudflare Access
 → backend issues mobile device token
 → app stores token in Keychain
 → app shows Capture screen
@@ -131,6 +132,8 @@ Open app
 * Device token must be scoped narrowly.
 * Token must be revocable.
 * Token must not allow exports, deletes, or admin actions.
+* Token should have no fixed expiry; revocation is the primary control.
+* Bearer token must only be delivered to the polling iPhone, never displayed in the browser.
 * Token must be stored securely on-device.
 * User should see device name and last sync status.
 
@@ -139,9 +142,11 @@ Open app
 ```text
 receipt:create
 business_card:create
-upload_status:read_own
 device:heartbeat
 ```
+
+Both capture scopes are available to paired devices in v1. The app should default
+to receipt capture on launch.
 
 ## 6.2 Receipt capture flow
 
@@ -157,7 +162,7 @@ Tap Capture Receipt
 → take photo
 → preview
 → Retake or Use Photo
-→ optional payment hint: AMEX / CASH / Unknown
+→ optional payment hint: AMEX / CASH
 → Uploading…
 → Receipt saved
 ```
@@ -171,7 +176,7 @@ device_id
 captured_at_client
 image_file
 sha256_hash if computed locally
-payment_hint optional: AMEX / CASH / UNKNOWN
+payment_hint optional: AMEX / CASH
 note optional
 app_version
 ```
@@ -197,7 +202,9 @@ receipt_records row
 R2 original image
 audit log entry
 status = needs_review
-source_type = ios_app
+source = mobile_capture
+source_type = paper_scanned
+upload_origin = mobile
 payment_path = provided hint or UNKNOWN
 ```
 
@@ -217,7 +224,7 @@ Tap Capture Business Card
 → take photo
 → preview
 → Retake or Use Photo
-→ optional batch/event name
+→ active event/batch is applied
 → Uploading…
 → Business card saved
 ```
@@ -231,8 +238,8 @@ device_id
 captured_at_client
 image_file
 sha256_hash if computed locally
-batch_name optional
-event_name optional
+batch_id optional
+event_name required once event mode is active
 note optional
 app_version
 ```
@@ -257,13 +264,19 @@ The backend should create or update:
 
 ```text
 contact_batches
-business_card_images
+business_card_images_v2
 batch_cards
 processing_jobs
 audit_logs
 ```
 
-The existing business-card architecture already uses `contact_batches`, `business_card_images`, `batch_cards`, review tasks, processing jobs, and audit logs in the shared `CRM_DB` contact spine. 
+The existing business-card architecture already uses `contact_batches`,
+`business_card_images_v2`, `batch_cards`, review tasks, processing jobs, and
+audit logs in the shared `CRM_DB` contact spine.
+
+Event/batch capture is required on day one. Once the user registers or selects an
+event in the app, that event applies to all subsequent business-card scans until
+the user changes or clears the active event.
 
 ## 6.4 Offline queue flow
 
@@ -289,23 +302,25 @@ Capture photo
 * Queue retries with exponential backoff.
 * User can manually retry.
 * User can delete a queued item before upload.
-* Successfully uploaded images should be removed from local storage unless user chooses local retention.
+* Successfully uploaded images should be removed from local storage.
 
-## 6.5 Upload history
+## 6.5 Upload status
 
 ### User story
 
-As a user, I want to know which captures were uploaded and which still need attention.
+As a user, I want to know what is still pending or failed, without keeping a local
+history after successful upload.
 
 ### UI
 
 ```text
-Today
-✓ Receipt uploaded 14:32
-✓ Business card uploaded 14:40
 ⟳ Receipt waiting for network 15:02
 ⚠ Business card upload failed
 ```
+
+Successful uploads are removed from local history after the user sees the final
+status. Duplicate retries should surface as `Already uploaded` and then clear
+from local history.
 
 ### Statuses
 
@@ -331,7 +346,6 @@ business card capture
 Later optional modes:
 
 ```text
-batch business-card capture
 multi-page receipt
 invoice/PDF import from Files
 ```
@@ -345,10 +359,14 @@ capture image
 preview image
 retake
 upload original image
-optional light compression only if configured
+JPEG-only app upload
+target payload under 500 KB
 ```
 
-Do not crop or deskew automatically in v1 unless using a safe built-in document scanner flow. The backend should preserve the original upload.
+Business-card capture should use VisionKit document scanning/crop in v1. Receipt
+capture can use a simpler camera flow, but should still send JPEG only and target
+files under 500 KB. Cloudflare resizing remains the backend fallback. The backend
+should preserve the uploaded JPEG.
 
 ## 7.3 Receipt metadata
 
@@ -357,7 +375,6 @@ At capture, only allow optional lightweight hints:
 ```text
 AMEX
 CASH
-Unknown
 Note
 ```
 
@@ -380,10 +397,12 @@ Those belong in `/receipts/review`.
 At capture, allow optional:
 
 ```text
-batch name
-event name
+active event/batch
 note
 ```
+
+An event/batch must be available on day one. Once selected or registered, the
+active event applies to subsequent card scans until changed or cleared.
 
 Do not require:
 
@@ -433,14 +452,17 @@ No silent no-op is allowed.
 
 ## 8.1 Mobile auth
 
-Add a mobile-device auth layer separate from Cloudflare browser auth.
+Add a mobile-device auth layer that uses Cloudflare browser auth only for pairing.
+After pairing, the iPhone uses a narrowly scoped bearer token backed by the
+existing `trusted_devices` revocation model.
 
 ### Required endpoints
 
 ```text
 POST /api/mobile/auth/start-pairing
+GET  /api/mobile/auth/check?code=...
 POST /api/mobile/auth/complete-pairing
-POST /api/mobile/auth/revoke-device
+POST /api/mobile/auth/revoke
 GET  /api/mobile/me
 ```
 
@@ -449,8 +471,8 @@ GET  /api/mobile/me
 Backend:
 
 ```text
-mobile_devices
-mobile_device_tokens or hashed token records
+trusted_devices extended with platform, app_version, scopes_json
+mobile_pairing_codes for short-lived pairing codes
 ```
 
 iPhone:
@@ -461,10 +483,10 @@ Keychain
 
 ### Token policy
 
-* Store only hashed token server-side.
+* Do not store the bearer token server-side; verify HMAC, then check the trusted-device row for revocation.
 * Token can be revoked from web settings.
 * Token is scoped to capture/upload only.
-* Token should expire or rotate periodically.
+* Token has no fixed expiry; explicit revocation is the primary control.
 
 ## 8.2 Receipt upload endpoint
 
@@ -479,7 +501,7 @@ file
 client_capture_id
 device_id
 captured_at_client
-payment_hint optional
+payment_hint optional: AMEX / CASH
 note optional
 app_version
 ```
@@ -509,8 +531,8 @@ file
 client_capture_id
 device_id
 captured_at_client
-batch_name optional
-event_name optional
+batch_id optional
+event_name required once event mode is active
 note optional
 app_version
 ```
@@ -533,26 +555,24 @@ Response:
 GET /api/mobile/uploads
 ```
 
-Returns recent uploads for this device.
+Returns pending or failed uploads for this device if server-side status is needed.
+The iPhone should not keep a successful-upload history.
 
 ## 9. Data model additions
 
-## 9.1 Mobile devices
+## 9.1 Trusted mobile devices
 
 ```sql
-CREATE TABLE mobile_devices (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  device_id TEXT NOT NULL UNIQUE,
-  user_email TEXT NOT NULL,
-  device_name TEXT,
-  platform TEXT NOT NULL,
-  app_version TEXT,
-  token_hash TEXT NOT NULL,
-  scopes_json TEXT NOT NULL,
-  last_seen_at TEXT,
-  revoked_at TEXT,
+ALTER TABLE trusted_devices ADD COLUMN platform TEXT;      -- 'web' | 'ios'
+ALTER TABLE trusted_devices ADD COLUMN app_version TEXT;
+ALTER TABLE trusted_devices ADD COLUMN scopes_json TEXT;
+
+CREATE TABLE mobile_pairing_codes (
+  code TEXT PRIMARY KEY,
   created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
+  expires_at TEXT NOT NULL,
+  consumed_device_id TEXT,
+  consumed_at TEXT
 );
 ```
 
@@ -561,7 +581,8 @@ CREATE TABLE mobile_devices (
 Add to `receipt_records` if missing:
 
 ```text
-source_type = ios_app
+source = mobile_capture
+source_type = paper_scanned
 device_id
 client_capture_id
 captured_at_client
@@ -578,7 +599,7 @@ WHERE device_id IS NOT NULL AND client_capture_id IS NOT NULL;
 
 ## 9.3 Business card additions
 
-Add to `business_card_images` or related table:
+Add to `business_card_images_v2`:
 
 ```text
 device_id
@@ -592,7 +613,7 @@ Add unique index:
 
 ```sql
 CREATE UNIQUE INDEX IF NOT EXISTS idx_business_card_mobile_idempotency
-ON business_card_images(device_id, client_capture_id)
+ON business_card_images_v2(device_id, client_capture_id)
 WHERE device_id IS NOT NULL AND client_capture_id IS NOT NULL;
 ```
 
@@ -607,7 +628,8 @@ store token in Keychain
 narrow token scopes
 no analytics SDK in v1
 no ad tracking
-no third-party crash reporting unless explicitly approved
+Apple crash reporting only
+no third-party crash reporting
 delete local image after successful upload by default
 encrypted local queue
 clear camera permission reason
@@ -650,7 +672,7 @@ Dazbeez Capture
 [ Capture Receipt ]
 [ Capture Business Card ]
 
-Recent uploads
+Upload queue
 Settings
 ```
 
@@ -661,7 +683,7 @@ Camera
 Preview
 Retake
 Use Photo
-Optional: AMEX / CASH / Unknown
+Optional: AMEX / CASH
 Upload status
 ```
 
@@ -672,7 +694,7 @@ Camera
 Preview
 Retake
 Use Photo
-Optional: batch/event name
+Active event/batch
 Upload status
 ```
 
@@ -740,7 +762,8 @@ Do not create a separate backend for the app.
 Deliver:
 
 ```text
-mobile_devices table
+trusted_devices mobile extensions
+mobile_pairing_codes table
 device pairing/token flow
 receipt mobile upload endpoint
 business-card mobile upload endpoint
@@ -804,8 +827,8 @@ Deliver:
 ```text
 document scanner mode
 optional crop
-batch business-card capture
 image quality settings
+event/batch ergonomics
 ```
 
 Acceptance:
@@ -834,7 +857,7 @@ one-week pilot captures real receipts and cards
 no data loss
 ```
 
-## 15. Major decisions required before proceeding
+## 15. Major architecture choices and remaining confirmations
 
 ### Decision 1: Native SwiftUI vs React Native/Expo vs PWA wrapper
 
@@ -842,14 +865,10 @@ Recommendation: **SwiftUI native**.
 
 Reason: this is a small internal app where camera capture, offline queueing, Keychain, and reliability matter more than UI reuse.
 
-Decision needed:
+Current direction:
 
 ```text
-Build native SwiftUI app?
-or
-Use React Native/Expo?
-or
-Delay native app and keep PWA?
+Build a native SwiftUI app under ios/DazbeezCapture.
 ```
 
 ### Decision 2: Authentication model
@@ -862,10 +881,10 @@ Options:
 
 Recommendation: **device pairing + scoped mobile token**.
 
-Decision needed:
+Current direction:
 
 ```text
-How should the app pair and authenticate?
+Pair through Cloudflare Access in the browser, then issue a scoped mobile bearer token.
 ```
 
 ### Decision 3: Business-card endpoint path
@@ -880,10 +899,10 @@ reuse /admin/api/batches
 
 Recommendation: **new `/api/mobile/business-cards/upload` endpoint** that writes into the existing CRM tables.
 
-Decision needed:
+Current direction:
 
 ```text
-Create clean mobile API namespace or extend admin namespace?
+Create a clean mobile API namespace.
 ```
 
 ### Decision 4: Receipt endpoint path
@@ -897,10 +916,10 @@ create /api/mobile/receipts/upload
 
 Recommendation: **create `/api/mobile/receipts/upload`** and reuse lower-level receipt storage/db functions internally.
 
-Decision needed:
+Current direction:
 
 ```text
-Separate mobile upload API or reuse existing browser upload route?
+Create a separate mobile upload API and reuse lower-level receipt helpers.
 ```
 
 ### Decision 5: Local retention policy
@@ -913,12 +932,14 @@ keep local copy for 7 days
 manual clear only
 ```
 
-Recommendation: **delete after upload by default**, keep only metadata/history.
+Recommendation: **delete after upload by default and keep no successful-upload history**.
+Pending and failed queue items remain visible until they upload or the user deletes
+them.
 
-Decision needed:
+Current direction:
 
 ```text
-How long should captured images stay on the iPhone?
+Delete captured images after successful upload and keep no successful-upload history.
 ```
 
 ### Decision 6: Offline queue scope
@@ -933,10 +954,10 @@ persistent encrypted queue
 
 Recommendation: **persistent encrypted queue** for MVP if native app is worth building.
 
-Decision needed:
+Current direction:
 
 ```text
-Must capture work offline from day one?
+Persistent encrypted offline queue from day one.
 ```
 
 ### Decision 7: Business card capture mode
@@ -949,12 +970,14 @@ batch capture
 composite image capture
 ```
 
-Recommendation: **single-card in MVP**, batch capture in v2.
+Recommendation: **event/batch capture on day one**.
+Once an event is registered or selected, it applies to all subsequent card scans
+until the user changes or clears the active event.
 
-Decision needed:
+Current direction:
 
 ```text
-Does MVP need event/batch capture, or is single-card enough?
+Event/batch capture is required for MVP.
 ```
 
 ### Decision 8: Image processing
@@ -967,12 +990,16 @@ document scanner crop
 automatic deskew/perspective correction
 ```
 
-Recommendation: **raw + preview first**, document scanner/crop in v2.
+Recommendation: **VisionKit document scanner/crop for MVP business-card capture**.
+Receipt capture can start with raw camera image plus preview, but card OCR quality
+depends on sending the backend a clean cropped card rather than a cluttered phone
+photo.
 
-Decision needed:
+Current direction:
 
 ```text
-Is native scanning/crop required for MVP?
+Business cards use VisionKit scanner/crop in MVP. Receipts use JPEG-only capture.
+The app should target files under 500 KB; Cloudflare resizing remains the server fallback.
 ```
 
 ### Decision 9: App distribution
@@ -988,10 +1015,10 @@ Apple Business Manager / custom app
 
 Recommendation: **TestFlight internal**.
 
-Decision needed:
+Current direction:
 
 ```text
-How will the app be distributed to the two users?
+Distribute through TestFlight internal testing.
 ```
 
 ### Decision 10: Repository structure
@@ -1005,10 +1032,10 @@ separate dazbeez-ios repo
 
 Recommendation: **start in existing repo under `ios/DazbeezCapture`** so backend/API contracts and app code evolve together.
 
-Decision needed:
+Current direction:
 
 ```text
-Same repo or separate iOS repo?
+Keep the iOS app in this repo under ios/DazbeezCapture.
 ```
 
 ## 16. Risks
@@ -1048,7 +1075,7 @@ MVP is complete when:
 5. Card appears in `/admin/batches` or equivalent review queue.
 6. Failed uploads retry without duplicates.
 7. Captures show clear acknowledgment and final status.
-8. Local images are deleted after upload unless retained by setting.
+8. Local images are deleted after upload and successful-upload history is not retained.
 9. Device token can be revoked.
 10. No export, accounting finalization, CRM finalization, or deletion is possible from the app.
 11. Existing web receipt and CRM workflows remain unchanged.
@@ -1056,25 +1083,19 @@ MVP is complete when:
 
 ## 18. Recommendation
 
-Proceed only after deciding:
-
-```text
-1. SwiftUI vs React Native
-2. mobile auth/pairing model
-3. mobile API namespace
-4. offline queue requirement
-5. local image retention policy
-6. TestFlight vs direct install
-```
-
-My default recommendation:
+Proceed with:
 
 ```text
 SwiftUI app
-device pairing + scoped mobile token
+code-only pairing + scoped mobile token with no fixed expiry
 /api/mobile/* namespace
 persistent encrypted offline queue
-delete local images after successful upload
+delete local images after successful upload and keep no successful-upload history
+receipt-default home screen
+AMEX/CASH receipt hint UI
+JPEG-only uploads targeting under 500 KB
+event/batch business-card capture on day one
+Apple crash reporting only
 TestFlight internal distribution
 same repo under ios/DazbeezCapture
 ```
