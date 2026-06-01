@@ -71,7 +71,7 @@ export const onRequestGet: PagesFunction<{ DB: D1Database }> = async (context) =
       <a href="/vcard/${contactIdParam}" class="btn btn-amber" download="${vcardProfile.fileName}" data-vcard-download>Save my contact</a>
       <a href="https://www.linkedin.com/in/david-klan" target="_blank" rel="noopener" class="btn btn-linkedin">Connect with me on LinkedIn</a>
       <a href="https://dazbeez.com/services" class="btn btn-outline">What I do</a>
-      <a href="https://dazbeez.com/inquiry" class="btn btn-outline">Start an inquiry</a>
+      <a href="https://dazbeez.com/contact" class="btn btn-outline">Start an inquiry</a>
     </div>
 
     <p class="subcopy">A later tap can take you straight back into services, questions, follow-up, or my LinkedIn profile when the need is clearer.</p>

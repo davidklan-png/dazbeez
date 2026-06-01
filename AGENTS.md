@@ -13,17 +13,45 @@ Dazbeez is a Next.js 16.2.3 website for AI, Automation & Data consulting service
 - **Local Reference Runtime:** Docker Compose on Mac M4
 - **Optional LLM:** Ollama for chatbot enhancement
 
+### Cloudflare Bindings (`wrangler.jsonc`)
+
+| Binding | Type | Backs |
+|---------|------|-------|
+| `DB` | D1 (`dazbeez-submissions`) | Public contact-form submissions |
+| `CRM_DB` | D1 (`dazbeez-networking`) | CRM / networking data |
+| `RECEIPTS_DB` | D1 (`dazbeez-receipts`) | Receipts module (`migrations_dir: db/receipts`) |
+| `CRM_IMAGES` | R2 (`dazbeez-crm-images`) | CRM card/contact images |
+| `RECEIPTS_BUCKET` | R2 (`dazbeez-receipts`) | Receipt files |
+| `RECEIPTS_ARCHIVE_BUCKET` | R2 (`dazbeez-receipts-archive`) | Archived receipts |
+| `AI` | Workers AI | Extraction / LLM tasks |
+| `ASSETS` · `WORKER_SELF_REFERENCE` | Worker | OpenNext asset serving + self-reference |
+
+> Secrets (`RESEND_API_KEY`, `GOOGLE_CLOUD_VISION_API_KEY`) are set via `wrangler secret put`, not committed.
+
 ## Key Conventions
 
 ### File Structure (App Router)
 ```
-app/
+app/                    # Routes, layouts, and API handlers (App Router)
 ├── layout.tsx          # Root layout (no _app.tsx or _document.tsx)
 ├── page.tsx            # Home page (root route)
 ├── globals.css         # Global styles (Tailwind)
 ├── [dynamic]/          # Dynamic routes use [bracket] syntax
+├── (receipt-system)/   # Route group for the receipts UI
+├── admin/              # Internal admin console (noindex)
+├── api/                # Route handlers (contact, receipts, mobile, nfc, vcard)
 └── .../
+components/             # Shared React components (all "use client" UI lives here)
+├── ui/                 # Primitives (btn, card, field, ...)
+├── receipts/           # Receipts-specific components
+└── admin/              # Admin console components
+lib/                    # Non-component logic (services, CRM, receipts, helpers)
+└── receipts/           # Receipts domain logic
+db/receipts/            # D1 SQL migrations for the receipts DB
 ```
+
+> Interactive components are isolated under `components/`; route files in `app/`
+> stay server components by default and import client components from there.
 
 ### Styling Guidelines
 - Use bee colors: `amber-500` (#F59E0B) primary, `gray-900` (#111827) dark
@@ -38,6 +66,9 @@ app/
 - Use `Image` from `next/image` for optimized images
 
 ### Routes
+
+**Public marketing site**
+
 | Route | Purpose |
 |-------|---------|
 | `/` | Landing page |
@@ -46,7 +77,23 @@ app/
 | `/contact` | Contact form (accepts `?service=<slug>` to preselect) |
 | `/business-card` | Explainer for the NFC card |
 | `/nfc` | NFC micro-page (widget-style) |
+| `/about` | About page |
+| `/case-studies` · `/case-studies/[slug]` | Case studies list + detail |
+| `/privacy-policy` · `/terms-of-service` | Legal pages |
+
+**API & internal**
+
+| Route | Purpose |
+|-------|---------|
 | `/api/contact` | POST endpoint for contact submissions (D1 persistence) |
+| `/api/receipts/*` | Receipts capture, extract, reconcile, export, devices, compliance |
+| `/api/mobile/*` | Mobile pairing/auth + receipt & business-card uploads |
+| `/api/nfc/hit` · `/api/vcard` | NFC tap tracking + vCard download |
+| `/admin/*` | Internal admin console (CRM, batches, review) — `noindex` |
+| `/.well-known/security.txt` | Security contact disclosure |
+
+> The receipts UI itself lives under the `(receipt-system)` route group — see
+> the Receipts Module section below.
 
 > `/inquiry` has been retired and 308-redirects to `/contact`.
 

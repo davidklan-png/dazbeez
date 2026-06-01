@@ -118,7 +118,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
 
     <div class="footer-links">
       <a href="https://dazbeez.com/services">What I do</a>
-      <a href="https://dazbeez.com/inquiry">Start an inquiry</a>
+      <a href="https://dazbeez.com/contact">Start an inquiry</a>
       <a href="https://dazbeez.com/business-card">About this card</a>
     </div>
 
