@@ -5,16 +5,16 @@
 //
 // WHERE THIS RUNS: the Mac, with live Cloudflare bindings (it shells out to
 // `wrangler`). It imports the real parser from lib/receipts/extraction.ts, so
-// run it with tsx: `npx tsx scripts/reprocess-extraction.mts`.
+// run it with tsx: `npx tsx scripts/reprocess-extraction.ts`.
 //
 // SAFETY: only receipts that have NOT been reviewed yet (status captured /
 // needs_review) are eligible — reviewed/reconciled/exported/archived rows are
 // never touched. Dry-run by default; pass --write to persist.
 //
 // USAGE:
-//   npx tsx scripts/reprocess-extraction.mts            # dry-run: before/after table
-//   npx tsx scripts/reprocess-extraction.mts --write    # persist corrected fields + audit
-//   npx tsx scripts/reprocess-extraction.mts --id <id>  # single receipt
+//   npx tsx scripts/reprocess-extraction.ts            # dry-run: before/after table
+//   npx tsx scripts/reprocess-extraction.ts --write    # persist corrected fields + audit
+//   npx tsx scripts/reprocess-extraction.ts --id <id>  # single receipt
 
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -93,7 +93,7 @@ for (const r of rows) {
     d1(
       `UPDATE receipt_records SET ${sets.join(", ")} WHERE id = '${id}' AND status IN (${ELIGIBLE.map((s) => `'${s}'`).join(",")});` +
         `INSERT INTO receipt_audit_log (id, actor, action, object_type, object_id, new_value_json, created_at) ` +
-        `VALUES ('${audit.id}', 'reprocess-extraction.mts', 'receipt.updated', 'receipt', '${id}', ${esc(JSON.stringify(audit))}, '${audit.created_at}');`,
+        `VALUES ('${audit.id}', 'reprocess-extraction.ts', 'receipt.updated', 'receipt', '${id}', ${esc(JSON.stringify(audit))}, '${audit.created_at}');`,
     );
   }
 }
