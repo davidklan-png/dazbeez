@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Receipt Extraction Accuracy — SLM Decision Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.0/dist/chart.umd.js" integrity="sha384-iU8HYtnGQ8Cy4zl7gbNMOhsDTTKX02BTXptVP/vqAWIaTfM7isw76iyZCsjL2eVi" crossorigin="anonymous"></script>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: #f6f7f9; color: #1b1f24;
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    padding: 20px;
+  }
+  h1 { font-size: 19px; margin: 0 0 2px; }
+  .sub { color: #6b7280; font-size: 12.5px; margin-bottom: 16px; }
+  .verdict {
+    border-radius: 12px; padding: 16px 18px; margin-bottom: 16px; border: 1px solid transparent;
+  }
+  .verdict h2 { margin: 0 0 6px; font-size: 16px; }
+  .verdict.justified { background: #fff4ed; border-color: #fdba74; }
+  .verdict.sufficient { background: #effaf1; border-color: #86efac; }
+  .verdict.loading  { background: #eef1f5; border-color: #d1d5db; }
+  .verdict p { margin: 4px 0 0; font-size: 13px; }
+  .reasons { margin: 8px 0 0; padding-left: 18px; }
+  .reasons li { margin: 2px 0; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 18px; }
+  .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 10px; padding: 12px 13px; }
+  .card .label { font-size: 12px; color: #6b7280; text-transform: uppercase; letter-spacing: .03em; }
+  .card .val { font-size: 26px; font-weight: 650; margin: 2px 0 1px; }
+  .card .meta { font-size: 11.5px; color: #6b7280; }
+  .pill { display: inline-block; font-size: 10.5px; font-weight: 600; padding: 1px 7px; border-radius: 999px; margin-top: 6px; }
+  .pill.pass { background: #dcfce7; color: #166534; }
+  .pill.fail { background: #fee2e2; color: #991b1b; }
+  .pill.na   { background: #e5e7eb; color: #4b5563; }
+  .panel { background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 16px; margin-bottom: 16px; }
+  .panel h3 { margin: 0 0 10px; font-size: 14px; }
+  table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #eef0f2; }
+  th { color: #6b7280; font-weight: 600; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .warn { background: #fffbeb; border: 1px solid #fde68a; color: #92400e; border-radius: 8px; padding: 9px 12px; font-size: 12.5px; margin-bottom: 14px; }
+  .err  { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; border-radius: 8px; padding: 12px; font-size: 13px; }
+  .foot { color: #9097a1; font-size: 11.5px; margin-top: 8px; }
+  .chartwrap { position: relative; height: 280px; }
+  code { background: #f1f3f5; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+</style>
+</head>
+<body>
+  <h1>Receipt Extraction Accuracy</h1>
+  <div class="sub">Baseline pipeline (Vision + regex / cloudflare_ai) vs reviewer-confirmed truth, per reconciled month. Live from <code>RECEIPTS_DB</code>. The signal below answers: <strong>is a bespoke SLM necessary?</strong></div>
+
+  <div id="verdict" class="verdict loading"><h2>Loading live data…</h2><p>Querying D1.</p></div>
+  <div id="nwarn"></div>
+  <div id="cards" class="cards"></div>
+
+  <div class="panel">
+    <h3>Per-field accuracy by month</h3>
+    <div class="chartwrap"><canvas id="trend"></canvas></div>
+    <div class="foot">Dashed lines are target thresholds. A month is omitted for a field when it has no labeled rows for that field.</div>
+  </div>
+
+  <div class="panel">
+    <h3>By extraction provider (where the errors come from)</h3>
+    <div id="providers"></div>
+  </div>
+
+  <div class="panel">
+    <h3>Method</h3>
+    <div class="foot" style="font-size:12.5px;color:#4b5563">
+      Truth = reviewer-confirmed fields on verified receipts (status reviewed / reconciled / exported / archived).
+      Prediction = <code>extraction_json</code> captured before human edit. Match: amount = numeric equality; date = exact YYYY-MM-DD;
+      currency = case-insensitive; merchant = trimmed case-insensitive exact; expense type = enum equality scored only where truth is set.
+      Headline verdict uses the most recent 3 month-buckets present. A field is flagged when its rolling accuracy is below threshold.
+    </div>
+  </div>
+
+<script>
+const DB_ID = "8dffd78f-b9aa-490d-822d-4f413e52aeba";
+const TOOL  = "mcp__d3807edf-84f5-4d80-aba6-964dc5eee558__d1_database_query";
+const SQL = `SELECT substr(r.transaction_date,1,7) AS ym, r.transaction_date AS t_date,
+  json_extract(r.extraction_json,'$.transactionDate') AS p_date,
+  r.merchant AS t_merchant, json_extract(r.extraction_json,'$.merchant') AS p_merchant,
+  r.amount_minor AS t_amount, json_extract(r.extraction_json,'$.amountMinor') AS p_amount,
+  r.currency AS t_curr, json_extract(r.extraction_json,'$.currency') AS p_curr,
+  r.expense_type AS t_exp, json_extract(r.extraction_json,'$.expenseType') AS p_exp,
+  json_extract(r.extraction_json,'$.provider') AS provider
+  FROM receipt_records r
+  WHERE r.extraction_json IS NOT NULL
+    AND r.status IN ('reviewed','reconciled','exported','archived')
+    AND r.legacy = 0 AND r.transaction_date IS NOT NULL
+  ORDER BY r.transaction_date;`;
+
+// field config: key, label, threshold, compliance-critical?
+const FIELDS = [
+  { key: "amount",   label: "Amount",       thr: 0.99, crit: true  },
+  { key: "date",     label: "Date",         thr: 0.98, crit: true  },
+  { key: "merchant", label: "Merchant",     thr: 0.95, crit: true  },
+  { key: "currency", label: "Currency",     thr: 0.99, crit: false },
+  { key: "expense",  label: "Expense type", thr: 0.90, crit: false },
+];
+const COLORS = { amount:"#2563eb", date:"#7c3aed", merchant:"#dc2626", currency:"#059669", expense:"#d97706" };
+const WINDOW = 3;          // most-recent month-buckets for the headline
+const LOW_N  = 30;         // below this, label the signal indicative
+
+const norm = (v) => (v == null ? "" : String(v).trim().toLowerCase());
+function hasTruth(field, t) {
+  if (field === "expense") return t != null && String(t).toUpperCase() !== "UNKNOWN";
+  if (field === "amount")  return t != null && t !== "";
+  return t != null && String(t).trim() !== "";
+}
+function isMatch(field, t, p) {
+  if (field === "amount") return t != null && p != null && Number(t) === Number(p);
+  return norm(t) === norm(p) && norm(t) !== "";
+}
+
+function evalRows(rows) {
+  // returns { byMonth: {ym:{n, field:{num,den}}}, months:[], overallWindow:{field:{num,den},n}, providers:{} }
+  const byMonth = {};
+  for (const r of rows) {
+    const ym = r.ym || "?";
+    byMonth[ym] = byMonth[ym] || { n: 0, f: {} };
+    byMonth[ym].n++;
+    for (const f of FIELDS) byMonth[ym].f[f.key] = byMonth[ym].f[f.key] || { num: 0, den: 0 };
+    const pairs = {
+      amount:   [r.t_amount, r.p_amount],
+      date:     [r.t_date, r.p_date],
+      merchant: [r.t_merchant, r.p_merchant],
+      currency: [r.t_curr, r.p_curr],
+      expense:  [r.t_exp, r.p_exp],
+    };
+    for (const f of FIELDS) {
+      const [t, p] = pairs[f.key];
+      if (hasTruth(f.key, t)) {
+        byMonth[ym].f[f.key].den++;
+        if (isMatch(f.key, t, p)) byMonth[ym].f[f.key].num++;
+      }
+    }
+  }
+  const months = Object.keys(byMonth).sort();
+  const windowMonths = months.slice(-WINDOW);
+  const win = { n: 0, f: {} };
+  for (const f of FIELDS) win.f[f.key] = { num: 0, den: 0 };
+  for (const ym of windowMonths) {
+    win.n += byMonth[ym].n;
+    for (const f of FIELDS) { win.f[f.key].num += byMonth[ym].f[f.key].num; win.f[f.key].den += byMonth[ym].f[f.key].den; }
+  }
+  // providers (overall)
+  const providers = {};
+  for (const r of rows) {
+    const pv = r.provider || "(unknown)";
+    providers[pv] = providers[pv] || { n: 0, f: {} };
+    providers[pv].n++;
+    for (const f of FIELDS) providers[pv].f[f.key] = providers[pv].f[f.key] || { num: 0, den: 0 };
+    const pairs = { amount:[r.t_amount,r.p_amount], date:[r.t_date,r.p_date], merchant:[r.t_merchant,r.p_merchant], currency:[r.t_curr,r.p_curr], expense:[r.t_exp,r.p_exp] };
+    for (const f of FIELDS) {
+      const [t,p] = pairs[f.key];
+      if (hasTruth(f.key,t)) { providers[pv].f[f.key].den++; if (isMatch(f.key,t,p)) providers[pv].f[f.key].num++; }
+    }
+  }
+  return { byMonth, months, windowMonths, win, providers };
+}
+
+const pct = (num, den) => den > 0 ? (100 * num / den) : null;
+const fmtPct = (v) => v == null ? "—" : v.toFixed(0) + "%";
+
+function renderCards(win) {
+  const el = document.getElementById("cards");
+  el.innerHTML = "";
+  for (const f of FIELDS) {
+    const { num, den } = win.f[f.key];
+    const acc = pct(num, den);
+    let pill;
+    if (acc == null) pill = '<span class="pill na">no labels</span>';
+    else if (acc / 100 >= f.thr) pill = '<span class="pill pass">at target</span>';
+    else pill = '<span class="pill fail">below ' + Math.round(f.thr*100) + '%</span>';
+    el.insertAdjacentHTML("beforeend",
+      '<div class="card"><div class="label">' + f.label + '</div>' +
+      '<div class="val" style="color:' + (acc==null?'#9097a1':COLORS[f.key]) + '">' + fmtPct(acc) + '</div>' +
+      '<div class="meta">n=' + den + ' &middot; target ' + Math.round(f.thr*100) + '%</div>' +
+      pill + '</div>');
+  }
+}
+
+function renderVerdict(ev) {
+  const el = document.getElementById("verdict");
+  const failing = [];
+  for (const f of FIELDS) {
+    const { num, den } = ev.win.f[f.key];
+    const acc = pct(num, den);
+    if (acc != null && acc/100 < f.thr) failing.push({ f, acc, den });
+  }
+  const critFail = failing.filter(x => x.f.crit);
+  const noLabel = FIELDS.filter(f => pct(ev.win.f[f.key].num, ev.win.f[f.key].den) == null);
+
+  if (critFail.length > 0) {
+    el.className = "verdict justified";
+    const reasons = failing.sort((a,b)=>a.acc-b.acc).map(x =>
+      '<li><strong>' + x.f.label + '</strong>: ' + x.acc.toFixed(0) + '% vs ' + Math.round(x.f.thr*100) +
+      '% target — gap of ' + (x.f.thr*100 - x.acc).toFixed(0) + ' pts (n=' + x.den + ')</li>').join("");
+    el.innerHTML = '<h2>&#9888;&#65039; SLM justified</h2>' +
+      '<p>The baseline misses target on ' + critFail.length + ' compliance-critical field' + (critFail.length>1?'s':'') +
+      '. A bespoke model is warranted, prioritised by the widest gap:</p>' +
+      '<ul class="reasons">' + reasons + '</ul>' +
+      (noLabel.length ? '<p style="margin-top:8px">Not yet evaluable (no reviewer labels): ' + noLabel.map(f=>f.label).join(", ") + '.</p>' : '');
+  } else {
+    el.className = "verdict sufficient";
+    el.innerHTML = '<h2>&#10003; Baseline sufficient</h2>' +
+      '<p>Every compliance-critical field is at or above target over the recent window. A bespoke SLM is not currently justified — revisit if a field drifts below threshold.</p>' +
+      (noLabel.length ? '<p style="margin-top:8px">Not evaluable (no reviewer labels): ' + noLabel.map(f=>f.label).join(", ") + '.</p>' : '');
+  }
+}
+
+function renderNWarn(ev) {
+  const el = document.getElementById("nwarn");
+  if (ev.win.n < LOW_N) {
+    el.innerHTML = '<div class="warn">Indicative only — the recent window holds <strong>' + ev.win.n +
+      '</strong> verified receipts (' + ev.windowMonths.join(", ") + '). Field accuracy is coarse at this volume; the signal stabilises as more months are reconciled.</div>';
+  } else el.innerHTML = "";
+}
+
+function renderProviders(ev) {
+  const el = document.getElementById("providers");
+  const names = Object.keys(ev.providers).sort((a,b)=>ev.providers[b].n - ev.providers[a].n);
+  let html = '<table><thead><tr><th>Provider</th><th class="num">n</th>';
+  for (const f of FIELDS) if (f.key!=="currency") html += '<th class="num">' + f.label + '</th>';
+  html += '</tr></thead><tbody>';
+  for (const pv of names) {
+    const p = ev.providers[pv];
+    html += '<tr><td><code>' + pv + '</code></td><td class="num">' + p.n + '</td>';
+    for (const f of FIELDS) if (f.key!=="currency") {
+      const a = pct(p.f[f.key].num, p.f[f.key].den);
+      html += '<td class="num">' + (a==null?'—':a.toFixed(0)+'%') + '</td>';
+    }
+    html += '</tr>';
+  }
+  html += '</tbody></table>';
+  el.innerHTML = html;
+}
+
+let chart;
+function renderChart(ev) {
+  const ctx = document.getElementById("trend");
+  const labels = ev.months;
+  const datasets = [];
+  for (const f of FIELDS) {
+    const data = labels.map(ym => pct(ev.byMonth[ym].f[f.key].num, ev.byMonth[ym].f[f.key].den));
+    datasets.push({ label: f.label, data, borderColor: COLORS[f.key], backgroundColor: COLORS[f.key],
+      spanGaps: true, tension: 0.25, pointRadius: 3, borderWidth: 2 });
+    // threshold reference line
+    datasets.push({ label: f.label + " target", data: labels.map(()=>f.thr*100), borderColor: COLORS[f.key],
+      borderDash: [4,4], borderWidth: 1, pointRadius: 0, fill: false, tension: 0,
+      // hide target lines from legend clutter
+      _isThreshold: true });
+  }
+  if (chart) chart.destroy();
+  chart = new Chart(ctx, {
+    type: "line",
+    data: { labels, datasets },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      interaction: { mode: "index", intersect: false },
+      scales: { y: { min: 0, max: 100, ticks: { callback: v => v + "%" } } },
+      plugins: {
+        legend: { labels: { filter: (item, data) => !data.datasets[item.datasetIndex]._isThreshold } },
+        tooltip: { callbacks: { label: (c) => c.dataset._isThreshold ? null : c.dataset.label + ": " + (c.parsed.y==null?"—":c.parsed.y.toFixed(0)+"%") } }
+      }
+    }
+  });
+}
+
+function showError(msg) {
+  document.getElementById("verdict").className = "verdict loading";
+  document.getElementById("verdict").innerHTML = '<div class="err"><strong>Could not load live data.</strong><br>' + msg + '</div>';
+}
+
+async function load() {
+  try {
+    if (!window.cowork || !window.cowork.callMcpTool) { showError("This view must run inside Cowork (connector bridge unavailable)."); return; }
+    const r = await window.cowork.callMcpTool(TOOL, { database_id: DB_ID, sql: SQL });
+    if (r && r.isError) { showError("D1 query returned an error."); return; }
+    let payload = r.structuredContent;
+    if (payload == null && r.content && r.content[0] && r.content[0].text) payload = JSON.parse(r.content[0].text);
+    // payload is [{ results: [...], success, meta }]
+    const block = Array.isArray(payload) ? payload[0] : payload;
+    const rows = (block && block.results) || [];
+    if (!rows.length) { showError("No verified receipts with predictions yet."); return; }
+    const ev = evalRows(rows);
+    renderVerdict(ev);
+    renderNWarn(ev);
+    renderCards(ev.win);
+    renderChart(ev);
+    renderProviders(ev);
+  } catch (e) {
+    showError((e && e.message) ? e.message : String(e));
+  }
+}
+load();
+</script>
+</body>
+</html>
