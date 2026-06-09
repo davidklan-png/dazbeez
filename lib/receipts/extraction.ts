@@ -279,20 +279,34 @@ function parseTaxInfo(
   const rateMatch = rawText.match(/\b(10|8)\s*%/);
   const taxRate = rateMatch ? `${rateMatch[1]}%` : null;
 
-  // Capture the amount that immediately follows a 消費税 token, so a line that
-  // also carries the gross total (e.g. "¥10,680- (内消費税等 ¥971-)") yields the
-  // tax (971), not the total. Skip taxable-base lines (対象).
+  // Capture the amount tied to a 消費税 token. Handles two layouts:
+  //   inline  — "¥10,680- (内消費税等 ¥971-)"  -> 971 (not the gross total)
+  //   wrapped — "(内消費税等" / "¥754)"        -> amount on the following line
+  // Taxable-base lines (対象) are skipped.
   let taxAmountMinor: number | null = null;
-  const taxRe = /(?:内)?消費税(?:等|額)?[^0-9¥￥]*[¥￥]?\s*([\d,]+)/;
-  for (const line of rawText.split(/\r?\n/)) {
-    if (/対象/.test(line)) continue;
-    const match = line.match(taxRe);
-    if (match) {
-      const value = Number(match[1].replace(/,/g, ""));
-      if (Number.isFinite(value) && value > 0) {
-        taxAmountMinor = currency === "JPY" ? Math.round(value) : Math.round(value * 100);
-        break;
+  const taxKeyword = /(?:内)?消費税(?:等|額)?/;
+  const inlineTax = /(?:内)?消費税(?:等|額)?[^0-9¥￥]*[¥￥]?\s*([\d,]+)/;
+  const lines = rawText.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (/対象/.test(line) || !taxKeyword.test(line)) continue;
+
+    let value: number | null = null;
+    const inline = line.match(inlineTax);
+    if (inline) {
+      value = Number(inline[1].replace(/,/g, ""));
+    } else {
+      // amount printed on the next line (OCR wrap)
+      const next = lines[i + 1] ?? "";
+      if (!/対象/.test(next) && hasMoneySignal(next)) {
+        const amounts = parseMoneyCandidates(next);
+        if (amounts.length > 0) value = amounts[0];
       }
+    }
+
+    if (value != null && Number.isFinite(value) && value > 0) {
+      taxAmountMinor = currency === "JPY" ? Math.round(value) : Math.round(value * 100);
+      break;
     }
   }
   return { taxAmountMinor, taxRate };

@@ -156,3 +156,10 @@ test("expense type is still NOT inferred from OCR (compliance contract)", () => 
   assert.equal(parseReceiptOcrText(HOLIDAY).expenseType, null);
   assert.equal(parseReceiptOcrText(JIN).expenseType, null);
 });
+
+test("tax amount: inline and amount-on-next-line (OCR wrap) layouts", () => {
+  // inline: "¥10,680- (内消費税等 ¥971-)" -> 971, not the 10,680 total
+  assert.equal(parseReceiptOcrText(HOLIDAY).taxAmountMinor, 971);
+  // wrapped: "(内消費税等" / "¥754)" on separate lines -> 754
+  assert.equal(parseReceiptOcrText(GOHAN).taxAmountMinor, 754);
+});
