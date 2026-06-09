@@ -1,5 +1,6 @@
 import { getGoogleCloudVisionApiKey } from "@/lib/cloudflare-runtime";
 import { ALLOWED_CURRENCIES } from "@/lib/receipts/validation";
+import { normalizeRegistrationNumber } from "@/lib/receipts/invoice";
 import type { ExtractionResult } from "@/lib/receipts/types";
 
 interface ExtractionProvider {
@@ -174,46 +175,149 @@ function parseAmountMinor(rawText: string, currency: string): number | null {
   return currency === "JPY" ? Math.round(amount) : Math.round(amount * 100);
 }
 
+// Card-brand tokens that frequently top-print on receipts and were being
+// mistaken for the merchant ("AMEX", "AMGX", "AMEX TULLY'S", ...).
+const CARD_BRAND_RE =
+  /\b(?:amex|amgx|american\s+express|visa|jcb|master(?:card)?|diners|union\s?pay)\b|アメックス|ダイナース/gi;
+
+// Lines that are never the merchant: receipt labels, footer keywords, the
+// cardholder/recipient line (様), addresses, money, dates, and capture noise.
+const MERCHANT_NOISE_RE: RegExp[] = [
+  /領収|レシート|receipt|tax\s*invoice|インボイス/i,
+  /登録番号|電話|tel|fax|phone|☎|〒/i,
+  /但し|として|上記正に|ご来店|お越し|ありがと|お待ち|印刷面|お預|お釣/,
+  /^(?:様|担当|担当者|印|収入|印紙|リスト|会費|接待費|内訳|小計|合計|総計|税率|消費税|現金|釣|点数|番号|受付|テーブル|人数|no\.?|pos)/i,
+  /^(?:東京都|北海道|大阪府|京都府|神奈川県|埼玉県|千葉県|愛知県|兵庫県|福岡県|.{1,3}[都道府県])/,
+  /丁目|番地|\d-\d/, // address-style chome numbering
+  /command|^fn$|^www|camer|あいう/i,
+];
+
+// Positive signal that a line is a business name.
+const MERCHANT_NAME_HINT_RE =
+  /店|本店|支店|酒場|居酒屋|食堂|珈琲|コーヒー|coffee|caf[eé]|cafe|\bbar\b|grill|lounge|\binn\b|hotel|tavern|kitchen|dining|株式会社|合同会社|有限会社|商店|屋$/i;
+
+// Footer anchors — in a typical JP receipt the store name sits just above the
+// phone / registration / postal block.
+const MERCHANT_FOOTER_ANCHOR_RE = /電話|tel|fax|phone|☎|登録番号|〒/i;
+
+function cleanMerchantLine(line: string): string {
+  return line
+    .replace(CARD_BRAND_RE, " ")
+    .replace(/\s*様\s*$/, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function looksLikeMerchant(line: string): boolean {
+  if (line.length < 2 || line.length > 60) return false;
+  if (MERCHANT_NOISE_RE.some((re) => re.test(line))) return false;
+  if (hasMoneySignal(line)) return false;
+  if (parseTransactionDate(line)) return false;
+  // punctuation / symbols / digits only
+  if (/^[\d\s:.,/\-()%¥￥$€£円*★☆_、。・~＊]+$/.test(line)) return false;
+  // must contain a letter, kana, or kanji of substance
+  return /[A-Za-z぀-ヿ一-龯]/.test(line);
+}
+
 function parseMerchant(rawText: string): string | null {
-  const noise = [
-    "領収書",
-    "レシート",
-    "receipt",
-    "tax invoice",
-    "登録番号",
-    "電話",
-    "tel",
-    "〒",
-  ];
+  const lines = rawText
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
 
-  for (const line of rawText.split(/\r?\n/)) {
-    const value = line.trim();
-    if (value.length < 2 || value.length > 80) continue;
+  const anchorIdx: number[] = [];
+  lines.forEach((line, i) => {
+    if (MERCHANT_FOOTER_ANCHOR_RE.test(line)) anchorIdx.push(i);
+  });
+  const distanceToAnchor = (i: number) =>
+    anchorIdx.length ? Math.min(...anchorIdx.map((a) => Math.abs(a - i))) : 99;
 
-    const lower = value.toLowerCase();
-    if (noise.some((keyword) => lower.includes(keyword.toLowerCase()))) continue;
-    if (hasMoneySignal(value)) continue;
-    if (parseTransactionDate(value)) continue;
-    if (/^\d[\d\s:./-]*$/.test(value)) continue;
+  const candidates: { value: string; index: number }[] = [];
+  lines.forEach((line, index) => {
+    const cleaned = cleanMerchantLine(line);
+    if (looksLikeMerchant(cleaned)) candidates.push({ value: cleaned, index });
+  });
+  if (candidates.length === 0) return null;
 
-    return value;
+  // Score each candidate: a name hint dominates; otherwise proximity to the
+  // footer block (store name usually printed just above phone/registration).
+  let best = candidates[0];
+  let bestScore = -Infinity;
+  for (const candidate of candidates) {
+    let score = 0;
+    // A name hint dominates, but a bare 2-3 char suffix fragment (本店/支店)
+    // should not outrank a full name.
+    if (MERCHANT_NAME_HINT_RE.test(candidate.value)) score += candidate.value.length >= 4 ? 50 : 12;
+    score += Math.max(0, 18 - distanceToAnchor(candidate.index) * 5);
+    if (/[A-Za-z]/.test(candidate.value)) score += 4;
+    if (/[一-龯]/.test(candidate.value)) score += 4;
+    if (candidate.value.length <= 3) score -= 8;
+    score -= candidate.index * 0.2; // mild tiebreak toward earlier lines
+    if (score > bestScore) {
+      bestScore = score;
+      best = candidate;
+    }
   }
+  return best.value || null;
+}
 
-  return null;
+// ── Qualified-invoice (インボイス) registration number: literal T + 13 digits ──
+function parseInvoiceRegistrationNumber(rawText: string): string | null {
+  const match = rawText.match(/T\s?\d{13}/i);
+  if (!match) return null;
+  const { normalized, formatValid } = normalizeRegistrationNumber(
+    match[0].replace(/\s/g, "").toUpperCase(),
+  );
+  return formatValid ? normalized : null;
+}
+
+// ── Consumption-tax amount + rate (内消費税 ¥xxx / 10% / 8%) ──────────────────
+function parseTaxInfo(
+  rawText: string,
+  currency: string,
+): { taxAmountMinor: number | null; taxRate: string | null } {
+  const rateMatch = rawText.match(/\b(10|8)\s*%/);
+  const taxRate = rateMatch ? `${rateMatch[1]}%` : null;
+
+  // Capture the amount that immediately follows a 消費税 token, so a line that
+  // also carries the gross total (e.g. "¥10,680- (内消費税等 ¥971-)") yields the
+  // tax (971), not the total. Skip taxable-base lines (対象).
+  let taxAmountMinor: number | null = null;
+  const taxRe = /(?:内)?消費税(?:等|額)?[^0-9¥￥]*[¥￥]?\s*([\d,]+)/;
+  for (const line of rawText.split(/\r?\n/)) {
+    if (/対象/.test(line)) continue;
+    const match = line.match(taxRe);
+    if (match) {
+      const value = Number(match[1].replace(/,/g, ""));
+      if (Number.isFinite(value) && value > 0) {
+        taxAmountMinor = currency === "JPY" ? Math.round(value) : Math.round(value * 100);
+        break;
+      }
+    }
+  }
+  return { taxAmountMinor, taxRate };
 }
 
 export function parseReceiptOcrText(rawText: string): Omit<ExtractionResult, "rawText" | "provider"> {
   const currency = normalizeCurrency(rawText);
+  const resolvedCurrency = ALLOWED_CURRENCIES.includes(currency) ? currency : "JPY";
+  const { taxAmountMinor, taxRate } = parseTaxInfo(rawText, resolvedCurrency);
 
   return {
     transactionDate: parseTransactionDate(rawText),
     merchant: parseMerchant(rawText),
     amountMinor: parseAmountMinor(rawText, currency),
-    currency: ALLOWED_CURRENCIES.includes(currency) ? currency : "JPY",
+    currency: resolvedCurrency,
+    // Expense type is intentionally NOT inferred from OCR: alcohol vs.
+    // non-alcohol is a compliance judgment left to the reviewer (see test
+    // "does not invent category or attendees from OCR text").
     expenseType: null,
     expenseCategoryCode: null,
     businessPurpose: null,
     attendeeNames: [],
+    invoiceRegistrationNumber: parseInvoiceRegistrationNumber(rawText),
+    taxAmountMinor,
+    taxRate,
   };
 }
 

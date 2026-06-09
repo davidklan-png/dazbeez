@@ -17,6 +17,11 @@ export async function POST(request: Request, { params }: RouteContext) {
     const actor = await requireReceiptsActor(request.headers);
     const { id } = await params;
 
+    // Reprocess mode: `?force=true` re-runs extraction and overwrites
+    // machine-set fields, but ONLY on receipts not yet reviewed
+    // (captured / needs_review). Reviewed+ receipts are never overwritten.
+    const force = new URL(request.url).searchParams.get("force") === "true";
+
     const receipt = await getReceiptRecord(id);
     const db = getReceiptsDb();
 
@@ -110,28 +115,43 @@ export async function POST(request: Request, { params }: RouteContext) {
       throw extractionError;
     }
 
-    // Only populate fields that are currently null/UNKNOWN — never overwrite confirmed data
+    // Default: only populate fields that are currently empty — never overwrite
+    // confirmed data. With `force` on a pre-review receipt, re-extracted values
+    // replace earlier machine guesses (e.g. a bad merchant from a noisy photo).
+    const reprocessable = receipt.status === "captured" || receipt.status === "needs_review";
+    const overwrite = force && reprocessable;
+    const canSet = (current: unknown) => overwrite || current === null || current === undefined || current === "";
+
     const updates: Parameters<typeof updateReceiptRecord>[1] = {
       extractionJson: JSON.stringify(result),
     };
 
-    if (!receipt.transaction_date && result.transactionDate) {
+    if (canSet(receipt.transaction_date) && result.transactionDate) {
       updates.transactionDate = result.transactionDate;
     }
-    if (!receipt.merchant && result.merchant) {
+    if (canSet(receipt.merchant) && result.merchant) {
       updates.merchant = result.merchant;
     }
-    if (receipt.amount_minor === null && result.amountMinor !== null) {
+    if (canSet(receipt.amount_minor) && result.amountMinor !== null) {
       updates.amountMinor = result.amountMinor;
     }
     if (result.currency && receipt.currency === "JPY") {
       updates.currency = result.currency;
     }
-    if (receipt.expense_type === "UNKNOWN" && result.expenseType) {
+    if ((overwrite || receipt.expense_type === "UNKNOWN") && result.expenseType) {
       updates.expenseType = result.expenseType;
     }
-    if (!receipt.business_purpose && result.businessPurpose) {
+    if (canSet(receipt.business_purpose) && result.businessPurpose) {
       updates.businessPurpose = result.businessPurpose;
+    }
+    if (canSet(receipt.tax_amount_minor) && result.taxAmountMinor != null) {
+      updates.taxAmountMinor = result.taxAmountMinor;
+    }
+    if (canSet(receipt.tax_rate) && result.taxRate) {
+      updates.taxRate = result.taxRate;
+    }
+    if (canSet(receipt.invoice_registration_number) && result.invoiceRegistrationNumber) {
+      updates.invoiceRegistrationNumber = result.invoiceRegistrationNumber;
     }
 
     await updateReceiptRecord(id, updates, actor);
