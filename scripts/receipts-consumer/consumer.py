@@ -43,7 +43,9 @@ CF_API_TOKEN = os.environ["CF_API_TOKEN"]
 R2_BUCKET = os.environ.get("RECEIPTS_R2_BUCKET", "dazbeez-receipts")
 EXTRACT_BASE = os.environ["RECEIPTS_EXTRACT_URL"].rstrip("/")
 PROCESSOR_KEY = os.environ["RECEIPTS_PROCESSOR_KEY"]
-MLX_MODEL = os.environ.get("MLX_MODEL", "mlx-community/Qwen3-VL-4B-Instruct-4bit")
+# Validated on the M4 Max (128 GB): 32B-4bit ≈ 18 GB on disk, ~21.6 GB RAM
+# (17%), ~26 tok/s. Strong JA accuracy incl. T-invoice numbers + tax math.
+MLX_MODEL = os.environ.get("MLX_MODEL", "mlx-community/Qwen3-VL-32B-Instruct-4bit")
 
 QUEUES_API = (
     f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}"
@@ -107,14 +109,16 @@ def fetch_image(r2_key: str) -> str:
 
 def run_mlx(image_path: str) -> dict[str, Any]:
     """Run the local MLX VLM and return {rawText, fields}."""
-    from mlx_vlm import generate, load  # imported lazily so --help works without MLX
+    from mlx_vlm import generate  # imported lazily so --help works without MLX
     from mlx_vlm.prompt_utils import apply_chat_template
     from mlx_vlm.utils import load_config
 
     model, processor = _load_model()
     config = load_config(MLX_MODEL)
     formatted = apply_chat_template(processor, config, PROMPT, num_images=1)
-    output = generate(model, processor, formatted, [image_path], max_tokens=1500, verbose=False)
+    result = generate(model, processor, formatted, [image_path], max_tokens=1500, verbose=False)
+    # mlx-vlm >= 0.5 returns GenerationResult; older returned str. Handle both.
+    output = result.text if hasattr(result, "text") else result
 
     raw_text, fields = _parse_model_output(output)
     return {"rawText": raw_text, "fields": fields}
