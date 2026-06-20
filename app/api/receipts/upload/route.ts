@@ -2,8 +2,9 @@ import { NextResponse } from "next/server";
 import { requireReceiptsActor } from "@/lib/receipts/auth";
 import { validateReceiptFile } from "@/lib/receipts/validation";
 import { generateR2Key, uploadOriginal } from "@/lib/receipts/storage";
-import { createReceiptRecord } from "@/lib/receipts/db";
+import { createReceiptRecord, updateReceiptRecord } from "@/lib/receipts/db";
 import { createReceiptFile } from "@/lib/receipts/files";
+import { buildExtractionJob, enqueueExtractionJob } from "@/lib/receipts/queue";
 import { getReceiptsBucket, getReceiptsDb } from "@/lib/cloudflare-runtime";
 import type { PaymentPath, SourceType } from "@/lib/receipts/types";
 
@@ -94,6 +95,10 @@ export async function POST(request: Request) {
           originalSha256: sha256,
           originalContentType: contentType,
           originalSizeBytes: file.size,
+          // ADR 0001: capture path is async store-and-forward. The receipt lands
+          // as 'captured' (pending processing) and an extraction job is enqueued
+          // for the Mac MLX consumer to drain. No AI runs in the Worker.
+          status: "captured",
         },
         actor,
       );
@@ -128,11 +133,33 @@ export async function POST(request: Request) {
       console.error("[receipts/upload] file manifest write failed", fileError);
     }
 
+    // ADR 0001: enqueue the extraction job. Best-effort — if the queue binding
+    // is missing or send fails, the receipt remains at status='captured' /
+    // extraction_state='captured' and a backfill can enqueue it later. Capture
+    // must never fail because the queue is unavailable.
+    const enqueuedAt = new Date().toISOString();
+    const enqueued = await enqueueExtractionJob(
+      buildExtractionJob({ receiptId, r2Key, contentType, enqueuedAt }),
+    );
+    if (enqueued) {
+      try {
+        await updateReceiptRecord(
+          receiptId,
+          { extractionState: "queued", extractionEnqueuedAt: enqueuedAt },
+          actor,
+        );
+      } catch (markError) {
+        console.error("[receipts/upload] mark-queued failed", markError);
+      }
+    }
+
     return NextResponse.json(
       {
         ok: true,
         receiptId,
-        status: "needs_review",
+        status: "captured",
+        extractionState: enqueued ? "queued" : "captured",
+        pendingProcessing: true,
         sourceType,
         reviewUrl: `/receipts/review/${receiptId}`,
       },

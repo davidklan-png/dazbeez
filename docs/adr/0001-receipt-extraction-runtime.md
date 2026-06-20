@@ -1,9 +1,24 @@
 # ADR 0001 — Receipt extraction runtime: Cloudflare capture/buffer + Mac-only processing
 
-- **Status:** Proposed
-- **Date:** 2026-06-09
+- **Status:** Accepted
+- **Date:** 2026-06-09 (proposed) · 2026-06-20 (accepted)
 - **Owner:** David (PM)
 - **Affects:** `app/api/receipts/*`, `lib/receipts/*`, `app/(receipt-system)/receipts/*`, `wrangler.jsonc`, `db/receipts/*`
+
+## Decision record (2026-06-20)
+
+**Approved** by David. Implemented on branch `feat/receipts-extraction-queue-mlx`. Decision brief: `docs/adr/0001-decision-brief.md`. Mac rollout steps: `docs/runbooks/receipts-extraction-rollout.md`.
+
+Choices made at sign-off:
+
+- **Rollout:** async + on-demand drain. Capture enqueues; the Mac consumer processes on network-up and via a manual "Process queue" action.
+- **Processor:** stand up the **MLX runtime now** with an off-the-shelf open vision-language model; **Google Vision is removed from the path**. The regex/heuristic extractor is retained as a **validation guardrail** over model output. The bespoke fine-tuned model is a later phase that drops into the same slot once it beats the regex baseline on the held-out eval.
+
+**Open questions — resolved:**
+
+1. *Mac consumer trigger policy* → automatic on network-up (launchd) **and** a manual "Process queue" action.
+2. *Notify field user when captures finish* → out of scope for v1; the review queue's "pending processing → ready for review" surfacing is sufficient.
+3. *Eval threshold before a model is trusted over regex* → per-field, only after beating the regex baseline on the held-out reconciled-month eval. Until then regex is the guardrail and the model is advisory.
 
 ## Context
 

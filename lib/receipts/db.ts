@@ -15,9 +15,11 @@ import type {
   CreateAttendeeInput,
   CreateReceiptInput,
   DashboardAlertDismissal,
+  ExtractionState,
   ImportAmexLineInput,
   MissingStatementAlert,
   ReceiptAttendee,
+  ReceiptStatus,
   ReceiptExport,
   ReceiptRecord,
   UpdateAmexLineCategoryInput,
@@ -39,6 +41,14 @@ export async function createReceiptRecord(
 
   const sourceType = input.sourceType ?? "manual_upload";
 
+  // ADR 0001: the async capture path inserts at status='captured', which seeds
+  // extraction_state='captured' (pending processing). Every other caller keeps
+  // the legacy 'needs_review' insert and is therefore 'processed' from the
+  // queue's point of view — it never blocks month-close as phantom pending work.
+  const status: ReceiptStatus = input.status ?? "needs_review";
+  const extractionState: ExtractionState =
+    status === "captured" ? "captured" : "processed";
+
   await db
     .prepare(
       `INSERT INTO receipt_records
@@ -46,11 +56,12 @@ export async function createReceiptRecord(
          payment_path, expense_type,
          transaction_date, merchant, amount_minor, currency, tax_amount_minor,
          business_purpose, alcohol_present, attendees_required, status,
+         extraction_state,
          original_r2_key, original_sha256, original_content_type, original_size_bytes,
          legacy, retention_until, legal_hold,
          source_type, preservation_status, qualified_invoice_status,
          created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 1, ?, 'needs_review', 'not_checked', ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 1, ?, 'needs_review', 'not_checked', ?, ?)`,
     )
     .bind(
       id,
@@ -71,7 +82,8 @@ export async function createReceiptRecord(
       expenseType === "entertainment-alcohol"
         ? 1
         : 0,
-      "needs_review",
+      status,
+      extractionState,
       input.originalR2Key,
       input.originalSha256,
       input.originalContentType,
@@ -141,6 +153,11 @@ export async function updateReceiptRecord(
   if ("counterpartyName" in input) { sets.push("counterparty_name = ?"); binds.push(input.counterpartyName ?? null); }
   if ("taxRate" in input) { sets.push("tax_rate = ?"); binds.push(input.taxRate ?? null); }
   if ("qualifiedInvoiceStatus" in input) { sets.push("qualified_invoice_status = ?"); binds.push(input.qualifiedInvoiceStatus ?? "not_checked"); }
+  if (input.extractionState !== undefined) { sets.push("extraction_state = ?"); binds.push(input.extractionState); }
+  if ("extractionEnqueuedAt" in input) { sets.push("extraction_enqueued_at = ?"); binds.push(input.extractionEnqueuedAt ?? null); }
+  if ("extractionProcessedAt" in input) { sets.push("extraction_processed_at = ?"); binds.push(input.extractionProcessedAt ?? null); }
+  if (input.extractionAttempts !== undefined) { sets.push("extraction_attempts = ?"); binds.push(input.extractionAttempts); }
+  if ("extractionProcessor" in input) { sets.push("extraction_processor = ?"); binds.push(input.extractionProcessor ?? null); }
 
   if (sets.length === 0) return;
 

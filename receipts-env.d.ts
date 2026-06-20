@@ -5,6 +5,11 @@
 declare namespace Cloudflare {
   interface Env {
     RESEND_API_KEY: string;
+    // Extraction queue producer (ADR 0001). Optional: absent until the queue
+    // is created on the Mac; accessors degrade gracefully when undefined.
+    RECEIPTS_QUEUE?: Queue<unknown>;
+    // Shared secret authenticating the Mac MLX consumer to the extract endpoint.
+    RECEIPTS_PROCESSOR_KEY?: string;
   }
 }
 declare namespace NodeJS {
@@ -14,5 +19,6 @@ declare namespace NodeJS {
     RECEIPTS_AUTH_USERNAME?: string;
     RECEIPTS_AUTH_PASSWORD?: string;
     RECEIPTS_DEVICE_SECRET?: string;
+    RECEIPTS_PROCESSOR_KEY?: string;
   }
 }

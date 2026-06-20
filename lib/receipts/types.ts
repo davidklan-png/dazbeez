@@ -25,6 +25,25 @@ export type ReceiptStatus =
   | "exported"
   | "archived";
 
+// Internal extraction-queue state (ADR 0001). Distinct from ReceiptStatus,
+// which is the user-facing lifecycle. A receipt can be status='captured' with
+// extraction_state 'captured' | 'queued' | 'processing' — all of which mean
+// "pending processing" — until the Mac consumer produces fields and advances
+// it to status='needs_review' with extraction_state='processed'.
+export type ExtractionState =
+  | "captured"
+  | "queued"
+  | "processing"
+  | "processed"
+  | "failed";
+
+/** States where a capture is enqueued/in-flight but not yet processed. */
+export const PENDING_EXTRACTION_STATES: readonly ExtractionState[] = [
+  "captured",
+  "queued",
+  "processing",
+];
+
 export type AmexMatchStatus =
   | "unmatched"
   | "matched"
@@ -225,6 +244,12 @@ export interface ReceiptRecord {
   counterparty_name?: string | null;
   search_text?: string | null;
   compliance_warnings_json?: string | null;
+  // Extraction queue state (0016_extraction_queue.sql, ADR 0001)
+  extraction_state?: ExtractionState;
+  extraction_enqueued_at?: string | null;
+  extraction_processed_at?: string | null;
+  extraction_attempts?: number;
+  extraction_processor?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -472,6 +497,10 @@ export interface CreateReceiptInput {
   originalSha256: string;
   originalContentType: string;
   originalSizeBytes: number;
+  // Lifecycle status to insert at. Defaults to 'needs_review' (legacy /
+  // synchronous path). The async capture path (ADR 0001) passes 'captured',
+  // which also seeds extraction_state='captured' (pending processing).
+  status?: ReceiptStatus;
 }
 
 export interface UpdateReceiptInput {
@@ -495,6 +524,12 @@ export interface UpdateReceiptInput {
   counterpartyName?: string | null;
   taxRate?: string | null;
   qualifiedInvoiceStatus?: QualifiedInvoiceStatus | null;
+  // Extraction queue state (0016_extraction_queue.sql, ADR 0001)
+  extractionState?: ExtractionState;
+  extractionEnqueuedAt?: string | null;
+  extractionProcessedAt?: string | null;
+  extractionAttempts?: number;
+  extractionProcessor?: string | null;
 }
 
 export interface CreateAttendeeInput {

@@ -335,6 +335,111 @@ export function parseReceiptOcrText(rawText: string): Omit<ExtractionResult, "ra
   };
 }
 
+// ─── MLX apply path (ADR 0001) ─────────────────────────────────────────────
+//
+// OCR/inference now happens off-Worker on the Mac (Apple MLX). The consumer
+// posts the OCR text plus any structured fields the model emitted; the Worker
+// applies the deterministic regex parser as a *guardrail* over that output.
+
+/** Structured fields a local model may emit alongside its OCR text. */
+export interface ModelExtractionFields {
+  transactionDate?: string | null;
+  merchant?: string | null;
+  amountMinor?: number | null;
+  currency?: string | null;
+  taxAmountMinor?: number | null;
+  taxRate?: string | null;
+  invoiceRegistrationNumber?: string | null;
+}
+
+export interface GuardedExtraction {
+  result: ExtractionResult;
+  /** Fields where the model and the regex guardrail disagreed. */
+  discrepancies: string[];
+}
+
+function sameMoney(a: number | null, b: number | null): boolean {
+  return a != null && b != null && a === b;
+}
+
+/**
+ * Build an ExtractionResult from OCR text produced off-Worker (MLX) plus any
+ * structured fields the model emitted, running the deterministic regex parser
+ * as a guardrail. Policy:
+ *
+ *  - Amount and date: the regex is authoritative when it extracts a value — it
+ *    catches a model confidently misreading a total, which is the
+ *    compliance-critical failure for a month-locking, audit-logged module. The
+ *    model fills these only when the regex finds nothing.
+ *  - Merchant / currency / tax / invoice number: model-primary (it reads layout
+ *    and semantics the regex cannot), regex as fallback when the model is null.
+ *  - Any disagreement on amount, date, or merchant is recorded as a discrepancy
+ *    so the receipt is surfaced for human review rather than silently trusted.
+ */
+export function buildGuardedExtraction(
+  rawText: string,
+  model: ModelExtractionFields = {},
+  provider = "mlx_local",
+): GuardedExtraction {
+  const regex = parseReceiptOcrText(rawText);
+  const discrepancies: string[] = [];
+
+  // Amount — regex authoritative.
+  const mAmount = model.amountMinor ?? null;
+  const amountMinor = regex.amountMinor ?? mAmount;
+  if (regex.amountMinor != null && mAmount != null && !sameMoney(regex.amountMinor, mAmount)) {
+    discrepancies.push("amountMinor");
+  }
+
+  // Date — regex authoritative.
+  const mDate = model.transactionDate ?? null;
+  const transactionDate = regex.transactionDate ?? mDate;
+  if (regex.transactionDate && mDate && regex.transactionDate !== mDate) {
+    discrepancies.push("transactionDate");
+  }
+
+  // Merchant — model primary, regex fallback.
+  const mMerchant = model.merchant ?? null;
+  const merchant = mMerchant ?? regex.merchant;
+  if (mMerchant && regex.merchant && mMerchant !== regex.merchant) {
+    discrepancies.push("merchant");
+  }
+
+  // Tax + invoice — model primary, regex fallback.
+  const taxAmountMinor = (model.taxAmountMinor ?? null) ?? regex.taxAmountMinor ?? null;
+  const taxRate = (model.taxRate ?? null) ?? regex.taxRate ?? null;
+  const invoiceRegistrationNumber =
+    (model.invoiceRegistrationNumber ?? null) ?? regex.invoiceRegistrationNumber ?? null;
+
+  // Currency — keep the regex's validated/normalized currency unless the regex
+  // fell back to the JPY default and the model supplied an allowed currency.
+  let currency = regex.currency;
+  const mCurrency = (model.currency ?? "").toUpperCase();
+  if (regex.currency === "JPY" && ALLOWED_CURRENCIES.includes(mCurrency)) {
+    currency = mCurrency;
+  }
+
+  return {
+    discrepancies,
+    result: {
+      transactionDate,
+      merchant,
+      amountMinor,
+      currency,
+      // Category/attendees remain a reviewer judgment, never machine-invented.
+      expenseType: null,
+      expenseCategoryCode: null,
+      businessPurpose: null,
+      attendeeNames: [],
+      invoiceRegistrationNumber,
+      taxAmountMinor,
+      taxRate,
+      rawText,
+      provider,
+    },
+  };
+}
+
 class GoogleVisionOcrExtractionProvider implements ExtractionProvider {
   name = "google_vision_document_text_detection";
 
@@ -401,10 +506,18 @@ class GoogleVisionOcrExtractionProvider implements ExtractionProvider {
   }
 }
 
+/**
+ * @deprecated ADR 0001 retired in-Worker OCR. The Google Vision provider below
+ * is no longer wired to any route — extraction runs on the Mac (MLX) and the
+ * Worker applies results via {@link buildGuardedExtraction}. Kept only for
+ * reference/rollback; delete once the MLX consumer is proven in production and
+ * the GOOGLE_CLOUD_VISION_API_KEY secret has been removed.
+ */
 function getExtractionProvider(): ExtractionProvider {
   return new GoogleVisionOcrExtractionProvider();
 }
 
+/** @deprecated See {@link getExtractionProvider}. Not called by any route. */
 export async function extractReceiptData(
   imageBytes: Uint8Array,
   contentType: string,
