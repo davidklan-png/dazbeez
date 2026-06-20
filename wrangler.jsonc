@@ -9,7 +9,11 @@
   ],
   // Manual secret setup:
   // npx wrangler secret put RESEND_API_KEY
-  // npx wrangler secret put GOOGLE_CLOUD_VISION_API_KEY
+  // npx wrangler secret put RECEIPTS_PROCESSOR_KEY   // ADR 0001: Mac MLX consumer auth
+  //
+  // GOOGLE_CLOUD_VISION_API_KEY is retired by ADR 0001 — extraction no longer
+  // runs in the Worker. Remove the secret after the MLX consumer is live:
+  //   npx wrangler secret delete GOOGLE_CLOUD_VISION_API_KEY
   "workers_dev": false,
   "preview_urls": false,
   "assets": {
@@ -58,6 +62,17 @@
       "bucket_name": "dazbeez-receipts-archive"
     }
   ],
+  // ADR 0001: extraction queue. The Worker is a producer only; the Mac runs an
+  // HTTP pull consumer (configured via the Cloudflare API/dashboard, not here).
+  // Create the queue first: `npx wrangler queues create dazbeez-receipts-extraction`.
+  "queues": {
+    "producers": [
+      {
+        "binding": "RECEIPTS_QUEUE",
+        "queue": "dazbeez-receipts-extraction"
+      }
+    ]
+  },
   "routes": [
     {
       "pattern": "dazbeez.com/*",

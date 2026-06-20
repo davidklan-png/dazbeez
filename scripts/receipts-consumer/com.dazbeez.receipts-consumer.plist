@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd job: drain the extraction queue on network-up and periodically.
+  Install:
+    cp com.dazbeez.receipts-consumer.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.dazbeez.receipts-consumer.plist
+  Edit the paths below to match where the repo and venv live on the Mac.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.dazbeez.receipts-consumer</string>
+
+  <!-- run.sh sources .env then runs consumer.py --once. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/dklan/projects/work/dazbeez/scripts/receipts-consumer/run.sh</string>
+    <string>--once</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/bin:/bin:/usr/local/bin</string>
+  </dict>
+  <key>WorkingDirectory</key>
+  <string>/Users/dklan/projects/work/dazbeez/scripts/receipts-consumer</string>
+
+  <!-- Run shortly after load / network change, then every 10 minutes as a
+       safety net. RunAtLoad fires when the agent (re)loads on login/wake. -->
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>600</integer>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/dazbeez-receipts-consumer.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/dazbeez-receipts-consumer.err.log</string>
+</dict>
+</plist>

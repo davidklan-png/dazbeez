@@ -57,3 +57,27 @@ export function getReceiptsBucket(): R2Bucket {
 export function getReceiptsArchiveBucket(): R2Bucket {
   return getCloudflareEnv().RECEIPTS_ARCHIVE_BUCKET;
 }
+
+/**
+ * Extraction queue producer (ADR 0001). Returns null when the binding is not
+ * configured (e.g. before the queue is created on the Mac) so capture can
+ * degrade gracefully — the receipt still lands in D1 as `captured` and a
+ * backfill can enqueue it later.
+ */
+export function getReceiptsQueue(): Queue<unknown> | null {
+  const env = getCloudflareEnv() as CloudflareEnv & {
+    RECEIPTS_QUEUE?: Queue<unknown>;
+  };
+  return env.RECEIPTS_QUEUE ?? null;
+}
+
+/**
+ * Shared secret for the Mac MLX consumer to authenticate to the extract
+ * endpoint as a machine actor. Set via `wrangler secret put RECEIPTS_PROCESSOR_KEY`.
+ */
+export function getReceiptsProcessorKey(): string | null {
+  const env = getCloudflareEnv() as CloudflareEnv & {
+    RECEIPTS_PROCESSOR_KEY?: string;
+  };
+  return env.RECEIPTS_PROCESSOR_KEY ?? process.env.RECEIPTS_PROCESSOR_KEY ?? null;
+}

@@ -116,6 +116,19 @@ The application does not expose hard-delete flows for retained tax records. Soft
 4. **AMEX import and reconciliation** — CSV import, matching, reconciliation UI
 5. **Monthly export and archive** — CSV bundle, SHA-256 manifest, archive bucket
 6. **Structured extraction** — pluggable OCR/LLM provider
+7. **Store-and-forward extraction (ADR 0001)** — capture enqueues to a durable Cloudflare Queue; the Mac drains it with a local MLX model; regex runs as a guardrail
+
+## Extraction runtime (ADR 0001 — Accepted)
+
+Extraction is **store-and-forward**, not synchronous. Capture writes the image to R2, inserts the receipt at `status='captured'` (`extraction_state='captured'`), and enqueues a job on the `RECEIPTS_QUEUE` Cloudflare Queue. The **Mac MLX consumer** (`scripts/receipts-consumer/`) is the only processor: it pulls a batch, runs a local vision-language model, and POSTs the result to `POST /api/receipts/[id]/extract` (authenticated with `RECEIPTS_PROCESSOR_KEY`), which runs the deterministic regex parser as a **guardrail** over the model output, merges fields, and advances the receipt to `needs_review`.
+
+Consequences enforced in code:
+
+- **Pending processing is a first-class state.** A captured-but-unprocessed receipt shows as "Receipts pending processing" (CTA: *Process queue*), never as a missing or unreviewed receipt.
+- **Month-close is gated on an empty queue.** `POST /api/receipts/reconcile/finalize` returns `409` if any pending receipt falls in the statement window — "drain the queue before close".
+- **Google Vision is retired from the path.** No OCR runs in the Worker; images never leave our estate. The Vision provider remains as deprecated dead code pending removal.
+
+Rollout (Mac-side): `docs/runbooks/receipts-extraction-rollout.md`.
 
 ## Security Notes
 

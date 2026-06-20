@@ -1,0 +1,5 @@
+# Mac (Apple Silicon) only. Install into a venv:
+#   python3 -m venv .venv && source .venv/bin/activate
+#   pip install -r requirements.txt
+requests>=2.31
+mlx-vlm>=0.1.0

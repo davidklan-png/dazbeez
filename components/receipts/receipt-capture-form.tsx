@@ -168,19 +168,13 @@ function applyPhaseToUpload(
     return { ...u, state: "uploading", pct: phase.pct };
   }
   if (phase.kind === "saved") {
-    const e = phase.extracted;
-    const amountLabel =
-      e?.amount != null
-        ? `${e.currency === "JPY" || !e.currency ? "¥" : ""}${e.amount.toLocaleString()}`
-        : "";
+    // ADR 0001: captured + enqueued. No OCR fields yet — extraction happens
+    // later in the queue, so the row shows as captured/ready with no preview.
     return {
       ...u,
-      state: phase.ocrStatus === "done" ? "ready" : "review",
+      state: "ready",
       pct: 100,
       receiptId: phase.receiptId,
-      merchant: e?.merchant ?? undefined,
-      amount: amountLabel || undefined,
-      date: e?.transactionDate ?? undefined,
     };
   }
   if (phase.kind === "error") {

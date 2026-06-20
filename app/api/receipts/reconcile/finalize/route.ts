@@ -9,10 +9,13 @@ import {
   listAmexLineAttendeeNamesByMonth,
   listAmexLines,
   listAttendees,
+  listReceiptRecords,
   listReceiptRecordsByIds,
 } from "@/lib/receipts/db";
 import { hashCsvContent } from "@/lib/receipts/export";
 import { buildReconciliationManifestCsv, validateAmexLinesForSignoff } from "@/lib/receipts/reconciliation-signoff";
+import { deriveStatementWindow, isReceiptInWindow } from "@/lib/receipts/statement-window";
+import { isPendingProcessing } from "@/lib/receipts/extraction-state";
 import { archiveManifest, deleteArchiveObject } from "@/lib/receipts/storage";
 
 export async function POST(request: Request) {
@@ -42,6 +45,29 @@ export async function POST(request: Request) {
       return NextResponse.json(
         { error: `No AMEX lines found for ${month}.` },
         { status: 400 },
+      );
+    }
+
+    // ADR 0001 — hard gate: a period cannot be finalized while the extraction
+    // queue still holds unprocessed receipts for its window. "Drain the queue
+    // before close" is enforced, not advice. A captured-but-unprocessed receipt
+    // has no field key yet, so it cannot be matched — without this gate a queue
+    // backlog masquerades as missing receipts. Captured receipts have no date
+    // yet, so isReceiptInWindow treats them as in-window (conservative).
+    const window = deriveStatementWindow(amexLines, month);
+    const capturedReceipts = await listReceiptRecords({ status: "captured", limit: 1000 });
+    const pendingInWindow = capturedReceipts.filter(
+      (r) => isPendingProcessing(r) && isReceiptInWindow(r, window),
+    );
+    if (pendingInWindow.length > 0) {
+      return NextResponse.json(
+        {
+          error:
+            `Cannot finalize ${month}: ${pendingInWindow.length} receipt(s) are still pending extraction. ` +
+            `Run the Mac MLX consumer to drain the queue, then retry.`,
+          pendingProcessing: pendingInWindow.length,
+        },
+        { status: 409 },
       );
     }
 

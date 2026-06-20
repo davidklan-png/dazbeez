@@ -4,29 +4,16 @@ import { useCallback, useRef, useState } from "react";
 import { maybeResizeImage } from "@/lib/receipts/client-image";
 import type { PaymentPath } from "@/lib/receipts/types";
 
-export type CaptureExtraction = {
-  merchant?: string | null;
-  amount?: number | null;
-  currency?: string | null;
-  transactionDate?: string | null;
-  expenseType?: string | null;
-};
+// ADR 0001: extraction is store-and-forward. Capture no longer runs OCR inline
+// — the image is uploaded, enqueued, and processed later by the Mac MLX
+// consumer. So the capture client just confirms "captured (pending processing)"
+// and re-arms for the next shot; there is nothing to review here.
 
 export type CapturePhase =
   | { kind: "idle" }
   | { kind: "uploading"; pct: number; fileName: string; fileSizeBytes: number }
-  | {
-      kind: "saved";
-      receiptId: string;
-      reviewUrl: string;
-      ocrStatus: "running" | "done" | "timeout" | "error";
-      extracted?: CaptureExtraction;
-      capturedAt: number;
-    }
+  | { kind: "saved"; receiptId: string; reviewUrl: string; capturedAt: number }
   | { kind: "error"; message: string };
-
-const OCR_POLL_INTERVAL_MS = 800;
-const OCR_TIMEOUT_MS = 12_000;
 
 export function useReceiptUpload() {
   const [phase, setPhase] = useState<CapturePhase>({ kind: "idle" });
@@ -75,19 +62,13 @@ export function useReceiptUpload() {
           return;
         }
 
-        const receiptId = json.receiptId;
-        const reviewUrl = json.reviewUrl ?? `/receipts/review/${receiptId}`;
-
+        // Captured and enqueued. Done — extraction happens later in the queue.
         setPhase({
           kind: "saved",
-          receiptId,
-          reviewUrl,
-          ocrStatus: "running",
+          receiptId: json.receiptId,
+          reviewUrl: json.reviewUrl ?? `/receipts/review/${json.receiptId}`,
           capturedAt: Date.now(),
         });
-
-        // Fire-and-poll OCR. Best-effort; UI degrades to "no preview" if it doesn't land in time.
-        void runOcrAndPoll(receiptId, reviewUrl, abort.signal, setPhase);
       } catch (error) {
         if ((error as DOMException | undefined)?.name === "AbortError") return;
         setPhase({
@@ -113,84 +94,4 @@ export function useReceiptUpload() {
   }, []);
 
   return { phase, upload, reset, cancel };
-}
-
-async function runOcrAndPoll(
-  receiptId: string,
-  reviewUrl: string,
-  signal: AbortSignal,
-  setPhase: (next: CapturePhase) => void,
-) {
-  try {
-    await fetch(`/api/receipts/${receiptId}/extract`, {
-      method: "POST",
-      signal,
-    });
-  } catch {
-    // ignore; we still poll the record
-  }
-
-  const started = Date.now();
-  while (!signal.aborted) {
-    if (Date.now() - started > OCR_TIMEOUT_MS) {
-      setPhase({
-        kind: "saved",
-        receiptId,
-        reviewUrl,
-        ocrStatus: "timeout",
-        capturedAt: started,
-      });
-      return;
-    }
-    try {
-      const res = await fetch(`/api/receipts/${receiptId}`, { signal });
-      if (res.ok) {
-        const data = (await res.json()) as {
-          receipt?: {
-            merchant?: string | null;
-            amount_minor?: number | null;
-            currency?: string | null;
-            transaction_date?: string | null;
-            expense_type?: string | null;
-            extraction_json?: string | null;
-          };
-        };
-        const r = data.receipt;
-        if (r && (r.merchant || r.amount_minor || r.extraction_json)) {
-          setPhase({
-            kind: "saved",
-            receiptId,
-            reviewUrl,
-            ocrStatus: "done",
-            capturedAt: started,
-            extracted: {
-              merchant: r.merchant ?? null,
-              amount: r.amount_minor ?? null,
-              currency: r.currency ?? null,
-              transactionDate: r.transaction_date ?? null,
-              expenseType: r.expense_type ?? null,
-            },
-          });
-          return;
-        }
-      }
-    } catch {
-      // network blip; retry until timeout
-    }
-    await wait(OCR_POLL_INTERVAL_MS, signal);
-  }
-}
-
-function wait(ms: number, signal: AbortSignal): Promise<void> {
-  return new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    signal.addEventListener(
-      "abort",
-      () => {
-        clearTimeout(timer);
-        resolve();
-      },
-      { once: true },
-    );
-  });
 }

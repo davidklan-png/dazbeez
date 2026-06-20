@@ -4,6 +4,7 @@
 // screen's "Ready to seal?" summary without forking the logic.
 
 import { requiresAttendees } from "@/lib/receipts/categories";
+import { isPendingProcessing } from "@/lib/receipts/extraction-state";
 import type { AmexStatementLine, ReceiptRecord } from "@/lib/receipts/types";
 
 export type BlockerSeverity = "blocker" | "warn";
@@ -35,8 +36,25 @@ export function computeExportBlockers(
     });
   }
 
+  // ADR 0001: "pending processing" is distinct from "unreviewed". A captured
+  // receipt still in the extraction queue has no field key yet and cannot be
+  // matched — surfacing it as a missing/unreviewed receipt would send someone
+  // chasing a receipt we already hold. The fix is to drain the queue (run the
+  // Mac consumer), not to review or re-capture.
+  const pendingProcessing = receipts.filter(isPendingProcessing).length;
+  if (pendingProcessing > 0) {
+    blockers.push({
+      severity: "blocker",
+      count: pendingProcessing,
+      label: "Receipts pending processing",
+      detail: "Captured but not yet extracted. Drain the queue on the Mac.",
+      href: "/receipts/review",
+      ctaLabel: "Process queue",
+    });
+  }
+
   const unreviewed = receipts.filter(
-    (r) => r.status === "captured" || r.status === "needs_review",
+    (r) => r.status === "needs_review" && !isPendingProcessing(r),
   ).length;
   if (unreviewed > 0) {
     blockers.push({
