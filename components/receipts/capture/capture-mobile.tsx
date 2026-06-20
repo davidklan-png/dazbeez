@@ -1,10 +1,10 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useRef, useState, type ChangeEvent } from "react";
+import { useRef, useState, type ChangeEvent } from "react";
 import { Btn } from "@/components/ui/btn";
 import { Pill } from "@/components/ui/pill";
-import { ArrowRightIcon, CameraIcon, CheckIcon, PlusIcon } from "@/components/ui/icons";
+import { CameraIcon, CheckIcon, PlusIcon } from "@/components/ui/icons";
 import { BeeMark } from "@/components/receipts/ui/bee-mark";
 import { ReceiptThumb } from "@/components/receipts/ui/receipt-thumb";
 import type { PaymentPath } from "@/lib/receipts/types";
@@ -52,9 +52,8 @@ export function CaptureMobile(props: CaptureMobileProps) {
       ) : props.phase.kind === "saved" ? (
         <CaptureSavedMobile
           phase={props.phase}
-          rapidMode={props.rapidMode}
-          onAddAnother={props.onReset}
-          onRetake={pickFile}
+          onCaptureNext={pickFile}
+          onDone={props.onReset}
         />
       ) : (
         <CaptureIdleMobile
@@ -96,7 +95,8 @@ function CaptureIdleMobile({
           just pay for?
         </h2>
         <p className="mt-2 max-w-[280px] text-sm text-gray-500">
-          Snap the receipt. We&rsquo;ll OCR it and you can fix anything tonight.
+          Snap it and keep going. We&rsquo;ll read each one during processing —
+          review later.
         </p>
 
         <div className="mt-5 flex flex-1 items-center justify-center">
@@ -252,7 +252,7 @@ function CaptureUploadingMobile({
         </div>
         <div className="mt-1 text-sm font-semibold">Uploading…</div>
         <div className="text-[11.5px] text-white/55">
-          resized from HEIC · running OCR
+          resized from HEIC · queued for processing
         </div>
       </div>
 
@@ -276,116 +276,57 @@ function CaptureUploadingMobile({
 
 function CaptureSavedMobile({
   phase,
-  rapidMode,
-  onAddAnother,
-  onRetake,
+  onCaptureNext,
+  onDone,
 }: {
   phase: Extract<CapturePhase, { kind: "saved" }>;
-  rapidMode: boolean;
-  onAddAnother: () => void;
-  onRetake: () => void;
+  onCaptureNext: () => void;
+  onDone: () => void;
 }) {
-  const elapsedMs = useElapsedMs(phase.capturedAt);
-  const elapsedLabel =
-    phase.ocrStatus === "done"
-      ? `OCR done in ${Math.max(0.1, elapsedMs / 1000).toFixed(1)}s`
-      : phase.ocrStatus === "running"
-        ? "OCR running…"
-        : phase.ocrStatus === "timeout"
-          ? "OCR still working — finish it on review"
-          : "OCR failed — finish manually";
-
-  const e = phase.extracted;
-  const merchant = e?.merchant ?? "Receipt saved";
-  const amountLabel = e?.amount
-    ? `${e.currency === "JPY" || !e.currency ? "¥" : ""}${e.amount.toLocaleString()}`
-    : "—";
-
+  // ADR 0001: extraction is deferred to the queue. There is nothing to review
+  // here — just confirm the capture and re-arm for the next shot.
   return (
     <>
-      <MobileHeader queueCount={null} label="Saved" />
+      <MobileHeader queueCount={null} label="Captured" />
 
-      <div className="flex flex-1 flex-col px-5 pt-5">
-        <div className="mt-1 flex items-center gap-3.5">
-          <div className="flex h-12 w-12 items-center justify-center rounded-full bg-green-500 shadow-[0_6px_16px_rgba(16,185,129,0.35)]">
-            <CheckIcon size={28} className="text-white" />
-          </div>
-          <div>
-            <div className="text-[19px] font-bold leading-[1.1] text-gray-900">
-              Saved.
-            </div>
-            <div className="mt-0.5 text-xs text-gray-500">
-              {phase.receiptId.slice(0, 8)}… · {elapsedLabel}
-            </div>
-          </div>
+      <div className="flex flex-1 flex-col items-center px-5 pt-10 text-center">
+        <div className="flex h-16 w-16 items-center justify-center rounded-full bg-green-500 shadow-[0_8px_20px_rgba(16,185,129,0.35)]">
+          <CheckIcon size={34} className="text-white" />
         </div>
+        <div className="mt-4 text-[22px] font-bold leading-[1.1] text-gray-900">
+          Captured.
+        </div>
+        <div className="mt-2 flex items-center gap-2">
+          <Pill tone="amber" size="sm" dot>
+            Pending processing
+          </Pill>
+          <span className="text-xs text-gray-400">
+            {phase.receiptId.slice(0, 8)}…
+          </span>
+        </div>
+        <p className="mt-3 max-w-[260px] text-sm text-gray-500">
+          Saved to the queue. We&rsquo;ll read it during processing — review and
+          fix anything later.
+        </p>
 
-        <div className="mt-4 overflow-hidden rounded-2xl border border-gray-200 bg-white">
-          <div className="flex gap-3 border-b border-gray-150 p-3.5">
-            <ReceiptThumb
-              size={56}
-              merchant={merchant.slice(0, 12)}
-              amount={amountLabel}
-            />
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-1.5">
-                <span className="text-[11px] font-semibold uppercase tracking-[0.05em] text-gray-400">
-                  What we read
-                </span>
-                {phase.ocrStatus === "done" ? (
-                  <Pill tone="green" size="sm" dot>
-                    OCR ready
-                  </Pill>
-                ) : phase.ocrStatus === "running" ? (
-                  <Pill tone="amber" size="sm" dot>
-                    OCR…
-                  </Pill>
-                ) : (
-                  <Pill tone="gray" size="sm">
-                    pending
-                  </Pill>
-                )}
-              </div>
-              <div className="mt-1 text-[15px] font-semibold text-gray-900">
-                {merchant}
-              </div>
-              <div className="text-lg font-bold tabular-nums text-gray-900">
-                {amountLabel}
-              </div>
-            </div>
-          </div>
-          <ul className="flex flex-col gap-1.5 p-3">
-            <OcrChipRow label="Merchant" value={e?.merchant ?? null} />
-            <OcrChipRow label="Date" value={e?.transactionDate ?? null} />
-            <OcrChipRow label="Amount" value={amountLabel === "—" ? null : amountLabel} />
-            <OcrChipRow label="Expense type" value={e?.expenseType ?? null} suggest />
-          </ul>
+        <div className="mt-6 flex w-[120px] justify-center">
+          <ReceiptThumb size={96} merchant="Receipt" amount="—" />
         </div>
 
         <div className="flex-1" />
-        <div className="flex flex-col gap-2 pb-28">
-          {rapidMode ? (
-            <Btn
-              kind="primary"
-              size="lg"
-              full
-              rightIcon={<ArrowRightIcon size={16} className="text-white" />}
-              onClick={onAddAnother}
-            >
-              Add another
-            </Btn>
-          ) : (
-            <Link
-              href={phase.reviewUrl}
-              className="inline-flex h-11 w-full items-center justify-center gap-2 rounded-lg bg-amber-500 px-5 text-sm font-semibold text-white hover:bg-amber-600"
-            >
-              Review now
-              <ArrowRightIcon size={16} className="text-white" />
-            </Link>
-          )}
+        <div className="flex w-full flex-col gap-2.5 pb-28">
+          <Btn
+            kind="primary"
+            size="lg"
+            full
+            leftIcon={<CameraIcon size={18} className="text-white" />}
+            onClick={onCaptureNext}
+          >
+            Capture next
+          </Btn>
           <div className="flex gap-2">
-            <Btn kind="ghost" size="md" className="flex-1" onClick={onRetake}>
-              Retake
+            <Btn kind="ghost" size="md" className="flex-1" onClick={onDone}>
+              Done
             </Btn>
             <Link
               href={phase.reviewUrl}
@@ -400,56 +341,7 @@ function CaptureSavedMobile({
   );
 }
 
-function OcrChipRow({
-  label,
-  value,
-  suggest,
-}: {
-  label: string;
-  value: string | null;
-  suggest?: boolean;
-}) {
-  return (
-    <li className="flex items-center gap-2 px-1 py-1.5 text-[12.5px]">
-      <span className="w-[72px] text-gray-500">{label}</span>
-      <span
-        className={[
-          "flex-1 truncate tabular-nums",
-          value
-            ? suggest
-              ? "font-medium text-amber-700"
-              : "font-semibold text-gray-900"
-            : "text-gray-400",
-        ].join(" ")}
-      >
-        {value ?? "—"}
-      </span>
-      {value && !suggest ? (
-        <span className="h-1.5 w-1.5 rounded-full bg-green-500" />
-      ) : value && suggest ? (
-        <span className="text-[11px] font-semibold text-amber-700">
-          tap to confirm
-        </span>
-      ) : null}
-    </li>
-  );
-}
-
 // ─── Header & nav ──────────────────────────────────────────────────
-
-function useElapsedMs(startMs: number): number {
-  const [now, setNow] = useState<number>(startMs);
-  useEffect(() => {
-    const tick = () => setNow(Date.now());
-    const initial = setTimeout(tick, 0);
-    const interval = setInterval(tick, 1000);
-    return () => {
-      clearTimeout(initial);
-      clearInterval(interval);
-    };
-  }, [startMs]);
-  return Math.max(0, now - startMs);
-}
 
 function MobileHeader({
   queueCount,
