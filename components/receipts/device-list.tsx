@@ -13,6 +13,8 @@ export interface DeviceListItem {
   isCurrent: boolean;
   platform: string | null;
   appVersion: string | null;
+  /** Owner email — set only in owner/admin view so each row shows whose it is. */
+  owner?: string | null;
 }
 
 function formatDate(value: string | null): string {
@@ -22,7 +24,13 @@ function formatDate(value: string | null): string {
   return d.toLocaleString();
 }
 
-export function DeviceList({ devices }: { devices: DeviceListItem[] }) {
+export function DeviceList({
+  devices,
+  isOwnerView = false,
+}: {
+  devices: DeviceListItem[];
+  isOwnerView?: boolean;
+}) {
   const [items, setItems] = useState(devices);
   const [busyId, setBusyId] = useState<string | null>(null);
   const { toast } = useToast();
@@ -32,7 +40,7 @@ export function DeviceList({ devices }: { devices: DeviceListItem[] }) {
       !confirm(
         isCurrent
           ? "Revoke this device? You'll be signed out and need to re-trust it via Cloudflare Access."
-          : `Revoke "${label}"?`,
+          : `Revoke "${label}"? That device will need to re-enroll.`,
       )
     ) {
       return;
@@ -62,7 +70,7 @@ export function DeviceList({ devices }: { devices: DeviceListItem[] }) {
   if (items.length === 0) {
     return (
       <p className="rounded-xl border border-dashed border-gray-300 bg-white p-6 text-sm text-gray-500">
-        No trusted devices yet.
+        {isOwnerView ? "No enrolled devices." : "No trusted devices yet."}
       </p>
     );
   }
@@ -89,6 +97,11 @@ export function DeviceList({ devices }: { devices: DeviceListItem[] }) {
                   <span className="rounded-full bg-gray-900 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-white">
                     {d.platform === "ios" ? "iPhone" : "Android"}
                     {d.appVersion ? ` · ${d.appVersion}` : ""}
+                  </span>
+                ) : null}
+                {d.owner ? (
+                  <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-medium text-gray-600">
+                    {d.owner}
                   </span>
                 ) : null}
               </div>
