@@ -46,5 +46,12 @@ yarn-error.log*
 next-env.d.ts
 .ssh/
 
+# python (receipts-consumer + scripts)
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
 # legacy local contact form artifacts
 /data/

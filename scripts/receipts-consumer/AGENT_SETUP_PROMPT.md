@@ -18,7 +18,7 @@ Do the following:
 
 4. **Smoke-test OCR before any queue wiring.** Run the model directly (`python -m mlx_vlm.generate --model <id> --image <path> --prompt "Transcribe all text, then output JSON with merchant, transactionDate, amountMinor, currency, taxAmountMinor, taxRate, invoiceRegistrationNumber. Use null if absent."`) on TWO sample receipts: one **Japanese** (with 合計/消費税/T-invoice number) and one **English**. Show the raw output for each. Acceptance: merchant, date, and total are correct on both; the Japanese invoice registration number (T + 13 digits) is captured when present. If Japanese is weak, try the next larger Qwen3-VL build and report the difference.
 
-5. **Wire config.** Copy `.env.example` to `.env` and fill `CF_ACCOUNT_ID`, `CF_QUEUE_ID`, `CF_API_TOKEN` (Queues Read+Write), `RECEIPTS_R2_BUCKET`, `RECEIPTS_EXTRACT_URL`, `RECEIPTS_PROCESSOR_KEY`, `MLX_MODEL`. Never print secret values back in full and never commit `.env` (confirm it is gitignored).
+5. **Wire config.** Copy `.env.example` to `.env` and fill `CF_ACCOUNT_ID`, `CF_QUEUE_ID`, `CF_API_TOKEN` (Queues Read+Write — no R2 scope needed; the consumer fetches images through the Worker), `RECEIPTS_EXTRACT_URL`, `RECEIPTS_PROCESSOR_KEY`, `MLX_MODEL`. Never print secret values back in full and never commit `.env` (confirm it is gitignored).
 
 6. **End-to-end dry run.** With at least one receipt sitting in the queue (status `captured`), run `./run.sh --once`. Confirm it pulls the job, fetches the R2 image, runs the model, POSTs to the extract endpoint, and the receipt advances to `needs_review` with fields populated. Show the consumer log.
 

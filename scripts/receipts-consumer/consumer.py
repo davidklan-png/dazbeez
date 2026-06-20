@@ -7,7 +7,8 @@ extraction queue, and it runs only on the Mac M4 with live Cloudflare creds.
 
 Per batch it:
   1. Pulls messages from the Cloudflare Queue (HTTP pull consumer).
-  2. For each job: fetches the original image from R2 (via wrangler).
+  2. For each job: fetches the original image via the Worker's /file endpoint
+     (the Worker proxies R2 with the same processor key — ADR 0001).
   3. Runs the local MLX vision-language model to OCR + read fields.
   4. POSTs the result to the Worker's extract endpoint, which applies the
      deterministic regex guardrail, merges fields, and advances the receipt to
@@ -20,16 +21,14 @@ Run as a daemon: python3 consumer.py            (polls; used by launchd on netwo
 
 Config via env (see .env.example):
   CF_ACCOUNT_ID, CF_QUEUE_ID, CF_API_TOKEN   queues_read + queues_write scope
-  RECEIPTS_R2_BUCKET                          e.g. dazbeez-receipts
   RECEIPTS_EXTRACT_URL                        https://dazbeez.com/api/receipts
   RECEIPTS_PROCESSOR_KEY                      matches the Worker secret
-  MLX_MODEL                                   e.g. mlx-community/Qwen2-VL-7B-Instruct-4bit
+  MLX_MODEL                                   e.g. mlx-community/Qwen3-VL-32B-Instruct-4bit
 """
 from __future__ import annotations
 
 import json
 import os
-import subprocess
 import sys
 import tempfile
 import time
@@ -40,7 +39,6 @@ import requests
 CF_ACCOUNT_ID = os.environ["CF_ACCOUNT_ID"]
 CF_QUEUE_ID = os.environ["CF_QUEUE_ID"]
 CF_API_TOKEN = os.environ["CF_API_TOKEN"]
-R2_BUCKET = os.environ.get("RECEIPTS_R2_BUCKET", "dazbeez-receipts")
 EXTRACT_BASE = os.environ["RECEIPTS_EXTRACT_URL"].rstrip("/")
 PROCESSOR_KEY = os.environ["RECEIPTS_PROCESSOR_KEY"]
 # Optional: if a Cloudflare Access *application* fronts /api/receipts/* at the
@@ -99,17 +97,31 @@ def ack(lease_ids: list[str]) -> None:
     ).raise_for_status()
 
 
-def fetch_image(r2_key: str) -> str:
-    """Download the original image from R2 to a temp file; return the path."""
+def fetch_image(receipt_id: str, r2_key: str) -> str:
+    """Download the original image via the Worker's /file endpoint.
+
+    The Worker proxies R2 with the same processor key the consumer uses to POST
+    extraction results (ADR 0001) — so the consumer needs no R2 scope on its
+    Cloudflare API token, and never shells out to wrangler per image.
+    """
     suffix = os.path.splitext(r2_key)[1] or ".bin"
     fd, path = tempfile.mkstemp(suffix=suffix)
     os.close(fd)
-    subprocess.run(
-        ["npx", "wrangler", "r2", "object", "get", f"{R2_BUCKET}/{r2_key}",
-         "--file", path, "--remote"],
-        check=True,
-        capture_output=True,
+    headers = {"x-receipts-processor-key": PROCESSOR_KEY}
+    if CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET:
+        headers["CF-Access-Client-Id"] = CF_ACCESS_CLIENT_ID
+        headers["CF-Access-Client-Secret"] = CF_ACCESS_CLIENT_SECRET
+    resp = requests.get(
+        f"{EXTRACT_BASE}/{receipt_id}/file",
+        headers=headers,
+        stream=True,
+        timeout=60,
     )
+    resp.raise_for_status()
+    with open(path, "wb") as fh:
+        for chunk in resp.iter_content(chunk_size=65536):
+            if chunk:
+                fh.write(chunk)
     return path
 
 
@@ -187,10 +199,11 @@ def process_once() -> int:
     acked: list[str] = []
     for msg in messages:
         lease_id = msg["lease_id"]
+        receipt_id = "?"
         try:
             job = msg["body"] if isinstance(msg["body"], dict) else json.loads(msg["body"])
             receipt_id, r2_key = job["receiptId"], job["r2Key"]
-            image_path = fetch_image(r2_key)
+            image_path = fetch_image(receipt_id, r2_key)
             try:
                 result = run_mlx(image_path)
             finally:
@@ -201,8 +214,19 @@ def process_once() -> int:
             apply_to_worker(receipt_id, result)
             acked.append(lease_id)
             print(f"[ok] {receipt_id}")
+        except requests.HTTPError as exc:
+            # 4xx from the Worker is permanent: receipt locked (409), not found
+            # (404), no OCR text (422), bad processor key (401). Retrying won't
+            # change the outcome — ack so the message doesn't redeliver forever.
+            status = exc.response.status_code if exc.response is not None else 0
+            if 400 <= status < 500:
+                body = (exc.response.text[:200] if exc.response is not None else "").replace("\n", " ")
+                acked.append(lease_id)
+                print(f"[drop] {receipt_id}: HTTP {status} — permanent, acking. body={body!r}", file=sys.stderr)
+            else:
+                print(f"[retry] {msg.get('id')} ({receipt_id}): {exc}", file=sys.stderr)
         except Exception as exc:  # noqa: BLE001 — leave unacked for redelivery
-            print(f"[retry] {msg.get('id')}: {exc}", file=sys.stderr)
+            print(f"[retry] {msg.get('id')} ({receipt_id}): {exc}", file=sys.stderr)
     ack(acked)
     return len(acked)
 
