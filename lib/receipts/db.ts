@@ -274,6 +274,30 @@ export async function listReceiptRecords(
   return result.results ?? [];
 }
 
+/**
+ * Receipts whose extraction has not finished (ADR 0001). Queries
+ * `extraction_state` directly rather than prefiltering by status, so it catches
+ * a pending receipt regardless of its lifecycle status — e.g. a non-queued
+ * insert path that left the column at its default, or a receipt advanced to
+ * reviewed without clearing the queue state. The month-close gate relies on
+ * this being exhaustive.
+ */
+export async function listPendingProcessingReceipts(
+  limit = 1000,
+): Promise<ReceiptRecord[]> {
+  const db = getReceiptsDb();
+  const result = await db
+    .prepare(
+      `SELECT * FROM receipt_records
+       WHERE deleted_at IS NULL
+         AND extraction_state IN ('captured', 'queued', 'processing')
+       ORDER BY captured_at DESC LIMIT ?`,
+    )
+    .bind(limit)
+    .all<ReceiptRecord>();
+  return result.results ?? [];
+}
+
 export async function listReceiptRecordsByIds(
   ids: string[],
 ): Promise<ReceiptRecord[]> {

@@ -47,10 +47,16 @@ export async function createMobileReceiptRecord(input: MobileReceiptInput): Prom
 
   await db
     .prepare(
+      // ADR 0001: mobile field captures are async like the web path — land as
+      // status='captured' / extraction_state='captured' (pending processing).
+      // The route enqueues a job and the Mac MLX consumer drains it. Setting
+      // extraction_state explicitly is required: the column defaults to
+      // 'captured', so any insert that omits it would otherwise read as pending
+      // forever even on paths that never enqueue.
       `INSERT INTO receipt_records
         (id, captured_at, captured_by, source, original_filename,
          payment_path, expense_type,
-         alcohol_present, attendees_required, status,
+         alcohol_present, attendees_required, status, extraction_state,
          original_r2_key, original_sha256, original_content_type, original_size_bytes,
          legacy, retention_until, legal_hold,
          source_type, preservation_status, qualified_invoice_status,
@@ -60,7 +66,7 @@ export async function createMobileReceiptRecord(input: MobileReceiptInput): Prom
        VALUES
         (?, ?, ?, 'mobile_capture', ?,
          ?, 'UNKNOWN',
-         0, 0, 'needs_review',
+         0, 0, 'captured', 'captured',
          ?, ?, ?, ?,
          0, ?, 1,
          'paper_scanned', 'captured', 'not_checked',

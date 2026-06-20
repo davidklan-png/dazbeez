@@ -8,6 +8,8 @@ import {
   createMobileReceiptRecord,
   findMobileReceiptByIdempotency,
 } from "@/lib/receipts/mobile-upload";
+import { updateReceiptRecord } from "@/lib/receipts/db";
+import { buildExtractionJob, enqueueExtractionJob } from "@/lib/receipts/queue";
 import type { PaymentPath } from "@/lib/receipts/types";
 
 async function sha256Hex(data: ArrayBuffer): Promise<string> {
@@ -138,12 +140,33 @@ export async function POST(request: Request) {
       console.error("[mobile/receipts/upload] file manifest write failed", fileError);
     }
 
+    // ADR 0001: enqueue the extraction job (best-effort). If the queue is
+    // unavailable the receipt stays captured/extraction_state='captured' and a
+    // backfill can pick it up — capture must not fail on queue errors.
+    const enqueuedAt = new Date().toISOString();
+    const enqueued = await enqueueExtractionJob(
+      buildExtractionJob({ receiptId, r2Key, contentType, enqueuedAt }),
+    );
+    if (enqueued) {
+      try {
+        await updateReceiptRecord(
+          receiptId,
+          { extractionState: "queued", extractionEnqueuedAt: enqueuedAt },
+          device.actor,
+        );
+      } catch (markError) {
+        console.error("[mobile/receipts/upload] mark-queued failed", markError);
+      }
+    }
+
     return NextResponse.json(
       {
         ok: true,
         duplicate: false,
         receiptId,
-        status: "needs_review",
+        status: "captured",
+        extractionState: enqueued ? "queued" : "captured",
+        pendingProcessing: true,
         reviewUrl: `/receipts/review/${receiptId}`,
       },
       { status: 201 },

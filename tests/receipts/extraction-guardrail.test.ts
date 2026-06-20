@@ -44,6 +44,32 @@ test("guardrail: merchant is model-primary, regex fallback, with discrepancy", (
   assert.ok(discrepancies.includes("merchant"));
 });
 
+test("guardrail: coerces stringy model amounts and rejects junk", () => {
+  // Untyped JSON from the consumer may send amounts as strings.
+  assert.equal(
+    buildGuardedExtraction("alpha\nbravo", { amountMinor: "5000" as unknown as number }).result.amountMinor,
+    5000,
+  );
+  assert.equal(
+    buildGuardedExtraction("alpha\nbravo", { amountMinor: "5,000" as unknown as number }).result.amountMinor,
+    5000,
+  );
+  assert.equal(
+    buildGuardedExtraction("alpha\nbravo", { amountMinor: "¥5,000" as unknown as number }).result.amountMinor,
+    5000,
+  );
+  // Non-numeric junk must not reach amount_minor.
+  assert.equal(
+    buildGuardedExtraction("alpha\nbravo", { amountMinor: "five thousand" as unknown as number }).result.amountMinor,
+    null,
+  );
+  // Stringy tax amount is coerced too.
+  assert.equal(
+    buildGuardedExtraction("alpha\nbravo", { taxAmountMinor: "754" as unknown as number }).result.taxAmountMinor,
+    754,
+  );
+});
+
 test("guardrail: model fills invoice registration number when regex finds none", () => {
   const { result } = buildGuardedExtraction("no invoice number here", {
     invoiceRegistrationNumber: "T1234567890123",
