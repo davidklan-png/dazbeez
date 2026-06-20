@@ -19,6 +19,10 @@ Per batch it:
 Run on demand:   python3 consumer.py --once
 Run as a daemon: python3 consumer.py            (polls; used by launchd on network-up)
 
+Recovery:        python3 consumer.py --backfill              # dry-run: list stranded rows
+                 python3 consumer.py --backfill --write      # apply: clean up / re-extract
+                 python3 consumer.py --backfill --id <uuid>  # surgical, single receipt
+
 Config via env (see .env.example):
   CF_ACCOUNT_ID, CF_QUEUE_ID, CF_API_TOKEN   queues_read + queues_write scope
   RECEIPTS_EXTRACT_URL                        https://dazbeez.com/api/receipts
@@ -29,6 +33,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -192,6 +197,184 @@ def apply_to_worker(receipt_id: str, payload: dict[str, Any]) -> None:
     resp.raise_for_status()
 
 
+# ─── Backfill drain (--backfill mode) ────────────────────────────────────────
+# Recovery path for receipts stranded in a pending extraction_state — typically
+# because the queue consumer acked a 4xx poison pill (409 locked, 422 no OCR)
+# but the D1 row's extraction_state never advanced. Reads pending rows straight
+# from D1, so no re-enqueue is needed (per ADR 0001 recovery design).
+#
+# Two row shapes:
+#   - stale-state: status is past needs_review (reviewed/reconciled/...) with a
+#     stuck extraction_state — the data already exists, just clean up the state.
+#   - real-capture: status is captured/needs_review with no prior OCR — run the
+#     full MLX path and POST to /extract (same as the queue path).
+#
+# Dry-run by default (matches scripts/reprocess-extraction.ts); --write applies.
+
+RECEIPTS_DB_NAME = "dazbeez-receipts"
+# Statuses that have already been extracted and must NOT be re-extracted —
+# /extract's guard returns 409 for these. They only need state cleanup.
+LOCKED_STATUSES = {
+    "reviewed", "categorized", "reconciled", "exported", "archived",
+}
+
+
+def _wrangler_env() -> dict[str, str]:
+    """Environment for wrangler subprocess calls.
+
+    run.sh sources the consumer's .env (so CF_API_TOKEN is in the env), and
+    wrangler prefers CF_API_TOKEN over its OAuth token from `wrangler login`.
+    The consumer's token is Queues-scoped, so any D1/R2 call dies with code
+    7403. Strip CF_* so wrangler falls back to its full-scope OAuth token.
+    """
+    env = {**os.environ}
+    for k in ("CF_API_TOKEN", "CF_ACCOUNT_ID", "CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID"):
+        env.pop(k, None)
+    return env
+
+
+def _d1_query(sql: str) -> list[dict[str, Any]]:
+    """Run a read-only SQL query against remote D1 and return rows as dicts."""
+    raw = subprocess.check_output(
+        ["npx", "wrangler", "d1", "execute", RECEIPTS_DB_NAME,
+         "--remote", "--env-file=/dev/null", "--json", "--command", sql],
+        text=True,
+        env=_wrangler_env(),
+    )
+    parsed = json.loads(raw)
+    return (parsed[0] if isinstance(parsed, list) else parsed).get("results", [])
+
+
+def _d1_execute(sql: str) -> None:
+    """Run a write SQL statement against remote D1."""
+    subprocess.check_output(
+        ["npx", "wrangler", "d1", "execute", RECEIPTS_DB_NAME,
+         "--remote", "--env-file=/dev/null", "--json", "--command", sql],
+        text=True,
+        env=_wrangler_env(),
+    )
+
+
+def _sql_escape(v: str | None) -> str:
+    """Single-quote-escape a value for SQL. NULL on None."""
+    return "NULL" if v is None else "'" + v.replace("'", "''") + "'"
+
+
+def pull_pending_rows(only_id: str | None = None) -> list[dict[str, Any]]:
+    """Pending-extraction rows from D1 (extraction_state captured/queued/processing).
+
+    Excludes 'failed' (the user's check query matches this set) and soft-deleted
+    rows. Matches listPendingProcessingReceipts in lib/receipts/db.ts.
+    """
+    where_id = f" AND id = {_sql_escape(only_id)}" if only_id else ""
+    return _d1_query(
+        "SELECT id, status, extraction_state, extraction_attempts, "
+        "original_r2_key, extraction_json, captured_at, merchant "
+        "FROM receipt_records "
+        "WHERE extraction_state IN ('captured','queued','processing') "
+        "AND deleted_at IS NULL"
+        + where_id +
+        " ORDER BY captured_at;"
+    )
+
+
+def mark_extraction_processed(receipt_id: str) -> None:
+    """Clean up stale extraction_state on a row that was already processed
+    (status past needs_review) but never had its state advanced."""
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    _d1_execute(
+        "UPDATE receipt_records "
+        f"SET extraction_state = 'processed', "
+        f"extraction_processed_at = {_sql_escape(now)} "
+        f"WHERE id = {_sql_escape(receipt_id)} "
+        "AND extraction_state IN ('captured','queued','processing') "
+        "AND deleted_at IS NULL;"
+    )
+
+
+def process_backfill(dry_run: bool, only_id: str | None = None) -> None:
+    """Drain pending extraction_state rows directly from D1 — no queue needed."""
+    rows = pull_pending_rows(only_id)
+    if not rows:
+        print("No pending extraction rows. Clean.")
+        return
+
+    # Decide whether the model is needed: only for real-capture rows that
+    # require re-extraction. Stale-state cleanups skip the 18 GB load.
+    needs_model = any(
+        r["status"] not in LOCKED_STATUSES for r in rows
+    ) and not dry_run
+    if needs_model:
+        try:
+            print(f"Loading {MLX_MODEL} …", file=sys.stderr)
+            _load_model()
+            print("Model ready.", file=sys.stderr)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[fatal] model load failed: {exc}", file=sys.stderr)
+            sys.exit(1)
+
+    print(
+        f"Backfilling {len(rows)} row(s) "
+        f"{'[WRITE]' if not dry_run else '[dry-run]'}\n"
+    )
+
+    stats = {"stale_state": 0, "extract_ok": 0, "extract_fail": 0}
+    for r in rows:
+        rid = str(r["id"])
+        status = str(r["status"])
+        state = str(r["extraction_state"])
+        label = f"{rid} status={status} state={state}"
+
+        # Path 1: locked status with stuck extraction_state — clean up only.
+        # Re-extracting would 409; the row already has data.
+        if status in LOCKED_STATUSES:
+            stats["stale_state"] += 1
+            print(f"  [stale-state] {label} -> extraction_state='processed'")
+            if not dry_run:
+                mark_extraction_processed(rid)
+            continue
+
+        # Path 2: real capture/needs_review row that needs MLX extraction.
+        # Dry-run skips the actual fetch+run so the report is safe to preview.
+        if dry_run:
+            print(f"  [extract]     {label} (dry-run: would fetch image + run MLX + POST /extract)")
+            continue
+
+        r2_key = str(r["original_r2_key"]) if r["original_r2_key"] else None
+        if not r2_key:
+            print(f"  [skip]        {label} — no original_r2_key, cannot fetch image", file=sys.stderr)
+            stats["extract_fail"] += 1
+            continue
+
+        try:
+            image_path = fetch_image(rid, r2_key)
+            try:
+                result = run_mlx(image_path)
+            finally:
+                try:
+                    os.unlink(image_path)
+                except OSError:
+                    pass
+            apply_to_worker(rid, result)
+            stats["extract_ok"] += 1
+            print(f"  [ok]          {label}")
+        except requests.HTTPError as exc:
+            status_code = exc.response.status_code if exc.response is not None else 0
+            body = (exc.response.text[:200] if exc.response is not None else "").replace("\n", " ")
+            print(f"  [fail-http{status_code}] {label} body={body!r}", file=sys.stderr)
+            stats["extract_fail"] += 1
+        except Exception as exc:  # noqa: BLE001
+            print(f"  [fail]        {label}: {exc}", file=sys.stderr)
+            stats["extract_fail"] += 1
+
+    print(
+        f"\nDone. stale-state cleanup: {stats['stale_state']}, "
+        f"extract ok: {stats['extract_ok']}, extract fail: {stats['extract_fail']}."
+    )
+    if dry_run:
+        print("Dry-run only. Re-run with --write to apply.")
+
+
 def process_once() -> int:
     messages = pull_batch()
     if not messages:
@@ -233,6 +416,22 @@ def process_once() -> int:
 
 def main() -> None:
     once = "--once" in sys.argv
+    backfill = "--backfill" in sys.argv
+
+    # Backfill mode drains pending extraction_state rows directly from D1 — no
+    # queue involved. Dry-run by default; --write applies. Optional --id <uuid>
+    # narrows to a single row.
+    if backfill:
+        dry_run = "--write" not in sys.argv
+        only_id = None
+        if "--id" in sys.argv:
+            i = sys.argv.index("--id")
+            if i + 1 >= len(sys.argv):
+                print("--id requires a UUID argument", file=sys.stderr)
+                sys.exit(2)
+            only_id = sys.argv[i + 1]
+        process_backfill(dry_run=dry_run, only_id=only_id)
+        return
 
     # Pre-warm the model BEFORE pulling any messages. The model load (cold:
     # download + load of an 18 GB model) must not happen inside a message lease,
