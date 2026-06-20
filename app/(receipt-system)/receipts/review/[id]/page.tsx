@@ -17,6 +17,7 @@ import {
 } from "@/components/receipts/review/inline-error";
 import { CompliancePanel } from "@/components/receipts/CompliancePanel";
 import { listChecksForObject } from "@/lib/receipts/compliance";
+import { getExtractionHealth } from "@/lib/receipts/extraction-state";
 import { getReceiptsDb } from "@/lib/cloudflare-runtime";
 
 export const dynamic = "force-dynamic";
@@ -69,12 +70,15 @@ async function renderReceiptPage(params: Promise<{ id: string }>) {
     (r) => r.status === "needs_review" || r.status === "captured",
   ).length;
 
+  const ocrHealth = getExtractionHealth(all);
+
   const shortId = `R-${receipt.id.slice(0, 8)}`;
 
   return (
     <ReviewLayout
       needsAttention={needsAttention}
       capturedThisMonth={all.length}
+      ocrHealth={ocrHealth}
       queueRail={
         <QueueRail
           items={queueItems}
