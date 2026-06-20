@@ -43,6 +43,12 @@ CF_API_TOKEN = os.environ["CF_API_TOKEN"]
 R2_BUCKET = os.environ.get("RECEIPTS_R2_BUCKET", "dazbeez-receipts")
 EXTRACT_BASE = os.environ["RECEIPTS_EXTRACT_URL"].rstrip("/")
 PROCESSOR_KEY = os.environ["RECEIPTS_PROCESSOR_KEY"]
+# Optional: if a Cloudflare Access *application* fronts /api/receipts/* at the
+# edge, the processor key alone won't get past it — Access blocks the request
+# before the Worker runs. Provide an Access service token (and add a service-
+# token policy on the Access app) so the consumer can reach the endpoint.
+CF_ACCESS_CLIENT_ID = os.environ.get("CF_ACCESS_CLIENT_ID", "")
+CF_ACCESS_CLIENT_SECRET = os.environ.get("CF_ACCESS_CLIENT_SECRET", "")
 # Validated on the M4 Max (128 GB): 32B-4bit ≈ 18 GB on disk, ~21.6 GB RAM
 # (17%), ~26 tok/s. Strong JA accuracy incl. T-invoice numbers + tax math.
 MLX_MODEL = os.environ.get("MLX_MODEL", "mlx-community/Qwen3-VL-32B-Instruct-4bit")
@@ -156,9 +162,18 @@ def _parse_model_output(output: str) -> tuple[str, dict[str, Any]]:
 
 
 def apply_to_worker(receipt_id: str, payload: dict[str, Any]) -> None:
+    headers = {
+        "x-receipts-processor-key": PROCESSOR_KEY,
+        "Content-Type": "application/json",
+    }
+    # Pass the Access service token through if configured (gets past an edge
+    # Cloudflare Access application; harmless if Access isn't fronting the API).
+    if CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET:
+        headers["CF-Access-Client-Id"] = CF_ACCESS_CLIENT_ID
+        headers["CF-Access-Client-Secret"] = CF_ACCESS_CLIENT_SECRET
     resp = requests.post(
         f"{EXTRACT_BASE}/{receipt_id}/extract",
-        headers={"x-receipts-processor-key": PROCESSOR_KEY, "Content-Type": "application/json"},
+        headers=headers,
         json={**payload, "model": f"mlx_local:{MLX_MODEL.split('/')[-1]}"},
         timeout=60,
     )
@@ -194,6 +209,19 @@ def process_once() -> int:
 
 def main() -> None:
     once = "--once" in sys.argv
+
+    # Pre-warm the model BEFORE pulling any messages. The model load (cold:
+    # download + load of an 18 GB model) must not happen inside a message lease,
+    # or the visibility timeout could expire mid-batch and the jobs get
+    # redelivered. Loading first means the lease only ever covers inference.
+    try:
+        print(f"Loading {MLX_MODEL} …", file=sys.stderr)
+        _load_model()
+        print("Model ready.", file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[fatal] model load failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+
     while True:
         try:
             n = process_once()

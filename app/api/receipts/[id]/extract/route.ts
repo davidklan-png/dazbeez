@@ -14,6 +14,17 @@ type RouteContext = { params: Promise<{ id: string }> };
 
 const PROCESSOR_ACTOR = "mlx-consumer@mac";
 
+// Constant-time string compare so the processor key can't be probed by timing.
+function timingSafeEqual(a: string, b: string): boolean {
+  const enc = new TextEncoder();
+  const ab = enc.encode(a);
+  const bb = enc.encode(b);
+  const len = Math.max(ab.length, bb.length);
+  let mismatch = ab.length ^ bb.length;
+  for (let i = 0; i < len; i += 1) mismatch |= (ab[i] ?? 0) ^ (bb[i] ?? 0);
+  return mismatch === 0;
+}
+
 interface ApplyBody {
   /** OCR text produced by the Mac MLX model. Authoritative source of fields. */
   rawText?: string;
@@ -40,7 +51,8 @@ export async function POST(request: Request, { params }: RouteContext) {
     // go through CF Access / basic auth as before.
     const processorKey = getReceiptsProcessorKey();
     const presentedKey = request.headers.get("x-receipts-processor-key");
-    const isProcessor = Boolean(processorKey) && presentedKey === processorKey;
+    const isProcessor =
+      !!processorKey && !!presentedKey && timingSafeEqual(presentedKey, processorKey);
     const actor = isProcessor
       ? PROCESSOR_ACTOR
       : await requireReceiptsActor(request.headers);
