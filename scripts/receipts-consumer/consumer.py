@@ -43,7 +43,7 @@ CF_API_TOKEN = os.environ["CF_API_TOKEN"]
 R2_BUCKET = os.environ.get("RECEIPTS_R2_BUCKET", "dazbeez-receipts")
 EXTRACT_BASE = os.environ["RECEIPTS_EXTRACT_URL"].rstrip("/")
 PROCESSOR_KEY = os.environ["RECEIPTS_PROCESSOR_KEY"]
-MLX_MODEL = os.environ.get("MLX_MODEL", "mlx-community/Qwen2-VL-7B-Instruct-4bit")
+MLX_MODEL = os.environ.get("MLX_MODEL", "mlx-community/Qwen3-VL-4B-Instruct-4bit")
 
 QUEUES_API = (
     f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}"
