@@ -3,6 +3,7 @@ import { createAuditEntry } from "@/lib/receipts/audit";
 import { nowIso, newUuid, stringifyJson } from "@/lib/receipts/db-utils";
 import { shouldOverwriteMerchant } from "@/lib/receipts/reconciliation";
 import { retentionUntilIso } from "@/lib/receipts/retention";
+import { PENDING_EXTRACTION_STATES } from "@/lib/receipts/types";
 import type {
   AmexMatchStatus,
   AmexReceiptStatus,
@@ -159,6 +160,22 @@ export async function updateReceiptRecord(
   if (input.extractionAttempts !== undefined) { sets.push("extraction_attempts = ?"); binds.push(input.extractionAttempts); }
   if ("extractionProcessor" in input) { sets.push("extraction_processor = ?"); binds.push(input.extractionProcessor ?? null); }
 
+  // ADR 0001 root-cause guard: advancing a receipt past extraction (e.g. a
+  // human reviews a still-queued capture before the consumer drains it) must
+  // clear any stale pending extraction_state, or listPendingProcessingReceipts
+  // keeps the month-close gate blocked forever — and the consumer later acks the
+  // now-409 message without fixing it. Only when the caller didn't set the state
+  // itself and the row is still pending.
+  if (
+    input.status !== undefined &&
+    input.status !== "captured" &&
+    input.extractionState === undefined &&
+    before.extraction_state !== undefined &&
+    PENDING_EXTRACTION_STATES.includes(before.extraction_state)
+  ) {
+    sets.push("extraction_state = 'processed'");
+  }
+
   if (sets.length === 0) return;
 
   sets.push("updated_at = ?");
@@ -272,6 +289,57 @@ export async function listReceiptRecords(
     .all<ReceiptRecord>();
 
   return result.results ?? [];
+}
+
+/**
+ * Receipts whose extraction has not finished (ADR 0001). Queries
+ * `extraction_state` directly rather than prefiltering by status, so it catches
+ * a pending receipt regardless of its lifecycle status — e.g. a non-queued
+ * insert path that left the column at its default, or a receipt advanced to
+ * reviewed without clearing the queue state. The month-close gate relies on
+ * this being exhaustive.
+ */
+export async function listPendingProcessingReceipts(
+  limit = 1000,
+): Promise<ReceiptRecord[]> {
+  const db = getReceiptsDb();
+  const result = await db
+    .prepare(
+      `SELECT * FROM receipt_records
+       WHERE deleted_at IS NULL
+         AND extraction_state IN ('captured', 'queued', 'processing')
+       ORDER BY captured_at DESC LIMIT ?`,
+    )
+    .bind(limit)
+    .all<ReceiptRecord>();
+  return result.results ?? [];
+}
+
+/**
+ * Reconcile a stale pending extraction_state to a terminal one (ADR 0001).
+ * Idempotent: only touches rows still in a pending state, so it is safe to call
+ * defensively. Used by the extract route when a queued message arrives for a
+ * receipt that can no longer be extracted (already reviewed → 'processed') or
+ * whose image was unreadable (→ 'failed'), so the consumer can ack the poison
+ * pill without leaving the month-close gate blocked. Deliberately bypasses the
+ * finalized-reconciliation guard — this only fixes the queue-state mirror, it
+ * does not touch business fields.
+ */
+export async function reconcileExtractionState(
+  id: string,
+  finalState: "processed" | "failed",
+): Promise<void> {
+  const db = getReceiptsDb();
+  const now = nowIso();
+  await db
+    .prepare(
+      `UPDATE receipt_records
+         SET extraction_state = ?, extraction_processed_at = ?, updated_at = ?
+       WHERE id = ?
+         AND extraction_state IN ('captured', 'queued', 'processing')`,
+    )
+    .bind(finalState, now, now, id)
+    .run();
 }
 
 export async function listReceiptRecordsByIds(

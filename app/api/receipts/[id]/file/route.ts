@@ -1,8 +1,31 @@
 import { requireReceiptsActor } from "@/lib/receipts/auth";
 import { getReceiptRecord } from "@/lib/receipts/db";
-import { getReceiptsBucket } from "@/lib/cloudflare-runtime";
+import { getReceiptsBucket, getReceiptsProcessorKey } from "@/lib/cloudflare-runtime";
 
 type RouteContext = { params: Promise<{ id: string }> };
+
+// Constant-time string compare so the processor key can't be probed by timing.
+// Mirrors the auth pattern in /api/receipts/[id]/extract/route.ts so the Mac
+// MLX consumer can fetch receipt images through this endpoint with the same
+// shared secret it uses to POST extraction results (ADR 0001: all R2 reads go
+// through the Worker — the consumer never touches R2 or wrangler directly).
+function timingSafeEqual(a: string, b: string): boolean {
+  const enc = new TextEncoder();
+  const ab = enc.encode(a);
+  const bb = enc.encode(b);
+  const len = Math.max(ab.length, bb.length);
+  let mismatch = ab.length ^ bb.length;
+  for (let i = 0; i < len; i += 1) mismatch |= (ab[i] ?? 0) ^ (bb[i] ?? 0);
+  return mismatch === 0;
+}
+
+// Returns true when the request presents the valid processor key. When false,
+// the caller must fall through to human auth (CF Access / device cookie).
+function isProcessorRequest(request: Request): boolean {
+  const processorKey = getReceiptsProcessorKey();
+  const presented = request.headers.get("x-receipts-processor-key");
+  return !!processorKey && !!presented && timingSafeEqual(presented, processorKey);
+}
 
 function safeFilename(name: string | null): string {
   if (!name) return "receipt";
@@ -35,7 +58,9 @@ function buildFileHeaders(
 
 export async function GET(request: Request, { params }: RouteContext) {
   try {
-    await requireReceiptsActor(request.headers);
+    if (!isProcessorRequest(request)) {
+      await requireReceiptsActor(request.headers);
+    }
     const { id } = await params;
 
     const receipt = await getReceiptRecord(id);
@@ -66,7 +91,9 @@ export async function GET(request: Request, { params }: RouteContext) {
 
 export async function HEAD(request: Request, { params }: RouteContext) {
   try {
-    await requireReceiptsActor(request.headers);
+    if (!isProcessorRequest(request)) {
+      await requireReceiptsActor(request.headers);
+    }
     const { id } = await params;
 
     const receipt = await getReceiptRecord(id);

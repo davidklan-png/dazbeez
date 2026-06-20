@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { requireReceiptsActor } from "@/lib/receipts/auth";
-import { getReceiptRecord, updateReceiptRecord } from "@/lib/receipts/db";
+import { getReceiptRecord, reconcileExtractionState, updateReceiptRecord } from "@/lib/receipts/db";
 import {
   buildGuardedExtraction,
   type ModelExtractionFields,
@@ -13,6 +13,17 @@ import type { ExtractionResult } from "@/lib/receipts/types";
 type RouteContext = { params: Promise<{ id: string }> };
 
 const PROCESSOR_ACTOR = "mlx-consumer@mac";
+
+// Constant-time string compare so the processor key can't be probed by timing.
+function timingSafeEqual(a: string, b: string): boolean {
+  const enc = new TextEncoder();
+  const ab = enc.encode(a);
+  const bb = enc.encode(b);
+  const len = Math.max(ab.length, bb.length);
+  let mismatch = ab.length ^ bb.length;
+  for (let i = 0; i < len; i += 1) mismatch |= (ab[i] ?? 0) ^ (bb[i] ?? 0);
+  return mismatch === 0;
+}
 
 interface ApplyBody {
   /** OCR text produced by the Mac MLX model. Authoritative source of fields. */
@@ -40,7 +51,8 @@ export async function POST(request: Request, { params }: RouteContext) {
     // go through CF Access / basic auth as before.
     const processorKey = getReceiptsProcessorKey();
     const presentedKey = request.headers.get("x-receipts-processor-key");
-    const isProcessor = Boolean(processorKey) && presentedKey === processorKey;
+    const isProcessor =
+      !!processorKey && !!presentedKey && timingSafeEqual(presentedKey, processorKey);
     const actor = isProcessor
       ? PROCESSOR_ACTOR
       : await requireReceiptsActor(request.headers);
@@ -65,8 +77,13 @@ export async function POST(request: Request, { params }: RouteContext) {
       return NextResponse.json({ error: "Receipt not found." }, { status: 404 });
     }
 
-    // Reviewed-and-beyond receipts are never machine-overwritten.
+    // Reviewed-and-beyond receipts are never machine-overwritten. A queued
+    // message can still arrive for one (a human reviewed it before the consumer
+    // drained the queue): reconcile its stale pending extraction_state to
+    // 'processed' so the month-close gate isn't blocked and the consumer can ack
+    // the 409 cleanly.
     if (receipt.status !== "captured" && receipt.status !== "needs_review") {
+      await reconcileExtractionState(id, "processed");
       await createAuditEntry(db, {
         actor,
         action: "receipt.extraction_denied",
@@ -92,6 +109,10 @@ export async function POST(request: Request, { params }: RouteContext) {
     }
 
     if (!rawText) {
+      // Unreadable image: mark extraction failed (not pending) so it drops out
+      // of the month-close gate and the consumer can ack the 422 poison pill.
+      // 'failed' flags it for manual handling / `consumer.py --backfill`.
+      await reconcileExtractionState(id, "failed");
       await createAuditEntry(db, {
         actor,
         action: "receipt.extraction_denied",

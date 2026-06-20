@@ -363,6 +363,24 @@ function sameMoney(a: number | null, b: number | null): boolean {
 }
 
 /**
+ * Coerce a model-supplied minor-unit amount to a safe integer. The MLX consumer
+ * posts untyped JSON, so a field typed `number` may actually arrive as a string
+ * ("5000", "5,000", "¥5,000") or junk. Anything that isn't cleanly numeric
+ * becomes null so it never reaches the integer amount_minor / tax_amount_minor
+ * columns or downstream matching/export.
+ */
+function coerceMinor(v: unknown): number | null {
+  if (typeof v === "number") return Number.isFinite(v) ? Math.round(v) : null;
+  if (typeof v === "string") {
+    const cleaned = v.replace(/[,\s¥$€£]/g, "");
+    if (!/^-?\d+(\.\d+)?$/.test(cleaned)) return null;
+    const n = Number(cleaned);
+    return Number.isFinite(n) ? Math.round(n) : null;
+  }
+  return null;
+}
+
+/**
  * Build an ExtractionResult from OCR text produced off-Worker (MLX) plus any
  * structured fields the model emitted, running the deterministic regex parser
  * as a guardrail. Policy:
@@ -384,8 +402,9 @@ export function buildGuardedExtraction(
   const regex = parseReceiptOcrText(rawText);
   const discrepancies: string[] = [];
 
-  // Amount — regex authoritative.
-  const mAmount = model.amountMinor ?? null;
+  // Amount — regex authoritative. Coerce the model value: untyped JSON may
+  // carry a string or non-numeric junk that must never reach amount_minor.
+  const mAmount = coerceMinor(model.amountMinor);
   const amountMinor = regex.amountMinor ?? mAmount;
   if (regex.amountMinor != null && mAmount != null && !sameMoney(regex.amountMinor, mAmount)) {
     discrepancies.push("amountMinor");
@@ -406,7 +425,7 @@ export function buildGuardedExtraction(
   }
 
   // Tax + invoice — model primary, regex fallback.
-  const taxAmountMinor = (model.taxAmountMinor ?? null) ?? regex.taxAmountMinor ?? null;
+  const taxAmountMinor = coerceMinor(model.taxAmountMinor) ?? regex.taxAmountMinor ?? null;
   const taxRate = (model.taxRate ?? null) ?? regex.taxRate ?? null;
   const invoiceRegistrationNumber =
     (model.invoiceRegistrationNumber ?? null) ?? regex.invoiceRegistrationNumber ?? null;

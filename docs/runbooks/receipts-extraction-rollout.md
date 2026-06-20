@@ -43,6 +43,8 @@ npx wrangler secret put RECEIPTS_PROCESSOR_KEY
 
 Use the same value in the consumer's `.env` (step 5).
 
+> **If a Cloudflare Access *application* fronts `dazbeez.com/api/receipts*` at the edge**, the processor key alone won't get the consumer through — Access blocks the request before the Worker runs, so the dry run (step 7) returns an Access login page instead of `200`. In that case also create an **Access service token** (Zero Trust → Access → Service Auth), add a policy on the Access app that allows that service token, and set `CF_ACCESS_CLIENT_ID` / `CF_ACCESS_CLIENT_SECRET` in the consumer `.env`. The consumer sends them automatically when present. If Access only validates in-Worker (no edge application), you can skip this.
+
 ## 4. Apply the D1 migration
 
 ```bash
