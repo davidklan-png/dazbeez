@@ -103,6 +103,40 @@ When Claude Code runs in a cloud sandbox (e.g. claude.ai/code web session) the c
 2. For Cloudflare runtime checks, run `npm run cf:dev`
 3. Smoke-test the deployment with `bash scripts/check-deployment.sh <base-url>`
 
+## Cloudflare Plan & CPU Budget (root cause of 2026-07-04 Error 1102s)
+
+The chronic Error 1102 ("Worker exceeded resource limits") storms were CPU
+budget exhaustion on the **Workers Free plan**: the 10ms/request CPU budget
+is enforced as a sustained average (bursts allowed, then the isolate is
+punished — subsequent requests fail fast at ~10ms until eviction). Measured
+average CPU is ~38ms/request (SSR + Clerk JWT verification since PR #59),
+i.e. ~4× the Free budget. Not fixable in code — do not burn time optimizing
+for a 10ms ceiling. If 1102s recur on the paid plan at normal CPU levels,
+that's a platform issue → Cloudflare support ticket, not a rollback.
+
+**Resolved 2026-07-04: account upgraded to Workers Paid ($5/mo).** Current
+headroom vs usage (~4.4k req/day, ~5M CPU-ms/mo): 10M requests + 30M CPU-ms
+included, 30s/request CPU limit. Architecturally relevant quotas now
+available: D1 5 GB / 25B reads / 50M writes per month; Queues 1M/mo;
+Workers Logs 20M events, 7-day retention (use for per-route CPU
+attribution); Workers AI 10K/day and Durable Objects unlocked (unused —
+candidates for future extraction/processing phases, not current design).
+
+## Receipts Data Lifecycle (operator-confirmed, 2026-07)
+
+Steady state once monthly reconciliation is habitual: **at most 2 statement
+months open at a time**. When a new month starts, the previous month should be
+closed — all receipts reconciled against the monthly AMEX statement and the
+reconciliation finalized. Design consequences:
+
+- Hot working set is bounded (≤2 open months). Prefer **month-scoped queries**
+  over global `LIMIT n` pagination in list/queue/reconcile views.
+- Closed months are immutable (finalized-reconciliation guard already enforces
+  this) → candidates for archival (R2 `RECEIPTS_ARCHIVE_BUCKET`) and exclusion
+  from default views, keeping hot D1 size flat regardless of system age.
+- Month-close should eventually be a visible gate/checklist in the UI, not
+  just operator habit.
+
 ## Two-Agent Workflow: Sandbox (Architect) vs. CLI (Worker)
 
 This repo is developed across two separate Claude sessions that share the same
