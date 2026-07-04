@@ -171,6 +171,21 @@ cutover either. Four phases, each independently reversible.
       name still defaults to Edge under OpenNext and is the only path that builds today. Spike
       (`spike/clerk-feasibility`, commit `881d51d`) established this. Revisit when OpenNext supports
       Node.js proxy, or when Next.js 17 removes `middleware.ts` entirely.
+      **Gotcha caught during S7 cf:dev verification:** the handler MUST `await auth.protect()` (or
+      `return` it). A bare `auth.protect();` is a floating promise — the synchronous throw inside
+      `createProtect`'s async wrapper (`node_modules/@clerk/nextjs/dist/esm/server/protect.js`) becomes
+      a silent Promise rejection, and the request falls through to the page with the middleware a
+      no-op. Symptom: `/admin` kept 500-ing (the layout's `assertAdminPageAccess` threw instead of
+      getting the redirect), and the cf:dev log showed zero `/clerk_<timestamp>` rewrites. Fix:
+      `async (auth, request) => { ...; await auth.protect(); }`. After fix, browser requests with
+      `Accept: text/html` get the expected 307 → `/receipts/sign-in?redirect_url=...`, and non-page
+      probes get a 404 + `x-clerk-auth-reason: protect-rewrite` (Clerk's standard notFound-rewrite).
+- [x] **Accepted behavior change for `/api/receipts/*`:** unauthenticated API requests now return
+      **404** from Clerk's notFound-rewrite, not the previous 401 from the per-route
+      `requireReceiptsActor` fallback. Reasoning: middleware now short-circuits before the route
+      handler ever runs. A 404 doesn't leak whether the route exists, which is fine for an internal
+      API. No frontend code observed depending on the 401 status specifically. Revisit only if it
+      causes real friction.
 - [x] Add a real sign-in route at `app/(receipt-system)/receipts/sign-in/[[...sign-in]]/page.tsx` using
       `<SignIn />`. (Note the `(receipt-system)` route group — `app/receipts/sign-in/...` would not
       resolve.) `/receipts/enroll` kept alive as a redirect shim to it, in case it's bookmarked.

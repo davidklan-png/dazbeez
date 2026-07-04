@@ -22,9 +22,15 @@ const isPublicRoute = createRouteMatcher([
   "/receipts/enroll(.*)", // redirect shim → /receipts/sign-in; must not be gated
 ]);
 
-export default clerkMiddleware((auth, request) => {
+export default clerkMiddleware(async (auth, request) => {
   if (!isPublicRoute(request)) {
-    auth.protect();
+    // MUST `await` the promise. `auth.protect()` throws synchronously inside
+    // an async wrapper when the user is signed out, which converts the throw
+    // to a Promise rejection. Without `await` (or `return`), the rejection is
+    // silently dropped and the request falls through to the page — making the
+    // middleware a no-op. Verified against @clerk/nextjs 7.5.12 source
+    // (createProtect in dist/esm/server/protect.js).
+    await auth.protect();
   }
 });
 
