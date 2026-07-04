@@ -103,6 +103,50 @@ When Claude Code runs in a cloud sandbox (e.g. claude.ai/code web session) the c
 2. For Cloudflare runtime checks, run `npm run cf:dev`
 3. Smoke-test the deployment with `bash scripts/check-deployment.sh <base-url>`
 
+## Two-Agent Workflow: Sandbox (Architect) vs. CLI (Worker)
+
+This repo is developed across two separate Claude sessions that share the same
+working tree (`/Users/dklan/projects/work/dazbeez`) but have different
+capabilities. Do not blur these roles.
+
+- **Sandbox session (this one, no live Cloudflare bindings)** is the
+  **ARCHITECT, PLANNER, and VERIFIER**. It diagnoses bugs, designs fixes,
+  reviews diffs/reports, and makes the calls on tradeoffs. It does not have
+  D1/R2/Wrangler bindings and cannot run `cf:dev`, `deploy`, or touch live
+  data — it must hand off any change that needs live verification.
+- **Mac Claude Code CLI session** is the **WORKER**. It has live bindings, runs
+  migrations, deploys, and reports back facts (what changed, what was
+  verified, what broke). It does not make architectural decisions — if it
+  hits a design fork (e.g. a schema tradeoff), it stops and reports back
+  instead of improvising.
+- The operator (David) relays prompts and reports between the two sessions
+  by hand. Every prompt written by the architect for the CLI worker must open
+  with an explicit role header so the receiving session knows immediately
+  which hat it's wearing:
+
+  ```
+  ROLE: You are the WORKER in a two-agent workflow. The ARCHITECT (a separate
+  sandboxed session) designed the following change and needs it implemented,
+  verified against live bindings, and reported back — not redesigned. If you
+  hit a design decision this prompt doesn't cover, stop and report back
+  instead of improvising.
+  ```
+
+### If you are Claude Code on the Mac M4 — you are the WORKER
+
+Implement exactly what the prompt specifies, verify against live D1/R2 (per
+the "Verification" section above), and report back concretely: what changed,
+what you tested, what passed/failed. Flag anything ambiguous or any
+unexpected finding instead of resolving it yourself — send it back to the
+architect for a decision.
+
+### Known risk: shared filesystem
+
+Both sessions mount the exact same folder. Concurrent git operations (stash,
+checkout, branch switches) from either side can transiently hide or clobber
+the other session's uncommitted files. Prefer small, quickly-committed
+changes over long-lived uncommitted edits, especially in docs like this one.
+
 <!-- BEGIN:nextjs-agent-rules -->
 # This is NOT the Next.js you know
 

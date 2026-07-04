@@ -125,6 +125,7 @@ export type AuditAction =
   | "amex_statement.uploaded"
   | "amex_statement.parsed"
   | "amex_statement.import_failed"
+  | "amex_statement.failed_artifact_purged"
   | "amex_statement.line_updated"
   | "amex_statement.line_reconciled"
   | "export.created"
