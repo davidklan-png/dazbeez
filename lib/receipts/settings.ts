@@ -16,6 +16,7 @@ export const COMPLIANCE_DEFAULTS: ComplianceSettings = {
   export_block_on_warnings: false,
   paper_original_discard_policy: "retain_until_accountant_confirms",
   statement_expected_day: 18,
+  track_tax_breakdown: false,
 };
 
 const INVOICE_MODES: ReadonlySet<InvoiceNumberRequirementMode> = new Set([
@@ -77,6 +78,10 @@ export function parseComplianceSettings(
     statement_expected_day: parseInt10(
       map.get("statement_expected_day"),
       COMPLIANCE_DEFAULTS.statement_expected_day,
+    ),
+    track_tax_breakdown: parseBool(
+      map.get("track_tax_breakdown"),
+      COMPLIANCE_DEFAULTS.track_tax_breakdown,
     ),
   };
 }

@@ -15,6 +15,7 @@ const LABELS: Record<keyof ComplianceSettings, string> = {
   export_block_on_warnings: "Block export when warnings are present",
   paper_original_discard_policy: "Paper original discard policy",
   statement_expected_day: "AMEX statement expected day",
+  track_tax_breakdown: "Track tax rate / amount breakdown",
 };
 
 export function ComplianceSettingsForm({ initial }: Props) {
@@ -164,6 +165,16 @@ export function ComplianceSettingsForm({ initial }: Props) {
             )
           }
           className="w-24 rounded-md border border-gray-300 px-3 py-2 text-sm"
+        />
+      </Row>
+
+      <Row
+        label={LABELS.track_tax_breakdown}
+        hint="Off by default — most JP receipts declare tax-included totals only. Turn on to warn when tax rate / amount are missing."
+      >
+        <Toggle
+          checked={settings.track_tax_breakdown}
+          onChange={(v) => update("track_tax_breakdown", v)}
         />
       </Row>
 

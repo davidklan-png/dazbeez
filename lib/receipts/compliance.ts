@@ -131,24 +131,28 @@ export function computeReceiptChecks(
     }
   }
 
-  // Tax rate / consumption tax amount — warning only; some receipts
-  // legitimately omit them (small-amount, non-taxable).
-  if (!receipt.tax_rate) {
-    checks.push({
-      checkType: "missing_tax_rate",
-      severity: "warning",
-      message: "Tax rate is missing (typically 10% or 8% reduced).",
-    });
-  }
-  if (
-    receipt.tax_amount_minor === null ||
-    receipt.tax_amount_minor === undefined
-  ) {
-    checks.push({
-      checkType: "missing_tax_amount",
-      severity: "warning",
-      message: "Consumption tax amount is missing.",
-    });
+  // Tax rate / consumption tax amount — auxiliary by default (operator
+  // policy 2026-07: most JP receipts declare tax-included totals only).
+  // Gated behind track_tax_breakdown so existing warnings auto-resolve via
+  // the "no longer applies" path when the setting is off.
+  if (settings.track_tax_breakdown) {
+    if (!receipt.tax_rate) {
+      checks.push({
+        checkType: "missing_tax_rate",
+        severity: "warning",
+        message: "Tax rate is missing (typically 10% or 8% reduced).",
+      });
+    }
+    if (
+      receipt.tax_amount_minor === null ||
+      receipt.tax_amount_minor === undefined
+    ) {
+      checks.push({
+        checkType: "missing_tax_amount",
+        severity: "warning",
+        message: "Consumption tax amount is missing.",
+      });
+    }
   }
 
   // Electronic transaction preservation: if the source type is electronic,

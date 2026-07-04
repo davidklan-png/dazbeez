@@ -239,3 +239,54 @@ test("compliance: missing original file is a blocker", () => {
   assert.ok(c);
   assert.equal(c!.severity, "blocker");
 });
+
+// ─── Tax breakdown gating (track_tax_breakdown, default off) ──────────────
+
+test("compliance: default settings do not warn on missing tax rate/amount", () => {
+  const checks = computeReceiptChecks({
+    receipt: baseReceipt({ tax_rate: null, tax_amount_minor: null }),
+    attendees: [],
+    files: [originalFile()],
+    settings: SETTINGS, // track_tax_breakdown defaults to false
+  });
+  assert.equal(
+    checks.find((c) => c.checkType === "missing_tax_rate"),
+    undefined,
+  );
+  assert.equal(
+    checks.find((c) => c.checkType === "missing_tax_amount"),
+    undefined,
+  );
+});
+
+test("compliance: track_tax_breakdown=true warns on missing tax rate", () => {
+  const checks = computeReceiptChecks({
+    receipt: baseReceipt({ tax_rate: null, tax_amount_minor: 500 }),
+    attendees: [],
+    files: [originalFile()],
+    settings: { ...SETTINGS, track_tax_breakdown: true },
+  });
+  const rate = checks.find((c) => c.checkType === "missing_tax_rate");
+  assert.ok(rate);
+  assert.equal(rate!.severity, "warning");
+  assert.equal(
+    checks.find((c) => c.checkType === "missing_tax_amount"),
+    undefined,
+  );
+});
+
+test("compliance: track_tax_breakdown=true warns on missing tax amount", () => {
+  const checks = computeReceiptChecks({
+    receipt: baseReceipt({ tax_rate: "10%", tax_amount_minor: null }),
+    attendees: [],
+    files: [originalFile()],
+    settings: { ...SETTINGS, track_tax_breakdown: true },
+  });
+  const amount = checks.find((c) => c.checkType === "missing_tax_amount");
+  assert.ok(amount);
+  assert.equal(amount!.severity, "warning");
+  assert.equal(
+    checks.find((c) => c.checkType === "missing_tax_rate"),
+    undefined,
+  );
+});

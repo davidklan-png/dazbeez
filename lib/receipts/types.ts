@@ -447,6 +447,10 @@ export interface ComplianceSettings {
   export_block_on_warnings: boolean;
   paper_original_discard_policy: PaperOriginalDiscardPolicy;
   statement_expected_day: number;
+  // Operator policy (2026-07): many JP receipts declare tax-included totals
+  // only; the breakdown is auxiliary, not nagged for by default. Flip to true
+  // to re-enable the missing_tax_rate / missing_tax_amount warnings.
+  track_tax_breakdown: boolean;
 }
 
 export interface AmexReconciliation {
