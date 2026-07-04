@@ -185,6 +185,10 @@ export function FormPane(props: FormPaneProps) {
             return;
           }
           setSave({ kind: "saved", at: Date.now() });
+          // Refresh server-rendered CompliancePanel without manual reload.
+          // router.refresh() preserves client state (focused input, useState
+          // field values) — React reconciles rather than replacing the DOM.
+          router.refresh();
         } catch (error) {
           if ((error as DOMException | undefined)?.name === "AbortError") return;
           setSave({ kind: "error", message: "Network error" });

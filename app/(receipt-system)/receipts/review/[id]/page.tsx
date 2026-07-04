@@ -16,7 +16,11 @@ import {
   isNextInternalError,
 } from "@/components/receipts/review/inline-error";
 import { CompliancePanel } from "@/components/receipts/CompliancePanel";
-import { listChecksForObject } from "@/lib/receipts/compliance";
+import {
+  listChecksForObject,
+  runComplianceChecksForReceipt,
+} from "@/lib/receipts/compliance";
+import { getComplianceSettings } from "@/lib/receipts/settings";
 import { getExtractionHealth } from "@/lib/receipts/extraction-state";
 import { getReceiptsDb } from "@/lib/cloudflare-runtime";
 
@@ -43,13 +47,37 @@ async function renderReceiptPage(params: Promise<{ id: string }>) {
   await assertReceiptsPageAccess();
 
   const { id } = await params;
-  const [receipt, attendees, all, complianceChecks] = await Promise.all([
+  const [receipt, attendees, all] = await Promise.all([
     getReceiptRecord(id),
     listAttendees(id),
     listReceiptRecords({ limit: 200 }),
-    listChecksForObject(getReceiptsDb(), "receipt", id),
   ]);
   if (!receipt) notFound();
+
+  // Compute compliance checks fresh on render so the panel always reflects
+  // the current state (track_tax_breakdown toggle, backfilled manifest rows,
+  // etc.) — without this, checks only recompute inside the PATCH handler and
+  // the panel reads stale rows until a full page reload. Engine failure
+  // falls back to the existing list rather than 500-ing the page.
+  let complianceChecks = await listChecksForObject(
+    getReceiptsDb(),
+    "receipt",
+    id,
+  );
+  try {
+    const settings = await getComplianceSettings();
+    await runComplianceChecksForReceipt(getReceiptsDb(), id, settings);
+    complianceChecks = await listChecksForObject(
+      getReceiptsDb(),
+      "receipt",
+      id,
+    );
+  } catch (err) {
+    console.error(
+      `[receipts] compliance re-run failed for ${id}, serving stale list`,
+      err,
+    );
+  }
 
   const amexFlags = await getAmexMatchFlagsByReceiptIds(
     all.map((r) => r.id).concat(all.some((r) => r.id === id) ? [] : [id]),
