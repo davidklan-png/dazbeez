@@ -12,6 +12,7 @@ import {
   getAmexArtifactByMonth,
   getFinalizedReconciliationForMonth,
   markPreviousArtifactsReplaced,
+  purgeFailedAmexArtifactsByHash,
   updateAmexArtifactStatus,
   createBusinessTripReports,
 } from "@/lib/receipts/db";
@@ -156,6 +157,16 @@ export async function POST(request: Request) {
     const artifactId = crypto.randomUUID();
     const r2Key = generateAmexArtifactKey(statementMonth, artifactId, file.name);
     await uploadAmexArtifact(r2Key, buffer);
+
+    // ── Purge stale failed/replaced rows for this hash ─────────────────────
+    // The UNIQUE constraint on sha256_hash
+    // (db/receipts/0005_amex_extended.sql:31) is a real backstop against
+    // double-importing a genuinely successful statement, but it also blocks
+    // re-uploading the identical file after a prior failed/replaced artifact
+    // has been purged from the application-layer dedup check. Clean those
+    // rows out (plus their receipt_files manifest entries + R2 objects) right
+    // before the fresh INSERT. No-op DELETE when nothing matches.
+    await purgeFailedAmexArtifactsByHash(sha256, actor);
 
     // ── Save artifact record ────────────────────────────────────────────────
     const savedArtifactId = await createAmexArtifact({

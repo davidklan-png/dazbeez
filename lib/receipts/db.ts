@@ -3,6 +3,7 @@ import { createAuditEntry } from "@/lib/receipts/audit";
 import { nowIso, newUuid, stringifyJson } from "@/lib/receipts/db-utils";
 import { shouldOverwriteMerchant } from "@/lib/receipts/reconciliation";
 import { retentionUntilIso } from "@/lib/receipts/retention";
+import { deleteAmexArtifact } from "@/lib/receipts/storage";
 import { PENDING_EXTRACTION_STATES } from "@/lib/receipts/types";
 import type {
   AmexMatchStatus,
@@ -1037,6 +1038,85 @@ export async function getAmexArtifactBySha256(
     )
     .bind(sha256)
     .first<AmexStatementArtifact>();
+}
+
+// Purge stale failed/replaced artifact rows for a given file hash so a fresh
+// INSERT with the same sha256_hash can succeed. The application-layer dedup
+// check (getAmexArtifactBySha256) excludes these rows, but the DB-level
+// UNIQUE constraint on sha256_hash (db/receipts/0005_amex_extended.sql:31)
+// still fires on INSERT because the row physically exists. Purging right
+// before createAmexArtifact() closes that gap.
+//
+// Non-fatal R2 cleanup: each row's R2 object is deleted best-effort. R2
+// failures are logged but do not block the DB cleanup — same "non-fatal,
+// log and continue" pattern as the manifest write in the import route.
+//
+// Audit: ONE entry is written per purge call (action:
+// amex_statement.failed_artifact_purged), so the trail shows who triggered
+// the re-upload that caused the purge. receipt_audit_log rows for the
+// purged artifacts are intentionally NOT deleted (append-only, tax/
+// compliance retention).
+export async function purgeFailedAmexArtifactsByHash(
+  sha256: string,
+  actor: string,
+): Promise<void> {
+  const db = getReceiptsDb();
+
+  const stale = await db
+    .prepare(
+      `SELECT id, r2_key FROM amex_statement_artifacts
+       WHERE sha256_hash = ? AND import_status IN ('failed', 'replaced')`,
+    )
+    .bind(sha256)
+    .all<{ id: string; r2_key: string }>();
+
+  const staleRows = stale.results ?? [];
+  if (staleRows.length === 0) return;
+
+  const staleIds = staleRows.map((r) => r.id);
+
+  // Best-effort R2 cleanup. Failure here does not block the DB purge.
+  for (const row of staleRows) {
+    try {
+      await deleteAmexArtifact(row.r2_key);
+    } catch (err) {
+      console.error(
+        `[purgeFailedAmexArtifactsByHash] R2 delete failed for key ${row.r2_key}`,
+        err,
+      );
+    }
+  }
+
+  // Atomic DB cleanup: delete manifest rows first (FK-ish reference via
+  // object_type/object_id, no formal FK constraint), then the artifact
+  // rows themselves. db.batch runs both in a single transaction.
+  const placeholders = staleIds.map(() => "?").join(", ");
+  await db.batch([
+    db
+      .prepare(
+        `DELETE FROM receipt_files
+         WHERE object_type = 'amex_statement_artifact'
+           AND object_id IN (${placeholders})`,
+      )
+      .bind(...staleIds),
+    db
+      .prepare(
+        `DELETE FROM amex_statement_artifacts WHERE id IN (${placeholders})`,
+      )
+      .bind(...staleIds),
+  ]);
+
+  await createAuditEntry(db, {
+    actor,
+    action: "amex_statement.failed_artifact_purged",
+    objectType: "amex_statement_artifact",
+    objectId: staleIds.join(","),
+    newValueJson: JSON.stringify({
+      sha256,
+      purgedCount: staleIds.length,
+      purgedIds: staleIds,
+    }),
+  });
 }
 
 export async function getAmexArtifactByMonth(

@@ -108,6 +108,16 @@ export async function uploadAmexArtifact(
   });
 }
 
+// Best-effort R2 delete for a stale artifact object. Used by
+// purgeFailedAmexArtifactsByHash when clearing out failed/replaced rows
+// before re-inserting. Errors are caught by the caller — this helper is
+// intentionally not try/catch'd so the caller can decide the failure
+// policy (in practice: log and continue).
+export async function deleteAmexArtifact(key: string): Promise<void> {
+  const bucket = getReceiptsBucket();
+  await bucket.delete(key);
+}
+
 export async function computeSha256Hex(buffer: ArrayBuffer): Promise<string> {
   const hashBuffer = await crypto.subtle.digest("SHA-256", buffer);
   const hashArray = Array.from(new Uint8Array(hashBuffer));
