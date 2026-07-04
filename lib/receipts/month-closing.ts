@@ -87,8 +87,16 @@ export async function validateMonthReadyForExport(
     );
   }
 
+  // Build the receiptMap the validator needs to resolve category from the
+  // matched receipt when present. Includes both month receipts (e.g. a March
+  // receipt in the March export) and matched-but-out-of-month receipts (e.g.
+  // a late-March receipt linked to an April statement line).
+  const receiptMap = new Map<string, ReceiptRecord>();
+  for (const r of currentDraft.receipts) receiptMap.set(r.id, r);
+  for (const r of matchedReceipts) receiptMap.set(r.id, r);
+
   blockers.push(
-    ...validateAmexLinesForSignoff(amexLines, amexAttendees, currentDraft.attendeeMap),
+    ...validateAmexLinesForSignoff(amexLines, amexAttendees, currentDraft.attendeeMap, receiptMap),
   );
 
   return blockers;

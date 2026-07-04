@@ -1,5 +1,6 @@
 import type { AmexStatementLine, ReceiptRecord } from "@/lib/receipts/types";
 import { requiresAttendees } from "@/lib/receipts/categories";
+import { resolveLineCategory } from "@/lib/receipts/line-classification";
 
 function csvEscape(value: string | null | undefined): string {
   if (value === null || value === undefined) return "";
@@ -69,7 +70,9 @@ export function buildReconciliationManifestCsv(
         csvEscape(line.matched_receipt_id),
         csvEscape(receipt?.original_sha256),
         csvEscape(line.receipt_missing_reason),
-        csvEscape(line.expense_category_code),
+        // Manifest category column = resolved value (receipt when matched,
+        // line otherwise). Column layout is unchanged.
+        csvEscape(resolveLineCategory(line, receipt)),
         csvEscape(line.cardholder_name),
         csvEscape(line.source_file_sha256),
         csvEscape(amexAtts.join("; ")),
@@ -87,21 +90,30 @@ export function buildReconciliationManifestCsv(
 /**
  * Validate that all AMEX lines are ready for sign-off/export.
  * Returns an array of human-readable blocker strings (empty = ready).
+ *
+ * `receiptMap` carries the matched receipts so category can be resolved
+ * from the receipt (not the line) when a match exists. Callers must build
+ * it from the matched_receipt_id set of the lines being validated.
  */
 export function validateAmexLinesForSignoff(
   amexLines: AmexStatementLine[],
   amexAttendees: Record<string, string[]>,
   receiptAttendeeMap: Map<string, string[]>,
+  receiptMap: Map<string, ReceiptRecord>,
 ): string[] {
   const blockers: string[] = [];
 
   for (const line of amexLines) {
     const label = `${line.transaction_date} ${line.merchant}`;
+    const receipt = line.matched_receipt_id
+      ? receiptMap.get(line.matched_receipt_id)
+      : undefined;
+    const resolvedCategory = resolveLineCategory(line, receipt);
 
     if (line.match_status === "unmatched" || line.match_status === "matched") {
       blockers.push(`AMEX ${label}: unresolved match status (${line.match_status})`);
     }
-    if (!line.expense_category_code) {
+    if (!resolvedCategory) {
       blockers.push(`AMEX ${label}: missing expense category`);
     }
     if (
@@ -118,7 +130,7 @@ export function validateAmexLinesForSignoff(
     ) {
       blockers.push(`AMEX ${label}: missing receipt requires a reason`);
     }
-    if (requiresAttendees(line.expense_category_code)) {
+    if (requiresAttendees(resolvedCategory)) {
       const linkedReceiptAttendees = line.matched_receipt_id
         ? receiptAttendeeMap.get(line.matched_receipt_id) ?? []
         : [];

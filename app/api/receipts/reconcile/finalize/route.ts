@@ -16,6 +16,7 @@ import { hashCsvContent } from "@/lib/receipts/export";
 import { buildReconciliationManifestCsv, validateAmexLinesForSignoff } from "@/lib/receipts/reconciliation-signoff";
 import { deriveStatementWindow, isReceiptInWindow } from "@/lib/receipts/statement-window";
 import { archiveManifest, deleteArchiveObject } from "@/lib/receipts/storage";
+import type { ReceiptRecord } from "@/lib/receipts/types";
 
 export async function POST(request: Request) {
   try {
@@ -76,6 +77,7 @@ export async function POST(request: Request) {
       .map((line) => line.matched_receipt_id)
       .filter((id): id is string => Boolean(id));
     const receipts = await listReceiptRecordsByIds(receiptIds);
+    const receiptMap = new Map<string, ReceiptRecord>(receipts.map((r) => [r.id, r]));
     const receiptAttendeeMap = new Map<string, string[]>();
     const attendeeResults = await Promise.all(
       receipts.map(async (r) => {
@@ -87,7 +89,7 @@ export async function POST(request: Request) {
       if (entry) receiptAttendeeMap.set(entry[0], entry[1]);
     }
 
-    const blockers = validateAmexLinesForSignoff(amexLines, amexAttendees, receiptAttendeeMap);
+    const blockers = validateAmexLinesForSignoff(amexLines, amexAttendees, receiptAttendeeMap, receiptMap);
 
     if (blockers.length > 0) {
       return NextResponse.json(

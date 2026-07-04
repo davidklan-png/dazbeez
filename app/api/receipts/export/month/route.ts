@@ -20,6 +20,7 @@ import {
 } from "@/lib/receipts/export";
 import { archiveBundle, archiveManifest } from "@/lib/receipts/storage";
 import { getCategoryByCode, requiresAttendees } from "@/lib/receipts/categories";
+import { resolveLineCategory } from "@/lib/receipts/line-classification";
 import { getReceiptsDb, getReceiptsArchiveBucket } from "@/lib/cloudflare-runtime";
 import { getAmexArtifactByMonth } from "@/lib/receipts/db";
 import { retentionMetadata } from "@/lib/receipts/retention";
@@ -95,6 +96,7 @@ export async function POST(request: Request) {
           .map((line) => line.matched_receipt_id)
           .filter((id): id is string => Boolean(id)),
       );
+      const receiptMap = new Map(matchedReceipts.map((r) => [r.id, r] as const));
       const matchedAttendeeMap = new Map(attendeeMap);
       for (const receipt of matchedReceipts) {
         if (matchedAttendeeMap.has(receipt.id)) continue;
@@ -106,18 +108,26 @@ export async function POST(request: Request) {
       const blockers: string[] = [];
 
       for (const line of amexLines) {
-        if (!line.expense_category_code) {
+        // Classification source: when a matched receipt exists, read its
+        // category (the receipt is the system of record). Fall back to the
+        // line value for no-receipt lines and dangling matches.
+        const receipt = line.matched_receipt_id
+          ? receiptMap.get(line.matched_receipt_id)
+          : undefined;
+        const resolvedCategory = resolveLineCategory(line, receipt);
+
+        if (!resolvedCategory) {
           blockers.push(`Line ${line.id}: missing expense category`);
         }
         if (line.receipt_status === "missing_receipt" && !line.receipt_missing_reason) {
           blockers.push(`Line ${line.id}: missing receipt without reason`);
         }
-        if (requiresAttendees(line.expense_category_code)) {
+        if (requiresAttendees(resolvedCategory)) {
           const linkedReceipt = line.matched_receipt_id
             ? matchedAttendeeMap.get(line.matched_receipt_id)
             : null;
           if (!linkedReceipt || linkedReceipt.length === 0) {
-            blockers.push(`Line ${line.id}: ${getCategoryByCode(line.expense_category_code ?? "")?.jaName ?? line.expense_category_code} requires attendees`);
+            blockers.push(`Line ${line.id}: ${getCategoryByCode(resolvedCategory ?? "")?.jaName ?? resolvedCategory} requires attendees`);
           }
         }
         if (line.business_trip_status === "candidate") {

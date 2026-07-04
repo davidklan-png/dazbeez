@@ -129,3 +129,48 @@ test("manifest CSV: attendees with commas are escaped", () => {
     "attendee with comma must be CSV-escaped",
   );
 });
+
+test("manifest CSV: category column resolves from matched receipt when present", () => {
+  // Line category is office_supplies (default from makeLine), receipt category
+  // is meeting. Manifest must show the receipt value (meeting).
+  const lines = [makeLine({ expense_category_code: "office_supplies" })];
+  const receipts = [makeReceipt({ expense_category_code: "meeting" })];
+
+  const csv = buildReconciliationManifestCsv(lines, receipts, {}, {});
+  const csvLines = csv.split("\n");
+  const headers = csvLines[0]!.split(",");
+  const catIdx = headers.indexOf("expense_category_code");
+  const dataCols = csvLines[1]!.split(",");
+  assert.equal(dataCols[catIdx], "meeting");
+});
+
+test("manifest CSV: category column falls back to line value when receipt has no category", () => {
+  // Receipt exists (matched) but has null category — receipt still wins as the
+  // system of record, so column must be empty (not the line's office_supplies).
+  const lines = [makeLine({ expense_category_code: "office_supplies" })];
+  const receipts = [makeReceipt({ expense_category_code: null })];
+
+  const csv = buildReconciliationManifestCsv(lines, receipts, {}, {});
+  const csvLines = csv.split("\n");
+  const headers = csvLines[0]!.split(",");
+  const catIdx = headers.indexOf("expense_category_code");
+  const dataCols = csvLines[1]!.split(",");
+  assert.equal(dataCols[catIdx], "");
+});
+
+test("manifest CSV: category column uses line value when no receipt linked", () => {
+  const lines = [makeLine({
+    matched_receipt_id: null,
+    match_status: "no_receipt",
+    receipt_status: "no_receipt_required",
+    receipt_missing_reason: "lost",
+    expense_category_code: "office_supplies",
+  })];
+  // No matching receipt in the array (r-1 not present).
+  const csv = buildReconciliationManifestCsv(lines, [], {}, {});
+  const csvLines = csv.split("\n");
+  const headers = csvLines[0]!.split(",");
+  const catIdx = headers.indexOf("expense_category_code");
+  const dataCols = csvLines[1]!.split(",");
+  assert.equal(dataCols[catIdx], "office_supplies");
+});
