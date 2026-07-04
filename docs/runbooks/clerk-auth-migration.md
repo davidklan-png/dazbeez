@@ -2,11 +2,17 @@
 
 Status: Phase 0 closed (3 of 4 secrets rotated out of the bundle; `NFC_ADMIN_API_KEY` deferred).
 Phase 1 closed Jul 4 via `clerk` CLI — see Phase 1 section for what's now verified firsthand.
-Phase 2 implemented on `feat/clerk-phase2` (commits `aaa2549`, `db77a9e`, `522bf50`), with the
-middleware `await` fix from S7 applied. cf:dev sign-in flow **cannot be verified locally** —
-production publishable keys reject `localhost` Origin (Clerk allowlist, not a code bug); see the
-Phase 2 gotcha note below. Server-side gates verified via curl. S7 sub-checks (b), (c), (d) deferred
-to the post-deploy production smoke test.
+Phase 2 shipped Jul 4 — deploy `d6263d43-4fd4-4e86-a8f3-cda9f988666d` (squashed as
+`fb9d9f9` on master, PR #59). All six production sub-checks (a–f) passed:
+  - (a) `/receipts` and `/admin` redirect to `/receipts/sign-in` when signed out
+  - (b) Real Clerk sign-in completes against the production instance
+  - (c) Session persists across refresh
+  - (d) `/admin` loads for the owner-role user (no more 500)
+  - (e) `/api/mobile/*` bearer-token path unaffected
+  - (f) `/api/receipts/*` returns 404 when signed out (accepted behavior change)
+Taz signed in on her own device; `/receipts/settings/devices` correctly scopes to her own
+devices. Mobile capture + pairing regressions clean. Cloudflare Access intentionally left
+active at the edge through Phase 3 — rollback is still `wrangler rollback`.
 
 The original Phase 1 status note (kept for history): Clerk app created (Production instance,
 custom domain `clerk.dazbeez.com`), keys wired (publishable in `.env.production`, secret via
@@ -221,13 +227,13 @@ cutover either. Four phases, each independently reversible.
       owner-role check, folding admin into one identity system instead of a third, separate one. This
       also fixes the `/admin` 500 (broken since the `middleware.ts` deletion) as a side effect, since it'll
       get a real redirect instead of an uncaught throw.
-- [ ] **Do not delete Cloudflare Access yet.** Leave the edge policy active through this phase as a
+- [x] **Do not delete Cloudflare Access yet.** Leave the edge policy active through this phase as a
       safety net — if something in the Clerk wiring is wrong, Access still gates the edge and the failure
       mode is "broken app page," not "receipts data exposed." This is what makes Phase 2 reversible:
       rollback = redeploy the previous Worker version (Cloudflare keeps prior deployments; roll back via
-      dashboard or `wrangler`).
-- [ ] Ship at a quiet time. Verify both you and Taz can sign in for real, on your real devices, before
-      moving on.
+      dashboard or `wrangler`). **Status Jul 4: Access still active post-Phase-2-deploy. To be removed in Phase 4.**
+- [x] Ship at a quiet time. Verify both you and Taz can sign in for real, on your real devices, before
+      moving on. **Done Jul 4 — both David and Taz verified end-to-end on real devices.**
 
 ### Phase 3 — Device trust cleanup
 
