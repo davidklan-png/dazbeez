@@ -58,7 +58,7 @@ export function ReviewLayout({
           {queueRail}
         </div>
         <div className="min-h-[50vh] lg:min-h-0">{imagePane}</div>
-        <div className="min-h-0 border-t border-gray-200 md:border-l md:border-t-0">
+        <div className="min-h-0 overflow-y-auto border-t border-gray-200 md:border-l md:border-t-0">
           {formPane}
         </div>
       </div>
