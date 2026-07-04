@@ -45,7 +45,13 @@ check_status "/services/ai" "200"
 check_status "/contact" "200"
 check_status "/manifest.webmanifest" "200"
 check_status "/inquiry" "308"
-check_status "/admin" "401"
+# Clerk-gated routes (Phase 2): default curl sends Accept: */* which Clerk
+# treats as a non-page request → notFound-rewrite → 404. Real browsers send
+# Accept: text/html and get a 307 redirect to /receipts/sign-in. The 404
+# status is enough to confirm "the route is gated" without needing to
+# reproduce the browser Accept header here.
+check_status "/admin" "404"
+check_status "/receipts" "404"
 
 check_header "/" "X-Frame-Options: SAMEORIGIN"
 check_header "/" "X-Content-Type-Options: nosniff"
