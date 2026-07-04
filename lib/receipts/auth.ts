@@ -1,7 +1,5 @@
-import {
-  verifyDeviceCookie,
-  verifyDeviceCookieLight,
-} from "@/lib/receipts/trusted-devices";
+import { verifyDeviceCookie } from "@/lib/receipts/trusted-devices";
+import { auth, clerkClient } from "@clerk/nextjs/server";
 
 const RECEIPTS_REALM = "Dazbeez Receipts";
 
@@ -278,61 +276,38 @@ export async function isReceiptsAuthorized(
 }
 
 // Middleware-safe: no DB calls. Cookie via HMAC only; CF Access via decode.
+//
+// Phase 2 Clerk cutover: the entire CF-Access/cookie/Basic-auth chain above
+// is now bypassed — auth is enforced by `proxy.ts` via clerkMiddleware.
+// `auth()` here reads the Clerk session that the proxy already established.
+// The legacy helpers (isCfAccessTokenAcceptable, decodeBasicAuthorization,
+// verifyDeviceCookieLight) are kept as dead code, deleted in Phase 4.
 export async function isReceiptsAuthorizedLight(
-  requestHeaders: Headers,
+  _requestHeaders: Headers,
 ): Promise<boolean> {
-  const device = await verifyDeviceCookieLight(requestHeaders).catch(() => null);
-  if (device) return true;
-
-  const token = requestHeaders.get("Cf-Access-Jwt-Assertion");
-  const { ok } = await isCfAccessTokenAcceptable(token);
-  if (ok) return true;
-
-  const configuredUsername = process.env.RECEIPTS_AUTH_USERNAME?.trim();
-  const configuredPassword = process.env.RECEIPTS_AUTH_PASSWORD;
-  if (configuredUsername && configuredPassword) {
-    const provided = decodeBasicAuthorization(requestHeaders.get("authorization"));
-    if (
-      provided &&
-      safeEqual(provided.username, configuredUsername) &&
-      safeEqual(provided.password, configuredPassword)
-    ) {
-      return true;
-    }
-  }
-
-  return false;
+  const session = await auth();
+  return !!session.userId;
 }
 
 // Single-pass: verifies auth and returns the actor. Replaces the previous
 // assertReceiptsAccessFromHeaders + getReceiptsActor pair that every receipts
 // route called, which performed verifyDeviceCookie (HMAC + D1 lookup for
 // revocation) twice per request.
+//
+// Phase 2 Clerk cutover: identity comes from Clerk. The proxy gates the route,
+// so by the time we get here the session is valid; the userId check is
+// defense-in-depth. The legacy verification chain above is dead code (Phase 4).
 export async function requireReceiptsActor(
-  requestHeaders: Headers,
+  _requestHeaders: Headers,
 ): Promise<string> {
-  // 1. Trusted-device cookie (HMAC + DB revocation check).
-  const device = await verifyDeviceCookie(requestHeaders).catch(() => null);
-  if (device) return device.actor;
-
-  // 2. CF Access JWT.
-  const token = requestHeaders.get("Cf-Access-Jwt-Assertion");
-  const { ok, email } = await isCfAccessTokenAcceptable(token);
-  if (ok) return email ?? "receipts";
-
-  // 3. Basic auth — local dev only.
-  const configuredUsername = process.env.RECEIPTS_AUTH_USERNAME?.trim();
-  const configuredPassword = process.env.RECEIPTS_AUTH_PASSWORD;
-  if (configuredUsername && configuredPassword) {
-    const provided = decodeBasicAuthorization(requestHeaders.get("authorization"));
-    if (
-      provided &&
-      safeEqual(provided.username, configuredUsername) &&
-      safeEqual(provided.password, configuredPassword)
-    ) {
-      return provided.username;
-    }
+  const session = await auth();
+  if (!session.userId) {
+    throw new Error("Unauthorized receipts request.");
   }
-
-  throw new Error("Unauthorized receipts request.");
+  const client = await clerkClient();
+  const user = await client.users.getUser(session.userId);
+  const email = user.emailAddresses.find(
+    (e) => e.id === user.primaryEmailAddressId,
+  )?.emailAddress;
+  return email ?? user.username ?? session.userId;
 }

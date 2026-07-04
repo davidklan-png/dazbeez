@@ -95,8 +95,9 @@ export function isAdminPageAuthorized(requestHeaders: Headers) {
   );
 }
 
-export function assertAdminPageAccessFromHeaders(requestHeaders: Headers) {
-  if (!isAdminPageAuthorized(requestHeaders)) {
-    throw new Error("Unauthorized admin request.");
-  }
+export async function assertAdminPageAccessFromHeaders(
+  _requestHeaders: Headers,
+): Promise<void> {
+  const { requireOwnerActor } = await import("@/lib/clerk-owner");
+  await requireOwnerActor();
 }

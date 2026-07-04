@@ -17,7 +17,7 @@ export const metadata: Metadata = {
 export default async function DevicesPage() {
   const requestHeaders = await headers();
   const actor = await getReceiptsPageActor();
-  const isOwner = isReceiptsOwner(actor);
+  const isOwner = await isReceiptsOwner(actor);
   // Owners get the full fleet across every user; everyone else sees their own.
   const devices = isOwner
     ? await listAllDevices()

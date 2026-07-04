@@ -20,7 +20,7 @@ export async function POST(
     }
 
     // Owners can revoke any device; everyone else only their own.
-    if (isReceiptsOwner(actor)) {
+    if (await isReceiptsOwner(actor)) {
       await revokeDeviceById(id);
     } else {
       await revokeDevice(id, actor);

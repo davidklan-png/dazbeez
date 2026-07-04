@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import Image from "next/image";
 import Link from "next/link";
+import { ClerkProvider } from "@clerk/nextjs";
 import { SiteNavigation } from "@/components/site-navigation";
 import "./globals.css";
 
@@ -119,15 +120,17 @@ export default function RootLayout({
   return (
     <html lang="en" className={`${inter.variable} antialiased`}>
       <body className="min-h-screen flex flex-col">
-        <a
-          href="#main-content"
-          className="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-[60] focus:rounded-md focus:bg-amber-500 focus:px-4 focus:py-2 focus:text-white focus:shadow-lg"
-        >
-          Skip to main content
-        </a>
-        <SiteNavigation />
-        <main id="main-content" className="flex-1">{children}</main>
-        <Footer />
+        <ClerkProvider>
+          <a
+            href="#main-content"
+            className="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-[60] focus:rounded-md focus:bg-amber-500 focus:px-4 focus:py-2 focus:text-white focus:shadow-lg"
+          >
+            Skip to main content
+          </a>
+          <SiteNavigation />
+          <main id="main-content" className="flex-1">{children}</main>
+          <Footer />
+        </ClerkProvider>
       </body>
     </html>
   );
