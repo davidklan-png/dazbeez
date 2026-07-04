@@ -2,8 +2,11 @@
 
 Status: Phase 0 closed (3 of 4 secrets rotated out of the bundle; `NFC_ADMIN_API_KEY` deferred).
 Phase 1 closed Jul 4 via `clerk` CLI — see Phase 1 section for what's now verified firsthand.
-Phase 2 implemented on `feat/clerk-phase2` (commit `aaa2549`), pending S7 cf:dev sign-in test
-and S8 deploy.
+Phase 2 implemented on `feat/clerk-phase2` (commits `aaa2549`, `db77a9e`, `522bf50`), with the
+middleware `await` fix from S7 applied. cf:dev sign-in flow **cannot be verified locally** —
+production publishable keys reject `localhost` Origin (Clerk allowlist, not a code bug); see the
+Phase 2 gotcha note below. Server-side gates verified via curl. S7 sub-checks (b), (c), (d) deferred
+to the post-deploy production smoke test.
 
 The original Phase 1 status note (kept for history): Clerk app created (Production instance,
 custom domain `clerk.dazbeez.com`), keys wired (publishable in `.env.production`, secret via
@@ -186,6 +189,26 @@ cutover either. Four phases, each independently reversible.
       handler ever runs. A 404 doesn't leak whether the route exists, which is fine for an internal
       API. No frontend code observed depending on the 401 status specifically. Revisit only if it
       causes real friction.
+- [ ] **cf:dev cannot exercise the real Clerk sign-in flow with production keys.** Caught during S7:
+      the production publishable key (`pk_live_...`) rejects any request whose `Origin` is not
+      `dazbeez.com` or a subdomain. Browser DevTools shows `GET https://clerk.dazbeez.com/v1/client
+      400 (Bad Request)` and `Clerk: Production Keys are only allowed for domain "dazbeez.com"`.
+      ClerkJS hydration aborts, so `<SignIn />` renders as an empty card with no inputs. This is a
+      Clerk-side allowlist, not a code bug. Workarounds: (a) add `http://localhost:8787` to the
+      production instance's allowed origins in Clerk Dashboard → Domains & Proxy, or (b) verify
+      sign-in on the production URL instead. We chose (b) — server-side gates (middleware, redirect,
+      matcher) all verify via curl locally, and sign-in end-to-end is meaningless against anything
+      other than the real production instance anyway. **Consequence:** S7 sub-checks (b) real sign-in,
+      (c) session persistence, (d) admin/owner role verification are deferred to the post-deploy
+      production smoke test. The spike (`spike/clerk-feasibility`) only ever used test keys, which
+      don't have this restriction, so this gotcha wasn't surfaced earlier.
+- [x] **Publishable key typo caught during S7:** the key `clerk env pull --instance prod` returned
+      decoded (via base64) to `clerk.dazbeiz.com` — a typo (missing `e`). Symptom: ClerkJS script
+      tag pointed at a non-resolvable host (`clerk.dazbeiz.com` → NXDOMAIN), so the form never
+      started hydrating at all. Correct key synthesized via `echo -n 'clerk.dazbeez.com' | base64`
+      = `Y2xlcmsuZGF6YmVlei5jb20k`, prefix `pk_live_`. Fixed in `.dev.vars` and `.env.production`.
+      Root cause: stale/wrong data from `clerk env pull`. Mitigation going forward: trust the
+      Clerk Dashboard's "Frontend API URL" field, not the CLI output, when reconstructing a key.
 - [x] Add a real sign-in route at `app/(receipt-system)/receipts/sign-in/[[...sign-in]]/page.tsx` using
       `<SignIn />`. (Note the `(receipt-system)` route group — `app/receipts/sign-in/...` would not
       resolve.) `/receipts/enroll` kept alive as a redirect shim to it, in case it's bookmarked.
