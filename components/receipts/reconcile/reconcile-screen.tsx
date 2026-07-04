@@ -60,6 +60,7 @@ export interface ReconcileScreenProps {
   finalizedAt?: string | null;
   window: StatementWindow | null;
   receiptsInWindow: ReceiptRecord[];
+  attendeesByReceiptId: Map<string, string[]>;
 }
 
 type Tab = "lines" | "orphans" | "trips";
@@ -428,6 +429,7 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
         <DetailPane
           active={active}
           receiptMap={receiptMap}
+          attendeesByReceiptId={props.attendeesByReceiptId}
           locked={locked}
           busyLineId={busy}
           onConfirm={(line, receiptId) =>
@@ -804,6 +806,7 @@ function OrphansList({
 function DetailPane({
   active,
   receiptMap,
+  attendeesByReceiptId,
   locked,
   busyLineId,
   onConfirm,
@@ -818,6 +821,7 @@ function DetailPane({
     match: ReconciliationMatch | undefined;
   } | null;
   receiptMap: Map<string, ReceiptRecord>;
+  attendeesByReceiptId: Map<string, string[]>;
   locked: boolean;
   busyLineId: string | null;
   onConfirm: (line: AmexStatementLine, receiptId: string) => void;
@@ -844,6 +848,9 @@ function DetailPane({
   const { line, band, match } = active;
   const receiptId = line.matched_receipt_id ?? match?.receiptId ?? null;
   const receipt = receiptId ? receiptMap.get(receiptId) ?? null : null;
+  const receiptAttendeeNames = receiptId
+    ? attendeesByReceiptId.get(receiptId) ?? []
+    : [];
   const color = BAND_DISPLAY[band];
   const busy = busyLineId === line.id;
   const showNoReceiptFields =
@@ -1018,35 +1025,51 @@ function DetailPane({
           <span className="text-[13.5px] font-semibold text-gray-900">
             Tax-ready classification
           </span>
-          {!line.expense_category_code && (
+          {!receipt && !line.expense_category_code && (
             <Pill tone="amber" size="sm">
               category needed
             </Pill>
           )}
           <span className="flex-1" />
           <span className="text-[11.5px] text-gray-500">
-            Auto-saves on change
+            {receipt
+              ? "From linked receipt — edit there"
+              : "Auto-saves on change"}
           </span>
         </div>
         <div className="grid grid-cols-1 gap-3.5 p-5 md:grid-cols-2">
-          <Field label="Expense category" required>
-            <SelectInput
-              disabled={locked}
-              value={line.expense_category_code ?? ""}
-              onChange={(e) => onUpdateCategory(line.id, e.target.value)}
-              options={[
-                { value: "", label: "— Select —" },
-                ...EXPENSE_CATEGORIES.map((c) => ({
-                  value: c.code,
-                  label: formatCategoryLabel(c.code),
-                })),
-              ]}
-            />
-          </Field>
+          {receipt ? (
+            <Field label="Expense category" hint="from linked receipt">
+              <TextInput
+                value={
+                  receipt.expense_category_code
+                    ? formatCategoryLabel(receipt.expense_category_code)
+                    : ""
+                }
+                readOnly
+                placeholder="Not set on receipt"
+              />
+            </Field>
+          ) : (
+            <Field label="Expense category" required>
+              <SelectInput
+                disabled={locked}
+                value={line.expense_category_code ?? ""}
+                onChange={(e) => onUpdateCategory(line.id, e.target.value)}
+                options={[
+                  { value: "", label: "— Select —" },
+                  ...EXPENSE_CATEGORIES.map((c) => ({
+                    value: c.code,
+                    label: formatCategoryLabel(c.code),
+                  })),
+                ]}
+              />
+            </Field>
+          )}
           <Field label="Tax rate">
             <TextInput value="10% (standard)" readOnly />
           </Field>
-          {showNoReceiptFields && (
+          {!receipt && showNoReceiptFields && (
             <NoReceiptFields
               key={line.id}
               line={line}
@@ -1054,28 +1077,55 @@ function DetailPane({
               onUpdateLineDetails={onUpdateLineDetails}
             />
           )}
-          <Field label="Business purpose" hint="optional unless required">
-            <TextInput
-              value={line.memo ?? ""}
-              readOnly
-              placeholder="Set on the linked receipt"
-            />
-          </Field>
-          <Field
-            label="Attendees"
-            hint={
-              line.expense_category_code &&
-              categoryRequiresAttendees(line.expense_category_code)
-                ? "required"
-                : "not required for this category"
-            }
-          >
-            <div className="flex min-h-[38px] items-center gap-1.5 rounded-lg border border-dashed border-gray-300 px-2 py-2 text-[13px] text-gray-400">
-              <span className="flex-1">
-                Edit attendees on the linked receipt
-              </span>
-            </div>
-          </Field>
+          {receipt ? (
+            <Field label="Business purpose" hint="from linked receipt">
+              <TextInput
+                value={receipt.business_purpose ?? ""}
+                readOnly
+                placeholder="Not set on receipt"
+              />
+            </Field>
+          ) : (
+            <Field label="Business purpose" hint="optional unless required">
+              <TextInput
+                value={line.memo ?? ""}
+                readOnly
+                placeholder="Set on the linked receipt"
+              />
+            </Field>
+          )}
+          {receipt ? (
+            <Field
+              label="Attendees"
+              hint={
+                receiptAttendeeNames.length > 0
+                  ? `${receiptAttendeeNames.length} from linked receipt`
+                  : "none on linked receipt"
+              }
+            >
+              <TextInput
+                value={receiptAttendeeNames.join(", ")}
+                readOnly
+                placeholder="No attendees on the linked receipt"
+              />
+            </Field>
+          ) : (
+            <Field
+              label="Attendees"
+              hint={
+                line.expense_category_code &&
+                categoryRequiresAttendees(line.expense_category_code)
+                  ? "required"
+                  : "not required for this category"
+              }
+            >
+              <div className="flex min-h-[38px] items-center gap-1.5 rounded-lg border border-dashed border-gray-300 px-2 py-2 text-[13px] text-gray-400">
+                <span className="flex-1">
+                  Edit attendees on the linked receipt
+                </span>
+              </div>
+            </Field>
+          )}
         </div>
       </Card>
 

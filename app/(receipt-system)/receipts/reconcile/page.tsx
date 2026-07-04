@@ -4,6 +4,7 @@ import {
   getReconciliationForMonth,
   listAmexLineCountsByMonth,
   listReconciliationStatusByMonth,
+  listAttendeeNamesByReceiptIds,
 } from "@/lib/receipts/db";
 import { matchAmexToReceipts } from "@/lib/receipts/reconciliation";
 import {
@@ -81,6 +82,20 @@ export default async function ReconcilePage({
       !suggestedReceiptIds.has(r.id),
   );
 
+  // Bulk-fetch attendee names once for every receipt that could be shown in
+  // the detail pane (matched on a line, suggested by the matcher, or visible
+  // as an orphan). Single query — keeps the detail pane N+1-free.
+  const attendeeReceiptIds = Array.from(
+    new Set([
+      ...linkedReceiptIds,
+      ...suggestedReceiptIds,
+      ...orphanReceipts.map((r) => r.id),
+    ]),
+  );
+  const attendeesByReceiptId = await listAttendeeNamesByReceiptIds(
+    attendeeReceiptIds,
+  );
+
   return (
     <ReconcileScreen
       amexLines={amexLines}
@@ -94,6 +109,7 @@ export default async function ReconcilePage({
       finalizedAt={reconciliation?.finalized_at ?? null}
       window={window}
       receiptsInWindow={receiptsInWindow}
+      attendeesByReceiptId={attendeesByReceiptId}
     />
   );
 }

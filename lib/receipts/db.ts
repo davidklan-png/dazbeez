@@ -463,6 +463,36 @@ export async function listAttendees(
   return result.results ?? [];
 }
 
+// Bulk variant for screens that need attendee names across many receipts in a
+// single query (e.g. reconcile detail pane iterating over multiple matched
+// lines). Empty input returns an empty Map — D1 rejects empty IN (...) lists.
+export async function listAttendeeNamesByReceiptIds(
+  receiptIds: string[],
+): Promise<Map<string, string[]>> {
+  const out = new Map<string, string[]>();
+  if (receiptIds.length === 0) return out;
+  const db = getReceiptsDb();
+  const placeholders = receiptIds.map(() => "?").join(", ");
+  const result = await db
+    .prepare(
+      `SELECT receipt_id, attendee_name
+       FROM receipt_attendees
+       WHERE receipt_id IN (${placeholders})
+       ORDER BY created_at ASC`,
+    )
+    .bind(...receiptIds)
+    .all<{ receipt_id: string; attendee_name: string }>();
+  for (const row of result.results ?? []) {
+    let arr = out.get(row.receipt_id);
+    if (!arr) {
+      arr = [];
+      out.set(row.receipt_id, arr);
+    }
+    arr.push(row.attendee_name);
+  }
+  return out;
+}
+
 // ─── AMEX statement lines ─────────────────────────────────────────────────────
 
 export async function importAmexLines(
