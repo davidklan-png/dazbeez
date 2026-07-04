@@ -5,18 +5,24 @@ import {
   requireReceiptsActor,
 } from "@/lib/receipts/auth";
 
-// Used by receipt pages before rendering protected content. Keeps to cheap
-// checks only (HMAC cookie, CF Access header presence) so page loads avoid
-// unnecessary D1 work and Worker CPU pressure.
+// Used by receipt pages before rendering protected content. The proxy already
+// gates these routes via Clerk, so this is now defense-in-depth: if the proxy
+// somehow let an unauthenticated request through, redirect to sign-in.
 export async function assertReceiptsPageAccess(): Promise<void> {
   const requestHeaders = await headers();
   const ok = await isReceiptsAuthorizedLight(requestHeaders);
-  if (!ok) redirect("/receipts/enroll");
+  if (!ok) redirect("/receipts/sign-in");
 }
 
 // Used by pages that need to know who is acting (actor shown in UI,
-// written to audit log). Runs the full check including DB revocation —
-// single pass, one verifyDeviceCookie round-trip.
+// written to audit log). Identity comes from Clerk via requireReceiptsActor.
+// The proxy guarantees a valid session by the time we get here; the try/catch
+// is defense-in-depth (clerkClient network failure, etc.) so a transient
+// error redirects to sign-in instead of crashing the page.
 export async function getReceiptsPageActor(): Promise<string> {
-  return requireReceiptsActor(await headers());
+  try {
+    return await requireReceiptsActor(await headers());
+  } catch {
+    redirect("/receipts/sign-in");
+  }
 }

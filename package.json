@@ -16,6 +16,7 @@
     "test": "tsx --test tests/**/*.test.ts"
   },
   "dependencies": {
+    "@clerk/nextjs": "^7.5.12",
     "@opennextjs/cloudflare": "^1.19.1",
     "@reactflow/background": "^11.3.14",
     "@reactflow/controls": "^11.2.14",
