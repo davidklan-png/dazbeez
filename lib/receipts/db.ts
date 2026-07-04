@@ -1024,9 +1024,16 @@ export async function getAmexArtifactBySha256(
   sha256: string,
 ): Promise<AmexStatementArtifact | null> {
   const db = getReceiptsDb();
+  // Exclude 'failed' and 'replaced' artifacts — a prior import that failed
+  // validation never actually inserted any line items, so it must not
+  // permanently block re-uploading the identical file once the underlying
+  // issue is fixed (e.g. a parser bug). Same filter as getAmexArtifactByMonth
+  // below, for the same reason.
   return db
     .prepare(
-      `SELECT * FROM amex_statement_artifacts WHERE sha256_hash = ? LIMIT 1`,
+      `SELECT * FROM amex_statement_artifacts
+       WHERE sha256_hash = ? AND import_status NOT IN ('failed', 'replaced')
+       ORDER BY created_at DESC LIMIT 1`,
     )
     .bind(sha256)
     .first<AmexStatementArtifact>();
