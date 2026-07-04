@@ -558,6 +558,12 @@ export interface ImportAmexLineInput {
   memo?: string;
   rawCsvLineNumber?: number;
   sourceFileSha256?: string;
+  // Set on rows the parser identifies as real charges with no receipt
+  // possible (e.g. annual card fees with no 利用日). Only applied on first
+  // insert — see importAmexLines, which never overwrites reconciliation
+  // state (receipt_status/receipt_missing_reason) on re-import.
+  receiptStatus?: AmexReceiptStatus;
+  receiptMissingReason?: string;
 }
 
 export interface CreateAmexArtifactInput {

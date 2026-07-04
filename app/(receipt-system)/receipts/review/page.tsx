@@ -8,6 +8,7 @@ import { assertReceiptsPageAccess } from "@/lib/receipts/auth-request";
 import { ReviewLayout } from "@/components/receipts/review/review-layout";
 import { QueueRail } from "@/components/receipts/review/queue-rail";
 import { buildQueueItems } from "@/lib/receipts/queue-items";
+import { getExtractionHealth } from "@/lib/receipts/extraction-state";
 import {
   InlineServerError,
   isNextInternalError,
@@ -60,6 +61,7 @@ async function renderReviewPage(
       activeFilter={filter}
       needsAttention={needsAttention}
       capturedThisMonth={receipts.length}
+      ocrHealth={getExtractionHealth(receipts)}
       queueRail={
         <QueueRail
           items={queueItems}

@@ -3,6 +3,8 @@ import Link from "next/link";
 import { Pill } from "@/components/ui/pill";
 import { SearchIcon } from "@/components/ui/icons";
 import { KeyboardHintBar } from "@/components/receipts/ui/keyboard-hint-bar";
+import { OcrHealthChip } from "@/components/receipts/review/ocr-health-chip";
+import type { ExtractionHealth } from "@/lib/receipts/extraction-state";
 
 const REVIEW_HINTS = [
   ["j / k", "next · prev"],
@@ -27,6 +29,7 @@ export function ReviewLayout({
   formPane,
   needsAttention,
   capturedThisMonth,
+  ocrHealth,
   activeFilter,
   savedAtLabel,
 }: {
@@ -35,6 +38,7 @@ export function ReviewLayout({
   formPane: ReactNode;
   needsAttention: number;
   capturedThisMonth: number;
+  ocrHealth?: ExtractionHealth;
   activeFilter?: string | null;
   savedAtLabel?: string;
 }) {
@@ -43,6 +47,7 @@ export function ReviewLayout({
       <SubHeader
         needsAttention={needsAttention}
         capturedThisMonth={capturedThisMonth}
+        ocrHealth={ocrHealth}
         activeFilter={activeFilter ?? null}
       />
       {/* Phone: stack queue → image → form so each pane is full-width and
@@ -72,10 +77,12 @@ export function ReviewLayout({
 function SubHeader({
   needsAttention,
   capturedThisMonth,
+  ocrHealth,
   activeFilter,
 }: {
   needsAttention: number;
   capturedThisMonth: number;
+  ocrHealth?: ExtractionHealth;
   activeFilter: string | null;
 }) {
   return (
@@ -90,6 +97,7 @@ function SubHeader({
         <span className="text-xs text-gray-400">
           · {capturedThisMonth} captured this month
         </span>
+        {ocrHealth && <OcrHealthChip health={ocrHealth} />}
       </div>
       <span className="flex-1" />
       <div className="hidden gap-1.5 md:flex">

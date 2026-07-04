@@ -556,11 +556,14 @@ export async function importAmexLines(
   // ── Chunked INSERT … ON CONFLICT DO UPDATE (with amex_reference) ────────
   const withRef = rows.filter((r) => !!r.amexReference);
   const withoutRef = rows.filter((r) => !r.amexReference);
-  // Each row binds 19 params (match_status is the SQL literal 'unmatched').
-  // 19 × 5 = 95 < 100 (D1 bind-variable ceiling).
-  const CHUNK_SIZE = 5;
+  // Each row binds 21 params (match_status is the SQL literal 'unmatched').
+  // receipt_status / receipt_missing_reason are set on first insert only
+  // (parser-flagged no-receipt-required lines, e.g. undated annual fees) —
+  // re-imports never overwrite them; see ON CONFLICT below.
+  // 21 × 4 = 84 < 100 (D1 bind-variable ceiling).
+  const CHUNK_SIZE = 4;
   const rowPlaceholder =
-    "(?, ?, ?, ?, ?, ?, ?, ?, 'unmatched', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+    "(?, ?, ?, ?, ?, ?, ?, ?, 'unmatched', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
   for (let i = 0; i < withRef.length; i += CHUNK_SIZE) {
     const chunk = withRef.slice(i, i + CHUNK_SIZE);
@@ -576,6 +579,8 @@ export async function importAmexLines(
         row.amountMinor,
         row.currency ?? "JPY",
         row.amexReference ?? null,
+        row.receiptStatus ?? "missing_receipt",
+        row.receiptMissingReason ?? null,
         row.rawJson,
         row.statementArtifactId ?? null,
         row.cardholderName ?? null,
@@ -593,10 +598,10 @@ export async function importAmexLines(
       .prepare(
         `INSERT INTO amex_statement_lines
           (id, statement_month, transaction_date, posting_date, merchant,
-           amount_minor, currency, amex_reference, match_status, raw_json,
-           statement_artifact_id, cardholder_name, cardholder_flag, payment_type,
-           prepayment_flag, memo, raw_csv_line_number, source_file_sha256,
-           imported_at, created_at)
+           amount_minor, currency, amex_reference, match_status, receipt_status,
+           receipt_missing_reason, raw_json, statement_artifact_id, cardholder_name,
+           cardholder_flag, payment_type, prepayment_flag, memo, raw_csv_line_number,
+           source_file_sha256, imported_at, created_at)
          VALUES ${placeholders}
          ON CONFLICT (statement_month, amex_reference, cardholder_name) DO UPDATE SET
            transaction_date = excluded.transaction_date,
@@ -639,6 +644,8 @@ export async function importAmexLines(
         row.amountMinor,
         row.currency ?? "JPY",
         row.amexReference ?? null,
+        row.receiptStatus ?? "missing_receipt",
+        row.receiptMissingReason ?? null,
         row.rawJson,
         row.statementArtifactId ?? null,
         row.cardholderName ?? null,
@@ -656,10 +663,10 @@ export async function importAmexLines(
       .prepare(
         `INSERT INTO amex_statement_lines
           (id, statement_month, transaction_date, posting_date, merchant,
-           amount_minor, currency, amex_reference, match_status, raw_json,
-           statement_artifact_id, cardholder_name, cardholder_flag, payment_type,
-           prepayment_flag, memo, raw_csv_line_number, source_file_sha256,
-           imported_at, created_at)
+           amount_minor, currency, amex_reference, match_status, receipt_status,
+           receipt_missing_reason, raw_json, statement_artifact_id, cardholder_name,
+           cardholder_flag, payment_type, prepayment_flag, memo, raw_csv_line_number,
+           source_file_sha256, imported_at, created_at)
          VALUES ${placeholders}
          ON CONFLICT (statement_month, transaction_date, amount_minor, merchant, cardholder_name)
            WHERE amex_reference IS NULL

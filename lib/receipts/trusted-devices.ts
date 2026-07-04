@@ -265,6 +265,33 @@ export async function revokeDevice(id: string, actor: string): Promise<void> {
     .run();
 }
 
+/**
+ * All active devices across every actor (owner/admin view). Same row shape as
+ * listDevicesForActor; each row's `actor` identifies the device's owner.
+ */
+export async function listAllDevices(): Promise<TrustedDeviceRow[]> {
+  const db = getReceiptsDb();
+  const result = await db
+    .prepare(
+      `SELECT id, actor, label, user_agent, created_at, last_seen_at, revoked_at,
+              platform, app_version, scopes_json
+       FROM trusted_devices WHERE revoked_at IS NULL ORDER BY created_at DESC`,
+    )
+    .all<TrustedDeviceRow>();
+  return result.results ?? [];
+}
+
+/** Revoke any device by id regardless of owner. Gated to owners in the route. */
+export async function revokeDeviceById(id: string): Promise<void> {
+  const db = getReceiptsDb();
+  await db
+    .prepare(
+      `UPDATE trusted_devices SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL`,
+    )
+    .bind(nowIso(), id)
+    .run();
+}
+
 // Returns the device id currently identified by the cookie (if any), for
 // highlighting "This device" in the device list.
 export async function getCurrentDeviceId(headers: Headers): Promise<string | null> {

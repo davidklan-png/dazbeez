@@ -1,7 +1,9 @@
 import type { Metadata } from "next";
 import { headers } from "next/headers";
-import { requireReceiptsActor } from "@/lib/receipts/auth";
+import { getReceiptsPageActor } from "@/lib/receipts/auth-request";
+import { isReceiptsOwner } from "@/lib/receipts/owners";
 import {
+  listAllDevices,
   listDevicesForActor,
   getCurrentDeviceId,
 } from "@/lib/receipts/trusted-devices";
@@ -14,8 +16,12 @@ export const metadata: Metadata = {
 
 export default async function DevicesPage() {
   const requestHeaders = await headers();
-  const actor = await requireReceiptsActor(requestHeaders);
-  const devices = await listDevicesForActor(actor);
+  const actor = await getReceiptsPageActor();
+  const isOwner = isReceiptsOwner(actor);
+  // Owners get the full fleet across every user; everyone else sees their own.
+  const devices = isOwner
+    ? await listAllDevices()
+    : await listDevicesForActor(actor);
   const currentDeviceId = await getCurrentDeviceId(requestHeaders);
 
   return (
@@ -28,11 +34,21 @@ export default async function DevicesPage() {
           Trusted devices
         </h1>
         <p className="mt-1 text-sm text-gray-600">
-          Devices below skip the email login for one year. Signed in as{" "}
-          <span className="font-medium text-gray-900">{actor}</span>.
+          {isOwner ? (
+            <>
+              Owner view — every enrolled device across all users. Signed in as{" "}
+              <span className="font-medium text-gray-900">{actor}</span>.
+            </>
+          ) : (
+            <>
+              Devices below skip the email login for one year. Signed in as{" "}
+              <span className="font-medium text-gray-900">{actor}</span>.
+            </>
+          )}
         </p>
       </div>
       <DeviceList
+        isOwnerView={isOwner}
         devices={devices.map((d) => ({
           id: d.id,
           label: d.label,
@@ -42,6 +58,7 @@ export default async function DevicesPage() {
           isCurrent: currentDeviceId === d.id,
           platform: d.platform,
           appVersion: d.app_version,
+          owner: isOwner ? d.actor : null,
         }))}
       />
     </div>

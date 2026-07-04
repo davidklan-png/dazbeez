@@ -20,5 +20,7 @@ declare namespace NodeJS {
     RECEIPTS_AUTH_PASSWORD?: string;
     RECEIPTS_DEVICE_SECRET?: string;
     RECEIPTS_PROCESSOR_KEY?: string;
+    // Comma-separated owner emails; owners see/manage all trusted devices.
+    RECEIPTS_OWNER_EMAILS?: string;
   }
 }

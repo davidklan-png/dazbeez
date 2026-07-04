@@ -1,9 +1,11 @@
 import { NextResponse } from "next/server";
 import { requireReceiptsActor } from "@/lib/receipts/auth";
+import { isReceiptsOwner } from "@/lib/receipts/owners";
 import {
   buildClearDeviceCookie,
   getCurrentDeviceId,
   revokeDevice,
+  revokeDeviceById,
 } from "@/lib/receipts/trusted-devices";
 
 export async function POST(
@@ -17,7 +19,12 @@ export async function POST(
       return NextResponse.json({ error: "Device id required." }, { status: 400 });
     }
 
-    await revokeDevice(id, actor);
+    // Owners can revoke any device; everyone else only their own.
+    if (isReceiptsOwner(actor)) {
+      await revokeDeviceById(id);
+    } else {
+      await revokeDevice(id, actor);
+    }
 
     const currentDeviceId = await getCurrentDeviceId(request.headers);
     const isCurrent = currentDeviceId === id;

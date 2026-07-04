@@ -126,6 +126,14 @@ export interface NetanswerParsedLine {
   currency: string;
   memo: string | null;
   rawFields: string[];
+  // True when this row had no 利用日 (usage date) in the CSV — e.g. an annual
+  // card fee, late fee, or interest adjustment. These are real charges that
+  // count toward the statement total but are billed on a fixed schedule
+  // rather than tied to a purchase, so no receipt will ever exist for them.
+  // transactionDate is backfilled with the statement's payment due date (or
+  // the statement month) purely so the NOT NULL column has a sortable value.
+  noReceiptRequired: boolean;
+  noReceiptReason: string | null;
 }
 
 export interface SkippedLineInfo {
@@ -229,7 +237,6 @@ export function parseAmexNetanswer(
   buffer: ArrayBuffer,
   _statementMonth: string,
 ): NetanswerParseResult {
-  void _statementMonth;
   const { text, encoding } = decodeAmexBuffer(buffer);
   const rawLines = text.split(/\r?\n/);
 
@@ -293,15 +300,19 @@ export function parseAmexNetanswer(
     // Skip subtotal / total rows
     if (col1 === "【小計】" || col1 === "【合計】") continue;
 
-    // Transaction row: col0 matches date. A non-date col0 here means the row
-    // is not a transaction — silently skip (it's expected to hit header /
-    // metadata / blank rows that fell through the explicit handlers above).
+    // Transaction row: normally col0 is the 利用日 (usage date). Netアンサー
+    // also emits real charge lines with NO date — annual card fees
+    // (カード年会費) are the known case, but late fees / interest / other
+    // fixed adjustments follow the same shape. These still count toward
+    // 今回ご請求額 (the statement total), so treating "no date" as "not a
+    // transaction" silently drops real money and breaks the total
+    // reconciliation check below (see incident: ¥36,300 of annual fees
+    // dropped from the 2026-07 Saison statement). Instead: any row here with
+    // a description in col1 is a real charge; only fall back to skipping if
+    // col1 is empty (blank/malformed row).
     const txDate = parseAmexDate(col0);
-    if (!txDate) continue;
+    const isUndatedChargeLine = !txDate;
 
-    // From here on the row is shaped like a transaction (date-led). If we
-    // bail out below we record the line + reason so the import surfaces
-    // partial data loss instead of silently dropping rows.
     const merchantName = col1;
     if (!merchantName) {
       skippedLines.push({ lineNumber: i + 1, reason: "missing merchant" });
@@ -349,17 +360,28 @@ export function parseAmexNetanswer(
     }
     const amountCents = isNegative ? -magnitude : magnitude;
 
+    // Undated charge lines (annual fees, etc.) have no 利用日 to store in the
+    // NOT NULL transaction_date column. Fall back to the statement's payment
+    // due date, then the statement month, so the row still sorts sensibly
+    // and the true reason (no receipt exists / possible) is preserved.
+    const effectiveDate =
+      txDate ?? metadata.paymentDueDate ?? `${_statementMonth}-01`;
+
     lines.push({
       lineNumber: i + 1,
       cardholderName: currentCardholder,
       cardholderFlag: txCardholderFlag || currentCardholderFlag,
-      transactionDate: txDate,
+      transactionDate: effectiveDate,
       merchantName,
       paymentType,
       prepaymentFlag,
       amountCents,
       currency: "JPY",
       memo: memo || null,
+      noReceiptRequired: isUndatedChargeLine,
+      noReceiptReason: isUndatedChargeLine
+        ? `No 利用日 (usage date) on statement for "${merchantName}" — fixed/recurring charge, no receipt applicable.`
+        : null,
       rawFields: fields,
     });
   }
@@ -418,6 +440,8 @@ export function netanswerLinesToImportInputs(
     memo: l.memo ?? undefined,
     rawCsvLineNumber: l.lineNumber,
     sourceFileSha256: sha256,
+    receiptStatus: l.noReceiptRequired ? "no_receipt_required" : undefined,
+    receiptMissingReason: l.noReceiptReason ?? undefined,
   }));
 }
 

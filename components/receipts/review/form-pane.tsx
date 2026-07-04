@@ -11,6 +11,7 @@ import { FormGroup } from "@/components/receipts/ui/form-group";
 import { PaymentPathSeg } from "@/components/receipts/ui/payment-path-seg";
 import { AttendeeEditor } from "@/components/receipts/attendee-editor";
 import { useKeyboardShortcuts } from "@/lib/receipts/keyboard";
+import { isPendingProcessing } from "@/lib/receipts/extraction-state";
 import { RECEIPT_ATTENDEE_DIRECTORY } from "@/lib/receipts/attendee-directory";
 import {
   EXPENSE_CATEGORIES,
@@ -60,6 +61,12 @@ export interface FormPaneProps {
 export function FormPane(props: FormPaneProps) {
   const router = useRouter();
   const { receipt } = props;
+
+  // OCR runs on the Mac processor, not here. While the receipt is still pending
+  // there is no stored OCR text, so the reprocess button (which only re-parses
+  // stored text — it does NOT run OCR) can do nothing. Disable + relabel it so
+  // it stops promising an action it can't perform (ADR 0001).
+  const pendingProcessing = isPendingProcessing(receipt);
 
   // ─── form state ─────────────────────────────────────────────────────
   const [paymentPath, setPaymentPath] = useState<PaymentPath>(receipt.payment_path);
@@ -410,10 +417,20 @@ export function FormPane(props: FormPaneProps) {
               kind="ghost"
               size="sm"
               onClick={handleExtract}
-              disabled={extractionBusy}
+              disabled={extractionBusy || pendingProcessing}
             >
-              {extractionBusy ? "Extracting…" : "Re-run OCR extraction"}
+              {pendingProcessing
+                ? "Waiting for processor…"
+                : extractionBusy
+                  ? "Re-parsing…"
+                  : "Re-parse OCR text"}
             </Btn>
+            {pendingProcessing && !extractionFeedback && (
+              <span className="ml-2 text-[11.5px] text-gray-500">
+                OCR runs on the Mac processor — this receipt is still in the
+                queue.
+              </span>
+            )}
             {extractionFeedback && (
               <span className="ml-2 text-[11.5px] text-gray-500">
                 {extractionFeedback}
