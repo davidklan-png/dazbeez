@@ -462,6 +462,81 @@ test("parseAmexNetanswer: △ (Japanese negative marker) is treated as a refund"
   assert.equal(result.validationErrors.length, 0);
 });
 
+// ─── Undated charge lines (annual fees, etc.) ───────────────────────────────
+
+test("parseAmexNetanswer: imports undated charge lines (e.g. annual fee) instead of dropping them", () => {
+  // Regression test for the 2026-07 Saison statement: カード年会費(本会員)
+  // has no 利用日 but is a real charge that counts toward 今回ご請求額. The
+  // parser previously required col0 to parse as a date, silently dropping
+  // this row and breaking the total reconciliation.
+  const csv = [
+    "カード名称,TestCard",
+    "お支払日,2026/07/06",
+    "今回ご請求額,0034000",
+    "",
+    "利用日,ご利用店名及び商品名,本人・家族区分,支払区分名称,締前入金区分,利用金額,備考",
+    ",ご利用者名:テスト 様,,,,,",
+    "2026/06/01,コンビニ,,1回,,1000,",
+    ",カード年会費(本会員),,,,33000,",
+    ",【小計】,,,,34000,",
+    ",【合計】,,,,34000,",
+  ].join("\n");
+  const result = parseAmexNetanswer(toBuffer(csv), "2026-07");
+  assert.equal(result.lines.length, 2);
+  assert.equal(result.parsedTotalCents, 34000);
+  assert.equal(result.validationErrors.length, 0);
+
+  const fee = result.lines.find((l) => l.merchantName === "カード年会費(本会員)");
+  assert.ok(fee, "annual fee line should be imported, not dropped");
+  assert.equal(fee!.amountCents, 33000);
+  assert.equal(fee!.noReceiptRequired, true);
+  assert.ok(fee!.noReceiptReason);
+  // No 利用日 on the statement — falls back to the payment due date so the
+  // NOT NULL transaction_date column still gets a sensible value.
+  assert.equal(fee!.transactionDate, "2026-07-06");
+
+  const dated = result.lines.find((l) => l.merchantName === "コンビニ");
+  assert.equal(dated!.noReceiptRequired, false);
+  assert.equal(dated!.noReceiptReason, null);
+});
+
+test("parseAmexNetanswer: undated charge line falls back to statement month when payment due date is missing", () => {
+  const csv = [
+    "カード名称,TestCard",
+    "今回ご請求額,0033000",
+    "",
+    "利用日,ご利用店名及び商品名,本人・家族区分,支払区分名称,締前入金区分,利用金額,備考",
+    ",ご利用者名:テスト 様,,,,,",
+    ",カード年会費(本会員),,,,33000,",
+  ].join("\n");
+  const result = parseAmexNetanswer(toBuffer(csv), "2026-07");
+  assert.equal(result.lines.length, 1);
+  assert.equal(result.lines[0]!.transactionDate, "2026-07-01");
+});
+
+test("netanswerLinesToImportInputs: flags undated charge lines as no_receipt_required", () => {
+  const csv = [
+    "カード名称,TestCard",
+    "お支払日,2026/07/06",
+    "今回ご請求額,0034000",
+    "",
+    "利用日,ご利用店名及び商品名,本人・家族区分,支払区分名称,締前入金区分,利用金額,備考",
+    ",ご利用者名:テスト 様,,,,,",
+    "2026/06/01,コンビニ,,1回,,1000,",
+    ",カード年会費(本会員),,,,33000,",
+  ].join("\n");
+  const { lines } = parseAmexNetanswer(toBuffer(csv), "2026-07");
+  const inputs = netanswerLinesToImportInputs(lines, "2026-07", "artifact-1", "sha256abc");
+
+  const feeInput = inputs.find((i) => i.merchant === "カード年会費(本会員)");
+  assert.equal(feeInput!.receiptStatus, "no_receipt_required");
+  assert.ok(feeInput!.receiptMissingReason);
+
+  const datedInput = inputs.find((i) => i.merchant === "コンビニ");
+  assert.equal(datedInput!.receiptStatus, undefined);
+  assert.equal(datedInput!.receiptMissingReason, undefined);
+});
+
 test("parseAmexNetanswer: handles comma thousands separators in metadata total", () => {
   const csv = [
     "カード名称,TestCard",
