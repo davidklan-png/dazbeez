@@ -37,6 +37,8 @@ interface ImportResult {
   message?: string;
   validationErrors?: string[];
   error?: string;
+  /** Audit B3: non-fatal post-import warnings (e.g. trip detection failed). */
+  warnings?: string[];
 }
 
 interface SkippedLineInfo {
@@ -316,6 +318,16 @@ function ImportResultSummary({ result }: { result: ImportResult }) {
                 + {result.skippedLines!.length - 5} more
               </li>
             )}
+          </ul>
+        </div>
+      )}
+      {(result.warnings?.length ?? 0) > 0 && (
+        <div className="mt-3 rounded-lg border border-amber-300 bg-amber-100 px-3 py-2 text-xs text-amber-900">
+          <p className="font-semibold">Import completed with warnings:</p>
+          <ul className="mt-1 list-disc pl-5">
+            {result.warnings!.map((w, i) => (
+              <li key={i}>{w}</li>
+            ))}
           </ul>
         </div>
       )}

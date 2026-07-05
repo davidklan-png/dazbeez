@@ -13,7 +13,7 @@ import type { CapturePhase } from "./use-receipt-upload";
 export interface CaptureMobileProps {
   initialPayment: PaymentPath | null;
   rapidMode: boolean;
-  todayCount: number;
+  todayCount: number | null;
   phase: CapturePhase;
   onPickFile: (file: File) => void;
   onCancel: () => void;
@@ -79,7 +79,7 @@ function CaptureIdleMobile({
   onTapCapture,
   error,
 }: {
-  todayCount: number;
+  todayCount: number | null;
   paymentChip: PaymentPath | null;
   setPaymentChip: (p: PaymentPath | null) => void;
   onTapCapture: () => void;
@@ -363,7 +363,23 @@ function MobileHeader({
         <BeeMark size={22} />
         <span className="text-[13px] font-semibold">{label}</span>
       </div>
-      {queueCount !== null && (
+      {queueCount === null ? (
+        // Audit B1: query failed — show "—" with a tooltip instead of
+        // silently rendering a confident "0 today".
+        <div
+          title="Today's capture count is unavailable."
+          className={[
+            "flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs",
+            dark
+              ? "border border-white/10 bg-white/5"
+              : "border border-gray-200 bg-white",
+          ].join(" ")}
+        >
+          <span className="h-[7px] w-[7px] rounded-full bg-gray-400" />
+          <span className="font-semibold tabular-nums text-gray-500">—</span>
+          <span className={dark ? "text-white/55" : "text-gray-500"}>today</span>
+        </div>
+      ) : (
         <div
           className={[
             "flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs",

@@ -30,13 +30,21 @@ export async function GET(request: Request, { params }: RouteContext) {
     const settings = await getComplianceSettings();
 
     // Refresh checks for every receipt in the month so the report reflects
-    // current state. This is idempotent.
+    // current state. This is idempotent. Audit B2: a per-receipt check
+    // failure no longer silently skips the receipt — its id is captured and
+    // surfaced in the response so the operator knows the report is partial.
     const receipts = await listReceiptRecords({ month, limit: 1000 });
+    const checkFailedReceiptIds: string[] = [];
     for (const r of receipts) {
       try {
         await runComplianceChecksForReceipt(db, r.id, settings);
-      } catch {
-        // Per-receipt check failure shouldn't block the report.
+      } catch (err) {
+        console.error(
+          "[api/receipts/compliance/[month]] check failed for receipt",
+          r.id,
+          err,
+        );
+        checkFailedReceiptIds.push(r.id);
       }
     }
 
@@ -55,6 +63,10 @@ export async function GET(request: Request, { params }: RouteContext) {
         amexLineCount: lines.length,
         missingReceiptLines: missingReceipt,
         complianceSummary: summary,
+        // Audit B2: surface partial-report state instead of silently
+        // skipping receipts whose check threw.
+        checkFailures: checkFailedReceiptIds.length,
+        checkFailedReceiptIds,
         disclaimer: {
           en: ACCOUNTANT_DISCLAIMER_EN,
           ja: ACCOUNTANT_DISCLAIMER_JA,

@@ -22,7 +22,23 @@ Do the following:
 
 6. **End-to-end dry run.** With at least one receipt sitting in the queue (status `captured`), run `./run.sh --once`. Confirm it pulls the job, fetches the R2 image, runs the model, POSTs to the extract endpoint, and the receipt advances to `needs_review` with fields populated. Show the consumer log.
 
-7. **Optional autostart.** If I confirm, install the launchd agent (`com.dazbeez.receipts-consumer.plist`) per the comments in that file so the queue drains on login/wake.
+7. **Optional autostart.** If I confirm, install the launchd agent (`com.dazbeez.receipts-consumer.plist`) per the comments in that file so the queue drains on login/wake. Also create the log directory and install the newsyslog rotation entry so logs persist across reboots and don't grow unbounded:
+
+   ```sh
+   # 1. Persistent log directory (~/Library/Logs survives reboot; /tmp does not).
+   mkdir -p ~/Library/Logs/dazbeez
+
+   # 2. Install launchd job.
+   cp com.dazbeez.receipts-consumer.plist ~/Library/LaunchAgents/
+   launchctl load ~/Library/LaunchAgents/com.dazbeez.receipts-consumer.plist
+
+   # 3. Install newsyslog rotation (1 MB size threshold, keep 5 gzip-compressed).
+   sudo cp newsyslog.d/dazbeez-receipts-consumer.conf /etc/newsyslog.d/
+
+   # 4. Verify both: tail the new log location and confirm the newsyslog entry parses.
+   tail -f ~/Library/Logs/dazbeez/receipts-consumer.log
+   sudo newsyslog -nv | grep dazbeez
+   ```
 
 Report at the end: installed mlx-vlm version, chosen model id + memory footprint + tokens/sec, JA and EN smoke-test results, and any edits you made to `consumer.py`. Do not run `wrangler deploy`, `cf:dev`, or modify Worker code.
 

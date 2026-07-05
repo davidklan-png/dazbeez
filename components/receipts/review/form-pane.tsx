@@ -105,6 +105,9 @@ export function FormPane(props: FormPaneProps) {
     props.initialAttendees.map((a) => a.attendee_name),
   );
   const [save, setSave] = useState<SaveState>({ kind: "idle" });
+  // Audit B4: post-save warnings from the API (e.g. compliance recompute
+  // failed). Save succeeded, so this is a toast — not an error state.
+  const [apiWarnings, setApiWarnings] = useState<string[]>([]);
 
   // ─── OCR extraction (delegated to the useExtraction hook) ───────────
   const {
@@ -192,6 +195,7 @@ export function FormPane(props: FormPaneProps) {
           });
           const json = (await res.json().catch(() => ({}))) as {
             error?: string;
+            warnings?: string[];
           };
           if (!res.ok) {
             setSave({
@@ -200,6 +204,7 @@ export function FormPane(props: FormPaneProps) {
             });
             return;
           }
+          setApiWarnings(json.warnings ?? []);
           setSave({ kind: "saved", at: Date.now() });
           // Refresh server-rendered CompliancePanel without manual reload.
           // router.refresh() preserves client state (focused input, useState
@@ -284,6 +289,10 @@ export function FormPane(props: FormPaneProps) {
           setSave({ kind: "error", message: json.error ?? "Save failed" });
           return;
         }
+        const okJson = (await res.json().catch(() => ({}))) as {
+          warnings?: string[];
+        };
+        setApiWarnings(okJson.warnings ?? []);
         setSave({ kind: "saved", at: Date.now() });
         if (props.nextReceiptId) {
           router.push(`/receipts/review/${props.nextReceiptId}`);
@@ -385,6 +394,32 @@ export function FormPane(props: FormPaneProps) {
           </span>
         </div>
       </header>
+
+      {apiWarnings.length > 0 && (
+        <div
+          role="status"
+          className="mx-6 mt-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900"
+        >
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <p className="font-semibold">Saved with warnings</p>
+              <ul className="mt-0.5 list-disc pl-5">
+                {apiWarnings.map((w, i) => (
+                  <li key={i}>{w}</li>
+                ))}
+              </ul>
+            </div>
+            <button
+              type="button"
+              onClick={() => setApiWarnings([])}
+              className="shrink-0 rounded px-1.5 py-0.5 text-amber-700 hover:bg-amber-100"
+              aria-label="Dismiss warnings"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+      )}
 
       <div className="flex-1 px-6 pb-6 pt-1">
         <FormGroup

@@ -40,7 +40,10 @@ export default async function CapturePage({
   );
 }
 
-async function countCapturedToday(): Promise<number> {
+// Audit finding B1: previously returned 0 on DB error, which the mobile
+// header rendered as a confident "0 today" — silently wrong. Now returns
+// null and the UI shows "—" with a "count unavailable" title attr.
+async function countCapturedToday(): Promise<number | null> {
   try {
     const rows = await listReceiptRecords({ limit: 200 });
     const startOfDay = new Date();
@@ -48,6 +51,6 @@ async function countCapturedToday(): Promise<number> {
     const startIso = startOfDay.toISOString();
     return rows.filter((r) => r.captured_at >= startIso).length;
   } catch {
-    return 0;
+    return null;
   }
 }

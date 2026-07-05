@@ -5,6 +5,11 @@
     cp com.dazbeez.receipts-consumer.plist ~/Library/LaunchAgents/
     launchctl load ~/Library/LaunchAgents/com.dazbeez.receipts-consumer.plist
   Edit the paths below to match where the repo and venv live on the Mac.
+
+  Logs go to ~/Library/Logs/dazbeez/ (created by the install script) and are
+  rotated by newsyslog — see newsyslog.d/dazbeez-receipts-consumer.conf.
+  Avoid /tmp: macOS clears it on reboot, which would silently erase the
+  consumer's recent history (audit C4).
 -->
 <plist version="1.0">
 <dict>
@@ -35,8 +40,8 @@
   <integer>600</integer>
 
   <key>StandardOutPath</key>
-  <string>/tmp/dazbeez-receipts-consumer.log</string>
+  <string>/Users/dklan/Library/Logs/dazbeez/receipts-consumer.log</string>
   <key>StandardErrorPath</key>
-  <string>/tmp/dazbeez-receipts-consumer.err.log</string>
+  <string>/Users/dklan/Library/Logs/dazbeez/receipts-consumer.err.log</string>
 </dict>
 </plist>

@@ -103,6 +103,14 @@ export function QueueRail({
                     needs {item.needs}
                   </span>
                 )}
+                {item.stuck && (
+                  <span
+                    className="mt-1 inline-block rounded bg-amber-200 px-1.5 py-px text-[10px] font-semibold text-amber-900"
+                    title="Pending extraction for >30 minutes — the MLX consumer may be stalled. Run the consumer or check launchd."
+                  >
+                    stuck?
+                  </span>
+                )}
               </div>
             </Link>
           ))
