@@ -137,6 +137,98 @@ reconciliation finalized. Design consequences:
 - Month-close should eventually be a visible gate/checklist in the UI, not
   just operator habit.
 
+## Receipts Backlog (architect-tracked, not urgent)
+
+1. **Deprecate `expense_type` in favor of `expense_category_code`.**
+   Half-finished migration (see LEGACY_CATEGORY_MAP in lib/receipts/
+   categories.ts). Plan: remove Expense Type from the review form; switch
+   insert-time `attendees_required` from hardcoded legacy values to
+   `requiresAttendees(categoryCode)`; decide export CSV column handling
+   with David (accountant-facing format). Keep the DB column for history.
+   Interim operator convention: David sets both fields consistently.
+2. **`listReceiptSummaries` refactor** — month-scoped, column-projected
+   queries (no `extraction_json`) for review queue / reconcile / capture /
+   export list views; replaces global `LIMIT 200/1000`. Bundle with #1
+   (same screens).
+3. **Per-route CPU attribution** via Workers Logs (now available on paid
+   plan) — explain the ~38ms average request CPU before adding features.
+4. **Month-close UI gate** — dashboard nudge when a prior month has
+   unreconciled receipts and a new month has activity (see Data Lifecycle
+   section).
+5. **receipt_files write integrity.** The mobile upload route
+   (app/api/mobile/receipts/upload/route.ts:139) swallows manifest-write
+   failures (console.error only) — this silently created the 15 orphans
+   backfilled on 2026-07-04. Design decision needed: fail the upload
+   loudly vs. a reconcile job that heals drift. Related: 2 dangling
+   receipt_files rows reference receipt IDs absent from receipt_records
+   (object_ids 37df0d98…, 45dfd7e5…) — likely the purge path deletes
+   receipts without cascading to receipt_files (and possibly R2). Fix
+   cascade + clean the 2 rows in the same PR.
+   DECISION (2026-07-05, audit finding A1): fail loudly — compensating
+   delete of R2 object + receipt row, return 500; client shows error tile.
+6. **Consolidate month-closing validation.** After the read-through fix
+   (223b22e), validateMonthReadyForExport's inline receipt loop duplicates
+   checks now covered by validateAmexLinesForSignoff. Cleanup pass to
+   single-source them.
+7. **Known edge — 2026-05 NFCTAGS line (91f51402…).** Line category =
+   advertising_promotion, receipt category = null, month already finalized
+   (archived manifest in R2 unchanged). Any future re-finalize/export
+   revision of 2026-05 will block on the null receipt category — and the
+   finalized-reconciliation guard also locks receipt edits. Resolution
+   path: unfinalize 2026-05 → set receipt category → re-finalize. Verify
+   an unfinalize flow exists before attempting.
+8. **Orphan classification: "upcoming" vs. true orphan.** The current 16
+   orphan receipts are all dated after the 2026-07 AMEX statement period —
+   they aren't errors, just receipts awaiting the next statement. Classify
+   orphans by date: receipt date after the latest statement period →
+   "upcoming" (expected to match when the next statement arrives); receipt
+   date within an existing statement's period → true orphan (needs
+   investigation). Derive at query time (no stored flag) so classification
+   flips automatically when a new statement lands. Surface the distinction
+   in reconcile/queue views so upcoming receipts don't read as problems.
+9. **Consumer poison-pill handling + DLQ.** Undecodable files (pre-PDF-fix:
+   PIL UnidentifiedImageError) fall into the generic retry path and redeliver
+   until max-deliveries silently drops them — receipt stuck at
+   extraction_state=queued with no signal. Two-part design: (a) consumer
+   classifies permanent local failures (undecodable file, conversion error)
+   and marks the receipt extraction_state='failed' (needs a Worker endpoint
+   or D1 write path — decide) instead of leaving unacked; (b) configure a
+   DLQ on the extraction queue so nothing is dropped invisibly. Backfill
+   remains the recovery net, but it shouldn't be the only detection.
+   Audit cross-ref: findings A4 + B6 (docs/audits/2026-07-05).
+10. **Source provenance: desktop uploads tagged "mobile_capture".** The
+    upload route doesn't validate `source` (free-form string) and the
+    desktop client hardcodes "mobile_capture". Follow-up per worker report
+    (4a08f92): desktop sends source="desktop_upload"; add a VALID_SOURCES
+    constant + route validation; extend the deriveSourceType heuristic so
+    a phone-scanned paper receipt dropped via desktop isn't mislabeled
+    manual_upload. Existing rows keep their historical values.
+11. **Capture client test coverage + cleanup.** No tests existed for
+    use-receipt-upload.ts / receipt-capture-form.tsx — the multi-drop data
+    loss shipped unnoticed. Backfill unit tests: mobile single-flight,
+    desktop concurrent pool (limit 3, FIFO), abort/cancel paths, error
+    rows never silent. Same PR: remove CaptureDesktop's dead `phase` prop.
+12. **Error-surfacing hardening pass (theme).** Three loss incidents share
+    one property — failures that don't announce themselves: swallowed
+    receipt_files manifest writes (#5), silent queue max-deliveries drops
+    (#9), silently aborted client uploads (fixed, 4a08f92). Audit complete:
+    docs/audits/2026-07-05-error-surfacing.md (PR #62) — 15 findings
+    (A=4, B=6, C=5) + 2 infra gaps. Phase 1 (A1, A2, DLQ+max_deliveries,
+    B5) in progress; Phase 2 = B1–B4 + newsyslog rotation (C4); C-class
+    accepted as documented.
+13. **Multi-page PDF handling.** Real-world case: 5608427143.pdf
+    (5c1ab53f…) has 2 pages; the consumer renders page 0 only and drops the
+    rest with a stderr-only warning — invisible to the operator. Design:
+    (a) render all pages and pass multiple images to the VLM (mlx-vlm
+    supports num_images > 1) or stack pages into one tall image; (b) record
+    page_count on the receipt and surface a "N pages, only p.1 extracted"
+    badge in the review UI until (a) ships. Feeds theme #12: warnings must
+    land where the operator works, not in a Mac log file.
+14. **Extraction quality: 登録番号 recall.** Extractor missed a clearly
+    printed T-number (receipt 92418c1a, T2810074043972 visible on image).
+    Improve Mac-side extractor recall; consider a re-extract pass over
+    existing receipts whose extraction_json lacks the field.
+
 ## Two-Agent Workflow: Sandbox (Architect) vs. CLI (Worker)
 
 This repo is developed across two separate Claude sessions that share the same
@@ -180,6 +272,20 @@ Both sessions mount the exact same folder. Concurrent git operations (stash,
 checkout, branch switches) from either side can transiently hide or clobber
 the other session's uncommitted files. Prefer small, quickly-committed
 changes over long-lived uncommitted edits, especially in docs like this one.
+
+Hard rules (adopted 2026-07-05 after `git reset --hard` destroyed the
+architect's uncommitted AGENTS.md backlog twice in one day):
+
+- **Worker: NEVER run `git reset --hard`, `git checkout -- <path>`,
+  `git clean`, or `git stash drop` while the working tree has modifications
+  you didn't make.** Branch from a remote ref with
+  `git checkout -b <branch> origin/master`, which carries uncommitted
+  changes across. If a destructive command seems necessary, stop and report.
+- **Only one session touches the tree at a time.** The architect makes no
+  edits while the worker has an active task, and vice versa. The operator's
+  relay message is the handoff.
+- **Commit architect-authored file changes as the FIRST action of a worker
+  task**, before any branch setup that could disturb them.
 
 <!-- BEGIN:nextjs-agent-rules -->
 # This is NOT the Next.js you know
