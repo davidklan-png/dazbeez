@@ -168,8 +168,9 @@ reconciliation finalized. Design consequences:
    delete of R2 object + receipt row, return 500; client shows error tile.
    DONE (40efd02, PR #63): both routes fail loudly via new canonical
    hardDeleteReceipt(); the 2 dangling rows were already gone from prod.
-   Remaining follow-up: iOS client must SURFACE the 500 (check untracked
-   DazbeezCapture/ sources in tree).
+   Remaining follow-up: iOS client must SURFACE the 500 — PARKED
+   (operator decision 2026-07-05: app development on hold until system
+   stabilized; repo contains only Xcode scaffolding, no Swift source).
 6. **Consolidate month-closing validation.** After the read-through fix
    (223b22e), validateMonthReadyForExport's inline receipt loop duplicates
    checks now covered by validateAmexLinesForSignoff. Cleanup pass to
@@ -226,7 +227,9 @@ reconciliation finalized. Design consequences:
     (A=4, B=6, C=5) + 2 infra gaps. Phase 1 DONE (PR #63, commits
     40efd02/58d38be/beb1e96/1e18891): A1 loud uploads, A2 atomic finalize
     cleanup + warnings banner, DLQ+max_retries, B5 parse-failure badge.
-    Phase 2 = B1–B4 + newsyslog rotation (C4) + stuck-pending indicator;
+    Phase 2 DONE (PR #64): B1–B4 warnings/banners, stuck-pending pill,
+    log rotation (newsyslog conf installed by operator). Theme closed
+    except #9(a) — consumer failed-state marking (in progress).
     C-class accepted as documented.
 13. **Multi-page PDF handling.** Real-world case: 5608427143.pdf
     (5c1ab53f…) has 2 pages; the consumer renders page 0 only and drops the
