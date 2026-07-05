@@ -201,7 +201,11 @@ reconciliation finalized. Design consequences:
    DLQ on the extraction queue so nothing is dropped invisibly. Backfill
    remains the recovery net, but it shouldn't be the only detection.
    Audit cross-ref: findings A4 + B6 (docs/audits/2026-07-05).
-   PART DONE (beb1e96, PR #63): (b) shipped — DLQ
+   DONE (PR #63 + PR #65): (a) shipped 1525b2e/d5d8dc5 — consumer
+   classifies permanent failures (explicit exception-type allowlist),
+   POSTs /api/receipts/:id/extraction-failed (processor-key guarded),
+   acks; failed receipts show a red pill in the queue, terminal until
+   operator action. (b) shipped — DLQ
    dazbeez-receipts-extraction-dlq + max_retries=5 (settings documented in
    wrangler.jsonc; NOT introspectable via CLI). (a) failed-state marking
    still open. Note: consumer-level visibility_timeout_ms is 12h — benign
@@ -228,9 +232,10 @@ reconciliation finalized. Design consequences:
     40efd02/58d38be/beb1e96/1e18891): A1 loud uploads, A2 atomic finalize
     cleanup + warnings banner, DLQ+max_retries, B5 parse-failure badge.
     Phase 2 DONE (PR #64): B1–B4 warnings/banners, stuck-pending pill,
-    log rotation (newsyslog conf installed by operator). Theme closed
-    except #9(a) — consumer failed-state marking (in progress).
-    C-class accepted as documented.
+    log rotation (newsyslog conf installed by operator). Theme CLOSED
+    (PR #65 completed #9(a) consumer failed-state marking). Every failure
+    path from the audit now surfaces or dies visibly. C-class accepted
+    as documented.
 13. **Multi-page PDF handling.** Real-world case: 5608427143.pdf
     (5c1ab53f…) has 2 pages; the consumer renders page 0 only and drops the
     rest with a stderr-only warning — invisible to the operator. Design:
