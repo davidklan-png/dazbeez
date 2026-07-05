@@ -20,6 +20,21 @@ import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
 const isPublicRoute = createRouteMatcher([
   "/receipts/sign-in(.*)",
   "/receipts/enroll(.*)", // redirect shim → /receipts/sign-in; must not be gated
+  // Processor-only routes — Mac MLX consumer (ADR 0001). These do layered
+  // auth INSIDE the route handler: valid `x-receipts-processor-key` header
+  // OR a Clerk-authenticated human actor (file: GET/HEAD at
+  // app/api/receipts/[id]/file/route.ts:61,94; extract: POST at
+  // app/api/receipts/[id]/extract/route.ts:52-58). They MUST stay in
+  // config.matcher below — clerkMiddleware has to RUN on them so that
+  // `auth()` is populated for the human-actor fall-through
+  // (requireReceiptsActor in lib/receipts/auth.ts reads `auth()`).
+  // Listing them here only skips `auth.protect()`; the handler then decides
+  // based on the header. Without this exemption, Phase 2's `auth.protect()`
+  // 404-rewrites processor-key requests before the handler runs — which is
+  // what silently dropped 17 receipts between Jul 4 (PR #59 shipped) and
+  // this fix.
+  "/api/receipts/:id/file",
+  "/api/receipts/:id/extract",
 ]);
 
 export default clerkMiddleware(async (auth, request) => {
