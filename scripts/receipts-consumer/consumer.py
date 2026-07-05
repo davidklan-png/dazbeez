@@ -185,8 +185,8 @@ def run_mlx(image_path: str) -> dict[str, Any]:
     # mlx-vlm >= 0.5 returns GenerationResult; older returned str. Handle both.
     output = result.text if hasattr(result, "text") else result
 
-    raw_text, fields = _parse_model_output(output)
-    return {"rawText": raw_text, "fields": fields}
+    raw_text, fields, parse_failed = _parse_model_output(output)
+    return {"rawText": raw_text, "fields": fields, "structuredParseFailed": parse_failed}
 
 
 _MODEL_CACHE: dict[str, Any] = {}
@@ -199,8 +199,14 @@ def _load_model():
     return _MODEL_CACHE["m"], _MODEL_CACHE["p"]
 
 
-def _parse_model_output(output: str) -> tuple[str, dict[str, Any]]:
-    """Pull the trailing JSON object out of the model output; fall back gracefully."""
+def _parse_model_output(output: str) -> tuple[str, dict[str, Any], bool]:
+    """Pull the trailing JSON object out of the model output; fall back gracefully.
+
+    Returns (raw_text, fields, structured_parse_failed). The flag is True
+    when the model emitted no parseable JSON object — caller passes it
+    through to /extract so the review UI can badge "structured parse
+    failed" instead of silently rendering empty fields (audit finding B5).
+    """
     fields: dict[str, Any] = {}
     raw_text = output
     start = output.rfind("{")
@@ -215,9 +221,14 @@ def _parse_model_output(output: str) -> tuple[str, dict[str, Any]]:
             ):
                 if k in parsed:
                     fields[k] = parsed[k]
+            return raw_text, fields, False
         except json.JSONDecodeError:
-            pass
-    return raw_text, fields
+            # Fall through — flag the parse failure so the operator can
+            # distinguish "model emitted nothing" from "model emitted
+            # malformed JSON".
+            return raw_text, fields, True
+    # No JSON-looking block at all in the output.
+    return raw_text, fields, True
 
 
 def apply_to_worker(receipt_id: str, payload: dict[str, Any]) -> None:

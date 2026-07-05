@@ -618,6 +618,11 @@ export interface ExtractionResult {
   taxAmountMinor?: number | null;
   counterpartyName?: string | null;
   qualifiedInvoiceStatus?: QualifiedInvoiceStatus | null;
+  // Audit finding B5: set when the MLX consumer's structured-output
+  // parser failed to extract JSON (no JSON-looking block, or malformed
+  // JSON). Review UI uses this to badge "Structured parse failed — raw
+  // text available" instead of silently rendering empty fields.
+  structuredParseFailed?: boolean;
 }
 
 // ─── Reconciliation ────────────────────────────────────────────────────────
