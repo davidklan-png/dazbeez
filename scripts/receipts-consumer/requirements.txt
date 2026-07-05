@@ -3,3 +3,7 @@
 #   pip install -r requirements.txt
 requests>=2.31
 mlx-vlm>=0.1.0
+# PDF→PNG rasterization for PDF receipts (fitz). Pure-Python wheels for
+# Apple Silicon — no poppler or other system deps. Lazy-imported inside
+# fetch_image() so --help works without it installed.
+pymupdf>=1.24

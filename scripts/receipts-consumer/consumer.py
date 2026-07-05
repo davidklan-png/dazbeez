@@ -108,6 +108,11 @@ def fetch_image(receipt_id: str, r2_key: str) -> str:
     The Worker proxies R2 with the same processor key the consumer uses to POST
     extraction results (ADR 0001) — so the consumer needs no R2 scope on its
     Cloudflare API token, and never shells out to wrangler per image.
+
+    PDFs are rasterized to PNG (page 0, ~200 DPI) before returning so the MLX
+    VLM (which expects a raster input) can read them. Multi-page PDFs warn to
+    stderr — receipts should be single-page; we want to know if they aren't.
+    Any fitz exception propagates to the caller's existing retry handling.
     """
     suffix = os.path.splitext(r2_key)[1] or ".bin"
     fd, path = tempfile.mkstemp(suffix=suffix)
@@ -127,7 +132,44 @@ def fetch_image(receipt_id: str, r2_key: str) -> str:
         for chunk in resp.iter_content(chunk_size=65536):
             if chunk:
                 fh.write(chunk)
+
+    # PDF → PNG (page 0 only). Lazy import so --help works without pymupdf.
+    if suffix.lower() == ".pdf":
+        return _rasterize_pdf(receipt_id, path)
+
     return path
+
+
+def _rasterize_pdf(receipt_id: str, pdf_path: str) -> str:
+    """Render page 0 of a PDF to a ~200 DPI PNG. Returns the PNG path.
+
+    The .pdf temp file is unlinked before returning so the caller's normal
+    os.unlink cleanup runs on the PNG instead. Any fitz exception propagates.
+    """
+    import fitz  # pymupdf — pure-Python wheel, no system deps
+
+    doc = fitz.open(pdf_path)
+    try:
+        page_count = doc.page_count
+        if page_count > 1:
+            print(
+                f"[warn] {receipt_id}: PDF has {page_count} pages; "
+                "only rendering page 0 (receipts should be single-page).",
+                file=sys.stderr,
+            )
+        page = doc.load_page(0)
+        # 200 DPI: 72 DPI is PDF's native scale, so 200/72 ≈ 2.78×.
+        # Captures fine JA receipt text including small 領収書 numbers.
+        matrix = fitz.Matrix(200 / 72, 200 / 72)
+        pixmap = page.get_pixmap(matrix=matrix, alpha=False)
+        fd, png_path = tempfile.mkstemp(suffix=".png")
+        os.close(fd)
+        pixmap.save(png_path)
+    finally:
+        doc.close()
+
+    os.unlink(pdf_path)
+    return png_path
 
 
 def run_mlx(image_path: str) -> dict[str, Any]:
