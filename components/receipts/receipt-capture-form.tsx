@@ -15,7 +15,9 @@ export type PaymentChip = PaymentPath | null;
 export interface ReceiptCaptureFormProps {
   initialPayment?: PaymentChip;
   rapidMode?: boolean;
-  todayCount?: number;
+  /** Today's captured-receipt count for the mobile header chip. null when
+   *  the count query failed (audit B1) — UI renders "—" with a title. */
+  todayCount?: number | null;
 }
 
 const SESSION_QUEUE_KEY = "dazbeez.receipts.captureQueue.v1";
@@ -84,7 +86,7 @@ interface UploadPool {
 export function ReceiptCaptureForm({
   initialPayment = null,
   rapidMode = false,
-  todayCount = 0,
+  todayCount = null,
 }: ReceiptCaptureFormProps) {
   const isMobile = useIsMobile();
   const { phase, upload, reset, cancel } = useReceiptUpload();
