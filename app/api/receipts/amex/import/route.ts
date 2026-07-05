@@ -253,7 +253,12 @@ export async function POST(request: Request) {
     }
 
     // ── Business trip candidate detection ───────────────────────────────────
+    // Audit B3: trip-detection failure previously vanished silently. The
+    // import still succeeds (statement lines are already committed), but
+    // the operator needs to know detection didn't run so they can re-check
+    // manually or retry the import.
     let businessTripCandidatesCount = 0;
+    const warnings: string[] = [];
     try {
       const db = getReceiptsDb();
       const inserted = await db
@@ -283,8 +288,14 @@ export async function POST(request: Request) {
         await createBusinessTripReports(candidates, actor);
         businessTripCandidatesCount = candidates.length;
       }
-    } catch {
-      // Non-fatal — trip detection failure does not block import
+    } catch (tripErr) {
+      console.error(
+        "[amex/import] business trip detection failed (statement lines already committed)",
+        tripErr,
+      );
+      warnings.push(
+        "Statement lines imported, but business-trip candidate detection failed — re-check the month manually.",
+      );
     }
 
     return NextResponse.json(
@@ -304,6 +315,7 @@ export async function POST(request: Request) {
         skippedLines,
         replaced: previousArtifact !== null,
         businessTripCandidates: businessTripCandidatesCount,
+        warnings,
       },
       { status: 200 },
     );

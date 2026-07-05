@@ -270,14 +270,22 @@ export async function PATCH(request: Request, { params }: RouteContext) {
     }
 
     // Re-run compliance checks so the review UI reflects the new state.
+    // Audit B4: previously swallowed silently — a stuck failure meant the
+    // compliance panel kept showing stale checks with no signal. Now we
+    // surface a warning so the review UI can toast/annotate; the receipt
+    // fields themselves did save successfully.
+    const warnings: string[] = [];
     try {
       const settings = await getComplianceSettings();
       await runComplianceChecksForReceipt(getReceiptsDb(), id, settings);
     } catch (checkError) {
       console.error("[api/receipts/[id]] compliance check failed", checkError);
+      warnings.push(
+        "Saved, but compliance checks could not be recomputed — the compliance panel may be stale. Refresh to retry.",
+      );
     }
 
-    return NextResponse.json({ ok: true }, { status: 200 });
+    return NextResponse.json({ ok: true, warnings }, { status: 200 });
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("Unauthorized")) {
       return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
