@@ -8,7 +8,7 @@ import {
   createMobileReceiptRecord,
   findMobileReceiptByIdempotency,
 } from "@/lib/receipts/mobile-upload";
-import { updateReceiptRecord } from "@/lib/receipts/db";
+import { hardDeleteReceipt, updateReceiptRecord } from "@/lib/receipts/db";
 import { buildExtractionJob, enqueueExtractionJob } from "@/lib/receipts/queue";
 import type { PaymentPath } from "@/lib/receipts/types";
 
@@ -122,6 +122,12 @@ export async function POST(request: Request) {
       throw dbError;
     }
 
+    // Audit finding A1: a failed manifest write previously left an orphan
+    // receipt_records row + R2 object. Mobile retries are normal (offline
+    // queue), but the idempotency key protects against re-running the
+    // compensating delete on a successful retry — by the time the retry
+    // lands, either the original failed (and was hard-deleted, so the
+    // idempotency lookup misses) or the original succeeded (no rollback).
     try {
       await createReceiptFile(getReceiptsDb(), {
         objectType: "receipt",
@@ -137,7 +143,38 @@ export async function POST(request: Request) {
         isOriginal: true,
       });
     } catch (fileError) {
-      console.error("[mobile/receipts/upload] file manifest write failed", fileError);
+      console.error(
+        "[mobile/receipts/upload] file manifest write failed — compensating delete",
+        fileError,
+      );
+      try {
+        await getReceiptsBucket().delete(r2Key);
+      } catch (r2CleanupError) {
+        console.error(
+          "[mobile/receipts/upload] R2 cleanup after manifest failure also failed",
+          r2CleanupError,
+        );
+      }
+      try {
+        await hardDeleteReceipt(
+          receiptId,
+          device.actor,
+          "manifest write failed during mobile upload",
+        );
+      } catch (deleteError) {
+        console.error(
+          "[mobile/receipts/upload] hardDeleteReceipt after manifest failure also failed — manual cleanup required",
+          deleteError,
+        );
+      }
+      return NextResponse.json(
+        {
+          ok: false,
+          error:
+            "Upload failed: file manifest could not be written. Receipt rolled back.",
+        },
+        { status: 500 },
+      );
     }
 
     // ADR 0001: enqueue the extraction job (best-effort). If the queue is

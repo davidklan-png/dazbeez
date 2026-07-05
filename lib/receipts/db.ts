@@ -118,6 +118,59 @@ export async function getReceiptRecord(
     .first<ReceiptRecord>();
 }
 
+/**
+ * Hard-delete a receipt and everything that references it. Used by the
+ * upload routes' compensating-delete path when the receipt_files manifest
+ * write fails (audit finding A1) — the receipt was inserted moments ago,
+ * nothing downstream has had time to reference it, but we clean every
+ * possible reference for safety. Atomic via db.batch.
+ *
+ * Returns true on success, false if the receipt row was already gone
+ * (idempotent — caller can retry safely).
+ */
+export async function hardDeleteReceipt(
+  receiptId: string,
+  actor: string,
+  reason: string,
+): Promise<boolean> {
+  const db = getReceiptsDb();
+
+  // Order matters: amex_statement_lines.matched_receipt_id has no ON DELETE
+  // clause, so we NULL it first or the receipt_records delete would block.
+  // receipt_attendees ON DELETE CASCADE handles attendees automatically, but
+  // we include them in the batch for explicitness. receipt_files has no FK
+  // constraint at all (migration 0014) — would orphan without explicit delete.
+  await db.batch([
+    db
+      .prepare(
+        `UPDATE amex_statement_lines
+           SET matched_receipt_id = NULL,
+               match_status = CASE WHEN match_status IN ('matched','confirmed') THEN 'unmatched' ELSE match_status END
+           WHERE matched_receipt_id = ?`,
+      )
+      .bind(receiptId),
+    db
+      .prepare(
+        `DELETE FROM receipt_files WHERE object_type = 'receipt' AND object_id = ?`,
+      )
+      .bind(receiptId),
+    db
+      .prepare(`DELETE FROM receipt_attendees WHERE receipt_id = ?`)
+      .bind(receiptId),
+    db.prepare(`DELETE FROM receipt_records WHERE id = ?`).bind(receiptId),
+  ]);
+
+  await createAuditEntry(db, {
+    actor,
+    action: "receipt.deleted",
+    objectType: "receipt",
+    objectId: receiptId,
+    newValueJson: stringifyJson({ reason, hardDelete: true }),
+  });
+
+  return true;
+}
+
 export async function updateReceiptRecord(
   id: string,
   input: UpdateReceiptInput,

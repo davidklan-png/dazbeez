@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { requireReceiptsActor } from "@/lib/receipts/auth";
 import { validateReceiptFile } from "@/lib/receipts/validation";
 import { generateR2Key, uploadOriginal } from "@/lib/receipts/storage";
-import { createReceiptRecord, updateReceiptRecord } from "@/lib/receipts/db";
+import { createReceiptRecord, hardDeleteReceipt, updateReceiptRecord } from "@/lib/receipts/db";
 import { createReceiptFile } from "@/lib/receipts/files";
 import { buildExtractionJob, enqueueExtractionJob } from "@/lib/receipts/queue";
 import { getReceiptsBucket, getReceiptsDb } from "@/lib/cloudflare-runtime";
@@ -111,10 +111,11 @@ export async function POST(request: Request) {
       throw dbError;
     }
 
-    // Manifest row for the original file. Failure to write the manifest row
-    // does not roll back the upload — the receipt_records row already has the
-    // hash + R2 key; the manifest row is additive metadata that downstream
-    // compliance reports use.
+    // Manifest row for the original file. Audit finding A1: a failed
+    // manifest write previously left an orphan receipt_records row + R2
+    // object (15-orphan incident on 2026-07-04). Now we compensating-delete
+    // both and surface a 500 to the client. The desktop client renders an
+    // error tile (4a08f92); the queue enqueue below only runs on success.
     try {
       await createReceiptFile(getReceiptsDb(), {
         objectType: "receipt",
@@ -130,7 +131,38 @@ export async function POST(request: Request) {
         isOriginal: true,
       });
     } catch (fileError) {
-      console.error("[receipts/upload] file manifest write failed", fileError);
+      console.error(
+        "[receipts/upload] file manifest write failed — compensating delete",
+        fileError,
+      );
+      try {
+        await getReceiptsBucket().delete(r2Key);
+      } catch (r2CleanupError) {
+        console.error(
+          "[receipts/upload] R2 cleanup after manifest failure also failed",
+          r2CleanupError,
+        );
+      }
+      try {
+        await hardDeleteReceipt(
+          receiptId,
+          actor,
+          "manifest write failed during upload",
+        );
+      } catch (deleteError) {
+        console.error(
+          "[receipts/upload] hardDeleteReceipt after manifest failure also failed — manual cleanup required",
+          deleteError,
+        );
+      }
+      return NextResponse.json(
+        {
+          ok: false,
+          error:
+            "Upload failed: file manifest could not be written. Receipt rolled back.",
+        },
+        { status: 500 },
+      );
     }
 
     // ADR 0001: enqueue the extraction job. Best-effort — if the queue binding
