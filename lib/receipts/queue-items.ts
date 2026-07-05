@@ -24,6 +24,12 @@ export type QueueItem = {
    *  more than STUCK_PENDING_MS ago. The queue-rail renders an amber
    *  "stuck?" badge to flag a likely-stalled consumer. */
   stuck: boolean;
+  /** True when extraction_state === 'failed'. Renders a red "extraction
+   *  failed" pill in the queue-rail so the operator sees the receipt needs
+   *  manual handling. `failureReason` (when present) is surfaced via the
+   *  pill's title attribute. */
+  extractionFailed: boolean;
+  failureReason: string | null;
 };
 
 export function buildQueueItems(
@@ -35,6 +41,7 @@ export function buildQueueItems(
     const code = r.expense_category_code ?? "";
     const cat = getCategoryByCode(code);
     const captured = r.captured_at ?? "";
+    const failure = readFailureInfo(r);
     return {
       id: r.id,
       merchant: r.merchant?.trim() || "Unnamed receipt",
@@ -44,8 +51,35 @@ export function buildQueueItems(
       status: r.status,
       needs: needsFlag(r, code, reReviewIds.has(r.id)),
       stuck: isStuckPending(r, now),
+      extractionFailed: failure.failed,
+      failureReason: failure.reason,
     };
   });
+}
+
+/** Parse extraction_json for the failed marker written by
+ *  POST /api/receipts/[id]/extraction-failed. Returns null-safe defaults
+ *  for receipts that never failed or have a non-JSON / mismatched shape. */
+function readFailureInfo(
+  r: ReceiptRecord,
+): { failed: boolean; reason: string | null } {
+  if (r.extraction_state !== "failed") return { failed: false, reason: null };
+  if (!r.extraction_json) return { failed: true, reason: null };
+  try {
+    const parsed = JSON.parse(r.extraction_json) as {
+      failed?: boolean;
+      reason?: string;
+    };
+    return {
+      failed: true,
+      reason:
+        typeof parsed.reason === "string" && parsed.reason.trim()
+          ? parsed.reason.trim().slice(0, 300)
+          : null,
+    };
+  } catch {
+    return { failed: true, reason: null };
+  }
 }
 
 function isStuckPending(r: ReceiptRecord, now: number): boolean {

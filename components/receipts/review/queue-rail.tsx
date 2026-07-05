@@ -111,6 +111,18 @@ export function QueueRail({
                     stuck?
                   </span>
                 )}
+                {item.extractionFailed && (
+                  <span
+                    className="mt-1 inline-block rounded bg-red-100 px-1.5 py-px text-[10px] font-semibold text-red-800"
+                    title={
+                      item.failureReason
+                        ? `Extraction failed: ${item.failureReason}. Re-run the consumer after fixing the file, or enter fields manually.`
+                        : "Extraction failed. Re-run the consumer after fixing the file, or enter fields manually."
+                    }
+                  >
+                    extraction failed
+                  </span>
+                )}
               </div>
             </Link>
           ))
