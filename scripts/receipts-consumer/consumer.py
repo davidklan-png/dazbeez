@@ -250,6 +250,122 @@ def apply_to_worker(receipt_id: str, payload: dict[str, Any]) -> None:
     resp.raise_for_status()
 
 
+def post_extraction_failed(receipt_id: str, reason: str) -> None:
+    """Tell the Worker this receipt's extraction failed permanently.
+
+    The Worker moves extraction_state to 'failed' (only from pending), persists
+    the reason into extraction_json, and the review UI surfaces a red
+    'extraction failed' pill. Caller then ACKs the queue message — retrying
+    the same bytes would produce the same failure, so the message must not
+    redeliver forever or land in the DLQ.
+
+    Failures of THIS call (network, 5xx) are swallowed because the caller
+    has already classified the original error as permanent and will ACK
+    regardless — losing the reason annotation is preferable to retrying
+    a poison pill.
+    """
+    headers = {
+        "x-receipts-processor-key": PROCESSOR_KEY,
+        "Content-Type": "application/json",
+    }
+    if CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET:
+        headers["CF-Access-Client-Id"] = CF_ACCESS_CLIENT_ID
+        headers["CF-Access-Client-Secret"] = CF_ACCESS_CLIENT_SECRET
+    try:
+        requests.post(
+            f"{EXTRACT_BASE}/{receipt_id}/extraction-failed",
+            headers=headers,
+            json={
+                "reason": reason[:1000],
+                "model": f"mlx_local:{MLX_MODEL.split('/')[-1]}",
+            },
+            timeout=30,
+        )
+    except requests.RequestException as exc:
+        print(
+            f"[warn] {receipt_id}: failed to post extraction-failed ({exc}); "
+            "acking anyway — reason will not be visible in the UI.",
+            file=sys.stderr,
+        )
+
+
+class PermanentExtractionFailure(Exception):
+    """Raised by the consumer for deterministic-permanent local failures we
+    detect ourselves (zero-byte download, manifest size mismatch). Distinct
+    from third-party exceptions (pymupdf.FileDataError, PIL.Unidentified
+    ImageError) which are recognized by name in `is_permanent_extraction_error`.
+
+    Carries a clean `reason` for the extraction-failed endpoint.
+    """
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _build_permanent_exception_types() -> tuple[type[Exception], ...]:
+    """Lazily resolve the tuple of permanent-failure exception classes.
+
+    Lazy so the module imports without pymupdf/PIL installed (e.g. when
+    running --help or unit tests that don't exercise the model path).
+
+    Membership:
+      - pymupdf.FileDataError (covers EmptyFileError too — subclass):
+        corrupt/truncated/empty PDF, encryption, render failure. Retrying
+        the same bytes will throw the same error.
+      - PIL.UnidentifiedImageError: corrupt or unsupported raster image.
+        Same bytes → same failure.
+    """
+    types: list[type[Exception]] = []
+    try:
+        import fitz  # noqa: WPS433 — lazy by design
+        if hasattr(fitz, "FileDataError"):
+            types.append(fitz.FileDataError)
+    except ImportError:
+        pass
+    try:
+        from PIL import UnidentifiedImageError  # noqa: WPS433
+        types.append(UnidentifiedImageError)
+    except ImportError:
+        pass
+    return tuple(types)
+
+
+# Module-level cache so we resolve the tuple at most once per process.
+_PERMANENT_TYPES_CACHE: tuple[type[Exception], ...] | None = None
+
+
+def is_permanent_extraction_error(exc: Exception) -> bool:
+    """True for deterministic-permanent local failures (corrupt image, bad PDF,
+    zero-byte download).
+
+    Used by per-message and backfill paths to decide: post extraction-failed
+    + ACK (permanent) vs. leave unacked for retry (transient).
+
+    Network errors, HTTP 5xx, and model-load/generate errors are deliberately
+    NOT permanent — those are environmental and may resolve on retry.
+    """
+    if isinstance(exc, PermanentExtractionFailure):
+        return True
+    global _PERMANENT_TYPES_CACHE
+    if _PERMANENT_TYPES_CACHE is None:
+        _PERMANENT_TYPES_CACHE = _build_permanent_exception_types()
+    permanent = _PERMANENT_TYPES_CACHE
+    if permanent and isinstance(exc, permanent):
+        return True
+    # Safety net: pymupdf errors sometimes nest under fitz.errors in newer
+    # versions; match by class name so we don't miss them.
+    name = exc.__class__.__name__
+    return name in ("FileDataError", "EmptyFileError", "UnidentifiedImageError")
+
+
+def _format_failure_reason(exc: Exception) -> str:
+    """Build the reason string for post_extraction_failed."""
+    if isinstance(exc, PermanentExtractionFailure):
+        return exc.reason[:1000]
+    return f"{exc.__class__.__name__}: {exc}"[:1000]
+
+
 # ─── Backfill drain (--backfill mode) ────────────────────────────────────────
 # Recovery path for receipts stranded in a pending extraction_state — typically
 # because the queue consumer acked a 4xx poison pill (409 locked, 422 no OCR)
@@ -316,8 +432,18 @@ def _sql_escape(v: str | None) -> str:
 def pull_pending_rows(only_id: str | None = None) -> list[dict[str, Any]]:
     """Pending-extraction rows from D1 (extraction_state captured/queued/processing).
 
-    Excludes 'failed' (the user's check query matches this set) and soft-deleted
-    rows. Matches listPendingProcessingReceipts in lib/receipts/db.ts.
+    Excludes 'failed' and soft-deleted rows. Matches listPendingProcessingReceipts
+    in lib/receipts/db.ts.
+
+    Why 'failed' is excluded: 'failed' is terminal-until-operator-action. A
+    receipt reaches 'failed' either via the no-OCR-text path in /extract (422)
+    or via the consumer's permanent-failure classifier (POST extraction-failed).
+    Both paths mean "retrying the same bytes will produce the same outcome" —
+    so backfill must NOT pick them back up. They are operator-visible in the
+    review queue (red 'extraction failed' pill) and require manual intervention
+    (replace the file, or enter fields by hand and advance status). To re-attempt
+    extraction on a failed row, the operator must first reset extraction_state
+    to 'captured' (or re-upload); backfill deliberately won't do that for them.
     """
     where_id = f" AND id = {_sql_escape(only_id)}" if only_id else ""
     return _d1_query(
@@ -402,6 +528,8 @@ def process_backfill(dry_run: bool, only_id: str | None = None) -> None:
         try:
             image_path = fetch_image(rid, r2_key)
             try:
+                if os.path.getsize(image_path) == 0:
+                    raise PermanentExtractionFailure("downloaded file is zero bytes")
                 result = run_mlx(image_path)
             finally:
                 try:
@@ -417,8 +545,20 @@ def process_backfill(dry_run: bool, only_id: str | None = None) -> None:
             print(f"  [fail-http{status_code}] {label} body={body!r}", file=sys.stderr)
             stats["extract_fail"] += 1
         except Exception as exc:  # noqa: BLE001
-            print(f"  [fail]        {label}: {exc}", file=sys.stderr)
-            stats["extract_fail"] += 1
+            if is_permanent_extraction_error(exc):
+                # Same logic as the queue path: permanent local failure →
+                # mark the receipt failed in the UI, count as extract_fail
+                # (no queue to ack here — backfill reads D1 directly).
+                reason = _format_failure_reason(exc)
+                post_extraction_failed(rid, reason)
+                stats["extract_fail"] += 1
+                print(
+                    f"  [fail-perm]   {label}: {reason} — marked extraction-failed",
+                    file=sys.stderr,
+                )
+            else:
+                print(f"  [fail]        {label}: {exc}", file=sys.stderr)
+                stats["extract_fail"] += 1
 
     print(
         f"\nDone. stale-state cleanup: {stats['stale_state']}, "
@@ -440,7 +580,13 @@ def process_once() -> int:
             job = msg["body"] if isinstance(msg["body"], dict) else json.loads(msg["body"])
             receipt_id, r2_key = job["receiptId"], job["r2Key"]
             image_path = fetch_image(receipt_id, r2_key)
+            # Zero-byte downloads are deterministic-permanent: a 200 OK with
+            # an empty body means R2 has nothing for this key. MLX would
+            # either crash or produce gibberish; either way retrying won't
+            # help. Post failure + ack.
             try:
+                if os.path.getsize(image_path) == 0:
+                    raise PermanentExtractionFailure("downloaded file is zero bytes")
                 result = run_mlx(image_path)
             finally:
                 try:
@@ -461,8 +607,23 @@ def process_once() -> int:
                 print(f"[drop] {receipt_id}: HTTP {status} — permanent, acking. body={body!r}", file=sys.stderr)
             else:
                 print(f"[retry] {msg.get('id')} ({receipt_id}): {exc}", file=sys.stderr)
-        except Exception as exc:  # noqa: BLE001 — leave unacked for redelivery
-            print(f"[retry] {msg.get('id')} ({receipt_id}): {exc}", file=sys.stderr)
+        except Exception as exc:  # noqa: BLE001
+            if is_permanent_extraction_error(exc):
+                # Deterministic-permanent local failure (corrupt image / PDF,
+                # zero-byte file). Mark the receipt failed so the operator
+                # sees it in the review UI, then ack so the message doesn't
+                # retry into the DLQ. Transient errors (network, model load,
+                # generate) fall through to the unacked-retry path.
+                reason = _format_failure_reason(exc)
+                post_extraction_failed(receipt_id, reason)
+                acked.append(lease_id)
+                print(
+                    f"[fail-perm] {msg.get('id')} ({receipt_id}): {reason} "
+                    "— marked extraction-failed + acked",
+                    file=sys.stderr,
+                )
+            else:
+                print(f"[retry] {msg.get('id')} ({receipt_id}): {exc}", file=sys.stderr)
     ack(acked)
     return len(acked)
 
