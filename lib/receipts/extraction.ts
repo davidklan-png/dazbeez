@@ -398,6 +398,7 @@ export function buildGuardedExtraction(
   rawText: string,
   model: ModelExtractionFields = {},
   provider = "mlx_local",
+  structuredParseFailed = false,
 ): GuardedExtraction {
   const regex = parseReceiptOcrText(rawText);
   const discrepancies: string[] = [];
@@ -455,6 +456,7 @@ export function buildGuardedExtraction(
       taxRate,
       rawText,
       provider,
+      structuredParseFailed,
     },
   };
 }

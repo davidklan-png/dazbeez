@@ -68,6 +68,22 @@ export function FormPane(props: FormPaneProps) {
   // it stops promising an action it can't perform (ADR 0001).
   const pendingProcessing = isPendingProcessing(receipt);
 
+  // Audit finding B5: surface structured-parse failures stored on the
+  // receipt's extraction_json. Without this the operator can't tell
+  // "model emitted nothing parseable" from "receipt genuinely has no
+  // structured data".
+  const structuredParseFailed = (() => {
+    if (!receipt.extraction_json) return false;
+    try {
+      const parsed = JSON.parse(receipt.extraction_json) as {
+        structuredParseFailed?: boolean;
+      };
+      return parsed.structuredParseFailed === true;
+    } catch {
+      return false;
+    }
+  })();
+
   // ─── form state ─────────────────────────────────────────────────────
   const [paymentPath, setPaymentPath] = useState<PaymentPath>(receipt.payment_path);
   const [expenseType, setExpenseType] = useState<ExpenseType>(receipt.expense_type);
@@ -438,6 +454,11 @@ export function FormPane(props: FormPaneProps) {
             {extractionFeedback && (
               <span className="ml-2 text-[11.5px] text-gray-500">
                 {extractionFeedback}
+              </span>
+            )}
+            {structuredParseFailed && (
+              <span className="ml-2 inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium text-amber-800">
+                Structured parse failed — raw text available
               </span>
             )}
           </div>

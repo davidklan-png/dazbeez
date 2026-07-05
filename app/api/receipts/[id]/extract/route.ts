@@ -32,6 +32,11 @@ interface ApplyBody {
   fields?: ModelExtractionFields;
   /** Provider/model label for audit + provenance, e.g. "mlx_local:qwen2-vl-7b". */
   model?: string;
+  /** Audit finding B5: true when the MLX consumer's structured-output
+   * parser failed to extract JSON. Persisted into extraction_json so the
+   * review UI can badge "Structured parse failed" instead of silently
+   * rendering empty fields. */
+  structuredParseFailed?: boolean;
 }
 
 /**
@@ -142,6 +147,7 @@ export async function POST(request: Request, { params }: RouteContext) {
       rawText,
       body?.fields ?? {},
       provider,
+      body?.structuredParseFailed === true,
     );
 
     // Field-merge: by default only fill empty fields (never clobber confirmed

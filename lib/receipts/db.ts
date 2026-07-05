@@ -118,6 +118,59 @@ export async function getReceiptRecord(
     .first<ReceiptRecord>();
 }
 
+/**
+ * Hard-delete a receipt and everything that references it. Used by the
+ * upload routes' compensating-delete path when the receipt_files manifest
+ * write fails (audit finding A1) — the receipt was inserted moments ago,
+ * nothing downstream has had time to reference it, but we clean every
+ * possible reference for safety. Atomic via db.batch.
+ *
+ * Returns true on success, false if the receipt row was already gone
+ * (idempotent — caller can retry safely).
+ */
+export async function hardDeleteReceipt(
+  receiptId: string,
+  actor: string,
+  reason: string,
+): Promise<boolean> {
+  const db = getReceiptsDb();
+
+  // Order matters: amex_statement_lines.matched_receipt_id has no ON DELETE
+  // clause, so we NULL it first or the receipt_records delete would block.
+  // receipt_attendees ON DELETE CASCADE handles attendees automatically, but
+  // we include them in the batch for explicitness. receipt_files has no FK
+  // constraint at all (migration 0014) — would orphan without explicit delete.
+  await db.batch([
+    db
+      .prepare(
+        `UPDATE amex_statement_lines
+           SET matched_receipt_id = NULL,
+               match_status = CASE WHEN match_status IN ('matched','confirmed') THEN 'unmatched' ELSE match_status END
+           WHERE matched_receipt_id = ?`,
+      )
+      .bind(receiptId),
+    db
+      .prepare(
+        `DELETE FROM receipt_files WHERE object_type = 'receipt' AND object_id = ?`,
+      )
+      .bind(receiptId),
+    db
+      .prepare(`DELETE FROM receipt_attendees WHERE receipt_id = ?`)
+      .bind(receiptId),
+    db.prepare(`DELETE FROM receipt_records WHERE id = ?`).bind(receiptId),
+  ]);
+
+  await createAuditEntry(db, {
+    actor,
+    action: "receipt.deleted",
+    objectType: "receipt",
+    objectId: receiptId,
+    newValueJson: stringifyJson({ reason, hardDelete: true }),
+  });
+
+  return true;
+}
+
 export async function updateReceiptRecord(
   id: string,
   input: UpdateReceiptInput,
@@ -1834,7 +1887,15 @@ export async function finalizeReconciliation(
 ): Promise<void> {
   const db = getReceiptsDb();
 
-  const result = await db
+  // Audit finding A2: previously, a race-loser request left a draft row
+  // in amex_reconciliations and the catch path deleted it via a separate
+  // D1 call wrapped in .catch(() => {}) — silent drift if that delete
+  // failed. Now the cleanup is atomic with the finalize UPDATE via
+  // db.batch (single transaction): if the UPDATE changes 0 rows (race
+  // lost), the DELETE in the same batch removes this request's draft.
+  // If the UPDATE succeeds (1 row changed), the DELETE matches 0 rows
+  // (status is now 'finalized') and is a no-op.
+  const updateStmt = db
     .prepare(
       `UPDATE amex_reconciliations
        SET status = 'finalized',
@@ -1844,10 +1905,18 @@ export async function finalizeReconciliation(
            finalized_at = ?
        WHERE id = ? AND status = 'draft'`,
     )
-    .bind(manifestR2Key, manifestSha256, actor, nowIso(), reconciliationId)
-    .run();
+    .bind(manifestR2Key, manifestSha256, actor, nowIso(), reconciliationId);
 
-  if ((result.meta.changes ?? 0) === 0) {
+  const cleanupStmt = db
+    .prepare(
+      `DELETE FROM amex_reconciliations WHERE id = ? AND status = 'draft'`,
+    )
+    .bind(reconciliationId);
+
+  const results = await db.batch([updateStmt, cleanupStmt]);
+  const updateResult = results[0];
+
+  if ((updateResult?.meta.changes ?? 0) === 0) {
     throw new Error(
       `Reconciliation ${reconciliationId} could not be finalized — it may already be finalized or not found.`,
     );
