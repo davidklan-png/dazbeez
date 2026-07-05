@@ -78,6 +78,10 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
     total: number;
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Audit finding A2: finalize cleanup warnings (e.g. R2 archive-object
+  // delete failed post-commit). Persistent across router.refresh() so the
+  // operator sees the banner even after the page reloads the new state.
+  const [warnings, setWarnings] = useState<string[] | null>(null);
   const [confirmType, setConfirmType] = useState<string>("");
   const [showFinalizeModal, setShowFinalizeModal] = useState(false);
 
@@ -270,6 +274,7 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
       const json = (await res.json().catch(() => ({}))) as {
         error?: string;
         blockers?: string[];
+        warnings?: string[];
       };
       if (!res.ok) {
         setError(
@@ -277,7 +282,21 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
             ? `${json.error ?? "Blocked"}: ${json.blockers.join("; ")}`
             : json.error ?? "Sign-off failed.",
         );
+        // Audit finding A2: surface R2 cleanup failures even when the
+        // request itself failed (race-loser case). Without this the
+        // operator could finalize-successfully later and never know an
+        // orphan manifest was left behind in the archive bucket.
+        if (json.warnings && json.warnings.length > 0) {
+          setWarnings(json.warnings);
+        }
         return;
+      }
+      // Success path also carries warnings (empty unless something non-fatal
+      // happened during finalize).
+      if (json.warnings && json.warnings.length > 0) {
+        setWarnings(json.warnings);
+      } else {
+        setWarnings(null);
       }
       setShowFinalizeModal(false);
       router.refresh();
@@ -413,6 +432,13 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
       {error && (
         <div className="border-b border-red-200 bg-red-50 px-8 py-2 text-sm text-red-700">
           {error}
+        </div>
+      )}
+
+      {warnings && warnings.length > 0 && (
+        <div className="border-b border-amber-300 bg-amber-50 px-8 py-2 text-sm text-amber-800">
+          <span className="font-semibold">Finalized, cleanup incomplete — see logs:</span>{" "}
+          {warnings.join("; ")}
         </div>
       )}
 

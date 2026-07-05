@@ -2,7 +2,6 @@ import { NextResponse } from "next/server";
 import { requireReceiptsActor } from "@/lib/receipts/auth";
 import {
   createReconciliationDraft,
-  deleteDraftReconciliation,
   finalizeReconciliation,
   getAmexArtifactByMonth,
   getFinalizedReconciliationForMonth,
@@ -137,6 +136,9 @@ export async function POST(request: Request) {
       const encoder = new TextEncoder();
       await archiveManifest(manifestR2Key, encoder.encode(manifestCsv).buffer as ArrayBuffer);
 
+      // finalizeReconciliation now atomically cleans up this request's draft
+      // row if it loses the finalize race (audit finding A2). The catch path
+      // only needs to handle R2 cleanup of the just-uploaded manifest.
       await finalizeReconciliation(
         reconciliationId,
         manifestR2Key,
@@ -148,14 +150,30 @@ export async function POST(request: Request) {
       if (
         finalizeError instanceof Error &&
         (finalizeError.message.includes("CONSTRAINT") ||
-          finalizeError.message.includes("UNIQUE"))
+          finalizeError.message.includes("UNIQUE") ||
+          finalizeError.message.includes("could not be finalized"))
       ) {
-        // Clean up draft row and uploaded manifest
-        await deleteDraftReconciliation(reconciliationId).catch(() => {});
-        await deleteArchiveObject(manifestR2Key).catch(() => {});
+        // D1 cleanup is already atomic inside finalizeReconciliation; only
+        // R2 needs post-commit cleanup. Don't swallow — log with signature
+        // so a failure here is observable (audit finding A2).
+        const warnings: string[] = [];
+        try {
+          await deleteArchiveObject(manifestR2Key);
+        } catch (r2CleanupError) {
+          console.error(
+            `[finalize-cleanup-fail] month=${month} key=${manifestR2Key} reason=R2 delete after race-loser threw`,
+            r2CleanupError,
+          );
+          warnings.push(
+            `R2 cleanup incomplete for ${manifestR2Key} — see logs.`,
+          );
+        }
 
         return NextResponse.json(
-          { error: `Reconciliation for ${month} was finalized by another request.` },
+          {
+            error: `Reconciliation for ${month} was finalized by another request.`,
+            warnings,
+          },
           { status: 409 },
         );
       }
@@ -172,6 +190,7 @@ export async function POST(request: Request) {
         matchedCount,
         noReceiptCount,
         finalized: true,
+        warnings: [] as string[],
       },
       { status: 200 },
     );

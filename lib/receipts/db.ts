@@ -1887,7 +1887,15 @@ export async function finalizeReconciliation(
 ): Promise<void> {
   const db = getReceiptsDb();
 
-  const result = await db
+  // Audit finding A2: previously, a race-loser request left a draft row
+  // in amex_reconciliations and the catch path deleted it via a separate
+  // D1 call wrapped in .catch(() => {}) — silent drift if that delete
+  // failed. Now the cleanup is atomic with the finalize UPDATE via
+  // db.batch (single transaction): if the UPDATE changes 0 rows (race
+  // lost), the DELETE in the same batch removes this request's draft.
+  // If the UPDATE succeeds (1 row changed), the DELETE matches 0 rows
+  // (status is now 'finalized') and is a no-op.
+  const updateStmt = db
     .prepare(
       `UPDATE amex_reconciliations
        SET status = 'finalized',
@@ -1897,10 +1905,18 @@ export async function finalizeReconciliation(
            finalized_at = ?
        WHERE id = ? AND status = 'draft'`,
     )
-    .bind(manifestR2Key, manifestSha256, actor, nowIso(), reconciliationId)
-    .run();
+    .bind(manifestR2Key, manifestSha256, actor, nowIso(), reconciliationId);
 
-  if ((result.meta.changes ?? 0) === 0) {
+  const cleanupStmt = db
+    .prepare(
+      `DELETE FROM amex_reconciliations WHERE id = ? AND status = 'draft'`,
+    )
+    .bind(reconciliationId);
+
+  const results = await db.batch([updateStmt, cleanupStmt]);
+  const updateResult = results[0];
+
+  if ((updateResult?.meta.changes ?? 0) === 0) {
     throw new Error(
       `Reconciliation ${reconciliationId} could not be finalized — it may already be finalized or not found.`,
     );
