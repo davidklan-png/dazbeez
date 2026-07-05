@@ -15,17 +15,36 @@ export type CapturePhase =
   | { kind: "saved"; receiptId: string; reviewUrl: string; capturedAt: number }
   | { kind: "error"; message: string };
 
+// Result of a single upload attempt. The desktop path (multi-file drop) reads
+// this to update its per-row state; the mobile path ignores the return value
+// and relies on `phase` (only one upload is ever in flight on mobile, so phase
+// stays coherent there).
+export type UploadResult =
+  | { ok: true; receiptId: string; reviewUrl: string }
+  | { ok: false; message: string };
+
 export function useReceiptUpload() {
   const [phase, setPhase] = useState<CapturePhase>({ kind: "idle" });
-  const abortRef = useRef<AbortController | null>(null);
+  // Each upload() gets its OWN controller; cancel()/reset() aborts all of
+  // them. The previous design kept a single controller and aborted it on
+  // every new upload — which silently killed all but the last file when the
+  // desktop drop handler called upload() N times back-to-back.
+  const controllersRef = useRef<Set<AbortController>>(new Set());
 
   const upload = useCallback(
-    async (file: File, paymentPath: PaymentPath | null) => {
-      abortRef.current?.abort();
+    async (
+      file: File,
+      paymentPath: PaymentPath | null,
+    ): Promise<UploadResult> => {
       const abort = new AbortController();
-      abortRef.current = abort;
+      controllersRef.current.add(abort);
 
-      setPhase({ kind: "uploading", pct: 5, fileName: file.name, fileSizeBytes: file.size });
+      setPhase({
+        kind: "uploading",
+        pct: 5,
+        fileName: file.name,
+        fileSizeBytes: file.size,
+      });
 
       try {
         const uploadFile = await maybeResizeImage(file);
@@ -38,6 +57,10 @@ export function useReceiptUpload() {
 
         const fd = new FormData();
         fd.append("file", uploadFile);
+        // NOTE: provenance mislabel — desktop uploads also send source=
+        // "mobile_capture" here. The upload route accepts any string for
+        // source (free-form column, no validation) so it doesn't break, but
+        // the value is wrong for desktop. Tracked for a follow-up.
         fd.append("source", "mobile_capture");
         if (paymentPath) fd.append("paymentPath", paymentPath);
 
@@ -55,43 +78,55 @@ export function useReceiptUpload() {
         };
 
         if (!res.ok || !json.receiptId) {
-          setPhase({
-            kind: "error",
-            message: json.error ?? "Upload failed. Please try again.",
-          });
-          return;
+          const message =
+            json.error ?? "Upload failed. Please try again.";
+          setPhase({ kind: "error", message });
+          return { ok: false, message };
         }
 
         // Captured and enqueued. Done — extraction happens later in the queue.
+        const reviewUrl =
+          json.reviewUrl ?? `/receipts/review/${json.receiptId}`;
         setPhase({
           kind: "saved",
           receiptId: json.receiptId,
-          reviewUrl: json.reviewUrl ?? `/receipts/review/${json.receiptId}`,
+          reviewUrl,
           capturedAt: Date.now(),
         });
+        return { ok: true, receiptId: json.receiptId, reviewUrl };
       } catch (error) {
-        if ((error as DOMException | undefined)?.name === "AbortError") return;
-        setPhase({
-          kind: "error",
-          message:
-            error instanceof Error
-              ? error.message
-              : "Network error — please try again.",
-        });
+        if ((error as DOMException | undefined)?.name === "AbortError") {
+          // Explicit cancel/reset already set phase to idle — don't clobber
+          // it with an error. Caller still sees a result it can act on.
+          return { ok: false, message: "Cancelled" };
+        }
+        const message =
+          error instanceof Error
+            ? error.message
+            : "Network error — please try again.";
+        setPhase({ kind: "error", message });
+        return { ok: false, message };
+      } finally {
+        controllersRef.current.delete(abort);
       }
     },
     [],
   );
 
-  const reset = useCallback(() => {
-    abortRef.current?.abort();
-    setPhase({ kind: "idle" });
+  const abortAll = useCallback(() => {
+    controllersRef.current.forEach((c) => c.abort());
+    controllersRef.current.clear();
   }, []);
 
-  const cancel = useCallback(() => {
-    abortRef.current?.abort();
+  const reset = useCallback(() => {
+    abortAll();
     setPhase({ kind: "idle" });
-  }, []);
+  }, [abortAll]);
+
+  const cancel = useCallback(() => {
+    abortAll();
+    setPhase({ kind: "idle" });
+  }, [abortAll]);
 
   return { phase, upload, reset, cancel };
 }

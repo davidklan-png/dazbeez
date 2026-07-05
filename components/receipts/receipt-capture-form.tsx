@@ -2,10 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { useIsMobile } from "@/lib/receipts/use-viewport";
-import {
-  useReceiptUpload,
-  type CapturePhase,
-} from "@/components/receipts/capture/use-receipt-upload";
+import { useReceiptUpload } from "@/components/receipts/capture/use-receipt-upload";
 import { CaptureMobile } from "@/components/receipts/capture/capture-mobile";
 import {
   CaptureDesktop,
@@ -28,6 +25,10 @@ const SESSION_QUEUE_TTL_MS = 1000 * 60 * 60 * 6;
 /** Stable empty array reference so useSyncExternalStore doesn't tear when
  *  the server snapshot is read repeatedly. */
 const EMPTY_QUEUE: SessionUpload[] = [];
+/** Max concurrent uploads on the desktop drop path. Drops beyond this are
+ *  queued in order (FIFO). 3 is a conservative cap that keeps the browser's
+ *  HTTP/2 connection to the Worker saturated without overwhelming it. */
+const MAX_CONCURRENT_UPLOADS = 3;
 
 // useSyncExternalStore requires the snapshot getter to return a
 // referentially-stable value, so we memoise across renders. The cache is
@@ -75,6 +76,11 @@ function persistQueue(items: SessionUpload[]) {
 
 const subscribeNoop = () => () => {};
 
+interface UploadPool {
+  active: number;
+  waiters: Array<() => void>;
+}
+
 export function ReceiptCaptureForm({
   initialPayment = null,
   rapidMode = false,
@@ -92,7 +98,10 @@ export function ReceiptCaptureForm({
     () => EMPTY_QUEUE,
   );
   const [sessionUploads, setSessionUploads] = useState<SessionUpload[]>(persisted);
-  const activeIdRef = useRef<string | null>(null);
+  // Per-form concurrency pool — limits simultaneous uploads so a 25-file
+  // drop doesn't fire 25 fetches at once. Held in a ref so waiters survive
+  // re-renders without restarting.
+  const poolRef = useRef<UploadPool>({ active: 0, waiters: [] });
 
   // Persist on every change so a hard reload doesn't lose the day's work.
   useEffect(() => {
@@ -106,9 +115,11 @@ export function ReceiptCaptureForm({
         await upload(file, initialPayment);
         return;
       }
-      // Desktop: register a session upload row immediately
+
+      // Desktop: register a session row immediately so the user sees the
+      // file appear in the batch grid + sidebar queue, then run the upload
+      // through the concurrency pool and patch the row from the result.
       const id = crypto.randomUUID();
-      activeIdRef.current = id;
       setSessionUploads((prev) => [
         {
           id,
@@ -119,22 +130,51 @@ export function ReceiptCaptureForm({
         },
         ...prev,
       ]);
-      await upload(file, initialPayment);
+
+      // Acquire a slot. Resolves immediately if under the cap, otherwise
+      // queues until a prior upload releases.
+      const pool = poolRef.current;
+      await new Promise<void>((resolve) => {
+        if (pool.active < MAX_CONCURRENT_UPLOADS) {
+          pool.active += 1;
+          resolve();
+        } else {
+          pool.waiters.push(() => {
+            pool.active += 1;
+            resolve();
+          });
+        }
+      });
+
+      try {
+        const result = await upload(file, initialPayment);
+        setSessionUploads((prev) =>
+          prev.map((u) =>
+            u.id === id
+              ? result.ok
+                ? {
+                    ...u,
+                    state: "ready",
+                    pct: 100,
+                    receiptId: result.receiptId,
+                  }
+                : {
+                    ...u,
+                    state: "error",
+                    pct: 100,
+                    errorMessage: result.message,
+                  }
+              : u,
+          ),
+        );
+      } finally {
+        pool.active -= 1;
+        const next = pool.waiters.shift();
+        if (next) next();
+      }
     },
     [isMobile, upload, initialPayment],
   );
-
-  // Mirror upload phase into the active session upload row (desktop only).
-  useEffect(() => {
-    if (isMobile) return;
-    const activeId = activeIdRef.current;
-    if (!activeId) return;
-    setSessionUploads((prev) =>
-      prev.map((u) =>
-        u.id === activeId ? applyPhaseToUpload(u, phase) : u,
-      ),
-    );
-  }, [phase, isMobile]);
 
   if (isMobile) {
     return (
@@ -158,27 +198,4 @@ export function ReceiptCaptureForm({
       sessionUploads={sessionUploads}
     />
   );
-}
-
-function applyPhaseToUpload(
-  u: SessionUpload,
-  phase: CapturePhase,
-): SessionUpload {
-  if (phase.kind === "uploading") {
-    return { ...u, state: "uploading", pct: phase.pct };
-  }
-  if (phase.kind === "saved") {
-    // ADR 0001: captured + enqueued. No OCR fields yet — extraction happens
-    // later in the queue, so the row shows as captured/ready with no preview.
-    return {
-      ...u,
-      state: "ready",
-      pct: 100,
-      receiptId: phase.receiptId,
-    };
-  }
-  if (phase.kind === "error") {
-    return { ...u, state: "error", pct: 100, errorMessage: phase.message };
-  }
-  return u;
 }
