@@ -3,6 +3,11 @@ import type { ComplianceSummary } from "@/lib/receipts/compliance";
 type Props = {
   month: string;
   summary: ComplianceSummary;
+  /** Audit B2: count of receipts in the month whose check threw and was
+   *  skipped from the summary. Optional because the dashboard computes the
+   *  summary directly (no per-receipt run) — only the API route surfaces
+   *  this today. */
+  checkFailures?: number;
 };
 
 const TYPE_LABELS: Record<string, string> = {
@@ -21,7 +26,7 @@ const TYPE_LABELS: Record<string, string> = {
   export_blocker: "Export blocker",
 };
 
-export function ComplianceSummaryCards({ month, summary }: Props) {
+export function ComplianceSummaryCards({ month, summary, checkFailures = 0 }: Props) {
   const topTypes = Object.entries(summary.byType)
     .sort(([, a], [, b]) => b - a)
     .slice(0, 4);
@@ -48,6 +53,19 @@ export function ComplianceSummaryCards({ month, summary }: Props) {
         <Card label="Warnings" count={summary.warnings} tone="amber" />
         <Card label="Info" count={summary.info} tone="gray" />
       </div>
+
+      {checkFailures > 0 && (
+        <div
+          role="status"
+          className="mt-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900"
+          title="One or more receipts in this month could not be checked — the summary above is partial."
+        >
+          <span className="font-semibold">Partial report:</span>{" "}
+          {checkFailures} {checkFailures === 1 ? "receipt" : "receipts"}{" "}
+          could not be checked. See <code>checkFailedReceiptIds</code> in the
+          JSON report.
+        </div>
+      )}
 
       {topTypes.length > 0 ? (
         <ul className="mt-4 space-y-1 text-xs text-gray-700">
