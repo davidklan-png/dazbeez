@@ -166,6 +166,10 @@ reconciliation finalized. Design consequences:
    cascade + clean the 2 rows in the same PR.
    DECISION (2026-07-05, audit finding A1): fail loudly — compensating
    delete of R2 object + receipt row, return 500; client shows error tile.
+   DONE (40efd02, PR #63): both routes fail loudly via new canonical
+   hardDeleteReceipt(); the 2 dangling rows were already gone from prod.
+   Remaining follow-up: iOS client must SURFACE the 500 (check untracked
+   DazbeezCapture/ sources in tree).
 6. **Consolidate month-closing validation.** After the read-through fix
    (223b22e), validateMonthReadyForExport's inline receipt loop duplicates
    checks now covered by validateAmexLinesForSignoff. Cleanup pass to
@@ -196,6 +200,12 @@ reconciliation finalized. Design consequences:
    DLQ on the extraction queue so nothing is dropped invisibly. Backfill
    remains the recovery net, but it shouldn't be the only detection.
    Audit cross-ref: findings A4 + B6 (docs/audits/2026-07-05).
+   PART DONE (beb1e96, PR #63): (b) shipped — DLQ
+   dazbeez-receipts-extraction-dlq + max_retries=5 (settings documented in
+   wrangler.jsonc; NOT introspectable via CLI). (a) failed-state marking
+   still open. Note: consumer-level visibility_timeout_ms is 12h — benign
+   because consumer.py overrides per-pull (5 min), but a trap for any
+   future consumer that doesn't.
 10. **Source provenance: desktop uploads tagged "mobile_capture".** The
     upload route doesn't validate `source` (free-form string) and the
     desktop client hardcodes "mobile_capture". Follow-up per worker report
@@ -213,9 +223,11 @@ reconciliation finalized. Design consequences:
     receipt_files manifest writes (#5), silent queue max-deliveries drops
     (#9), silently aborted client uploads (fixed, 4a08f92). Audit complete:
     docs/audits/2026-07-05-error-surfacing.md (PR #62) — 15 findings
-    (A=4, B=6, C=5) + 2 infra gaps. Phase 1 (A1, A2, DLQ+max_deliveries,
-    B5) in progress; Phase 2 = B1–B4 + newsyslog rotation (C4); C-class
-    accepted as documented.
+    (A=4, B=6, C=5) + 2 infra gaps. Phase 1 DONE (PR #63, commits
+    40efd02/58d38be/beb1e96/1e18891): A1 loud uploads, A2 atomic finalize
+    cleanup + warnings banner, DLQ+max_retries, B5 parse-failure badge.
+    Phase 2 = B1–B4 + newsyslog rotation (C4) + stuck-pending indicator;
+    C-class accepted as documented.
 13. **Multi-page PDF handling.** Real-world case: 5608427143.pdf
     (5c1ab53f…) has 2 pages; the consumer renders page 0 only and drops the
     rest with a stderr-only warning — invisible to the operator. Design:
