@@ -6,6 +6,7 @@ import {
   type ModelExtractionFields,
 } from "@/lib/receipts/extraction";
 import { createAuditEntry } from "@/lib/receipts/audit";
+import { ExportFinalizedError } from "@/lib/receipts/month-lock";
 import { nowIso, stringifyJson } from "@/lib/receipts/db-utils";
 import { getReceiptsDb, getReceiptsProcessorKey } from "@/lib/cloudflare-runtime";
 import type { ExtractionResult } from "@/lib/receipts/types";
@@ -214,6 +215,9 @@ export async function POST(request: Request, { params }: RouteContext) {
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("Unauthorized")) {
       return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
+    }
+    if (error instanceof ExportFinalizedError) {
+      return NextResponse.json({ error: error.message }, { status: 409 });
     }
     if (error instanceof Error && error.message.includes("finalized reconciliation")) {
       return NextResponse.json({ error: error.message }, { status: 409 });
