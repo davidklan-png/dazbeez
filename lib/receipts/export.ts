@@ -64,6 +64,15 @@ const CSV_HEADERS = [
   "ReceiptId",
   "ReceiptStatus",
   "OriginalR2Key",
+  // Compliance (audit A5; 電子帳簿保存法 / インボイス制度). Sourced from
+  // the matched receipt on AMEX-line rows; from the receipt itself on
+  // CASH/DIGITAL receipt rows; null when no receipt is present.
+  "InvoiceRegistrationNumber",
+  "QualifiedInvoiceStatus",
+  "TaxRate",
+  "TaxAmount",
+  "SourceType",
+  "CounterpartyName",
 ];
 
 /**
@@ -107,6 +116,13 @@ export function buildMonthlyExportCsv(
       csvEscape(row.receiptId),
       csvEscape(row.status),
       csvEscape(row.originalR2Key),
+      // Compliance columns
+      csvEscape(row.invoiceRegistrationNumber),
+      csvEscape(row.qualifiedInvoiceStatus),
+      csvEscape(row.taxRate),
+      csvEscape(formatAmount(row.taxAmountMinor, row.currency)),
+      csvEscape(row.sourceType),
+      csvEscape(row.counterpartyName),
     ].join(",");
     lines.push(line);
   }
@@ -202,6 +218,10 @@ export function buildManifestKey(month: string, exportId: string): string {
   return `exports/${month}/${exportId}-manifest.csv`;
 }
 
+export function buildSummaryKey(month: string, exportId: string): string {
+  return `exports/${month}/${exportId}-summary.csv`;
+}
+
 export function buildManifestCsv(
   exportId: string,
   month: string,
@@ -295,6 +315,7 @@ export function buildExportReadme(opts: {
   correctionReason?: string | null;
   archiveSha256: string;
   manifestSha256?: string | null;
+  summarySha256?: string | null;
 }): string {
   const revisionLine =
     opts.exportRevision > 1
@@ -308,6 +329,7 @@ export function buildExportReadme(opts: {
     revisionLine,
     `Archive SHA-256: ${opts.archiveSha256}`,
     `Manifest SHA-256: ${opts.manifestSha256 ?? "(pending)"}`,
+    `Summary SHA-256: ${opts.summarySha256 ?? "(none)"}`,
     "",
     "── Accountant review ──────────────────────────────────────",
     ACCOUNTANT_DISCLAIMER_EN,
@@ -317,5 +339,7 @@ export function buildExportReadme(opts: {
     "── Files included ─────────────────────────────────────────",
     "See the manifest CSV for SHA-256 hashes of every receipt original,",
     "derivative, and the AMEX statement CSV included in this export.",
+    "The summary CSV (<exportId>-summary.csv) provides per-category and",
+    "per-PaymentPath totals for a quick reconciliation check.",
   ].join("\n");
 }

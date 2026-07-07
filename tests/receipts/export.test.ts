@@ -7,7 +7,12 @@ import {
   hashCsvContent,
   buildArchiveKey,
   buildManifestKey,
+  buildSummaryKey,
 } from "@/lib/receipts/export";
+import {
+  ExportFinalizedError,
+  transactionMonthOf,
+} from "@/lib/receipts/month-lock";
 import type { ExportRow } from "@/lib/receipts/types";
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
@@ -35,6 +40,12 @@ function makeReceiptRow(overrides: Partial<ExportRow> = {}): ExportRow {
     paymentPath: "CASH",
     businessPurpose: "Team coffee",
     attendees: [],
+    invoiceRegistrationNumber: null,
+    qualifiedInvoiceStatus: null,
+    taxRate: null,
+    taxAmountMinor: null,
+    sourceType: null,
+    counterpartyName: null,
     ...overrides,
   };
 }
@@ -62,6 +73,12 @@ function makeAmexLineRow(overrides: Partial<ExportRow> = {}): ExportRow {
     paymentPath: "AMEX",
     businessPurpose: "Client meeting",
     attendees: ["Client A", "David Klan"],
+    invoiceRegistrationNumber: "T1234567890123",
+    qualifiedInvoiceStatus: "valid",
+    taxRate: "0.10",
+    taxAmountMinor: 490,
+    sourceType: "paper_scanned",
+    counterpartyName: "Power Lunch Sushi K.K.",
     ...overrides,
   };
 }
@@ -232,6 +249,74 @@ test("buildExportSummaryCsv: uncategorized bucket when category null", () => {
     "t",
   );
   assert.match(csv, /uncategorized,1,/);
+});
+
+// ─── Compliance columns on main CSV (A5) ──────────────────────────────────────
+
+test("buildMonthlyExportCsv: compliance columns populated from receipt", () => {
+  const csv = buildMonthlyExportCsv(
+    [makeAmexLineRow({
+      invoiceRegistrationNumber: "T2810074043972",
+      qualifiedInvoiceStatus: "valid",
+      taxRate: "0.10",
+      taxAmountMinor: 490,
+      sourceType: "paper_scanned",
+      counterpartyName: "Power Lunch Sushi K.K.",
+    })],
+    new Map(),
+  );
+  assert.ok(csv.includes("T2810074043972"), "invoice registration number");
+  assert.ok(csv.includes("valid"), "qualified invoice status");
+  assert.ok(csv.includes("0.10"), "tax rate");
+  assert.ok(csv.includes("490"), "tax amount minor");
+  assert.ok(csv.includes("paper_scanned"), "source type");
+  assert.ok(csv.includes("Power Lunch Sushi K.K."), "counterparty name");
+});
+
+test("buildMonthlyExportCsv: header carries compliance column names", () => {
+  const csv = buildMonthlyExportCsv([], new Map());
+  const header = csv.split("\n")[0]!;
+  for (const col of [
+    "InvoiceRegistrationNumber",
+    "QualifiedInvoiceStatus",
+    "TaxRate",
+    "TaxAmount",
+    "SourceType",
+    "CounterpartyName",
+  ]) {
+    assert.ok(header.includes(col), `header must include ${col}`);
+  }
+});
+
+// ─── buildSummaryKey ──────────────────────────────────────────────────────────
+
+test("buildSummaryKey: uses correct path pattern", () => {
+  const key = buildSummaryKey("2024-01", "export-uuid");
+  assert.equal(key, "exports/2024-01/export-uuid-summary.csv");
+});
+
+// ─── Split lock model helpers (audit A5) ──────────────────────────────────────
+
+test("transactionMonthOf: extracts YYYY-MM from YYYY-MM-DD", () => {
+  assert.equal(transactionMonthOf("2026-05-15"), "2026-05");
+});
+
+test("transactionMonthOf: returns null for null/empty/malformed", () => {
+  assert.equal(transactionMonthOf(null), null);
+  assert.equal(transactionMonthOf(""), null);
+  assert.equal(transactionMonthOf("not-a-date"), null);
+});
+
+test("transactionMonthOf: accepts ISO timestamps too", () => {
+  assert.equal(transactionMonthOf("2026-05-15T08:30:00Z"), "2026-05");
+});
+
+test("ExportFinalizedError: carries month and message", () => {
+  const err = new ExportFinalizedError("2026-05", "locked");
+  assert.equal(err.month, "2026-05");
+  assert.equal(err.message, "locked");
+  assert.equal(err.name, "ExportFinalizedError");
+  assert.ok(err instanceof Error);
 });
 
 // ─── hashCsvContent ────────────────────────────────────────────────────────────

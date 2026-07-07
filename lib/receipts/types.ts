@@ -699,6 +699,15 @@ export interface ExportRow {
   paymentPath: PaymentPath;
   businessPurpose: string | null;
   attendees: string[];
+  // Compliance fields (audit A5; 電子帳簿保存法 / インボイス制度). Sourced
+  // from the matched receipt on AMEX-line rows; from the receipt itself on
+  // CASH/DIGITAL receipt rows; null when no receipt is present.
+  invoiceRegistrationNumber: string | null;
+  qualifiedInvoiceStatus: QualifiedInvoiceStatus | null;
+  taxRate: string | null;
+  taxAmountMinor: number | null;
+  sourceType: SourceType | null;
+  counterpartyName: string | null;
 }
 
 // ─── Dashboard alerts ──────────────────────────────────────────────────────

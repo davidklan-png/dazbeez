@@ -8,10 +8,13 @@ import {
   replaceExportItems,
 } from "@/lib/receipts/db";
 import {
+  bomPrefixedCrlf,
   buildMonthlyExportCsv,
+  buildExportSummaryCsv,
   hashCsvContent,
   buildArchiveKey,
   buildManifestKey,
+  buildSummaryKey,
   buildManifestCsv,
   buildReadmeKey,
   buildExportReadme,
@@ -20,6 +23,7 @@ import { archiveBundle, archiveManifest } from "@/lib/receipts/storage";
 import {
   buildExportBundle,
   validateMonthReadyForExport,
+  computeEarlierOpenMonthWarnings,
 } from "@/lib/receipts/month-closing";
 import { getReceiptsDb, getReceiptsArchiveBucket } from "@/lib/cloudflare-runtime";
 import { getAmexArtifactByMonth } from "@/lib/receipts/db";
@@ -78,9 +82,14 @@ export async function POST(request: Request) {
       }
     }
 
-    // Generate CSV and hash from the shared bundle rows.
-    const csv = buildMonthlyExportCsv(bundle.rows, bundle.attendeeMap);
-    const sha256 = await hashCsvContent(csv);
+    // Generate CSV. The pure form is what tests assert against; the route
+    // applies UTF-8 BOM + CRLF (audit A5) before hashing and upload so the
+    // SHA-256 in the manifest matches the bytes in R2 exactly. The
+    // accountant opens this CSV in Excel on Windows — without BOM/CRLF the
+    // Japanese merchant names render as mojibake.
+    const csvPure = buildMonthlyExportCsv(bundle.rows, bundle.attendeeMap);
+    const csvShipped = bomPrefixedCrlf(csvPure);
+    const sha256 = await hashCsvContent(csvShipped);
 
     // Create or retrieve export record, then reload to pick up revision
     // metadata (export_revision / supersedes_export_id / correction_reason).
@@ -102,10 +111,14 @@ export async function POST(request: Request) {
 
     const archiveKey = buildArchiveKey(month, exportId);
     const manifestKey = buildManifestKey(month, exportId);
+    const summaryKey = buildSummaryKey(month, exportId);
 
     // Upload CSV to archive bucket
     const encoder = new TextEncoder();
-    await archiveBundle(archiveKey, encoder.encode(csv).buffer as ArrayBuffer);
+    await archiveBundle(
+      archiveKey,
+      encoder.encode(csvShipped).buffer as ArrayBuffer,
+    );
 
     // Gather all file-manifest entries for receipts included in this export
     // plus the AMEX statement artifact. This builds the per-file SHA-256
@@ -164,6 +177,21 @@ export async function POST(request: Request) {
     const manifestSha256 = await hashCsvContent(manifest);
     await archiveManifest(manifestKey, manifestBytes.buffer as ArrayBuffer);
 
+    // Summary CSV (audit A5): per-category and per-PaymentPath totals for
+    // a quick reconciliation check. Same BOM/CRLF treatment as the main
+    // archive so the accountant can open it in Excel without mojibake.
+    const summaryPure = buildExportSummaryCsv(bundle.rows, month, generatedAt);
+    const summaryShipped = bomPrefixedCrlf(summaryPure);
+    const summarySha256 = await hashCsvContent(summaryShipped);
+    await getReceiptsArchiveBucket().put(
+      summaryKey,
+      encoder.encode(summaryShipped).buffer as ArrayBuffer,
+      {
+        httpMetadata: { contentType: "text/csv; charset=utf-8" },
+        customMetadata: retentionMetadata(),
+      },
+    );
+
     // README accompanies every bundle. Disclaimer text + revision context.
     const readme = buildExportReadme({
       exportId,
@@ -175,6 +203,7 @@ export async function POST(request: Request) {
       correctionReason,
       archiveSha256: sha256,
       manifestSha256,
+      summarySha256,
     });
     const readmeKey = buildReadmeKey(month, exportId);
     await getReceiptsArchiveBucket().put(
@@ -187,6 +216,7 @@ export async function POST(request: Request) {
     );
 
     // Auto-finalize if requested
+    let finalizeWarnings: string[] = [];
     if (body.finalize) {
       await finalizeExport(
         exportId,
@@ -196,6 +226,10 @@ export async function POST(request: Request) {
         actor,
         manifestSha256,
       );
+      // A7: non-blocking warning when an earlier statement month is still
+      // open. Surfaced in the finalize response so the operator's toast on
+      // "Finalize succeeded" can also say "but March is still open."
+      finalizeWarnings = await computeEarlierOpenMonthWarnings(month);
     }
 
     return NextResponse.json(
@@ -205,10 +239,13 @@ export async function POST(request: Request) {
         rowCount: bundle.rows.length,
         sha256,
         manifestSha256,
+        summarySha256,
         archiveKey,
         manifestKey,
+        summaryKey,
         readmeKey,
         finalized: body.finalize ?? false,
+        warnings: finalizeWarnings,
       },
       { status: 200 },
     );

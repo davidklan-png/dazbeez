@@ -3,8 +3,8 @@ import {
   getFinalizedReconciliationForMonth,
   listAmexLineAttendeeNamesByMonth,
   listAmexLines,
+  listAllReceiptsInMonth,
   listAttendeeNamesByReceiptIds,
-  listReceiptRecords,
   listReceiptRecordsByIds,
 } from "@/lib/receipts/db";
 import { getComplianceSettings } from "@/lib/receipts/settings";
@@ -82,10 +82,12 @@ export async function buildExportBundle(month: string): Promise<ExportBundle> {
 
   // (3) Non-AMEX receipts anchored by transaction_date in month M. UNKNOWN
   // is intentionally excluded here (ambiguous export month) — the
-  // validator blocks finalize when any UNKNOWN receipts exist.
+  // validator blocks finalize when any UNKNOWN receipts exist. Pages
+  // internally via listAllReceiptsInMonth and refuses to silently
+  // truncate at the cap (audit A6 — a partial bundle is an audit failure).
   const [cashReceipts, digitalReceipts] = await Promise.all([
-    listReceiptRecords({ month, paymentPath: "CASH", limit: 5000 }),
-    listReceiptRecords({ month, paymentPath: "DIGITAL", limit: 5000 }),
+    listAllReceiptsInMonth(month, { paymentPath: "CASH" }),
+    listAllReceiptsInMonth(month, { paymentPath: "DIGITAL" }),
   ]);
   // A receipt matched to a line appears once on the line row — drop it
   // from the CASH/DIGITAL receipt-rows section so it cannot double-count.
@@ -134,6 +136,12 @@ export async function buildExportBundle(month: string): Promise<ExportBundle> {
       paymentPath: "AMEX",
       businessPurpose: receipt?.business_purpose ?? null,
       attendees: receipt?.id ? (attendeeMap.get(receipt.id) ?? []) : [],
+      invoiceRegistrationNumber: receipt?.invoice_registration_number ?? null,
+      qualifiedInvoiceStatus: receipt?.qualified_invoice_status ?? null,
+      taxRate: receipt?.tax_rate ?? null,
+      taxAmountMinor: receipt?.tax_amount_minor ?? null,
+      sourceType: receipt?.source_type ?? null,
+      counterpartyName: receipt?.counterparty_name ?? null,
     });
     items.push({ itemType: "amex_line", itemId: line.id });
     if (receipt?.id && !seenReceiptIds.has(receipt.id)) {
@@ -166,6 +174,12 @@ export async function buildExportBundle(month: string): Promise<ExportBundle> {
       paymentPath: receipt.payment_path,
       businessPurpose: receipt.business_purpose,
       attendees: attendeeMap.get(receipt.id) ?? [],
+      invoiceRegistrationNumber: receipt.invoice_registration_number ?? null,
+      qualifiedInvoiceStatus: receipt.qualified_invoice_status ?? null,
+      taxRate: receipt.tax_rate ?? null,
+      taxAmountMinor: receipt.tax_amount_minor ?? null,
+      sourceType: receipt.source_type ?? null,
+      counterpartyName: receipt.counterparty_name ?? null,
     });
     items.push({ itemType: "receipt", itemId: receipt.id });
   }
