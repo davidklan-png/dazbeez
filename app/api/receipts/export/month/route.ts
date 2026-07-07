@@ -2,12 +2,10 @@ import { NextResponse } from "next/server";
 import { requireReceiptsActor } from "@/lib/receipts/auth";
 import {
   listReceiptRecords,
-  listReceiptRecordsByIds,
   listAttendees,
   createExport,
   finalizeExport,
   getFinalizedReconciliationForMonth,
-  listAmexLines,
 } from "@/lib/receipts/db";
 import {
   buildMonthlyExportCsv,
@@ -19,8 +17,8 @@ import {
   buildExportReadme,
 } from "@/lib/receipts/export";
 import { archiveBundle, archiveManifest } from "@/lib/receipts/storage";
-import { getCategoryByCode, requiresAttendees } from "@/lib/receipts/categories";
-import { resolveLineCategory } from "@/lib/receipts/line-classification";
+import { getCategoryByCode } from "@/lib/receipts/categories";
+import { validateMonthReadyForExport } from "@/lib/receipts/month-closing";
 import { getReceiptsDb, getReceiptsArchiveBucket } from "@/lib/cloudflare-runtime";
 import { getAmexArtifactByMonth } from "@/lib/receipts/db";
 import { retentionMetadata } from "@/lib/receipts/retention";
@@ -80,64 +78,12 @@ export async function POST(request: Request) {
       };
     });
 
-    // Export blocking validation — check AMEX lines and reconciliation before finalizing
+    // Export blocking validation — single authority is validateMonthReadyForExport
+    // (lib/receipts/month-closing.ts). Do NOT inline a second finalize gate here;
+    // any divergence between this route and /api/receipts/export/[month] reopens
+    // the audit-9 drift where one path could finalize a month the other blocks.
     if (body.finalize) {
-      const reconciliation = await getFinalizedReconciliationForMonth(month);
-      if (!reconciliation) {
-        return NextResponse.json(
-          { error: `Cannot finalize export: no finalized reconciliation for ${month}. Sign off the reconciliation first.`, blockers: [`No finalized reconciliation for ${month}`] },
-          { status: 422 },
-        );
-      }
-
-      const amexLines = await listAmexLines(month);
-      const matchedReceipts = await listReceiptRecordsByIds(
-        amexLines
-          .map((line) => line.matched_receipt_id)
-          .filter((id): id is string => Boolean(id)),
-      );
-      const receiptMap = new Map(matchedReceipts.map((r) => [r.id, r] as const));
-      const matchedAttendeeMap = new Map(attendeeMap);
-      for (const receipt of matchedReceipts) {
-        if (matchedAttendeeMap.has(receipt.id)) continue;
-        const attendees = await listAttendees(receipt.id);
-        if (attendees.length > 0) {
-          matchedAttendeeMap.set(receipt.id, attendees.map((a) => a.attendee_name));
-        }
-      }
-      const blockers: string[] = [];
-
-      for (const line of amexLines) {
-        // Classification source: when a matched receipt exists, read its
-        // category (the receipt is the system of record). Fall back to the
-        // line value for no-receipt lines and dangling matches.
-        const receipt = line.matched_receipt_id
-          ? receiptMap.get(line.matched_receipt_id)
-          : undefined;
-        const resolvedCategory = resolveLineCategory(line, receipt);
-
-        if (!resolvedCategory) {
-          blockers.push(`Line ${line.id}: missing expense category`);
-        }
-        if (line.receipt_status === "missing_receipt" && !line.receipt_missing_reason) {
-          blockers.push(`Line ${line.id}: missing receipt without reason`);
-        }
-        if (requiresAttendees(resolvedCategory)) {
-          const linkedReceipt = line.matched_receipt_id
-            ? matchedAttendeeMap.get(line.matched_receipt_id)
-            : null;
-          if (!linkedReceipt || linkedReceipt.length === 0) {
-            blockers.push(`Line ${line.id}: ${getCategoryByCode(resolvedCategory ?? "")?.jaName ?? resolvedCategory} requires attendees`);
-          }
-        }
-        if (line.business_trip_status === "candidate") {
-          blockers.push(`Line ${line.id}: unresolved business trip candidate`);
-        }
-        if (line.re_review_needed) {
-          blockers.push(`Line ${line.id}: statement line changed after confirmation`);
-        }
-      }
-
+      const blockers = await validateMonthReadyForExport(month);
       if (blockers.length > 0) {
         return NextResponse.json(
           { error: "Export blocked — resolve these issues first.", blockers },

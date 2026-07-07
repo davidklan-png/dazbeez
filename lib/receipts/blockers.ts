@@ -2,6 +2,13 @@
 // Hoisted out of app/(receipt-system)/receipts/export/page.tsx so the same
 // rules can power the dashboard "Export status" tile and the reconcile
 // screen's "Ready to seal?" summary without forking the logic.
+//
+// PRESENTATION ONLY. These tiles describe why a month isn't ready so the
+// operator knows what to fix; they are not the API gate. The single
+// enforcement authority is validateMonthReadyForExport() in
+// lib/receipts/month-closing.ts — every finalize path (POST
+// /api/receipts/export/month, POST /api/receipts/export/[month]) routes
+// through it. If you add a new rule, add it THERE, not here.
 
 import { requiresAttendees } from "@/lib/receipts/categories";
 import { isPendingProcessing } from "@/lib/receipts/extraction-state";

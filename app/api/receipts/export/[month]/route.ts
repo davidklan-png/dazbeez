@@ -3,7 +3,6 @@ import { requireReceiptsActor } from "@/lib/receipts/auth";
 import {
   getExport,
   finalizeExport,
-  getFinalizedReconciliationForMonth,
   createExportRevision,
 } from "@/lib/receipts/db";
 import { validateMonthReadyForExport } from "@/lib/receipts/month-closing";
@@ -87,16 +86,9 @@ export async function POST(request: Request, { params }: RouteContext) {
       );
     }
 
-    const reconciliation = await getFinalizedReconciliationForMonth(month);
-    if (!reconciliation) {
-      return NextResponse.json(
-        {
-          error: `Cannot finalize export: no finalized reconciliation for ${month}.`,
-        },
-        { status: 422 },
-      );
-    }
-
+    // validateMonthReadyForExport is the single authority — it includes the
+    // finalized-reconciliation precondition. The redundant pre-check that
+    // used to live here was dropped to keep both finalize paths identical.
     const blockers = await validateMonthReadyForExport(month);
     if (blockers.length > 0) {
       return NextResponse.json(
