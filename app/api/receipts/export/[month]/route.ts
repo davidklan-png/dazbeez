@@ -5,7 +5,10 @@ import {
   finalizeExport,
   createExportRevision,
 } from "@/lib/receipts/db";
-import { validateMonthReadyForExport } from "@/lib/receipts/month-closing";
+import {
+  validateMonthReadyForExport,
+  computeEarlierOpenMonthWarnings,
+} from "@/lib/receipts/month-closing";
 
 type RouteContext = { params: Promise<{ month: string }> };
 
@@ -106,7 +109,16 @@ export async function POST(request: Request, { params }: RouteContext) {
       exportRecord.manifest_sha256 ?? undefined,
     );
 
-    return NextResponse.json({ ok: true, month, finalized: true }, { status: 200 });
+    // A7: non-blocking warning when finalizing month M while an earlier
+    // statement month is still open. A late cash/digital receipt dated in
+    // that earlier month will cost a revision once it lands — operators
+    // should know that before they walk away thinking the month is "done."
+    const warnings = await computeEarlierOpenMonthWarnings(month);
+
+    return NextResponse.json(
+      { ok: true, month, finalized: true, warnings },
+      { status: 200 },
+    );
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("Unauthorized")) {
       return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
