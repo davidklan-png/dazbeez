@@ -10,7 +10,7 @@ import {
 import { getComplianceSettings } from "@/lib/receipts/settings";
 import { summarizeOpenChecksForMonth } from "@/lib/receipts/compliance";
 import { getReceiptsDb } from "@/lib/cloudflare-runtime";
-import type { ExportRow, ReceiptRecord } from "@/lib/receipts/types";
+import type { AmexReconciliation, ExportRow, ReceiptRecord } from "@/lib/receipts/types";
 import { validateAmexLinesForSignoff } from "@/lib/receipts/reconciliation-signoff";
 
 export interface MonthlyExportDraft {
@@ -76,11 +76,17 @@ export async function buildMonthlyExportDraft(
 export async function validateMonthReadyForExport(
   month: string,
   draft?: MonthlyExportDraft,
+  preloadedReconciliation?: AmexReconciliation | null,
 ): Promise<string[]> {
   const blockers: string[] = [];
 
-  // (1) Statement-sealed gate.
-  const reconciliation = await getFinalizedReconciliationForMonth(month);
+  // (1) Statement-sealed gate. Callers that already fetched the
+  // reconciliation (e.g. /api/receipts/export/month to populate the manifest
+  // pointer) may pass it in to avoid a second D1 round-trip.
+  const reconciliation =
+    preloadedReconciliation !== undefined
+      ? preloadedReconciliation
+      : await getFinalizedReconciliationForMonth(month);
   if (!reconciliation) {
     blockers.push(
       `No finalized reconciliation for ${month}. Sign off the reconciliation first.`,

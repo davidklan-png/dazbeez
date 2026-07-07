@@ -5,6 +5,7 @@ import {
   listAttendees,
   createExport,
   finalizeExport,
+  getExport,
   getFinalizedReconciliationForMonth,
 } from "@/lib/receipts/db";
 import {
@@ -22,7 +23,7 @@ import { validateMonthReadyForExport } from "@/lib/receipts/month-closing";
 import { getReceiptsDb, getReceiptsArchiveBucket } from "@/lib/cloudflare-runtime";
 import { getAmexArtifactByMonth } from "@/lib/receipts/db";
 import { retentionMetadata } from "@/lib/receipts/retention";
-import type { ExportRow, ReceiptFile } from "@/lib/receipts/types";
+import type { AmexReconciliation, ExportRow, ReceiptFile } from "@/lib/receipts/types";
 
 export async function POST(request: Request) {
   try {
@@ -82,8 +83,19 @@ export async function POST(request: Request) {
     // (lib/receipts/month-closing.ts). Do NOT inline a second finalize gate here;
     // any divergence between this route and /api/receipts/export/[month] reopens
     // the audit-9 drift where one path could finalize a month the other blocks.
+    //
+    // Fetch the reconciliation ONCE so we can both pass it into the validator
+    // (avoiding its internal round-trip) and use the same row for the manifest
+    // pointer below. Pre-1102-storm profiling showed finalize did two identical
+    // SELECTs against amex_reconciliations; this collapses them to one.
+    let reconciliation: AmexReconciliation | null = null;
     if (body.finalize) {
-      const blockers = await validateMonthReadyForExport(month);
+      reconciliation = await getFinalizedReconciliationForMonth(month);
+      const blockers = await validateMonthReadyForExport(
+        month,
+        undefined,
+        reconciliation,
+      );
       if (blockers.length > 0) {
         return NextResponse.json(
           { error: "Export blocked — resolve these issues first.", blockers },
@@ -96,19 +108,24 @@ export async function POST(request: Request) {
     const csv = buildMonthlyExportCsv(exportRows, attendeeMap);
     const sha256 = await hashCsvContent(csv);
 
-    // Create or retrieve export record
+    // Create or retrieve export record, then reload to pick up revision
+    // metadata (export_revision / supersedes_export_id / correction_reason).
+    // createExport() returns just the id; the row's revision fields are needed
+    // to label the manifest and README correctly when reusing a draft created
+    // by createExportRevision() — otherwise revision N ships with a README
+    // claiming "Revision: 1 (initial)".
     const exportId = await createExport(month, actor);
+    const exportRecord = await getExport(month);
+    const exportRevision = exportRecord?.export_revision ?? 1;
+    const supersedesExportId = exportRecord?.supersedes_export_id ?? null;
+    const correctionReason = exportRecord?.correction_reason ?? null;
+
     const archiveKey = buildArchiveKey(month, exportId);
     const manifestKey = buildManifestKey(month, exportId);
 
     // Upload CSV to archive bucket
     const encoder = new TextEncoder();
     await archiveBundle(archiveKey, encoder.encode(csv).buffer as ArrayBuffer);
-
-    // When finalizing, include reconciliation manifest reference in the export manifest
-    const reconciliation = body.finalize
-      ? await getFinalizedReconciliationForMonth(month)
-      : null;
 
     // Gather all file-manifest entries for receipts included in this export
     // plus the AMEX statement artifact. This builds the per-file SHA-256
@@ -158,6 +175,9 @@ export async function POST(request: Request) {
               originalFilename: amexArtifact.original_filename ?? "",
             }
           : null,
+        exportRevision,
+        supersedesExportId,
+        correctionReason,
       },
     );
     const manifestBytes = encoder.encode(manifest);
@@ -170,7 +190,9 @@ export async function POST(request: Request) {
       month,
       rowCount: exportRows.length,
       generatedAt,
-      exportRevision: 1,
+      exportRevision,
+      supersedesExportId,
+      correctionReason,
       archiveSha256: sha256,
       manifestSha256,
     });
