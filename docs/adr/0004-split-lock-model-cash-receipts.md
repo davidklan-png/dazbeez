@@ -29,8 +29,17 @@ The two never overlap. AMEX-path receipts are governed by reconciliation-sealed 
 The export-finalized lock is implemented by:
 
 - `ExportFinalizedError` — typed error class so routes use `instanceof` instead of brittle substring matching on `error.message`.
-- `assertTransactionMonthEditable(month)` — throws when the month has `receipt_exports.status='finalized'`. Memoized in-process for tight loops.
+- `assertTransactionMonthEditable(month)` — throws when the month is locked for edits (see predicate below). No-op for null/empty input, since uploads insert with a null `transaction_date` and the lock can't apply until the extraction backfill lands.
+- `isMonthLockedForEdits(db, month)` — the actual edit-lock predicate. Returns true iff an export exists at `status='finalized'` for the month AND no export exists at `status='draft'` for the month. Implemented as a single D1 CASE expression; one indexed lookup per mutation.
 - `transactionMonthOf(date)` — derives `YYYY-MM` from a YYYY-MM-DD or ISO timestamp.
+
+### Draft revision reopens the month (correction-flow fix, 2026-07-08)
+
+Finalized export rows are permanent (preservation principle — `receipt_exports.status='finalized'` never transitions back). Without a carve-out, the correction flow could never actually correct anything: `POST /api/receipts/export/<month>?correction=true` creates a fresh `status='draft'` revision row, but the finalized row it sits next to would keep the lock engaged and every edit attempt would re-throw.
+
+The predicate resolves this by treating "has open draft revision" as a release of the lock. While the draft exists, edits land normally against the live `receipt_records` rows. Finalizing the revision consumes the draft (it becomes the new finalized row), so the lock re-closes automatically — no explicit "re-seal" step is needed.
+
+This is why the predicate is **not** memoized: the locked state is no longer monotonic. A module-level `Set<string>` cached "locked" would survive a revision draft being opened within the same Worker isolate, and the correction flow would deadlock again. One D1 lookup per mutation is the correct cost; the index on `receipt_exports(export_month, status)` makes it cheap.
 
 Wired into:
 - `createReceiptRecord` (no-op for the upload path, which inserts at status='captured' with null date; guards callers that supply the date up front)
@@ -39,7 +48,8 @@ Wired into:
 
 ## Consequences
 
-- A late cash receipt for a finalized month must go through `createExportRevision` (the `?correction=true` endpoint). Direct inserts/edits return 409.
+- A late cash receipt for a finalized month must go through `createExportRevision` (the `?correction=true` endpoint). Direct inserts/edits return 409 — **until** the revision draft exists, at which point the month reopens for the duration of the correction. Finalizing the revision re-seals the month.
 - Receipt rows already at `status='exported'` (set by `finalizeExport`) surface a revision hint in their 409 too — the operator knows exactly where to go.
 - The reconciliation-sealed gate is unchanged for AMEX paths; existing edit-rejection behavior there is preserved.
 - The locks compose cleanly when both are active (a month can be both reconciliation-sealed and export-finalized — they protect different populations).
+- The lock state is non-monotonic (open draft → released; finalize draft → re-locked). It must be re-computed per mutation from D1 — never cached in-process.

@@ -319,6 +319,22 @@ test("ExportFinalizedError: carries month and message", () => {
   assert.ok(err instanceof Error);
 });
 
+test("ExportFinalizedError: routes via instanceof, not substring matching on message", () => {
+  // Routes catch this with `instanceof ExportFinalizedError` (see app/api/receipts/*).
+  // A plain Error carrying the same string in its message must NOT be confused
+  // for the typed signal — that's the whole point of having a typed error class.
+  function catchResult(err: unknown): "locked" | "passthrough" {
+    if (err instanceof ExportFinalizedError) return "locked";
+    return "passthrough";
+  }
+  assert.equal(catchResult(new ExportFinalizedError("2026-05", "x")), "locked");
+  assert.equal(
+    catchResult(new Error("Month 2026-05 is export-finalized")),
+    "passthrough",
+    "plain Error must not satisfy the instanceof check",
+  );
+});
+
 // ─── hashCsvContent ────────────────────────────────────────────────────────────
 
 test("hashCsvContent: same content produces same hash", async () => {

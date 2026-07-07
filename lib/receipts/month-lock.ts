@@ -46,7 +46,7 @@ export function buildMonthLock(input: {
   };
 }
 
-// ─── Split lock model (audit A5) ─────────────────────────────────────────────
+// ─── Split lock model (audit A5, fix F1-F3 2026-07-08) ───────────────────────
 //
 // Two independent locks govern month-end state, each blocking a different
 // kind of edit:
@@ -56,7 +56,7 @@ export function buildMonthLock(input: {
 //      amex_reconciliation row is status='finalized', every AMEX line — and
 //      any receipt matched to one — is immutable. Statement-month scope.
 //
-//   2. Export-finalized (new below). When an export for month M is
+//   2. Export-finalized (below). When an export for month M is
 //      status='finalized', CASH/DIGITAL receipt edits anchored by
 //      transaction_date in M are blocked. A late cash receipt that arrives
 //      after its transaction month shipped must go through the export
@@ -67,12 +67,20 @@ export function buildMonthLock(input: {
 // they are governed by (1) via their statement line. CASH/DIGITAL
 // receipts are NOT gated by (1) — they have no statement line to match.
 // Each lock owns its own population; the two never overlap.
+//
+// F1 correction (2026-07-08 architecture review): the lock must release
+// while a draft revision exists for the month. A finalized export row is
+// permanent (preservation principle), so without this carve-out the
+// correction flow could never actually correct anything — every edit
+// attempt would re-hit the finalized row and re-throw. The predicate
+// below treats "has draft revision" as a release of the lock; finalizing
+// the revision closes the lock again (draft goes away, finalized stays).
 
 /**
  * Typed error thrown when an insert/update would land a CASH/DIGITAL
- * receipt in a month that already has a finalized export. Routes catch
- * this with `instanceof ExportFinalizedError` instead of brittle string
- * matching against error.message.
+ * receipt in a month that already has a finalized export and no open
+ * draft revision. Routes catch this with `instanceof ExportFinalizedError`
+ * instead of brittle string matching against error.message.
  */
 export class ExportFinalizedError extends Error {
   constructor(
@@ -86,8 +94,24 @@ export class ExportFinalizedError extends Error {
 }
 
 /**
+ * Minimal D1 shape this module queries against. Exported so tests can
+ * build a fake without depending on the full Cloudflare D1Database type.
+ */
+export interface MonthLockD1 {
+  prepare(sql: string): {
+    bind(...args: unknown[]): {
+      first<T = unknown>(): Promise<T | null>;
+    };
+  };
+}
+
+/**
  * True when an export for `month` exists at status='finalized'. No data
  * from the row is returned — callers only need the boolean.
+ *
+ * Note: this does NOT account for draft revisions. For "is this month
+ * locked for edits?" use {@link isMonthLockedForEdits} instead — that
+ * predicate releases the lock while a draft revision exists.
  */
 export async function isMonthExportFinalized(month: string): Promise<boolean> {
   const db = getReceiptsDb();
@@ -103,10 +127,49 @@ export async function isMonthExportFinalized(month: string): Promise<boolean> {
 }
 
 /**
+ * The actual edit-lock predicate. A month is locked for CASH/DIGITAL
+ * receipt edits iff:
+ *   - an export exists at status='finalized' for the month, AND
+ *   - no export exists at status='draft' for the month.
+ *
+ * The draft carve-out is what makes the correction flow workable: opening
+ * a revision via POST /api/receipts/export/<month>?correction=true creates
+ * a fresh draft row, which releases the lock for the duration of the
+ * correction. Finalizing the revision (or deleting the draft) re-closes
+ * it. One indexed D1 lookup per mutation — acceptable cost, and avoids
+ * the stale-cache trap a module-level memo would introduce (F2).
+ *
+ * Takes `db` as a parameter so tests can fake it without module mocking.
+ */
+export async function isMonthLockedForEdits(
+  db: MonthLockD1,
+  month: string,
+): Promise<boolean> {
+  const row = await db
+    .prepare(
+      `SELECT CASE
+         WHEN EXISTS(
+           SELECT 1 FROM receipt_exports
+           WHERE export_month = ? AND status = 'draft'
+         ) THEN 0
+         WHEN EXISTS(
+           SELECT 1 FROM receipt_exports
+           WHERE export_month = ? AND status = 'finalized'
+         ) THEN 1
+         ELSE 0
+       END AS locked`,
+    )
+    .bind(month, month)
+    .first<{ locked: 0 | 1 }>();
+  return row?.locked === 1;
+}
+
+/**
  * Assert that a CASH/DIGITAL receipt can be placed in the given
- * transaction month. Throws ExportFinalizedError when month M has a
- * finalized export. Caller must format `transactionMonth` as YYYY-MM
- * (the same format receipt_records.transaction_date stores as YYYY-MM-DD).
+ * transaction month. Throws ExportFinalizedError when the month is locked
+ * for edits (see {@link isMonthLockedForEdits}). Caller must format
+ * `transactionMonth` as YYYY-MM (the same format
+ * receipt_records.transaction_date stores as YYYY-MM-DD).
  *
  * No-op when `transactionMonth` is null/empty — the lock can't apply
  * until the transaction_date is known (uploads insert with null date
@@ -116,10 +179,8 @@ export async function assertTransactionMonthEditable(
   transactionMonth: string | null | undefined,
 ): Promise<void> {
   if (!transactionMonth) return;
-  if (finalizedMemo.has(transactionMonth)) return; // memoized in-process
-  const finalizedFlag = await isMonthExportFinalized(transactionMonth);
-  if (finalizedFlag) {
-    finalizedMemo.add(transactionMonth);
+  const db = getReceiptsDb();
+  if (await isMonthLockedForEdits(db, transactionMonth)) {
     throw new ExportFinalizedError(
       transactionMonth,
       `Month ${transactionMonth} is export-finalized. POST /api/receipts/export/${transactionMonth}?correction=true to create a revision.`,
@@ -139,9 +200,3 @@ export function transactionMonthOf(
   const m = /^(\d{4}-\d{2})/.exec(transactionDate);
   return m ? m[1]! : null;
 }
-
-// In-process memo of finalized months. A single request rarely checks the
-// same month more than once, but updateReceiptRecord runs the check on
-// every PATCH and the same month is common within a finalize-then-edit
-// race window. Cleared per Worker invocation (module-level state).
-const finalizedMemo = new Set<string>();
