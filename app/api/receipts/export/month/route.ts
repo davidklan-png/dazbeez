@@ -1,12 +1,11 @@
 import { NextResponse } from "next/server";
 import { requireReceiptsActor } from "@/lib/receipts/auth";
 import {
-  listReceiptRecords,
-  listAttendees,
   createExport,
   finalizeExport,
   getExport,
   getFinalizedReconciliationForMonth,
+  replaceExportItems,
 } from "@/lib/receipts/db";
 import {
   buildMonthlyExportCsv,
@@ -18,12 +17,14 @@ import {
   buildExportReadme,
 } from "@/lib/receipts/export";
 import { archiveBundle, archiveManifest } from "@/lib/receipts/storage";
-import { getCategoryByCode } from "@/lib/receipts/categories";
-import { validateMonthReadyForExport } from "@/lib/receipts/month-closing";
+import {
+  buildExportBundle,
+  validateMonthReadyForExport,
+} from "@/lib/receipts/month-closing";
 import { getReceiptsDb, getReceiptsArchiveBucket } from "@/lib/cloudflare-runtime";
 import { getAmexArtifactByMonth } from "@/lib/receipts/db";
 import { retentionMetadata } from "@/lib/receipts/retention";
-import type { AmexReconciliation, ExportRow, ReceiptFile } from "@/lib/receipts/types";
+import type { AmexReconciliation, ReceiptFile } from "@/lib/receipts/types";
 
 export async function POST(request: Request) {
   try {
@@ -39,45 +40,18 @@ export async function POST(request: Request) {
       );
     }
 
-    // Load receipts for the month
-    const receipts = await listReceiptRecords({ month, limit: 1000 });
+    // Build the bundle ONCE — single shared row-assembly authority
+    // (lib/receipts/month-closing.ts buildExportBundle). The route and the
+    // validator both consume the same rows so a draft the operator previews
+    // is bit-identical to the bundle that ships on finalize. Audit A4.
+    const bundle = await buildExportBundle(month);
 
-    if (receipts.length === 0) {
+    if (bundle.rows.length === 0) {
       return NextResponse.json(
-        { error: `No receipts found for ${month}.` },
+        { error: `No exportable activity found for ${month}.` },
         { status: 400 },
       );
     }
-
-    // Load attendees for all receipts
-    const attendeeMap = new Map<string, string[]>();
-    for (const r of receipts) {
-      const attendees = await listAttendees(r.id);
-      if (attendees.length > 0) {
-        attendeeMap.set(r.id, attendees.map((a) => a.attendee_name));
-      }
-    }
-
-    // Build export rows
-    const exportRows: ExportRow[] = receipts.map((r) => {
-      const cat = getCategoryByCode(r.expense_category_code ?? "");
-      return {
-        receiptId: r.id,
-        transactionDate: r.transaction_date,
-        merchant: r.merchant,
-        amountMinor: r.amount_minor,
-        currency: r.currency,
-        expenseType: r.expense_type,
-        expenseCategoryCode: r.expense_category_code ?? null,
-        expenseCategoryJa: cat?.jaName ?? null,
-        expenseCategoryEn: cat?.enName ?? null,
-        paymentPath: r.payment_path,
-        businessPurpose: r.business_purpose,
-        attendees: attendeeMap.get(r.id) ?? [],
-        status: r.status,
-        originalR2Key: r.original_r2_key,
-      };
-    });
 
     // Export blocking validation — single authority is validateMonthReadyForExport
     // (lib/receipts/month-closing.ts). Do NOT inline a second finalize gate here;
@@ -93,7 +67,7 @@ export async function POST(request: Request) {
       reconciliation = await getFinalizedReconciliationForMonth(month);
       const blockers = await validateMonthReadyForExport(
         month,
-        undefined,
+        bundle,
         reconciliation,
       );
       if (blockers.length > 0) {
@@ -104,8 +78,8 @@ export async function POST(request: Request) {
       }
     }
 
-    // Generate CSV and hash
-    const csv = buildMonthlyExportCsv(exportRows, attendeeMap);
+    // Generate CSV and hash from the shared bundle rows.
+    const csv = buildMonthlyExportCsv(bundle.rows, bundle.attendeeMap);
     const sha256 = await hashCsvContent(csv);
 
     // Create or retrieve export record, then reload to pick up revision
@@ -120,6 +94,12 @@ export async function POST(request: Request) {
     const supersedesExportId = exportRecord?.supersedes_export_id ?? null;
     const correctionReason = exportRecord?.correction_reason ?? null;
 
+    // Record exactly which receipts and AMEX lines ship in this bundle. The
+    // one-draft-per-month invariant means an existing draft's items get
+    // replaced on rebuild — the (export_id, item_type, item_id) UNIQUE on
+    // receipt_export_items makes this idempotent.
+    await replaceExportItems(exportId, bundle.items);
+
     const archiveKey = buildArchiveKey(month, exportId);
     const manifestKey = buildManifestKey(month, exportId);
 
@@ -131,7 +111,7 @@ export async function POST(request: Request) {
     // plus the AMEX statement artifact. This builds the per-file SHA-256
     // section of the manifest so an accountant can verify every artifact.
     const db = getReceiptsDb();
-    const includedReceiptIds = receipts.map((r) => r.id);
+    const includedReceiptIds = bundle.receipts.map((r) => r.id);
     const fileRows: ReceiptFile[] = [];
     if (includedReceiptIds.length > 0) {
       const CHUNK_SIZE = 90;
@@ -157,7 +137,7 @@ export async function POST(request: Request) {
       month,
       archiveKey,
       sha256,
-      exportRows.length,
+      bundle.rows.length,
       generatedAt,
       reconciliation
         ? {
@@ -188,7 +168,7 @@ export async function POST(request: Request) {
     const readme = buildExportReadme({
       exportId,
       month,
-      rowCount: exportRows.length,
+      rowCount: bundle.rows.length,
       generatedAt,
       exportRevision,
       supersedesExportId,
@@ -222,7 +202,7 @@ export async function POST(request: Request) {
       {
         exportId,
         month,
-        rowCount: exportRows.length,
+        rowCount: bundle.rows.length,
         sha256,
         manifestSha256,
         archiveKey,

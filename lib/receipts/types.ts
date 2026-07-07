@@ -660,21 +660,45 @@ export interface BusinessTripCandidate {
 
 // ─── Export ────────────────────────────────────────────────────────────────
 
+/**
+ * A single row in the monthly export CSV. After the 2026-07-08 redesign the
+ * export unit is the **statement month**: one row per AMEX statement line
+ * (with the matched receipt's fields joined), plus one row per CASH/DIGITAL
+ * receipt anchored by transaction_date. A receipt matched to a line appears
+ * once — on the line row — never twice.
+ *
+ * `rowType` distinguishes the two populations. AMEX-line-only fields
+ * (lineId, matchStatus, receiptStatus, missingReceiptReason, cardholderName,
+ * businessTripStatus) are null on receipt rows; receipt-only fields
+ * (receiptId, status, originalR2Key) are null on missing-receipt lines.
+ */
 export interface ExportRow {
-  receiptId: string;
+  rowType: "amex_line" | "receipt";
+  // AMEX-line identity (null on receipt rows)
+  lineId: string | null;
+  matchStatus: AmexMatchStatus | null;
+  /** AmexReceiptStatus on line rows; null on receipt rows. */
+  receiptStatus: AmexReceiptStatus | null;
+  missingReceiptReason: string | null;
+  cardholderName: string | null;
+  businessTripStatus: AmexBusinessTripStatus | null;
+  // Receipt identity (null on missing-receipt lines)
+  receiptId: string | null;
+  /** ReceiptStatus on receipt rows and matched-receipt line rows; null otherwise. */
+  status: ReceiptStatus | null;
+  originalR2Key: string | null;
+  // Common accounting fields
   transactionDate: string | null;
   merchant: string | null;
   amountMinor: number | null;
   currency: string;
-  expenseType: ExpenseType;
+  expenseType: ExpenseType | null;
   expenseCategoryCode: string | null;
   expenseCategoryJa: string | null;
   expenseCategoryEn: string | null;
   paymentPath: PaymentPath;
   businessPurpose: string | null;
   attendees: string[];
-  status: ReceiptStatus;
-  originalR2Key: string;
 }
 
 // ─── Dashboard alerts ──────────────────────────────────────────────────────

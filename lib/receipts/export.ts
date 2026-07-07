@@ -4,10 +4,26 @@ import {
   ACCOUNTANT_DISCLAIMER_JA,
 } from "@/lib/receipts/settings";
 
+/**
+ * CSV cell escaper.
+ *
+ * - Doubles inner double-quotes and wraps in quotes when the cell contains
+ *   a comma, double-quote, newline, or carriage return.
+ * - Formula injection guard (audit A5): if the first character is one of
+ *   `=`, `+`, `-`, `@`, the cell is prefixed with a single quote so Excel
+ *   / Sheets / Numbers treat it as text instead of evaluating it. The
+ *   accountant opens this CSV in Excel on Windows; without the guard a
+ *   merchant named `=cmd|'/c calc'!A1` would run a formula on open.
+ */
 function csvEscape(value: string | null | undefined): string {
   if (value === null || value === undefined) return "";
-  const s = String(value);
-  if (s.includes(",") || s.includes('"') || s.includes("\n")) {
+  let s = String(value);
+  // Formula-injection guard. Single-quote prefix is invisible in Excel when
+  // the cell format is General — the user sees the original text.
+  if (s.length > 0 && (s[0] === "=" || s[0] === "+" || s[0] === "-" || s[0] === "@")) {
+    s = `'${s}`;
+  }
+  if (s.includes(",") || s.includes('"') || s.includes("\n") || s.includes("\r")) {
     return `"${s.replace(/"/g, '""')}"`;
   }
   return s;
@@ -24,22 +40,37 @@ function formatAmount(amountMinor: number | null, currency: string): string {
 }
 
 const CSV_HEADERS = [
-  "ReceiptId",
+  "RowType",
   "TransactionDate",
   "Merchant",
   "Amount",
   "Currency",
+  "PaymentPath",
   "ExpenseType",
   "ExpenseCategoryCode",
   "ExpenseCategoryJa",
   "ExpenseCategoryEn",
-  "PaymentPath",
   "BusinessPurpose",
   "Attendees",
-  "Status",
-  "R2Key",
+  // Line identity / status
+  "LineId",
+  "StatementMonth", // unused on receipt rows; populated from line when present
+  "MatchStatus",
+  "ReceiptStatus",
+  "MissingReceiptReason",
+  "CardholderName",
+  "BusinessTripStatus",
+  // Receipt identity
+  "ReceiptId",
+  "ReceiptStatus",
+  "OriginalR2Key",
 ];
 
+/**
+ * Build the monthly export CSV body (no BOM, LF newlines). The route
+ * prepends the UTF-8 BOM and converts to CRLF before upload so Excel on
+ * Windows parses Japanese text correctly. Tests exercise this pure form.
+ */
 export function buildMonthlyExportCsv(
   rows: ExportRow[],
   attendeeMap: Map<string, string[]>,
@@ -47,26 +78,110 @@ export function buildMonthlyExportCsv(
   const lines: string[] = [CSV_HEADERS.join(",")];
 
   for (const row of rows) {
-    const attendees = attendeeMap.get(row.receiptId) ?? [];
+    const attendees = row.receiptId
+      ? (attendeeMap.get(row.receiptId) ?? row.attendees ?? [])
+      : (row.attendees ?? []);
     const line = [
-      csvEscape(row.receiptId),
+      csvEscape(row.rowType),
       csvEscape(row.transactionDate),
       csvEscape(row.merchant),
       csvEscape(formatAmount(row.amountMinor, row.currency)),
       csvEscape(row.currency),
+      csvEscape(row.paymentPath),
       csvEscape(row.expenseType),
       csvEscape(row.expenseCategoryCode),
       csvEscape(row.expenseCategoryJa),
       csvEscape(row.expenseCategoryEn),
-      csvEscape(row.paymentPath),
       csvEscape(row.businessPurpose),
       csvQuoteAlways(attendees.join("; ")),
+      csvEscape(row.lineId),
+      // StatementMonth column is intentionally empty here; line.statement_month
+      // matches the bundle's month so it's redundant on line rows and
+      // meaningless on receipt rows.
+      "",
+      csvEscape(row.matchStatus),
+      csvEscape(row.receiptStatus),
+      csvEscape(row.missingReceiptReason),
+      csvEscape(row.cardholderName),
+      csvEscape(row.businessTripStatus),
+      csvEscape(row.receiptId),
       csvEscape(row.status),
       csvEscape(row.originalR2Key),
     ].join(",");
     lines.push(line);
   }
 
+  return lines.join("\n");
+}
+
+/**
+ * Add UTF-8 BOM (so Excel on Windows detects encoding and renders Japanese
+ * text instead of mojibake) and convert LF → CRLF (Excel-friendlier).
+ */
+export function bomPrefixedCrlf(csvText: string): string {
+  return `\ufeff${csvText.replace(/\r?\n/g, "\r\n")}`;
+}
+
+/**
+ * Summary CSV: per-expense-category count + total, then a PaymentPath
+ * breakdown, then a grand total. Generated from the same ExportRow list
+ * as the main CSV so the two cannot drift.
+ */
+export function buildExportSummaryCsv(
+  rows: ExportRow[],
+  month: string,
+  generatedAt: string,
+): string {
+  const catTotals = new Map<string, { count: number; totalMinor: number }>();
+  let amexCount = 0;
+  let amexTotal = 0;
+  let cashCount = 0;
+  let cashTotal = 0;
+  let digitalCount = 0;
+  let digitalTotal = 0;
+  let grandCount = 0;
+  let grandTotal = 0;
+
+  for (const row of rows) {
+    const code = row.expenseCategoryCode ?? "uncategorized";
+    const cat = catTotals.get(code) ?? { count: 0, totalMinor: 0 };
+    cat.count += 1;
+    cat.totalMinor += row.amountMinor ?? 0;
+    catTotals.set(code, cat);
+
+    grandCount += 1;
+    grandTotal += row.amountMinor ?? 0;
+
+    if (row.rowType === "amex_line" || row.paymentPath === "AMEX") {
+      amexCount += 1;
+      amexTotal += row.amountMinor ?? 0;
+    } else if (row.paymentPath === "CASH") {
+      cashCount += 1;
+      cashTotal += row.amountMinor ?? 0;
+    } else if (row.paymentPath === "DIGITAL") {
+      digitalCount += 1;
+      digitalTotal += row.amountMinor ?? 0;
+    }
+  }
+
+  const lines: string[] = [
+    `Field,Value`,
+    `Month,${csvEscape(month)}`,
+    `GeneratedAt,${csvEscape(generatedAt)}`,
+    `RowCount,${grandCount}`,
+    `GrandTotalMinor,${grandTotal}`,
+    ``,
+    `ExpenseCategoryCode,Count,TotalMinor`,
+  ];
+  const sorted = [...catTotals.entries()].sort((a, b) => b[1].totalMinor - a[1].totalMinor);
+  for (const [code, v] of sorted) {
+    lines.push(`${csvEscape(code)},${v.count},${v.totalMinor}`);
+  }
+  lines.push(``);
+  lines.push(`PaymentPath,Count,TotalMinor`);
+  lines.push(`AMEX,${amexCount},${amexTotal}`);
+  lines.push(`CASH,${cashCount},${cashTotal}`);
+  lines.push(`DIGITAL,${digitalCount},${digitalTotal}`);
   return lines.join("\n");
 }
 

@@ -1617,6 +1617,82 @@ export async function listExports(): Promise<ReceiptExport[]> {
   return result.results ?? [];
 }
 
+// ─── receipt_export_items ───────────────────────────────────────────────────
+// Per-bundle audit trail of which receipts and AMEX lines shipped in each
+// export (migration 0017). Populated at bundle-build time, consulted by
+// finalizeExport to mark receipts status='exported' and by the cross-month
+// finalize gate. Replaced on rebuild — the partial unique index on
+// (export_id, item_type, item_id) makes this idempotent per-export.
+
+/**
+ * Replace the item set for an export. Deletes existing rows for the
+ * export then inserts the new set. Caller must ensure exportId exists.
+ */
+export async function replaceExportItems(
+  exportId: string,
+  items: Array<{ itemType: "receipt" | "amex_line"; itemId: string }>,
+): Promise<void> {
+  const db = getReceiptsDb();
+  const now = nowIso();
+  await db
+    .prepare(`DELETE FROM receipt_export_items WHERE export_id = ?`)
+    .bind(exportId)
+    .run();
+  if (items.length === 0) return;
+  // Batch via db.batch for a single transaction.
+  const stmts = items.map((it) =>
+    db
+      .prepare(
+        `INSERT OR IGNORE INTO receipt_export_items
+          (id, export_id, item_type, item_id, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .bind(newUuid(), exportId, it.itemType, it.itemId, now),
+  );
+  // D1 limits batches to ~30 statements; chunk to stay safe.
+  const CHUNK = 30;
+  for (let i = 0; i < stmts.length; i += CHUNK) {
+    await db.batch(stmts.slice(i, i + CHUNK));
+  }
+}
+
+/**
+ * Receipt IDs that shipped in the given export. Used by finalizeExport to
+ * mark receipts status='exported' (audit A5).
+ */
+export async function listReceiptIdsForExport(
+  exportId: string,
+): Promise<string[]> {
+  const db = getReceiptsDb();
+  const result = await db
+    .prepare(
+      `SELECT item_id FROM receipt_export_items
+       WHERE export_id = ? AND item_type = 'receipt'
+       ORDER BY created_at ASC`,
+    )
+    .bind(exportId)
+    .all<{ item_id: string }>();
+  return (result.results ?? []).map((r) => r.item_id);
+}
+
+/**
+ * Export IDs whose bundle included a given receipt. Reverse-lookup used by
+ * audit / future "is this receipt already exported" surfaces.
+ */
+export async function listExportsContainingReceipt(
+  receiptId: string,
+): Promise<string[]> {
+  const db = getReceiptsDb();
+  const result = await db
+    .prepare(
+      `SELECT DISTINCT export_id FROM receipt_export_items
+       WHERE item_type = 'receipt' AND item_id = ?`,
+    )
+    .bind(receiptId)
+    .all<{ export_id: string }>();
+  return (result.results ?? []).map((r) => r.export_id);
+}
+
 export async function finalizeExport(
   exportId: string,
   archiveR2Key: string,
