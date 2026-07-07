@@ -388,6 +388,20 @@ export interface ReceiptExport {
   manifest_sha256?: string | null;
 }
 
+/**
+ * Per-item audit trail for an export bundle (0017_export_integrity.sql).
+ * One row per receipt or AMEX line that shipped in a specific export.
+ * Populated at bundle-build time; consulted by finalizeExport to mark
+ * receipts status='exported' and by the cross-month finalize gate.
+ */
+export interface ReceiptExportItem {
+  id: string;
+  export_id: string;
+  item_type: "receipt" | "amex_line";
+  item_id: string;
+  created_at: string;
+}
+
 // ─── Compliance row shapes ────────────────────────────────────────────────
 
 export interface ReceiptFile {
