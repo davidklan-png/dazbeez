@@ -147,5 +147,30 @@ export function validateAmexLinesForSignoff(
     }
   }
 
+  // Consolidated receipts: when ≥2 confirmed lines share one receipt, their
+  // amounts must sum exactly to the receipt total. Partial groups are legal
+  // during the month; finalize is where the books must balance. (Single-line
+  // amount mismatches remain allowed, as before — "Amount differs — verify
+  // before confirming" is a reviewer judgment, not a blocker.)
+  const confirmedByReceipt = new Map<string, AmexStatementLine[]>();
+  for (const line of amexLines) {
+    if (line.match_status !== "confirmed" || !line.matched_receipt_id) continue;
+    const group = confirmedByReceipt.get(line.matched_receipt_id) ?? [];
+    group.push(line);
+    confirmedByReceipt.set(line.matched_receipt_id, group);
+  }
+  for (const [receiptId, group] of confirmedByReceipt) {
+    if (group.length < 2) continue;
+    const receipt = receiptMap.get(receiptId);
+    if (!receipt || receipt.amount_minor === null) continue;
+    const sum = group.reduce((total, line) => total + line.amount_minor, 0);
+    if (sum !== receipt.amount_minor) {
+      const label = receipt.merchant ?? receiptId;
+      blockers.push(
+        `Consolidated receipt ${label}: ${group.length} confirmed lines sum to ${sum} but receipt total is ${receipt.amount_minor}`,
+      );
+    }
+  }
+
   return blockers;
 }

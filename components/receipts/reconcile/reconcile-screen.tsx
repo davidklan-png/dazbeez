@@ -7,6 +7,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useTransition,
   type ReactNode,
 } from "react";
 import Link from "next/link";
@@ -32,6 +33,7 @@ import {
   formatCategoryLabel,
 } from "@/lib/receipts/categories";
 import { normalizeDescription } from "@/lib/receipts/reconciliation";
+import { resolveLineCategory } from "@/lib/receipts/line-classification";
 import type {
   AmexBusinessTripStatus,
   AmexReceiptStatus,
@@ -84,8 +86,29 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
   const [warnings, setWarnings] = useState<string[] | null>(null);
   const [confirmType, setConfirmType] = useState<string>("");
   const [showFinalizeModal, setShowFinalizeModal] = useState(false);
+  const [isRefreshing, startRefresh] = useTransition();
 
   const locked = props.finalized;
+
+  // Match suggestions are computed server-side on every render of this page
+  // (never persisted), so "re-run matching" is just a router.refresh(). New
+  // receipts finish OCR asynchronously (upload → queue → MLX consumer on the
+  // Mac), which means an open reconcile tab goes stale the moment a new
+  // receipt lands — refresh when the tab regains focus, and expose a manual
+  // button in the top bar for mid-session refreshes.
+  const refreshMatches = useCallback(() => {
+    startRefresh(() => router.refresh());
+  }, [router]);
+
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState !== "visible") return;
+      if (busy !== null || bulkProgress !== null) return;
+      router.refresh();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [router, busy, bulkProgress]);
 
   const matchMap = useMemo(
     () => new Map(props.autoMatches.map((m) => [m.amexLineId, m])),
@@ -95,6 +118,20 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
     () => new Map(props.receipts.map((r) => [r.id, r])),
     [props.receipts],
   );
+
+  // Consolidated receipts: all confirmed lines keyed by their shared receipt.
+  // Drives the "consolidated" row badge and the group-sum explanation in the
+  // detail pane (a receipt may legitimately cover several card charges).
+  const confirmedLinesByReceipt = useMemo(() => {
+    const map = new Map<string, AmexStatementLine[]>();
+    for (const l of props.amexLines) {
+      if (l.match_status !== "confirmed" || !l.matched_receipt_id) continue;
+      const group = map.get(l.matched_receipt_id) ?? [];
+      group.push(l);
+      map.set(l.matched_receipt_id, group);
+    }
+    return map;
+  }, [props.amexLines]);
 
   const linesWithBand = useMemo(
     () =>
@@ -404,6 +441,17 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
           <Btn
             kind="ghost"
             size="md"
+            onClick={refreshMatches}
+            disabled={isRefreshing || bulkProgress !== null}
+            title="Re-run matching against the latest receipts (new uploads appear here once OCR completes)"
+          >
+            {isRefreshing ? "Refreshing…" : "Refresh matches"}
+          </Btn>
+        )}
+        {!locked && (
+          <Btn
+            kind="ghost"
+            size="md"
             onClick={bulkConfirmObvious}
             disabled={counts.obvious === 0 || bulkProgress !== null}
           >
@@ -445,6 +493,8 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
       <div className="grid min-h-0 flex-1 grid-cols-[540px_minmax(0,1fr)]">
         <LinesPane
           linesWithBand={linesWithBand}
+          receiptMap={receiptMap}
+          confirmedLinesByReceipt={confirmedLinesByReceipt}
           activeId={activeId}
           setActiveId={setActiveId}
           tab={tab}
@@ -455,6 +505,7 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
         <DetailPane
           active={active}
           receiptMap={receiptMap}
+          confirmedLinesByReceipt={confirmedLinesByReceipt}
           attendeesByReceiptId={props.attendeesByReceiptId}
           locked={locked}
           busyLineId={busy}
@@ -501,6 +552,8 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
 
 function LinesPane({
   linesWithBand,
+  receiptMap,
+  confirmedLinesByReceipt,
   activeId,
   setActiveId,
   tab,
@@ -513,6 +566,8 @@ function LinesPane({
     band: ConfidenceBand;
     match: ReconciliationMatch | undefined;
   }>;
+  receiptMap: Map<string, ReceiptRecord>;
+  confirmedLinesByReceipt: Map<string, AmexStatementLine[]>;
   activeId: string | null;
   setActiveId: (id: string) => void;
   tab: Tab;
@@ -588,6 +643,8 @@ function LinesPane({
               <LineRow
                 key={l.line.id}
                 lwb={l}
+                receiptMap={receiptMap}
+                confirmedLinesByReceipt={confirmedLinesByReceipt}
                 active={activeId === l.line.id}
                 onClick={() => setActiveId(l.line.id)}
               />
@@ -599,6 +656,8 @@ function LinesPane({
               <LineRow
                 key={l.line.id}
                 lwb={l}
+                receiptMap={receiptMap}
+                confirmedLinesByReceipt={confirmedLinesByReceipt}
                 active={activeId === l.line.id}
                 onClick={() => setActiveId(l.line.id)}
               />
@@ -614,6 +673,8 @@ function LinesPane({
               <LineRow
                 key={l.line.id}
                 lwb={l}
+                receiptMap={receiptMap}
+                confirmedLinesByReceipt={confirmedLinesByReceipt}
                 active={activeId === l.line.id}
                 onClick={() => setActiveId(l.line.id)}
               />
@@ -629,6 +690,8 @@ function LinesPane({
               <LineRow
                 key={l.line.id}
                 lwb={l}
+                receiptMap={receiptMap}
+                confirmedLinesByReceipt={confirmedLinesByReceipt}
                 active={activeId === l.line.id}
                 onClick={() => setActiveId(l.line.id)}
               />
@@ -678,6 +741,8 @@ function SectionHeader({
 
 function LineRow({
   lwb,
+  receiptMap,
+  confirmedLinesByReceipt,
   active,
   onClick,
 }: {
@@ -686,12 +751,25 @@ function LineRow({
     band: ConfidenceBand;
     match: ReconciliationMatch | undefined;
   };
+  receiptMap: Map<string, ReceiptRecord>;
+  confirmedLinesByReceipt: Map<string, AmexStatementLine[]>;
   active: boolean;
   onClick: () => void;
 }) {
   const { line, band, match } = lwb;
   const color = BAND_DISPLAY[band];
   const receiptId = line.matched_receipt_id ?? match?.receiptId ?? null;
+  // Consolidated 領収書: suggested group size, or the count of confirmed
+  // siblings sharing this receipt.
+  const consolidatedCount =
+    match?.consolidatedGroupSize ??
+    (receiptId ? confirmedLinesByReceipt.get(receiptId)?.length ?? 0 : 0);
+  // Same source of truth the detail pane and finalize validators use:
+  // a linked receipt's category is authoritative over the line's own.
+  const categoryCode = resolveLineCategory(
+    line,
+    receiptId ? receiptMap.get(receiptId) : undefined,
+  );
   const confirmed = line.match_status === "confirmed";
   const noReceipt = line.match_status === "no_receipt";
 
@@ -738,9 +816,9 @@ function LineRow({
           </span>
         </div>
         <div className="mt-0.5 flex items-center gap-1.5">
-          {line.expense_category_code ? (
+          {categoryCode ? (
             <span className="text-[11px] text-gray-500">
-              {formatCategoryLabel(line.expense_category_code)}
+              {formatCategoryLabel(categoryCode)}
             </span>
           ) : (
             <span className="text-[11px] font-medium text-amber-700">
@@ -755,6 +833,11 @@ function LineRow({
           {confirmed && !noReceipt && (
             <Pill tone="green" size="sm">
               confirmed
+            </Pill>
+          )}
+          {consolidatedCount >= 2 && (
+            <Pill tone="gray" size="sm">
+              consolidated · {consolidatedCount}
             </Pill>
           )}
           {line.re_review_needed ? (
@@ -832,6 +915,7 @@ function OrphansList({
 function DetailPane({
   active,
   receiptMap,
+  confirmedLinesByReceipt,
   attendeesByReceiptId,
   locked,
   busyLineId,
@@ -847,6 +931,7 @@ function DetailPane({
     match: ReconciliationMatch | undefined;
   } | null;
   receiptMap: Map<string, ReceiptRecord>;
+  confirmedLinesByReceipt: Map<string, AmexStatementLine[]>;
   attendeesByReceiptId: Map<string, string[]>;
   locked: boolean;
   busyLineId: string | null;
@@ -899,7 +984,12 @@ function DetailPane({
                   : color.label}
           </Pill>
           <span className="text-[13px] text-gray-500">
-            {match?.matchReasons.join(", ") || matchExplanation(line, receipt)}
+            {match?.matchReasons.join(", ") ||
+              matchExplanation(
+                line,
+                receipt,
+                receiptId ? confirmedLinesByReceipt.get(receiptId) ?? [] : [],
+              )}
           </span>
           <span className="flex-1" />
           <Kbd>e</Kbd>

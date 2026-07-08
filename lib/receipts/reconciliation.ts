@@ -30,6 +30,29 @@ function daysBetween(dateA: string, dateB: string): number {
   return Math.abs((a - b) / (1000 * 60 * 60 * 24));
 }
 
+// Known descriptor ↔ legal-name pairs. JP card statements often print a
+// booking-service brand while the receipt carries the operator's registered
+// company name, so token matching can never connect them. Each group lists
+// patterns that all refer to the same merchant; a line and a receipt matching
+// any two patterns in one group count as a merchant match. Extend this table
+// as new descriptor mismatches surface in review.
+const MERCHANT_ALIAS_GROUPS: RegExp[][] = [
+  // えきねっと (JR East's booking site) charges appear as the brand; the
+  // 領収書 is issued by 東日本旅客鉄道株式会社.
+  [/えきねっと|エキネット|EKI-?NET/i, /東日本旅客鉄道|JR\s*東日本|JR\s*EAST/i],
+];
+
+// Consolidated-group suggestions never reach the "obvious" (auto-confirm)
+// band — 0.92 in lib/receipts/confidence.ts. A wrong grouping is the
+// costliest reconciliation mistake, so a human confirms each group line.
+const CONSOLIDATED_CONFIDENCE_CAP = 0.9;
+
+function merchantAliasMatch(a: string, b: string): boolean {
+  return MERCHANT_ALIAS_GROUPS.some(
+    (group) => group.some((re) => re.test(a)) && group.some((re) => re.test(b)),
+  );
+}
+
 function descriptionContains(amexDesc: string, receiptMerchant: string): boolean {
   const normalizedDesc = normalizeDescription(amexDesc);
   const normalizedMerchant = normalizeDescription(receiptMerchant);
@@ -149,6 +172,9 @@ export function matchAmexToReceipts(
         if (descriptionContains(line.merchant, receipt.merchant)) {
           score += 0.15;
           reasons.push("merchant match");
+        } else if (merchantAliasMatch(line.merchant, receipt.merchant)) {
+          score += 0.15;
+          reasons.push("known merchant alias");
         }
       }
 
@@ -192,6 +218,57 @@ export function matchAmexToReceipts(
     assignedReceipts.add(match.receiptId);
     assignedLines.add(match.amexLineId);
     resolved.push(match);
+  }
+
+  // Phase 3: consolidated receipts (領収書 covering several card charges).
+  // Runs only over lines and receipts left unmatched by the 1:1 phases.
+  // Policy (deliberately narrow): ALL same-merchant unmatched lines within the
+  // date window must sum EXACTLY to the receipt total, with at least two
+  // lines. No subset search — an exact full-group sum is explainable in an
+  // audit; combinatorial subset picks are not. Confidence is capped below the
+  // auto-confirm band so a human confirms every consolidated group.
+  for (const receipt of eligibleReceipts) {
+    if (assignedReceipts.has(receipt.id)) continue;
+    if (receipt.amount_minor === null || !receipt.merchant) continue;
+    if (!receipt.transaction_date) continue;
+
+    const group = amexLines.filter(
+      (line) =>
+        !assignedLines.has(line.id) &&
+        line.match_status !== "confirmed" &&
+        line.match_status !== "no_receipt" &&
+        line.currency.toUpperCase() === receipt.currency.toUpperCase() &&
+        !!line.merchant &&
+        (descriptionContains(line.merchant, receipt.merchant!) ||
+          merchantAliasMatch(line.merchant, receipt.merchant!)) &&
+        !!line.transaction_date &&
+        daysBetween(line.transaction_date, receipt.transaction_date!) <= 7,
+    );
+    if (group.length < 2) continue;
+
+    const groupSum = group.reduce((sum, line) => sum + line.amount_minor, 0);
+    if (groupSum !== receipt.amount_minor) continue;
+
+    for (const line of group) {
+      const dateDelta = daysBetween(line.transaction_date!, receipt.transaction_date);
+      const score = Math.min(
+        0.5 + Math.max(0, 0.35 - 0.05 * dateDelta) + 0.15,
+        CONSOLIDATED_CONFIDENCE_CAP,
+      );
+      assignedLines.add(line.id);
+      resolved.push({
+        amexLineId: line.id,
+        receiptId: receipt.id,
+        confidenceScore: score,
+        matchReasons: [
+          `consolidated receipt: ${group.length} lines sum to total`,
+          "merchant match",
+          `${dateDelta}-day window`,
+        ],
+        consolidatedGroupSize: group.length,
+      });
+    }
+    assignedReceipts.add(receipt.id);
   }
 
   return resolved;

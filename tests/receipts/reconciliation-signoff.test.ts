@@ -181,6 +181,63 @@ test("signoff validator: dangling match (matched_receipt_id set, receipt missing
   assert.deepEqual(blockers, []);
 });
 
+// ─── Consolidated receipts (multiple lines → one 領収書) ─────────────────────
+
+function makeConsolidatedPair(receiptTotal: number) {
+  const lineA = makeLine({
+    id: "line-a",
+    merchant: "HUB 東京オペラシティ店",
+    amount_minor: 2864,
+    matched_receipt_id: "r-hub",
+    expense_category_code: "office_supplies",
+  });
+  const lineB = makeLine({
+    id: "line-b",
+    merchant: "HUB 東京オペラシティ店",
+    amount_minor: 4185,
+    matched_receipt_id: "r-hub",
+    expense_category_code: "office_supplies",
+  });
+  const receipt = makeReceipt({
+    id: "r-hub",
+    merchant: "HUB 東京オペラシティ店",
+    amount_minor: receiptTotal,
+    expense_category_code: "office_supplies",
+  });
+  return { lines: [lineA, lineB], receiptMap: new Map([[receipt.id, receipt]]) };
+}
+
+test("signoff validator: consolidated receipt with exact group sum passes", () => {
+  const { lines, receiptMap } = makeConsolidatedPair(2864 + 4185);
+  const blockers = validateAmexLinesForSignoff(lines, {}, new Map(), receiptMap);
+  assert.deepEqual(blockers, []);
+});
+
+test("signoff validator: consolidated receipt with mismatched group sum blocks", () => {
+  const { lines, receiptMap } = makeConsolidatedPair(9999);
+  const blockers = validateAmexLinesForSignoff(lines, {}, new Map(), receiptMap);
+  assert.ok(
+    blockers.some((b) => b.includes("Consolidated receipt") && b.includes("9999")),
+    `expected consolidated-sum blocker, got: ${JSON.stringify(blockers)}`,
+  );
+});
+
+test("signoff validator: single-line amount mismatch is NOT a consolidated blocker (unchanged behavior)", () => {
+  const line = makeLine({
+    matched_receipt_id: "r-1",
+    amount_minor: 500,
+    expense_category_code: "office_supplies",
+  });
+  const receipt = makeReceipt({ id: "r-1", amount_minor: 999, expense_category_code: "office_supplies" });
+  const blockers = validateAmexLinesForSignoff(
+    [line],
+    {},
+    new Map(),
+    new Map([[receipt.id, receipt]]),
+  );
+  assert.deepEqual(blockers, []);
+});
+
 test("signoff validator: unmatched line still blocks on missing receipt confirmation regardless of category", () => {
   const line = makeLine({
     matched_receipt_id: null,

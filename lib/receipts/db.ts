@@ -983,20 +983,12 @@ export async function updateAmexReconciliation(
       break;
   }
 
-  // Race guard: prevent two AMEX lines from confirming the same receipt.
-  if (matchStatus === "confirmed" && receiptId) {
-    const conflict = await db
-      .prepare(
-        `SELECT id FROM amex_statement_lines
-         WHERE matched_receipt_id = ? AND match_status = 'confirmed' AND id != ?
-         LIMIT 1`,
-      )
-      .bind(receiptId, amexLineId)
-      .first<{ id: string }>();
-    if (conflict) {
-      throw new Error(`Receipt already confirmed against another AMEX line: ${conflict.id}`);
-    }
-  }
+  // Multiple confirmed lines MAY share one receipt: a consolidated 領収書
+  // covers several card charges (e.g. two same-night HUB charges on one
+  // receipt). The former 1:1 race guard that threw here is intentionally
+  // gone. Sum-vs-receipt-total integrity is enforced as a sign-off blocker
+  // (validateAmexLinesForSignoff), not at confirm time, so partial groups
+  // can be linked incrementally during the month.
 
   const statements = [
     db
@@ -1074,6 +1066,11 @@ export async function updateAmexReconciliation(
   // (either dropping the link entirely or switching to a different receipt).
   // Guard with `status = 'reconciled'` so we don't clobber a status another
   // process may have advanced this receipt to in the meantime.
+  // Consolidated receipts: only demote when NO other confirmed line still
+  // references it — unlinking one of two grouped lines must not knock a
+  // still-claimed receipt back to needs_review. The NOT EXISTS guard is
+  // evaluated inside the same batch as the line update, so it sees a
+  // consistent view.
   const wasConfirmed = previousStatus === "confirmed";
   if (wasConfirmed && previousReceiptId && previousReceiptId !== receiptId) {
     statements.push(
@@ -1081,9 +1078,15 @@ export async function updateAmexReconciliation(
         .prepare(
           `UPDATE receipt_records
            SET status = 'needs_review', updated_at = ?
-           WHERE id = ? AND status = 'reconciled'`,
+           WHERE id = ? AND status = 'reconciled'
+             AND NOT EXISTS (
+               SELECT 1 FROM amex_statement_lines
+               WHERE matched_receipt_id = ?
+                 AND match_status = 'confirmed'
+                 AND id != ?
+             )`,
         )
-        .bind(now, previousReceiptId),
+        .bind(now, previousReceiptId, previousReceiptId, amexLineId),
     );
   }
 

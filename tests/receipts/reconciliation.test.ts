@@ -101,6 +101,84 @@ test("exact amount + same date produces high confidence match", () => {
   assert.ok(matches[0]!.matchReasons.includes("0-day window"));
 });
 
+test("known merchant alias (えきねっと ↔ 東日本旅客鉄道) reaches auto-confirm band", () => {
+  const lines = [
+    makeAmexLine({ merchant: "えきねっと", amount_minor: 4900, transaction_date: "2026-04-25" }),
+  ];
+  const receipts = [
+    makeReceipt({
+      merchant: "東日本旅客鉄道株式会社",
+      amount_minor: 4900,
+      transaction_date: "2026-04-25",
+    }),
+  ];
+  const matches = matchAmexToReceipts(lines, receipts);
+  assert.equal(matches.length, 1);
+  assert.ok(
+    matches[0]!.confidenceScore >= 0.92,
+    `expected obvious-band score, got ${matches[0]!.confidenceScore}`,
+  );
+  assert.ok(matches[0]!.matchReasons.includes("known merchant alias"));
+});
+
+// ─── Consolidated receipts (multiple statement lines → one 領収書) ────────────
+
+test("consolidated receipt: two same-merchant lines summing exactly to the receipt total are both matched to it", () => {
+  const lines = [
+    makeAmexLine({ id: "hub-1", merchant: "HUB 東京オペラシティ店", amount_minor: 2864, transaction_date: "2026-04-27" }),
+    makeAmexLine({ id: "hub-2", merchant: "HUB 東京オペラシティ店", amount_minor: 4185, transaction_date: "2026-04-27" }),
+  ];
+  const receipts = [
+    makeReceipt({ id: "r-hub", merchant: "HUB 東京オペラシティ店", amount_minor: 7049, transaction_date: "2026-04-27" }),
+  ];
+  const matches = matchAmexToReceipts(lines, receipts);
+  assert.equal(matches.length, 2);
+  assert.ok(matches.every((m) => m.receiptId === "r-hub"));
+  assert.ok(matches.every((m) => m.consolidatedGroupSize === 2));
+  // Capped below the auto-confirm band (0.92) — a human confirms each group line.
+  assert.ok(matches.every((m) => m.confidenceScore >= 0.7 && m.confidenceScore < 0.92));
+  assert.ok(matches.every((m) => m.matchReasons.some((r) => r.includes("consolidated"))));
+});
+
+test("consolidated receipt: no group suggestion when the sum does not match exactly", () => {
+  const lines = [
+    makeAmexLine({ id: "e-1", merchant: "ENEOS", amount_minor: 3300, transaction_date: "2026-04-29" }),
+    makeAmexLine({ id: "e-2", merchant: "ENEOS", amount_minor: 19470, transaction_date: "2026-04-29" }),
+  ];
+  const receipts = [
+    makeReceipt({ id: "r-e", merchant: "ENEOS", amount_minor: 22771, transaction_date: "2026-04-29" }),
+  ];
+  assert.equal(matchAmexToReceipts(lines, receipts).length, 0);
+});
+
+test("consolidated receipt: a receipt with a 1:1 match is not also group-matched", () => {
+  // Receipt equals one line exactly → 1:1 wins; the second line stays unmatched
+  // rather than being pulled into a bogus group.
+  const lines = [
+    makeAmexLine({ id: "l-1", merchant: "ENEOS", amount_minor: 3300, transaction_date: "2026-04-29" }),
+    makeAmexLine({ id: "l-2", merchant: "ENEOS", amount_minor: 19470, transaction_date: "2026-04-29" }),
+  ];
+  const receipts = [
+    makeReceipt({ id: "r-single", merchant: "ENEOS", amount_minor: 3300, transaction_date: "2026-04-29" }),
+  ];
+  const matches = matchAmexToReceipts(lines, receipts);
+  assert.equal(matches.length, 1);
+  assert.equal(matches[0]!.amexLineId, "l-1");
+  assert.equal(matches[0]!.consolidatedGroupSize, undefined);
+});
+
+test("consolidated receipt: lines outside the 7-day window are excluded from the group", () => {
+  const lines = [
+    makeAmexLine({ id: "n-1", merchant: "ENEOS", amount_minor: 3300, transaction_date: "2026-04-29" }),
+    makeAmexLine({ id: "n-2", merchant: "ENEOS", amount_minor: 19470, transaction_date: "2026-06-15" }),
+  ];
+  const receipts = [
+    makeReceipt({ id: "r-e", merchant: "ENEOS", amount_minor: 22770, transaction_date: "2026-04-29" }),
+  ];
+  // Group = only n-1 (single line) → below the 2-line minimum → no suggestion.
+  assert.equal(matchAmexToReceipts(lines, receipts).length, 0);
+});
+
 test("no match when date is more than 7 days apart", () => {
   const lines = [makeAmexLine({ transaction_date: "2024-01-15" })];
   const receipts = [makeReceipt({ transaction_date: "2024-01-24" })];

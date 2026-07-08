@@ -646,6 +646,12 @@ export interface ReconciliationMatch {
   receiptId: string;
   confidenceScore: number;
   matchReasons: string[];
+  /**
+   * Set when this match is part of a consolidated-receipt group: N statement
+   * lines (same merchant, exact sum) sharing one receipt. Every line in the
+   * group carries the same receiptId and the same group size.
+   */
+  consolidatedGroupSize?: number;
 }
 
 // ─── Business trip detection ───────────────────────────────────────────────

@@ -105,8 +105,45 @@ function parseTransactionDate(rawText: string): string | null {
   return null;
 }
 
+// Prefer an explicitly-labeled transaction date over the first date on the
+// receipt. E-tickets (えきねっと etc.) print 発行日 (PDF issue date) first, but
+// the card is charged on 購入日/利用日 — that is the date the AMEX line will
+// carry, and reconciliation hard-rejects candidates >7 days apart. Labels are
+// tried in priority order; the date may sit on the same line or wrap to the
+// next (OCR table cells). Falls back to null → caller uses first-found date.
+const DATE_LABEL_PRIORITY: RegExp[] = [
+  /取引日/,
+  /(?:ご)?利用日/,
+  /購入日|お買上げ?日|お買い上げ日/,
+];
+
+function parseLabeledTransactionDate(rawText: string): string | null {
+  const lines = rawText.split(/\r?\n/);
+  for (const label of DATE_LABEL_PRIORITY) {
+    for (let i = 0; i < lines.length; i++) {
+      if (!label.test(lines[i]!)) continue;
+      const date =
+        parseTransactionDate(lines[i]!) ?? parseTransactionDate(lines[i + 1] ?? "");
+      if (date) return date;
+    }
+  }
+  return null;
+}
+
+// Numbers that share a line with the total but are never money: the card's
+// last-4 digits ("クレジットカード利用(カード番号下4桁：5102)", "ending in 5102",
+// "****5102") and tax-rate percentages ("税込10%"). Without masking, a last-4
+// like 5102 outbids a ¥4,900 total in the max() pick below.
+function maskNonAmountNumbers(line: string): string {
+  return line
+    .replace(/下\s*4\s*(?:桁|ケタ|けた)\s*[:：]?\s*\d{4}/g, " ")
+    .replace(/(?:ending(?:\s+in)?|last\s*4(?:\s*digits)?)\s*[:：#]?\s*\d{4}/gi, " ")
+    .replace(/[xX*＊]{2,}[-\s]?\d{4}/g, " ")
+    .replace(/\d{1,3}(?:\.\d+)?\s*[%％]/g, " ");
+}
+
 function parseMoneyCandidates(line: string): number[] {
-  const matches = line.matchAll(
+  const matches = maskNonAmountNumbers(line).matchAll(
     /(?:[¥￥$€£]\s*)?(-?\d{1,3}(?:,\d{3})+|-?\d+)(?:\.(\d{1,2}))?(?:\s*円)?/g,
   );
   return Array.from(matches)
@@ -138,9 +175,13 @@ function parseAmountMinor(rawText: string, currency: string): number | null {
     "amount due",
     "grand total",
   ];
+  // NOTE: no bare "税" here — it would veto every "税込" total line (税込 is a
+  // totalKeyword and contains 税). Tax-adjacent lines are excluded via the
+  // specific forms below instead.
   const skipKeywords = [
     "小計",
-    "税",
+    "税抜",
+    "税額",
     "消費税",
     "内税",
     "外税",
@@ -318,7 +359,7 @@ export function parseReceiptOcrText(rawText: string): Omit<ExtractionResult, "ra
   const { taxAmountMinor, taxRate } = parseTaxInfo(rawText, resolvedCurrency);
 
   return {
-    transactionDate: parseTransactionDate(rawText),
+    transactionDate: parseLabeledTransactionDate(rawText) ?? parseTransactionDate(rawText),
     merchant: parseMerchant(rawText),
     amountMinor: parseAmountMinor(rawText, currency),
     currency: resolvedCurrency,
