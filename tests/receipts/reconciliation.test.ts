@@ -167,6 +167,93 @@ test("consolidated receipt: a receipt with a 1:1 match is not also group-matched
   assert.equal(matches[0]!.consolidatedGroupSize, undefined);
 });
 
+test("consolidated receipt: remaining line is still suggested after the first line is confirmed", () => {
+  // Confirming line 1 promotes the receipt to 'reconciled' and the page
+  // refreshes — the second line must keep its suggestion (Codex P2).
+  const lines = [
+    makeAmexLine({
+      id: "hub-1",
+      merchant: "HUB 東京オペラシティ店",
+      amount_minor: 2864,
+      transaction_date: "2026-04-27",
+      match_status: "confirmed",
+      matched_receipt_id: "r-hub",
+    }),
+    makeAmexLine({
+      id: "hub-2",
+      merchant: "HUB 東京オペラシティ店",
+      amount_minor: 4185,
+      transaction_date: "2026-04-27",
+    }),
+  ];
+  const receipts = [
+    makeReceipt({
+      id: "r-hub",
+      merchant: "HUB 東京オペラシティ店",
+      amount_minor: 7049,
+      transaction_date: "2026-04-27",
+      status: "reconciled",
+    }),
+  ];
+  const matches = matchAmexToReceipts(lines, receipts);
+  assert.equal(matches.length, 1);
+  assert.equal(matches[0]!.amexLineId, "hub-2");
+  assert.equal(matches[0]!.receiptId, "r-hub");
+  assert.equal(matches[0]!.consolidatedGroupSize, 2);
+});
+
+test("consolidated receipt: fully-claimed receipt is not re-offered to leftover lines", () => {
+  const lines = [
+    makeAmexLine({
+      id: "hub-1",
+      merchant: "HUB 東京オペラシティ店",
+      amount_minor: 7049,
+      transaction_date: "2026-04-27",
+      match_status: "confirmed",
+      matched_receipt_id: "r-hub",
+    }),
+    makeAmexLine({
+      id: "hub-3",
+      merchant: "HUB 東京オペラシティ店",
+      amount_minor: 1200,
+      transaction_date: "2026-04-27",
+    }),
+  ];
+  const receipts = [
+    makeReceipt({
+      id: "r-hub",
+      merchant: "HUB 東京オペラシティ店",
+      amount_minor: 7049,
+      transaction_date: "2026-04-27",
+      status: "reconciled",
+    }),
+  ];
+  assert.equal(matchAmexToReceipts(lines, receipts).length, 0);
+});
+
+test("consolidated receipt: receipt reconciled by ANOTHER month's lines is not offered", () => {
+  // status='reconciled' but no confirmed line in this month's set — the
+  // claim lives elsewhere; do not offer it.
+  const lines = [
+    makeAmexLine({
+      id: "hub-2",
+      merchant: "HUB 東京オペラシティ店",
+      amount_minor: 4185,
+      transaction_date: "2026-04-27",
+    }),
+  ];
+  const receipts = [
+    makeReceipt({
+      id: "r-hub",
+      merchant: "HUB 東京オペラシティ店",
+      amount_minor: 4185,
+      transaction_date: "2026-04-27",
+      status: "reconciled",
+    }),
+  ];
+  assert.equal(matchAmexToReceipts(lines, receipts).length, 0);
+});
+
 test("consolidated receipt: lines outside the 7-day window are excluded from the group", () => {
   const lines = [
     makeAmexLine({ id: "n-1", merchant: "ENEOS", amount_minor: 3300, transaction_date: "2026-04-29" }),

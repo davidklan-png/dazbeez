@@ -8,7 +8,7 @@ import {
   listReceiptRecordsByIds,
 } from "@/lib/receipts/db";
 import { getComplianceSettings } from "@/lib/receipts/settings";
-import { summarizeOpenChecksForMonth } from "@/lib/receipts/compliance";
+import { summarizeOpenChecksForExport } from "@/lib/receipts/compliance";
 import { getReceiptsDb } from "@/lib/cloudflare-runtime";
 import { resolveLineCategory } from "@/lib/receipts/line-classification";
 import type {
@@ -292,9 +292,16 @@ export async function validateMonthReadyForExport(
     ),
   );
 
-  // (5) Compliance-engine gate.
+  // (5) Compliance-engine gate. Summarize over the month filter UNION the
+  // bundle's receipt IDs: matched receipts may be dated outside the
+  // statement month, and exported_month isn't stamped until after finalize,
+  // so the month filter alone misses their open checks (Codex P1).
   const settings = await getComplianceSettings();
-  const summary = await summarizeOpenChecksForMonth(db, month);
+  const summary = await summarizeOpenChecksForExport(
+    db,
+    month,
+    bundle.receipts.map((r) => r.id),
+  );
   if (summary.blockers > 0) {
     blockers.push(
       `${summary.blockers} open compliance blocker(s) on receipts in ${month}`,

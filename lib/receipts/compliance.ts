@@ -289,9 +289,32 @@ export async function summarizeOpenChecksForMonth(
   db: D1Database,
   month: string,
 ): Promise<ComplianceSummary> {
-  const result = await db
+  return summarizeOpenChecksForExport(db, month, []);
+}
+
+/**
+ * Open-check summary for an export gate. Covers the union of:
+ *   (a) receipts anchored in `month` by transaction_date or exported_month
+ *       (the original month filter), and
+ *   (b) `extraReceiptIds` — the export bundle's receipts by ID.
+ *
+ * (b) exists because AMEX statement months include matched receipts whose
+ * transaction_date falls in a DIFFERENT month (the statement window lags),
+ * and exported_month isn't stamped until after finalize. Filtering by month
+ * alone let open blockers on those receipts slip past the finalize gate
+ * (Codex review P1, 2026-07-08). Rows are deduped by check id.
+ */
+export async function summarizeOpenChecksForExport(
+  db: D1Database,
+  month: string,
+  extraReceiptIds: string[],
+): Promise<ComplianceSummary> {
+  type CheckRow = { id: string; severity: ComplianceCheckSeverity; check_type: string };
+  const rowsById = new Map<string, CheckRow>();
+
+  const monthResult = await db
     .prepare(
-      `SELECT rcc.severity, rcc.check_type
+      `SELECT rcc.id, rcc.severity, rcc.check_type
        FROM receipt_compliance_checks rcc
        JOIN receipt_records rr ON rr.id = rcc.object_id
        WHERE rcc.object_type = 'receipt'
@@ -300,7 +323,29 @@ export async function summarizeOpenChecksForMonth(
          AND rr.deleted_at IS NULL`,
     )
     .bind(`${month}%`, month)
-    .all<{ severity: ComplianceCheckSeverity; check_type: string }>();
+    .all<CheckRow>();
+  for (const row of monthResult.results ?? []) rowsById.set(row.id, row);
+
+  // Chunked IN-lists keep each statement well under D1's bind-parameter cap.
+  const CHUNK = 50;
+  const ids = [...new Set(extraReceiptIds)];
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    const chunk = ids.slice(i, i + CHUNK);
+    const placeholders = chunk.map(() => "?").join(",");
+    const idResult = await db
+      .prepare(
+        `SELECT rcc.id, rcc.severity, rcc.check_type
+         FROM receipt_compliance_checks rcc
+         JOIN receipt_records rr ON rr.id = rcc.object_id
+         WHERE rcc.object_type = 'receipt'
+           AND rcc.status = 'open'
+           AND rcc.object_id IN (${placeholders})
+           AND rr.deleted_at IS NULL`,
+      )
+      .bind(...chunk)
+      .all<CheckRow>();
+    for (const row of idResult.results ?? []) rowsById.set(row.id, row);
+  }
 
   const summary: ComplianceSummary = {
     blockers: 0,
@@ -309,7 +354,7 @@ export async function summarizeOpenChecksForMonth(
     total: 0,
     byType: {},
   };
-  for (const row of result.results ?? []) {
+  for (const row of rowsById.values()) {
     summary.total++;
     if (row.severity === "blocker") summary.blockers++;
     else if (row.severity === "warning") summary.warnings++;

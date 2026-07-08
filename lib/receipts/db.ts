@@ -989,6 +989,37 @@ export async function updateAmexReconciliation(
   // gone. Sum-vs-receipt-total integrity is enforced as a sign-off blocker
   // (validateAmexLinesForSignoff), not at confirm time, so partial groups
   // can be linked incrementally during the month.
+  //
+  // What is NOT allowed (Codex review P2, 2026-07-08): confirming a receipt
+  // that is already confirmed against a line in a DIFFERENT statement month
+  // whose reconciliation is finalized. rejectIfFinalized above only checks
+  // the target line's month, so without this guard a sealed month's receipt
+  // could be re-claimed — and this function would then mutate that receipt's
+  // merchant/date/status, breaking finalized-month immutability. Same-month
+  // consolidated siblings pass; cross-month links into open months are left
+  // to the export gate's cross-month integrity blocker.
+  if (matchStatus === "confirmed" && receiptId) {
+    const sealedClaim = await db
+      .prepare(
+        `SELECT asl.statement_month
+         FROM amex_statement_lines asl
+         JOIN amex_reconciliations ar
+           ON ar.statement_month = asl.statement_month
+          AND ar.status = 'finalized'
+         WHERE asl.matched_receipt_id = ?
+           AND asl.match_status = 'confirmed'
+           AND asl.id != ?
+           AND asl.statement_month != ?
+         LIMIT 1`,
+      )
+      .bind(receiptId, amexLineId, statementMonth ?? "")
+      .first<{ statement_month: string }>();
+    if (sealedClaim) {
+      throw new Error(
+        `Receipt is confirmed in the finalized reconciliation for ${sealedClaim.statement_month} and cannot be linked to another month. Reopen that month first.`,
+      );
+    }
+  }
 
   const statements = [
     db

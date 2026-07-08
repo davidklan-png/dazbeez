@@ -221,16 +221,47 @@ export function matchAmexToReceipts(
   }
 
   // Phase 3: consolidated receipts (領収書 covering several card charges).
-  // Runs only over lines and receipts left unmatched by the 1:1 phases.
-  // Policy (deliberately narrow): ALL same-merchant unmatched lines within the
-  // date window must sum EXACTLY to the receipt total, with at least two
-  // lines. No subset search — an exact full-group sum is explainable in an
-  // audit; combinatorial subset picks are not. Confidence is capped below the
+  // Runs only over lines left unmatched by the 1:1 phases. Policy
+  // (deliberately narrow): the same-merchant unmatched lines within the date
+  // window must sum EXACTLY to the receipt's REMAINING amount (total minus
+  // any lines already confirmed against it), with at least two lines in the
+  // full group. No subset search — an exact sum is explainable in an audit;
+  // combinatorial subset picks are not. Confidence is capped below the
   // auto-confirm band so a human confirms every consolidated group.
-  for (const receipt of eligibleReceipts) {
+  //
+  // Already-confirmed siblings matter here (Codex review P2, 2026-07-08):
+  // confirming the first line of a group promotes the receipt to
+  // 'reconciled', which the 1:1 eligibility filter excludes — so the
+  // remaining lines must be grouped against a wider receipt set, with the
+  // confirmed lines' sum subtracted from the target.
+  const confirmedSumByReceipt = new Map<string, { sum: number; count: number }>();
+  for (const line of amexLines) {
+    if (line.match_status !== "confirmed" || !line.matched_receipt_id) continue;
+    const entry = confirmedSumByReceipt.get(line.matched_receipt_id) ?? { sum: 0, count: 0 };
+    entry.sum += line.amount_minor;
+    entry.count += 1;
+    confirmedSumByReceipt.set(line.matched_receipt_id, entry);
+  }
+
+  const consolidationReceipts = receipts.filter((r) => {
+    if (r.deleted_at !== null || r.status === "archived" || r.status === "exported") {
+      return false;
+    }
+    // 'reconciled' receipts are only group-eligible when the claim comes from
+    // this month's own confirmed lines — a receipt fully claimed elsewhere
+    // must not be re-offered.
+    if (r.status === "reconciled" && !confirmedSumByReceipt.has(r.id)) return false;
+    return r.payment_path === "AMEX";
+  });
+
+  for (const receipt of consolidationReceipts) {
     if (assignedReceipts.has(receipt.id)) continue;
     if (receipt.amount_minor === null || !receipt.merchant) continue;
     if (!receipt.transaction_date) continue;
+
+    const confirmed = confirmedSumByReceipt.get(receipt.id) ?? { sum: 0, count: 0 };
+    const remaining = receipt.amount_minor - confirmed.sum;
+    if (remaining <= 0) continue; // fully claimed (or over-claimed — a sign-off blocker)
 
     const group = amexLines.filter(
       (line) =>
@@ -244,10 +275,11 @@ export function matchAmexToReceipts(
         !!line.transaction_date &&
         daysBetween(line.transaction_date, receipt.transaction_date!) <= 7,
     );
-    if (group.length < 2) continue;
+    const totalGroupSize = group.length + confirmed.count;
+    if (group.length < 1 || totalGroupSize < 2) continue;
 
     const groupSum = group.reduce((sum, line) => sum + line.amount_minor, 0);
-    if (groupSum !== receipt.amount_minor) continue;
+    if (groupSum !== remaining) continue;
 
     for (const line of group) {
       const dateDelta = daysBetween(line.transaction_date!, receipt.transaction_date);
@@ -261,11 +293,13 @@ export function matchAmexToReceipts(
         receiptId: receipt.id,
         confidenceScore: score,
         matchReasons: [
-          `consolidated receipt: ${group.length} lines sum to total`,
+          confirmed.count > 0
+            ? `consolidated receipt: ${group.length} remaining line(s) sum to the unclaimed balance (${confirmed.count} already confirmed)`
+            : `consolidated receipt: ${group.length} lines sum to total`,
           "merchant match",
           `${dateDelta}-day window`,
         ],
-        consolidatedGroupSize: group.length,
+        consolidatedGroupSize: totalGroupSize,
       });
     }
     assignedReceipts.add(receipt.id);
