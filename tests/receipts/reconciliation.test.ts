@@ -207,6 +207,37 @@ test("consolidated receipt: brand in raw OCR text bridges franchise operator nam
   assert.ok(matches.every((m) => m.receiptId === "r-eneos" && m.consolidatedGroupSize === 2));
 });
 
+test("consolidated receipt: same-brand charges AFTER the receipt date do not poison the group (ENEOS prod data)", () => {
+  // Real data 2026-06 statement: ENEOS pair on 04-29 sums to the 04-29
+  // consolidated receipt, but two later fill-ups (05-02) share the brand and
+  // sit inside the ±7-day window. A receipt cannot cover future charges —
+  // the group must be bounded at the receipt date.
+  const rawText = JSON.stringify({ rawText: "ENEOS\n納品書(領収書)\n2026年04月29日" });
+  const lines = [
+    makeAmexLine({ id: "e-1", merchant: "ENEOS", amount_minor: 3300, transaction_date: "2026-04-29" }),
+    makeAmexLine({ id: "e-2", merchant: "ENEOS", amount_minor: 19470, transaction_date: "2026-04-29" }),
+    makeAmexLine({ id: "e-3", merchant: "ENEOS", amount_minor: 1705, transaction_date: "2026-05-02" }),
+    makeAmexLine({ id: "e-4", merchant: "ENEOS", amount_minor: 1840, transaction_date: "2026-05-02" }),
+  ];
+  const receipts = [
+    makeReceipt({
+      id: "r-eneos",
+      merchant: "株式会社 豊島屋 岡谷SS",
+      amount_minor: 22770,
+      transaction_date: "2026-04-29",
+      status: "reviewed",
+      extraction_json: rawText,
+    }),
+  ];
+  const matches = matchAmexToReceipts(lines, receipts);
+  assert.equal(matches.length, 2);
+  assert.deepEqual(
+    matches.map((m) => m.amexLineId).sort(),
+    ["e-1", "e-2"],
+  );
+  assert.ok(matches.every((m) => m.receiptId === "r-eneos" && m.consolidatedGroupSize === 2));
+});
+
 test("raw-text brand fallback requires the brand to actually appear", () => {
   const lines = [
     makeAmexLine({ id: "e-1", merchant: "ENEOS", amount_minor: 3300, transaction_date: "2026-04-29" }),

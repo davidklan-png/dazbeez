@@ -320,6 +320,13 @@ export function matchAmexToReceipts(
           merchantAliasMatch(line.merchant, receipt.merchant!) ||
           rawTextMentionsMerchant(rawTextOf(receipt), line.merchant)) &&
         !!line.transaction_date &&
+        // A consolidated 領収書 is issued at (or after) settlement — it can
+        // never cover a charge dated AFTER the receipt. Without this bound,
+        // unrelated later charges at the same brand fall into the ±7-day
+        // window and poison the exact-sum test (observed in prod: two ENEOS
+        // 05-02 fill-ups joining the 04-29 pair → 26,315 ≠ 22,770 → no
+        // suggestion at all). ISO dates compare correctly as strings.
+        line.transaction_date <= receipt.transaction_date! &&
         daysBetween(line.transaction_date, receipt.transaction_date!) <= 7,
     );
     const totalGroupSize = group.length + confirmed.count;
