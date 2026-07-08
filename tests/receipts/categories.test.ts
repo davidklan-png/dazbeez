@@ -12,13 +12,25 @@ import {
 
 // ─── Category seed ───────────────────────────────────────────────────────────
 
-test("EXPENSE_CATEGORIES has exactly 14 entries", () => {
-  assert.equal(EXPENSE_CATEGORIES.length, 14);
+test("EXPENSE_CATEGORIES has exactly 15 entries", () => {
+  // 14 original + miscellaneous (雑費), added 2026-07 per operator request.
+  assert.equal(EXPENSE_CATEGORIES.length, 15);
 });
 
-test("all 14 canonical codes are unique", () => {
+test("all canonical codes are unique", () => {
   const codes = EXPENSE_CATEGORIES.map((c) => c.code);
-  assert.equal(new Set(codes).size, 14);
+  assert.equal(new Set(codes).size, EXPENSE_CATEGORIES.length);
+});
+
+test("legacy 'misc' still requires review despite canonical 'miscellaneous' existing", () => {
+  // Guard: mapLegacyCategory checks isCanonicalCode first, so the canonical
+  // code must never be named 'misc' — old dumping-ground values would be
+  // silently legitimized instead of surfacing for review.
+  assert.deepEqual(mapLegacyCategory("misc"), { code: null, ambiguous: true });
+  assert.deepEqual(mapLegacyCategory("miscellaneous"), {
+    code: "miscellaneous",
+    ambiguous: false,
+  });
 });
 
 test("every category has required fields", () => {
