@@ -167,6 +167,63 @@ test("consolidated receipt: a receipt with a 1:1 match is not also group-matched
   assert.equal(matches[0]!.consolidatedGroupSize, undefined);
 });
 
+test("consolidated receipt: CJK/Latin spacing difference does not break the merchant gate (HUB)", () => {
+  // Real data 2026-04: statement prints "HUB 東京オペラシティ店" (space),
+  // OCR merchant is "HUB東京オペラシティ店" (no space).
+  const lines = [
+    makeAmexLine({ id: "hub-1", merchant: "HUB 東京オペラシティ店", amount_minor: 2864, transaction_date: "2026-04-27" }),
+    makeAmexLine({ id: "hub-2", merchant: "HUB 東京オペラシティ店", amount_minor: 4185, transaction_date: "2026-04-27" }),
+  ];
+  const receipts = [
+    makeReceipt({ id: "r-hub", merchant: "HUB東京オペラシティ店", amount_minor: 7049, transaction_date: "2026-04-27", status: "reviewed" }),
+  ];
+  const matches = matchAmexToReceipts(lines, receipts);
+  assert.equal(matches.length, 2);
+  assert.ok(matches.every((m) => m.receiptId === "r-hub" && m.consolidatedGroupSize === 2));
+});
+
+test("consolidated receipt: brand in raw OCR text bridges franchise operator names (ENEOS)", () => {
+  // Real data 2026-04: statement prints "ENEOS", the receipt is issued by
+  // the franchise operator 株式会社 豊島屋 岡谷SS — but the OCR text carries
+  // the ENEOS brand mark.
+  const lines = [
+    makeAmexLine({ id: "e-1", merchant: "ENEOS", amount_minor: 3300, transaction_date: "2026-04-29" }),
+    makeAmexLine({ id: "e-2", merchant: "ENEOS", amount_minor: 19470, transaction_date: "2026-04-29" }),
+  ];
+  const receipts = [
+    makeReceipt({
+      id: "r-eneos",
+      merchant: "株式会社 豊島屋 岡谷SS",
+      amount_minor: 22770,
+      transaction_date: "2026-04-29",
+      status: "reviewed",
+      extraction_json: JSON.stringify({
+        rawText: "AMEX\n出張交通費\nENEOS\n納品書(領収書)\n2026年04月29日 13:42",
+      }),
+    }),
+  ];
+  const matches = matchAmexToReceipts(lines, receipts);
+  assert.equal(matches.length, 2);
+  assert.ok(matches.every((m) => m.receiptId === "r-eneos" && m.consolidatedGroupSize === 2));
+});
+
+test("raw-text brand fallback requires the brand to actually appear", () => {
+  const lines = [
+    makeAmexLine({ id: "e-1", merchant: "ENEOS", amount_minor: 3300, transaction_date: "2026-04-29" }),
+    makeAmexLine({ id: "e-2", merchant: "ENEOS", amount_minor: 19470, transaction_date: "2026-04-29" }),
+  ];
+  const receipts = [
+    makeReceipt({
+      id: "r-other",
+      merchant: "株式会社 豊島屋 岡谷SS",
+      amount_minor: 22770,
+      transaction_date: "2026-04-29",
+      extraction_json: JSON.stringify({ rawText: "納品書(領収書)\n2026年04月29日" }),
+    }),
+  ];
+  assert.equal(matchAmexToReceipts(lines, receipts).length, 0);
+});
+
 test("consolidated receipt: remaining line is still suggested after the first line is confirmed", () => {
   // Confirming line 1 promotes the receipt to 'reconciled' and the page
   // refreshes — the second line must keep its suggestion (Codex P2).

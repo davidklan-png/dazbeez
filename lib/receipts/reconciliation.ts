@@ -5,11 +5,18 @@ import type {
 } from "@/lib/receipts/types";
 
 export function normalizeDescription(value: string): string {
-  return value
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}\s]/gu, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+  return (
+    value
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}\s]/gu, " ")
+      // Split at Latin/digit ↔ CJK script boundaries: statements print
+      // "HUB 東京オペラシティ店" while receipts OCR as "HUB東京オペラシティ店" —
+      // without segmentation the two tokenize differently and never match.
+      .replace(/([a-z0-9])([぀-ヿ一-龯])/g, "$1 $2")
+      .replace(/([぀-ヿ一-龯])([a-z0-9])/g, "$1 $2")
+      .replace(/\s+/g, " ")
+      .trim()
+  );
 }
 
 /**
@@ -51,6 +58,22 @@ function merchantAliasMatch(a: string, b: string): boolean {
   return MERCHANT_ALIAS_GROUPS.some(
     (group) => group.some((re) => re.test(a)) && group.some((re) => re.test(b)),
   );
+}
+
+// Last-resort merchant bridge: the statement brand printed ON the receipt.
+// Franchised operators issue receipts under their legal name (ENEOS station →
+// 株式会社豊島屋) but the brand mark is in the OCR text. A statement-merchant
+// token of ≥4 chars found in the receipt's normalized raw text counts as a
+// merchant signal. Length ≥4 keeps short/generic tokens from false-matching.
+function rawTextMentionsMerchant(
+  rawTextNorm: string | null,
+  lineMerchant: string,
+): boolean {
+  if (!rawTextNorm) return false;
+  const tokens = normalizeDescription(lineMerchant)
+    .split(" ")
+    .filter((t) => t.length >= 4);
+  return tokens.some((t) => rawTextNorm.includes(t));
 }
 
 function descriptionContains(amexDesc: string, receiptMerchant: string): boolean {
@@ -105,6 +128,26 @@ export function matchAmexToReceipts(
       r.status !== "exported" &&
       r.status !== "reconciled",
   );
+
+  // Normalized raw OCR text per receipt, parsed lazily at most once — used by
+  // the brand-on-receipt merchant fallback in the 1:1 bonus and phase-3 gate.
+  const rawTextNormCache = new Map<string, string | null>();
+  const rawTextOf = (receipt: ReceiptRecord): string | null => {
+    let cached = rawTextNormCache.get(receipt.id);
+    if (cached === undefined) {
+      cached = null;
+      if (receipt.extraction_json) {
+        try {
+          const parsed = JSON.parse(receipt.extraction_json) as { rawText?: string };
+          cached = normalizeDescription(parsed.rawText ?? "") || null;
+        } catch {
+          /* malformed extraction JSON — no raw text available */
+        }
+      }
+      rawTextNormCache.set(receipt.id, cached);
+    }
+    return cached;
+  };
 
   // Phase 1: compute best candidate per AMEX line
   const candidates: Array<{ match: ReconciliationMatch; dateDelta: number }> = [];
@@ -175,6 +218,9 @@ export function matchAmexToReceipts(
         } else if (merchantAliasMatch(line.merchant, receipt.merchant)) {
           score += 0.15;
           reasons.push("known merchant alias");
+        } else if (rawTextMentionsMerchant(rawTextOf(receipt), line.merchant)) {
+          score += 0.15;
+          reasons.push("brand found on receipt text");
         }
       }
 
@@ -271,7 +317,8 @@ export function matchAmexToReceipts(
         line.currency.toUpperCase() === receipt.currency.toUpperCase() &&
         !!line.merchant &&
         (descriptionContains(line.merchant, receipt.merchant!) ||
-          merchantAliasMatch(line.merchant, receipt.merchant!)) &&
+          merchantAliasMatch(line.merchant, receipt.merchant!) ||
+          rawTextMentionsMerchant(rawTextOf(receipt), line.merchant)) &&
         !!line.transaction_date &&
         daysBetween(line.transaction_date, receipt.transaction_date!) <= 7,
     );
