@@ -1,6 +1,10 @@
 import { getReceiptsDb } from "@/lib/cloudflare-runtime";
 import { createAuditEntry } from "@/lib/receipts/audit";
 import { nowIso, newUuid, stringifyJson } from "@/lib/receipts/db-utils";
+import {
+  assertTransactionMonthEditable,
+  transactionMonthOf,
+} from "@/lib/receipts/month-lock";
 import { shouldOverwriteMerchant } from "@/lib/receipts/reconciliation";
 import { retentionUntilIso } from "@/lib/receipts/retention";
 import { deleteAmexArtifact } from "@/lib/receipts/storage";
@@ -40,6 +44,19 @@ export async function createReceiptRecord(
 
   const paymentPath = input.paymentPath ?? "UNKNOWN";
   const expenseType = input.expenseType ?? "UNKNOWN";
+
+  // Split lock (audit A5): a CASH/DIGITAL receipt may not be inserted with
+  // a transaction_date that lands in an already-finalized export month —
+  // it must go through the export revision flow. No-op for uploads, which
+  // insert at status='captured' with null transaction_date and let the
+  // extractor backfill it; this guards callers that supply the date up
+  // front (manual create, future import paths). AMEX-path receipts are
+  // governed by the reconciliation-sealed gate instead.
+  if (paymentPath === "CASH" || paymentPath === "DIGITAL") {
+    await assertTransactionMonthEditable(
+      transactionMonthOf(input.transactionDate ?? null),
+    );
+  }
 
   const sourceType = input.sourceType ?? "manual_upload";
 
@@ -185,6 +202,16 @@ export async function updateReceiptRecord(
 
   if (!before) throw new Error(`Receipt ${id} not found.`);
   await rejectIfReceiptInFinalizedReconciliation(db, id);
+  // Split lock (audit A5): for CASH/DIGITAL receipts, also check the
+  // export-finalized gate against the EFFECTIVE transaction month (input
+  // override wins, else the existing row's date). AMEX-path receipts skip
+  // this — they're covered by the reconciliation-sealed gate above.
+  const effectivePaymentPath = input.paymentPath ?? before.payment_path;
+  if (effectivePaymentPath === "CASH" || effectivePaymentPath === "DIGITAL") {
+    const effectiveDate =
+      "transactionDate" in input ? input.transactionDate : before.transaction_date;
+    await assertTransactionMonthEditable(transactionMonthOf(effectiveDate));
+  }
 
   const sets: string[] = [];
   const binds: unknown[] = [];
@@ -343,6 +370,49 @@ export async function listReceiptRecords(
     .all<ReceiptRecord>();
 
   return result.results ?? [];
+}
+
+/**
+ * Exhaustive month-scoped receipt list. Pages internally until exhausted,
+ * then throws if the total touches `hardCap` — silent truncation in the
+ * export bundle or compliance views would be an audit failure (a receipt
+ * omitted from the bundle is a receipt the accountant never sees). Callers
+ * that want UI pagination should keep using `listReceiptRecords` with an
+ * explicit small limit; this helper is for "I need every row in month M"
+ * paths (export bundle, compliance view, finalize validator).
+ *
+ * The hard cap is set high enough (default 10000) that hitting it signals
+ * a real data anomaly rather than routine load — even 4 concurrent open
+ * months at operator volume stay well under 1000/month.
+ */
+export async function listAllReceiptsInMonth(
+  month: string,
+  opts?: { paymentPath?: string; hardCap?: number },
+): Promise<ReceiptRecord[]> {
+  const paymentPath = opts?.paymentPath;
+  const hardCap = opts?.hardCap ?? 10000;
+  const PAGE = 500;
+  const out: ReceiptRecord[] = [];
+  let offset = 0;
+  // Loop with offset until a page comes back short or we hit the cap.
+  for (;;) {
+    const page = await listReceiptRecords({
+      month,
+      paymentPath,
+      limit: PAGE,
+      offset,
+    });
+    out.push(...page);
+    if (page.length < PAGE) return out;
+    offset += PAGE;
+    if (out.length >= hardCap) {
+      throw new Error(
+        `listAllReceiptsInMonth(${month}) hit hard cap of ${hardCap} rows — ` +
+          `silent truncation would corrupt the export bundle. Inspect the data ` +
+          `or raise the cap explicitly via opts.hardCap.`,
+      );
+    }
+  }
 }
 
 /**
@@ -913,18 +983,41 @@ export async function updateAmexReconciliation(
       break;
   }
 
-  // Race guard: prevent two AMEX lines from confirming the same receipt.
+  // Multiple confirmed lines MAY share one receipt: a consolidated 領収書
+  // covers several card charges (e.g. two same-night HUB charges on one
+  // receipt). The former 1:1 race guard that threw here is intentionally
+  // gone. Sum-vs-receipt-total integrity is enforced as a sign-off blocker
+  // (validateAmexLinesForSignoff), not at confirm time, so partial groups
+  // can be linked incrementally during the month.
+  //
+  // What is NOT allowed (Codex review P2, 2026-07-08): confirming a receipt
+  // that is already confirmed against a line in a DIFFERENT statement month
+  // whose reconciliation is finalized. rejectIfFinalized above only checks
+  // the target line's month, so without this guard a sealed month's receipt
+  // could be re-claimed — and this function would then mutate that receipt's
+  // merchant/date/status, breaking finalized-month immutability. Same-month
+  // consolidated siblings pass; cross-month links into open months are left
+  // to the export gate's cross-month integrity blocker.
   if (matchStatus === "confirmed" && receiptId) {
-    const conflict = await db
+    const sealedClaim = await db
       .prepare(
-        `SELECT id FROM amex_statement_lines
-         WHERE matched_receipt_id = ? AND match_status = 'confirmed' AND id != ?
+        `SELECT asl.statement_month
+         FROM amex_statement_lines asl
+         JOIN amex_reconciliations ar
+           ON ar.statement_month = asl.statement_month
+          AND ar.status = 'finalized'
+         WHERE asl.matched_receipt_id = ?
+           AND asl.match_status = 'confirmed'
+           AND asl.id != ?
+           AND asl.statement_month != ?
          LIMIT 1`,
       )
-      .bind(receiptId, amexLineId)
-      .first<{ id: string }>();
-    if (conflict) {
-      throw new Error(`Receipt already confirmed against another AMEX line: ${conflict.id}`);
+      .bind(receiptId, amexLineId, statementMonth ?? "")
+      .first<{ statement_month: string }>();
+    if (sealedClaim) {
+      throw new Error(
+        `Receipt is confirmed in the finalized reconciliation for ${sealedClaim.statement_month} and cannot be linked to another month. Reopen that month first.`,
+      );
     }
   }
 
@@ -1004,6 +1097,11 @@ export async function updateAmexReconciliation(
   // (either dropping the link entirely or switching to a different receipt).
   // Guard with `status = 'reconciled'` so we don't clobber a status another
   // process may have advanced this receipt to in the meantime.
+  // Consolidated receipts: only demote when NO other confirmed line still
+  // references it — unlinking one of two grouped lines must not knock a
+  // still-claimed receipt back to needs_review. The NOT EXISTS guard is
+  // evaluated inside the same batch as the line update, so it sees a
+  // consistent view.
   const wasConfirmed = previousStatus === "confirmed";
   if (wasConfirmed && previousReceiptId && previousReceiptId !== receiptId) {
     statements.push(
@@ -1011,9 +1109,15 @@ export async function updateAmexReconciliation(
         .prepare(
           `UPDATE receipt_records
            SET status = 'needs_review', updated_at = ?
-           WHERE id = ? AND status = 'reconciled'`,
+           WHERE id = ? AND status = 'reconciled'
+             AND NOT EXISTS (
+               SELECT 1 FROM amex_statement_lines
+               WHERE matched_receipt_id = ?
+                 AND match_status = 'confirmed'
+                 AND id != ?
+             )`,
         )
-        .bind(now, previousReceiptId),
+        .bind(now, previousReceiptId, previousReceiptId, amexLineId),
     );
   }
 
@@ -1617,6 +1721,82 @@ export async function listExports(): Promise<ReceiptExport[]> {
   return result.results ?? [];
 }
 
+// ─── receipt_export_items ───────────────────────────────────────────────────
+// Per-bundle audit trail of which receipts and AMEX lines shipped in each
+// export (migration 0017). Populated at bundle-build time, consulted by
+// finalizeExport to mark receipts status='exported' and by the cross-month
+// finalize gate. Replaced on rebuild — the partial unique index on
+// (export_id, item_type, item_id) makes this idempotent per-export.
+
+/**
+ * Replace the item set for an export. Deletes existing rows for the
+ * export then inserts the new set. Caller must ensure exportId exists.
+ */
+export async function replaceExportItems(
+  exportId: string,
+  items: Array<{ itemType: "receipt" | "amex_line"; itemId: string }>,
+): Promise<void> {
+  const db = getReceiptsDb();
+  const now = nowIso();
+  await db
+    .prepare(`DELETE FROM receipt_export_items WHERE export_id = ?`)
+    .bind(exportId)
+    .run();
+  if (items.length === 0) return;
+  // Batch via db.batch for a single transaction.
+  const stmts = items.map((it) =>
+    db
+      .prepare(
+        `INSERT OR IGNORE INTO receipt_export_items
+          (id, export_id, item_type, item_id, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .bind(newUuid(), exportId, it.itemType, it.itemId, now),
+  );
+  // D1 limits batches to ~30 statements; chunk to stay safe.
+  const CHUNK = 30;
+  for (let i = 0; i < stmts.length; i += CHUNK) {
+    await db.batch(stmts.slice(i, i + CHUNK));
+  }
+}
+
+/**
+ * Receipt IDs that shipped in the given export. Used by finalizeExport to
+ * mark receipts status='exported' (audit A5).
+ */
+export async function listReceiptIdsForExport(
+  exportId: string,
+): Promise<string[]> {
+  const db = getReceiptsDb();
+  const result = await db
+    .prepare(
+      `SELECT item_id FROM receipt_export_items
+       WHERE export_id = ? AND item_type = 'receipt'
+       ORDER BY created_at ASC`,
+    )
+    .bind(exportId)
+    .all<{ item_id: string }>();
+  return (result.results ?? []).map((r) => r.item_id);
+}
+
+/**
+ * Export IDs whose bundle included a given receipt. Reverse-lookup used by
+ * audit / future "is this receipt already exported" surfaces.
+ */
+export async function listExportsContainingReceipt(
+  receiptId: string,
+): Promise<string[]> {
+  const db = getReceiptsDb();
+  const result = await db
+    .prepare(
+      `SELECT DISTINCT export_id FROM receipt_export_items
+       WHERE item_type = 'receipt' AND item_id = ?`,
+    )
+    .bind(receiptId)
+    .all<{ export_id: string }>();
+  return (result.results ?? []).map((r) => r.export_id);
+}
+
 export async function finalizeExport(
   exportId: string,
   archiveR2Key: string,
@@ -1670,6 +1850,55 @@ export async function finalizeExport(
       manifestSha256: manifestSha256 ?? null,
     }),
   });
+
+  // A5 lifecycle: mark every receipt that shipped in this bundle as
+  // status='exported' and exported_month=<the export's month>. Both
+  // columns already existed but were dead before receipt_export_items
+  // gave finalizeExport a row set to act on. Audit-log each promotion so
+  // the receipt's lifecycle trail explains why it's no longer editable.
+  //
+  // Idempotent across re-runs only because finalizeExport itself refuses
+  // to run twice (status='draft' guard above). Re-entering here after a
+  // partial failure would re-UPDATE the same rows harmlessly.
+  const exportRow = await db
+    .prepare(`SELECT export_month FROM receipt_exports WHERE id = ?`)
+    .bind(exportId)
+    .first<{ export_month: string }>();
+  const exportMonth = exportRow?.export_month;
+  if (exportMonth) {
+    const exportedReceiptIds = await listReceiptIdsForExport(exportId);
+    if (exportedReceiptIds.length > 0) {
+      // Promote status + stamp exported_month. The status CHECK constraint
+      // allows 'exported'. We do NOT touch 'archived' rows — once archived
+      // the lifecycle is terminal and a re-finalize shouldn't unwind it.
+      // Chunk to respect D1's parameter limit per statement.
+      const CHUNK_SIZE = 90;
+      for (let i = 0; i < exportedReceiptIds.length; i += CHUNK_SIZE) {
+        const chunk = exportedReceiptIds.slice(i, i + CHUNK_SIZE);
+        const placeholders = chunk.map(() => "?").join(",");
+        await db
+          .prepare(
+            `UPDATE receipt_records
+               SET status = 'exported',
+                   exported_month = ?,
+                   updated_at = ?
+             WHERE id IN (${placeholders})
+               AND status IN ('captured','needs_review','reviewed','reconciled')`,
+          )
+          .bind(exportMonth, now, ...chunk)
+          .run();
+      }
+      for (const receiptId of exportedReceiptIds) {
+        await createAuditEntry(db, {
+          actor,
+          action: "receipt.exported",
+          objectType: "receipt",
+          objectId: receiptId,
+          newValueJson: stringifyJson({ exportId, exportedMonth: exportMonth }),
+        });
+      }
+    }
+  }
 }
 
 /**

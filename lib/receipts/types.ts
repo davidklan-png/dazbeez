@@ -104,6 +104,7 @@ export type AuditAction =
   | "receipt.extraction_requested"
   | "receipt.extraction_completed"
   | "receipt.extraction_denied"
+  | "receipt.extraction_date_deferred"
   | "receipt.extraction_failed"
   | "receipt.reviewed"
   | "receipt.reconciled"
@@ -388,6 +389,20 @@ export interface ReceiptExport {
   manifest_sha256?: string | null;
 }
 
+/**
+ * Per-item audit trail for an export bundle (0017_export_integrity.sql).
+ * One row per receipt or AMEX line that shipped in a specific export.
+ * Populated at bundle-build time; consulted by finalizeExport to mark
+ * receipts status='exported' and by the cross-month finalize gate.
+ */
+export interface ReceiptExportItem {
+  id: string;
+  export_id: string;
+  item_type: "receipt" | "amex_line";
+  item_id: string;
+  created_at: string;
+}
+
 // ─── Compliance row shapes ────────────────────────────────────────────────
 
 export interface ReceiptFile {
@@ -632,6 +647,12 @@ export interface ReconciliationMatch {
   receiptId: string;
   confidenceScore: number;
   matchReasons: string[];
+  /**
+   * Set when this match is part of a consolidated-receipt group: N statement
+   * lines (same merchant, exact sum) sharing one receipt. Every line in the
+   * group carries the same receiptId and the same group size.
+   */
+  consolidatedGroupSize?: number;
 }
 
 // ─── Business trip detection ───────────────────────────────────────────────
@@ -646,21 +667,54 @@ export interface BusinessTripCandidate {
 
 // ─── Export ────────────────────────────────────────────────────────────────
 
+/**
+ * A single row in the monthly export CSV. After the 2026-07-08 redesign the
+ * export unit is the **statement month**: one row per AMEX statement line
+ * (with the matched receipt's fields joined), plus one row per CASH/DIGITAL
+ * receipt anchored by transaction_date. A receipt matched to a line appears
+ * once — on the line row — never twice.
+ *
+ * `rowType` distinguishes the two populations. AMEX-line-only fields
+ * (lineId, matchStatus, receiptStatus, missingReceiptReason, cardholderName,
+ * businessTripStatus) are null on receipt rows; receipt-only fields
+ * (receiptId, status, originalR2Key) are null on missing-receipt lines.
+ */
 export interface ExportRow {
-  receiptId: string;
+  rowType: "amex_line" | "receipt";
+  // AMEX-line identity (null on receipt rows)
+  lineId: string | null;
+  matchStatus: AmexMatchStatus | null;
+  /** AmexReceiptStatus on line rows; null on receipt rows. */
+  receiptStatus: AmexReceiptStatus | null;
+  missingReceiptReason: string | null;
+  cardholderName: string | null;
+  businessTripStatus: AmexBusinessTripStatus | null;
+  // Receipt identity (null on missing-receipt lines)
+  receiptId: string | null;
+  /** ReceiptStatus on receipt rows and matched-receipt line rows; null otherwise. */
+  status: ReceiptStatus | null;
+  originalR2Key: string | null;
+  // Common accounting fields
   transactionDate: string | null;
   merchant: string | null;
   amountMinor: number | null;
   currency: string;
-  expenseType: ExpenseType;
+  expenseType: ExpenseType | null;
   expenseCategoryCode: string | null;
   expenseCategoryJa: string | null;
   expenseCategoryEn: string | null;
   paymentPath: PaymentPath;
   businessPurpose: string | null;
   attendees: string[];
-  status: ReceiptStatus;
-  originalR2Key: string;
+  // Compliance fields (audit A5; 電子帳簿保存法 / インボイス制度). Sourced
+  // from the matched receipt on AMEX-line rows; from the receipt itself on
+  // CASH/DIGITAL receipt rows; null when no receipt is present.
+  invoiceRegistrationNumber: string | null;
+  qualifiedInvoiceStatus: QualifiedInvoiceStatus | null;
+  taxRate: string | null;
+  taxAmountMinor: number | null;
+  sourceType: SourceType | null;
+  counterpartyName: string | null;
 }
 
 // ─── Dashboard alerts ──────────────────────────────────────────────────────

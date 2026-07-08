@@ -37,7 +37,6 @@ export interface ExportScreenProps {
     taxMinor: number;
     receiptsAttached: number;
     receiptsTotal: number;
-    attendeesLogged: number;
     eventCount: number;
   };
   breakdown: CategoryBreakdownRow[];
@@ -52,7 +51,6 @@ export interface ManifestSampleRow {
   amountMinor: number;
   categoryLabel: string;
   payment: string;
-  cardLast4: string;
   alcohol: boolean;
   archivePath: string;
 }
@@ -512,9 +510,9 @@ function DraftPreview({
           sub={`${Math.max(0, stats.receiptsTotal - stats.receiptsAttached)} no-receipt-expected`}
         />
         <Kpi
-          label="Attendees logged"
-          value={stats.attendeesLogged.toString()}
-          sub={`${stats.eventCount} event${stats.eventCount === 1 ? "" : "s"}`}
+          label="Events"
+          value={stats.eventCount.toString()}
+          sub="entertainment / meeting"
         />
       </div>
 
@@ -913,7 +911,7 @@ function ReportFormat({
 }
 
 const COL_TEMPLATE =
-  "95px 170px 80px 70px 110px 80px 75px 70px 1fr";
+  "95px 170px 80px 70px 110px 80px 70px 1fr";
 
 function ManifestTable({ rows }: { rows: ManifestSampleRow[] }) {
   return (
@@ -928,7 +926,6 @@ function ManifestTable({ rows }: { rows: ManifestSampleRow[] }) {
         <span className="text-right">amount</span>
         <span>category</span>
         <span>payment</span>
-        <span>card_last4</span>
         <span>alcohol</span>
         <span>archive_path</span>
       </div>
@@ -944,7 +941,6 @@ function ManifestTable({ rows }: { rows: ManifestSampleRow[] }) {
           <span className="text-right tabular-nums">{r.amountMinor}</span>
           <span className="truncate">{r.categoryLabel}</span>
           <span className="truncate">{r.payment}</span>
-          <span className="truncate">{r.cardLast4 || "—"}</span>
           <span className="truncate">{r.alcohol ? "true" : "false"}</span>
           <span className="truncate">{r.archivePath}</span>
         </div>
@@ -962,7 +958,6 @@ const SCHEMA_COLS = [
   { k: "category", t: "enum", ex: "接待交際費", n: "one of 14 JP catalog" },
   { k: "expense_type", t: "enum", ex: "meeting-no-alcohol", n: "expense classification" },
   { k: "payment_path", t: "enum", ex: "AMEX", n: "AMEX / CASH / DIGITAL / UNKNOWN" },
-  { k: "card_last4", t: "string", ex: "3091", n: "present when payment_path=AMEX" },
   { k: "amex_reference", t: "string", ex: "20260417-0214", n: "links to amex_statement_lines" },
   { k: "business_purpose", t: "string", ex: "Client dinner · Acme", n: "free text" },
   { k: "attendees", t: "jsonl", ex: "[D Klan, T Sato]", n: "one per row in companion CSV" },
@@ -1009,7 +1004,7 @@ function SchemaTable() {
 
 function rawCsv(rows: ManifestSampleRow[]): string {
   const header =
-    "receipt_id,merchant,transaction_date,amount,category,payment_path,card_last4,alcohol_present,archive_path";
+    "receipt_id,merchant,transaction_date,amount,category,payment_path,alcohol_present,archive_path";
   const body = rows
     .map((r) =>
       [
@@ -1019,7 +1014,6 @@ function rawCsv(rows: ManifestSampleRow[]): string {
         r.amountMinor,
         csvField(r.categoryLabel),
         r.payment,
-        r.cardLast4 || "",
         r.alcohol ? "true" : "false",
         csvField(r.archivePath),
       ].join(","),

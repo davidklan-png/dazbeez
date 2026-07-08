@@ -17,6 +17,7 @@ import { getComplianceSettings } from "@/lib/receipts/settings";
 import {
   validateInvoiceRegistrationNumber,
 } from "@/lib/receipts/invoice";
+import { ExportFinalizedError } from "@/lib/receipts/month-lock";
 import type {
   QualifiedInvoiceStatus,
   SourceType,
@@ -102,8 +103,18 @@ export async function PATCH(request: Request, { params }: RouteContext) {
     }
 
     if (receipt.status === "exported" || receipt.status === "archived") {
+      // Surface the revision endpoint when the receipt shipped in a
+      // finalized export — the operator can't edit it directly and must
+      // open a correction. exported_month tells us which month's revision
+      // endpoint to point at (audit A5 split-lock model).
+      const revisionHint =
+        receipt.status === "exported" && receipt.exported_month
+          ? ` POST /api/receipts/export/${receipt.exported_month}?correction=true to create a revision.`
+          : "";
       return NextResponse.json(
-        { error: `Receipt is ${receipt.status} and cannot be edited.` },
+        {
+          error: `Receipt is ${receipt.status} and cannot be edited.${revisionHint}`,
+        },
         { status: 409 },
       );
     }
@@ -289,6 +300,9 @@ export async function PATCH(request: Request, { params }: RouteContext) {
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("Unauthorized")) {
       return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
+    }
+    if (error instanceof ExportFinalizedError) {
+      return NextResponse.json({ error: error.message }, { status: 409 });
     }
     if (error instanceof Error && error.message.includes("finalized reconciliation")) {
       return NextResponse.json({ error: error.message }, { status: 409 });

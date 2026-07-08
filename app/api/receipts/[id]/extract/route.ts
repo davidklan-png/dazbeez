@@ -6,6 +6,7 @@ import {
   type ModelExtractionFields,
 } from "@/lib/receipts/extraction";
 import { createAuditEntry } from "@/lib/receipts/audit";
+import { ExportFinalizedError } from "@/lib/receipts/month-lock";
 import { nowIso, stringifyJson } from "@/lib/receipts/db-utils";
 import { getReceiptsDb, getReceiptsProcessorKey } from "@/lib/cloudflare-runtime";
 import type { ExtractionResult } from "@/lib/receipts/types";
@@ -197,7 +198,37 @@ export async function POST(request: Request, { params }: RouteContext) {
       updates.invoiceRegistrationNumber = result.invoiceRegistrationNumber;
     }
 
-    await updateReceiptRecord(id, updates, actor);
+    // A CASH/DIGITAL receipt whose EXTRACTED date lands in an export-finalized
+    // month trips the month lock inside updateReceiptRecord. Do not drop the
+    // OCR result: the consumer treats any 4xx as permanent and ACKs the queue
+    // message, so a 409 here would strand the receipt in a pending state with
+    // no job left to re-apply the result (Codex review P1, 2026-07-08).
+    // Instead, persist everything EXCEPT the lock-triggering transaction_date
+    // (the full result, date included, is kept in extraction_json for the
+    // operator to apply via re-parse once a revision is open) and ack with 200.
+    let dateDeferredMonth: string | null = null;
+    try {
+      await updateReceiptRecord(id, updates, actor);
+    } catch (error) {
+      if (!(error instanceof ExportFinalizedError) || !("transactionDate" in updates)) {
+        throw error;
+      }
+      dateDeferredMonth = error.month;
+      const { transactionDate: _deferred, ...withoutDate } = updates;
+      await updateReceiptRecord(id, withoutDate, actor);
+      await createAuditEntry(db, {
+        actor,
+        action: "receipt.extraction_date_deferred",
+        objectType: "receipt",
+        objectId: id,
+        newValueJson: stringifyJson({
+          provider,
+          deferredTransactionDate: result.transactionDate,
+          lockedMonth: error.month,
+          reason: "extracted date lands in an export-finalized month",
+        }),
+      });
+    }
 
     await createAuditEntry(db, {
       actor,
@@ -208,12 +239,27 @@ export async function POST(request: Request, { params }: RouteContext) {
     });
 
     return NextResponse.json(
-      { ok: true, extracted: result, discrepancies, extractedAt: nowIso() },
+      {
+        ok: true,
+        extracted: result,
+        discrepancies,
+        extractedAt: nowIso(),
+        ...(dateDeferredMonth
+          ? {
+              dateDeferred: true,
+              lockedMonth: dateDeferredMonth,
+              note: `Extracted transaction date withheld: month ${dateDeferredMonth} is export-finalized. Open a revision, then re-parse to apply it.`,
+            }
+          : {}),
+      },
       { status: 200 },
     );
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("Unauthorized")) {
       return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
+    }
+    if (error instanceof ExportFinalizedError) {
+      return NextResponse.json({ error: error.message }, { status: 409 });
     }
     if (error instanceof Error && error.message.includes("finalized reconciliation")) {
       return NextResponse.json({ error: error.message }, { status: 409 });

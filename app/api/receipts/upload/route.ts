@@ -4,6 +4,7 @@ import { validateReceiptFile } from "@/lib/receipts/validation";
 import { generateR2Key, uploadOriginal } from "@/lib/receipts/storage";
 import { createReceiptRecord, hardDeleteReceipt, updateReceiptRecord } from "@/lib/receipts/db";
 import { createReceiptFile } from "@/lib/receipts/files";
+import { ExportFinalizedError } from "@/lib/receipts/month-lock";
 import { buildExtractionJob, enqueueExtractionJob } from "@/lib/receipts/queue";
 import { getReceiptsBucket, getReceiptsDb } from "@/lib/cloudflare-runtime";
 import type { PaymentPath, SourceType } from "@/lib/receipts/types";
@@ -200,6 +201,9 @@ export async function POST(request: Request) {
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("Unauthorized")) {
       return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
+    }
+    if (error instanceof ExportFinalizedError) {
+      return NextResponse.json({ error: error.message }, { status: 409 });
     }
     console.error("[api/receipts/upload] failed", error);
     return NextResponse.json(

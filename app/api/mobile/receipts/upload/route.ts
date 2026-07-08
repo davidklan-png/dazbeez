@@ -9,6 +9,7 @@ import {
   findMobileReceiptByIdempotency,
 } from "@/lib/receipts/mobile-upload";
 import { hardDeleteReceipt, updateReceiptRecord } from "@/lib/receipts/db";
+import { ExportFinalizedError } from "@/lib/receipts/month-lock";
 import { buildExtractionJob, enqueueExtractionJob } from "@/lib/receipts/queue";
 import type { PaymentPath } from "@/lib/receipts/types";
 
@@ -214,6 +215,9 @@ export async function POST(request: Request) {
     }
     if (error instanceof Error && error.message.startsWith("Forbidden")) {
       return NextResponse.json({ error: error.message }, { status: 403 });
+    }
+    if (error instanceof ExportFinalizedError) {
+      return NextResponse.json({ error: error.message }, { status: 409 });
     }
     console.error("[api/mobile/receipts/upload] failed", error);
     return NextResponse.json(

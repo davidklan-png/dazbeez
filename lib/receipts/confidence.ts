@@ -45,8 +45,17 @@ export function bandForLine(
 export function matchExplanation(
   line: AmexStatementLine,
   receipt: ReceiptRecord | null,
+  /** All confirmed lines sharing this receipt (consolidated 領収書 group). */
+  confirmedSiblings: AmexStatementLine[] = [],
 ): string {
   if (!receipt) return "Pick a receipt or mark as no-receipt-expected.";
+  if (confirmedSiblings.length >= 2 && receipt.amount_minor != null) {
+    const sum = confirmedSiblings.reduce((total, l) => total + l.amount_minor, 0);
+    if (sum === receipt.amount_minor) {
+      return `Consolidated receipt — ${confirmedSiblings.length} lines sum to the receipt total.`;
+    }
+    return `Consolidated receipt — ${confirmedSiblings.length} lines sum to ${sum}, receipt total is ${receipt.amount_minor}. Link the remaining charges before sign-off.`;
+  }
   if (line.amount_minor !== (receipt.amount_minor ?? 0))
     return "Amount differs — verify before confirming.";
   if (

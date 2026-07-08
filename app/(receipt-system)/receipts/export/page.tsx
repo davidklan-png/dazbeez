@@ -2,7 +2,6 @@ import {
   listAmexLines,
   listExports,
   listReceiptRecords,
-  listAttendees,
   getExport,
   listAmexLineCountsByMonth,
   listReconciliationStatusByMonth,
@@ -17,7 +16,6 @@ import {
   type CategoryBreakdownRow,
   type ManifestSampleRow,
 } from "@/components/receipts/export/export-screen";
-import type { AmexStatementLine, ReceiptRecord } from "@/lib/receipts/types";
 import { MonthSwitcher, type MonthOption } from "@/components/receipts/month-switcher";
 import { formatMonth } from "@/lib/receipts/format";
 import {
@@ -28,6 +26,8 @@ import {
   ACCOUNTANT_DISCLAIMER_EN,
   ACCOUNTANT_DISCLAIMER_JA,
 } from "@/lib/receipts/settings";
+import { buildExportBundle } from "@/lib/receipts/month-closing";
+import { buildMonthlyExportCsv } from "@/lib/receipts/export";
 
 export const dynamic = "force-dynamic";
 
@@ -65,22 +65,37 @@ export default async function ExportPage({
       : new Date().toISOString().slice(0, 7));
   const monthLabel = formatMonth(month);
 
-  const [exports, monthReceipts, monthLines, currentExport] = await Promise.all([
-    listExports(),
-    listReceiptRecords({ month, limit: 1000 }),
-    listAmexLines(month),
-    getExport(month),
-  ]);
+  // Build the SAME bundle the route finalizes with (single shared
+  // row-assembly authority in lib/receipts/month-closing.ts buildExportBundle).
+  // The preview the operator sees is now bit-identical to what ships —
+  // eliminates the audit-9 drift where the dashboard's row count, total,
+  // and size estimate could differ from the finalized bundle.
+  //
+  // We still fetch the unfiltered month receipts + lines separately for the
+  // blockers panel (computeExportBlockers runs over the raw receipt set,
+  // including UNKNOWN payment_path that the bundle intentionally excludes).
+  const [bundle, exports, monthReceipts, monthLines, currentExport] =
+    await Promise.all([
+      buildExportBundle(month),
+      listExports(),
+      listReceiptRecords({ month, limit: 1000 }),
+      listAmexLines(month),
+      getExport(month),
+    ]);
 
   const blockers = computeExportBlockers(monthReceipts, monthLines);
   const warnings = computeExportWarnings(monthLines);
 
-  const draftStats = computeDraftStats(monthReceipts, monthLines);
-  const breakdown = computeBreakdown(monthReceipts, monthLines);
-  const manifestSample = await buildManifestSample(monthReceipts.slice(0, 6));
+  const draftStats = computeDraftStats(bundle.rows);
+  const breakdown = computeBreakdown(bundle.rows);
+  const manifestSample = buildManifestSample(bundle.rows.slice(0, 6));
+  // Honest CSV size: build the pure CSV (same call the route makes before
+  // applying BOM/CRLF) and measure its UTF-8 byte length. BOM+CRLF add a
+  // small constant overhead we ignore — the operator only needs a ballpark.
+  const pureCsv = buildMonthlyExportCsv(bundle.rows, bundle.attendeeMap);
   const manifestSize = {
     rowsTotal: draftStats.rows,
-    sizeBytes: Math.max(800, draftStats.rows * 135),
+    sizeBytes: new TextEncoder().encode(pureCsv).byteLength,
     sha256: currentExport?.archive_sha256 ?? null,
   };
 
@@ -114,38 +129,45 @@ export default async function ExportPage({
   );
 }
 
-function computeDraftStats(
-  receipts: ReceiptRecord[],
-  lines: AmexStatementLine[],
-) {
-  const rows = receipts.length + lines.length;
-  const totalMinor =
-    receipts.reduce((s, r) => s + (r.amount_minor ?? 0), 0) +
-    lines.reduce((s, l) => s + l.amount_minor, 0);
-  const taxMinor = receipts.reduce(
-    (s, r) => s + (r.tax_amount_minor ?? 0),
-    0,
-  );
-  const receiptsAttached = lines.filter(
-    (l) => l.matched_receipt_id || l.match_status === "no_receipt",
+/**
+ * Compute KPI stats over the bundle rows — the same rows that ship in the
+ * CSV. Audit A6: previously summed `receipts + lines`, double-counting
+ * matched receipts (their amount appeared in both the line and the
+ * receipt). Bundle assembly already excludes matched receipts from the
+ * non-Amex receipt section, so summing bundle.rows is correct by
+ * construction.
+ */
+function computeDraftStats(rows: ExportRowLike[]): {
+  rows: number;
+  totalMinor: number;
+  taxMinor: number;
+  receiptsAttached: number;
+  receiptsTotal: number;
+  eventCount: number;
+} {
+  const totalMinor = rows.reduce((s, r) => s + (r.amountMinor ?? 0), 0);
+  // Tax only applies to AMEX-line rows where the matched receipt carried
+  // tax data. Bundle rows for CASH/DIGITAL don't include tax here because
+  // this sum is a display estimate, not an accounting total.
+  const taxMinor = rows.reduce((s, r) => s + (r.taxAmountMinor ?? 0), 0);
+  const receiptsAttached = rows.filter(
+    (r) => r.rowType === "amex_line" && (r.receiptId || r.matchStatus === "no_receipt"),
   ).length;
+  const eventCount = rows.filter((r) => {
+    const code = r.expenseCategoryCode ?? "";
+    return code === "entertainment" || code === "meeting";
+  }).length;
   return {
-    rows,
+    rows: rows.length,
     totalMinor,
     taxMinor,
-    receiptsAttached: receipts.length + receiptsAttached,
-    receiptsTotal: rows,
-    attendeesLogged: 0, // populated below per-month if cheap
-    eventCount: receipts.filter((r) =>
-      ["entertainment", "meeting"].includes(r.expense_category_code ?? ""),
-    ).length,
+    receiptsAttached,
+    receiptsTotal: rows.length,
+    eventCount,
   };
 }
 
-function computeBreakdown(
-  receipts: ReceiptRecord[],
-  lines: AmexStatementLine[],
-): CategoryBreakdownRow[] {
+function computeBreakdown(rows: ExportRowLike[]): CategoryBreakdownRow[] {
   const totals = new Map<string, { count: number; total: number }>();
 
   const bump = (code: string | null, amount: number) => {
@@ -156,8 +178,7 @@ function computeBreakdown(
     totals.set(key, existing);
   };
 
-  for (const r of receipts) bump(r.expense_category_code, r.amount_minor ?? 0);
-  for (const l of lines) bump(l.expense_category_code, l.amount_minor);
+  for (const r of rows) bump(r.expenseCategoryCode ?? null, r.amountMinor ?? 0);
 
   const grand = Array.from(totals.values()).reduce(
     (s, v) => s + v.total,
@@ -179,28 +200,44 @@ function computeBreakdown(
     .slice(0, 7);
 }
 
-async function buildManifestSample(
-  receipts: ReceiptRecord[],
-): Promise<ManifestSampleRow[]> {
-  // Compute manifest rows for the first 6 receipts. Attendees aren't needed
-  // for the preview but keep one query path warm for parity with export.ts.
-  return Promise.all(
-    receipts.map(async (r) => {
-      await listAttendees(r.id);
-      const cat = r.expense_category_code
-        ? getCategoryByCode(r.expense_category_code)
-        : null;
-      return {
-        receiptId: `R-${r.id.slice(0, 8)}`,
-        merchant: r.merchant ?? "(unnamed)",
-        txnDate: r.transaction_date ?? r.captured_at.slice(0, 10),
-        amountMinor: r.amount_minor ?? 0,
-        categoryLabel: cat?.jaName ?? r.expense_category_code ?? "—",
-        payment: r.payment_path,
-        cardLast4: r.payment_path === "AMEX" ? "3091" : "",
-        alcohol: Boolean(r.alcohol_present),
-        archivePath: `r2://.../${r.id.slice(0, 8)}.jpg`,
-      };
-    }),
-  );
+/**
+ * Build the manifest preview rows from bundle rows. Audit A6: the previous
+ * implementation fired a `listAttendees` call per receipt just to "keep the
+ * query path warm" (its own comment) — pure N+1 waste. Attendees are now
+ * batched once in buildExportBundle (listAttendeeNamesByReceiptIds).
+ */
+function buildManifestSample(rows: ExportRowLike[]): ManifestSampleRow[] {
+  return rows.map((r) => {
+    const cat = r.expenseCategoryCode
+      ? getCategoryByCode(r.expenseCategoryCode)
+      : null;
+    return {
+      receiptId: r.receiptId ? `R-${r.receiptId.slice(0, 8)}` : "—",
+      merchant: r.merchant ?? "(unnamed)",
+      txnDate: r.transactionDate ?? "—",
+      amountMinor: r.amountMinor ?? 0,
+      categoryLabel: cat?.jaName ?? r.expenseCategoryCode ?? "—",
+      payment: r.paymentPath ?? "—",
+      alcohol: false,
+      archivePath: r.originalR2Key
+        ? `r2://.../${r.originalR2Key.slice(-12)}`
+        : "—",
+    };
+  });
 }
+
+// Minimal structural shape of ExportRow that the helpers above read. We
+// import the full type via the bundle; this alias keeps the helper
+// signatures self-documenting without re-listing every field.
+type ExportRowLike = {
+  rowType: "amex_line" | "receipt";
+  receiptId: string | null;
+  transactionDate: string | null;
+  merchant: string | null;
+  amountMinor: number | null;
+  expenseCategoryCode: string | null;
+  paymentPath: string | null;
+  matchStatus: string | null;
+  taxAmountMinor: number | null;
+  originalR2Key: string | null;
+};

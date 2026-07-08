@@ -10,7 +10,7 @@ import {
   ACCOUNTANT_DISCLAIMER_EN,
   ACCOUNTANT_DISCLAIMER_JA,
 } from "@/lib/receipts/settings";
-import { listReceiptRecords, listAmexLines } from "@/lib/receipts/db";
+import { listAllReceiptsInMonth, listAmexLines } from "@/lib/receipts/db";
 
 type RouteContext = { params: Promise<{ month: string }> };
 
@@ -33,7 +33,10 @@ export async function GET(request: Request, { params }: RouteContext) {
     // current state. This is idempotent. Audit B2: a per-receipt check
     // failure no longer silently skips the receipt — its id is captured and
     // surfaced in the response so the operator knows the report is partial.
-    const receipts = await listReceiptRecords({ month, limit: 1000 });
+    // Audit A6: listAllReceiptsInMonth pages internally and refuses to
+    // silently truncate — a partial compliance report would mask exactly
+    // the receipts most likely to need attention.
+    const receipts = await listAllReceiptsInMonth(month);
     const checkFailedReceiptIds: string[] = [];
     for (const r of receipts) {
       try {

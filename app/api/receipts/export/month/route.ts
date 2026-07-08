@@ -1,30 +1,34 @@
 import { NextResponse } from "next/server";
 import { requireReceiptsActor } from "@/lib/receipts/auth";
 import {
-  listReceiptRecords,
-  listReceiptRecordsByIds,
-  listAttendees,
   createExport,
   finalizeExport,
+  getExport,
   getFinalizedReconciliationForMonth,
-  listAmexLines,
+  replaceExportItems,
 } from "@/lib/receipts/db";
 import {
+  bomPrefixedCrlf,
   buildMonthlyExportCsv,
+  buildExportSummaryCsv,
   hashCsvContent,
   buildArchiveKey,
   buildManifestKey,
+  buildSummaryKey,
   buildManifestCsv,
   buildReadmeKey,
   buildExportReadme,
 } from "@/lib/receipts/export";
 import { archiveBundle, archiveManifest } from "@/lib/receipts/storage";
-import { getCategoryByCode, requiresAttendees } from "@/lib/receipts/categories";
-import { resolveLineCategory } from "@/lib/receipts/line-classification";
+import {
+  buildExportBundle,
+  validateMonthReadyForExport,
+  computeEarlierOpenMonthWarnings,
+} from "@/lib/receipts/month-closing";
 import { getReceiptsDb, getReceiptsArchiveBucket } from "@/lib/cloudflare-runtime";
 import { getAmexArtifactByMonth } from "@/lib/receipts/db";
 import { retentionMetadata } from "@/lib/receipts/retention";
-import type { ExportRow, ReceiptFile } from "@/lib/receipts/types";
+import type { AmexReconciliation, ReceiptFile } from "@/lib/receipts/types";
 
 export async function POST(request: Request) {
   try {
@@ -40,104 +44,36 @@ export async function POST(request: Request) {
       );
     }
 
-    // Load receipts for the month
-    const receipts = await listReceiptRecords({ month, limit: 1000 });
+    // Build the bundle ONCE — single shared row-assembly authority
+    // (lib/receipts/month-closing.ts buildExportBundle). The route and the
+    // validator both consume the same rows so a draft the operator previews
+    // is bit-identical to the bundle that ships on finalize. Audit A4.
+    const bundle = await buildExportBundle(month);
 
-    if (receipts.length === 0) {
+    if (bundle.rows.length === 0) {
       return NextResponse.json(
-        { error: `No receipts found for ${month}.` },
+        { error: `No exportable activity found for ${month}.` },
         { status: 400 },
       );
     }
 
-    // Load attendees for all receipts
-    const attendeeMap = new Map<string, string[]>();
-    for (const r of receipts) {
-      const attendees = await listAttendees(r.id);
-      if (attendees.length > 0) {
-        attendeeMap.set(r.id, attendees.map((a) => a.attendee_name));
-      }
-    }
-
-    // Build export rows
-    const exportRows: ExportRow[] = receipts.map((r) => {
-      const cat = getCategoryByCode(r.expense_category_code ?? "");
-      return {
-        receiptId: r.id,
-        transactionDate: r.transaction_date,
-        merchant: r.merchant,
-        amountMinor: r.amount_minor,
-        currency: r.currency,
-        expenseType: r.expense_type,
-        expenseCategoryCode: r.expense_category_code ?? null,
-        expenseCategoryJa: cat?.jaName ?? null,
-        expenseCategoryEn: cat?.enName ?? null,
-        paymentPath: r.payment_path,
-        businessPurpose: r.business_purpose,
-        attendees: attendeeMap.get(r.id) ?? [],
-        status: r.status,
-        originalR2Key: r.original_r2_key,
-      };
-    });
-
-    // Export blocking validation — check AMEX lines and reconciliation before finalizing
+    // Export blocking validation — single authority is validateMonthReadyForExport
+    // (lib/receipts/month-closing.ts). Do NOT inline a second finalize gate here;
+    // any divergence between this route and /api/receipts/export/[month] reopens
+    // the audit-9 drift where one path could finalize a month the other blocks.
+    //
+    // Fetch the reconciliation ONCE so we can both pass it into the validator
+    // (avoiding its internal round-trip) and use the same row for the manifest
+    // pointer below. Pre-1102-storm profiling showed finalize did two identical
+    // SELECTs against amex_reconciliations; this collapses them to one.
+    let reconciliation: AmexReconciliation | null = null;
     if (body.finalize) {
-      const reconciliation = await getFinalizedReconciliationForMonth(month);
-      if (!reconciliation) {
-        return NextResponse.json(
-          { error: `Cannot finalize export: no finalized reconciliation for ${month}. Sign off the reconciliation first.`, blockers: [`No finalized reconciliation for ${month}`] },
-          { status: 422 },
-        );
-      }
-
-      const amexLines = await listAmexLines(month);
-      const matchedReceipts = await listReceiptRecordsByIds(
-        amexLines
-          .map((line) => line.matched_receipt_id)
-          .filter((id): id is string => Boolean(id)),
+      reconciliation = await getFinalizedReconciliationForMonth(month);
+      const blockers = await validateMonthReadyForExport(
+        month,
+        bundle,
+        reconciliation,
       );
-      const receiptMap = new Map(matchedReceipts.map((r) => [r.id, r] as const));
-      const matchedAttendeeMap = new Map(attendeeMap);
-      for (const receipt of matchedReceipts) {
-        if (matchedAttendeeMap.has(receipt.id)) continue;
-        const attendees = await listAttendees(receipt.id);
-        if (attendees.length > 0) {
-          matchedAttendeeMap.set(receipt.id, attendees.map((a) => a.attendee_name));
-        }
-      }
-      const blockers: string[] = [];
-
-      for (const line of amexLines) {
-        // Classification source: when a matched receipt exists, read its
-        // category (the receipt is the system of record). Fall back to the
-        // line value for no-receipt lines and dangling matches.
-        const receipt = line.matched_receipt_id
-          ? receiptMap.get(line.matched_receipt_id)
-          : undefined;
-        const resolvedCategory = resolveLineCategory(line, receipt);
-
-        if (!resolvedCategory) {
-          blockers.push(`Line ${line.id}: missing expense category`);
-        }
-        if (line.receipt_status === "missing_receipt" && !line.receipt_missing_reason) {
-          blockers.push(`Line ${line.id}: missing receipt without reason`);
-        }
-        if (requiresAttendees(resolvedCategory)) {
-          const linkedReceipt = line.matched_receipt_id
-            ? matchedAttendeeMap.get(line.matched_receipt_id)
-            : null;
-          if (!linkedReceipt || linkedReceipt.length === 0) {
-            blockers.push(`Line ${line.id}: ${getCategoryByCode(resolvedCategory ?? "")?.jaName ?? resolvedCategory} requires attendees`);
-          }
-        }
-        if (line.business_trip_status === "candidate") {
-          blockers.push(`Line ${line.id}: unresolved business trip candidate`);
-        }
-        if (line.re_review_needed) {
-          blockers.push(`Line ${line.id}: statement line changed after confirmation`);
-        }
-      }
-
       if (blockers.length > 0) {
         return NextResponse.json(
           { error: "Export blocked — resolve these issues first.", blockers },
@@ -146,29 +82,49 @@ export async function POST(request: Request) {
       }
     }
 
-    // Generate CSV and hash
-    const csv = buildMonthlyExportCsv(exportRows, attendeeMap);
-    const sha256 = await hashCsvContent(csv);
+    // Generate CSV. The pure form is what tests assert against; the route
+    // applies UTF-8 BOM + CRLF (audit A5) before hashing and upload so the
+    // SHA-256 in the manifest matches the bytes in R2 exactly. The
+    // accountant opens this CSV in Excel on Windows — without BOM/CRLF the
+    // Japanese merchant names render as mojibake.
+    const csvPure = buildMonthlyExportCsv(bundle.rows, bundle.attendeeMap);
+    const csvShipped = bomPrefixedCrlf(csvPure);
+    const sha256 = await hashCsvContent(csvShipped);
 
-    // Create or retrieve export record
+    // Create or retrieve export record, then reload to pick up revision
+    // metadata (export_revision / supersedes_export_id / correction_reason).
+    // createExport() returns just the id; the row's revision fields are needed
+    // to label the manifest and README correctly when reusing a draft created
+    // by createExportRevision() — otherwise revision N ships with a README
+    // claiming "Revision: 1 (initial)".
     const exportId = await createExport(month, actor);
+    const exportRecord = await getExport(month);
+    const exportRevision = exportRecord?.export_revision ?? 1;
+    const supersedesExportId = exportRecord?.supersedes_export_id ?? null;
+    const correctionReason = exportRecord?.correction_reason ?? null;
+
+    // Record exactly which receipts and AMEX lines ship in this bundle. The
+    // one-draft-per-month invariant means an existing draft's items get
+    // replaced on rebuild — the (export_id, item_type, item_id) UNIQUE on
+    // receipt_export_items makes this idempotent.
+    await replaceExportItems(exportId, bundle.items);
+
     const archiveKey = buildArchiveKey(month, exportId);
     const manifestKey = buildManifestKey(month, exportId);
+    const summaryKey = buildSummaryKey(month, exportId);
 
     // Upload CSV to archive bucket
     const encoder = new TextEncoder();
-    await archiveBundle(archiveKey, encoder.encode(csv).buffer as ArrayBuffer);
-
-    // When finalizing, include reconciliation manifest reference in the export manifest
-    const reconciliation = body.finalize
-      ? await getFinalizedReconciliationForMonth(month)
-      : null;
+    await archiveBundle(
+      archiveKey,
+      encoder.encode(csvShipped).buffer as ArrayBuffer,
+    );
 
     // Gather all file-manifest entries for receipts included in this export
     // plus the AMEX statement artifact. This builds the per-file SHA-256
     // section of the manifest so an accountant can verify every artifact.
     const db = getReceiptsDb();
-    const includedReceiptIds = receipts.map((r) => r.id);
+    const includedReceiptIds = bundle.receipts.map((r) => r.id);
     const fileRows: ReceiptFile[] = [];
     if (includedReceiptIds.length > 0) {
       const CHUNK_SIZE = 90;
@@ -194,7 +150,7 @@ export async function POST(request: Request) {
       month,
       archiveKey,
       sha256,
-      exportRows.length,
+      bundle.rows.length,
       generatedAt,
       reconciliation
         ? {
@@ -212,21 +168,42 @@ export async function POST(request: Request) {
               originalFilename: amexArtifact.original_filename ?? "",
             }
           : null,
+        exportRevision,
+        supersedesExportId,
+        correctionReason,
       },
     );
     const manifestBytes = encoder.encode(manifest);
     const manifestSha256 = await hashCsvContent(manifest);
     await archiveManifest(manifestKey, manifestBytes.buffer as ArrayBuffer);
 
+    // Summary CSV (audit A5): per-category and per-PaymentPath totals for
+    // a quick reconciliation check. Same BOM/CRLF treatment as the main
+    // archive so the accountant can open it in Excel without mojibake.
+    const summaryPure = buildExportSummaryCsv(bundle.rows, month, generatedAt);
+    const summaryShipped = bomPrefixedCrlf(summaryPure);
+    const summarySha256 = await hashCsvContent(summaryShipped);
+    await getReceiptsArchiveBucket().put(
+      summaryKey,
+      encoder.encode(summaryShipped).buffer as ArrayBuffer,
+      {
+        httpMetadata: { contentType: "text/csv; charset=utf-8" },
+        customMetadata: retentionMetadata(),
+      },
+    );
+
     // README accompanies every bundle. Disclaimer text + revision context.
     const readme = buildExportReadme({
       exportId,
       month,
-      rowCount: exportRows.length,
+      rowCount: bundle.rows.length,
       generatedAt,
-      exportRevision: 1,
+      exportRevision,
+      supersedesExportId,
+      correctionReason,
       archiveSha256: sha256,
       manifestSha256,
+      summarySha256,
     });
     const readmeKey = buildReadmeKey(month, exportId);
     await getReceiptsArchiveBucket().put(
@@ -239,6 +216,7 @@ export async function POST(request: Request) {
     );
 
     // Auto-finalize if requested
+    let finalizeWarnings: string[] = [];
     if (body.finalize) {
       await finalizeExport(
         exportId,
@@ -248,19 +226,26 @@ export async function POST(request: Request) {
         actor,
         manifestSha256,
       );
+      // A7: non-blocking warning when an earlier statement month is still
+      // open. Surfaced in the finalize response so the operator's toast on
+      // "Finalize succeeded" can also say "but March is still open."
+      finalizeWarnings = await computeEarlierOpenMonthWarnings(month);
     }
 
     return NextResponse.json(
       {
         exportId,
         month,
-        rowCount: exportRows.length,
+        rowCount: bundle.rows.length,
         sha256,
         manifestSha256,
+        summarySha256,
         archiveKey,
         manifestKey,
+        summaryKey,
         readmeKey,
         finalized: body.finalize ?? false,
+        warnings: finalizeWarnings,
       },
       { status: 200 },
     );

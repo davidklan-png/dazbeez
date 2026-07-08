@@ -45,6 +45,9 @@ Seed this exact list:
 | `payment_fees` | 支払手数料 | Payment and service fees | false | false |
 | `rent_lease` | 賃借料 | Rent and lease expenses | false | false |
 | `insurance` | 保険料 | Insurance premiums | false | false |
+| `miscellaneous` | 雑費 | Miscellaneous expenses | false | false |
+
+Note (2026-07): `miscellaneous` (雑費) added as the 15th canonical category (migration 0018). The code is deliberately not `misc` — legacy `misc` values continue to map to null (require review).
 
 ---
 

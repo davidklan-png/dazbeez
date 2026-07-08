@@ -5,11 +5,18 @@ import type {
 } from "@/lib/receipts/types";
 
 export function normalizeDescription(value: string): string {
-  return value
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}\s]/gu, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+  return (
+    value
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}\s]/gu, " ")
+      // Split at Latin/digit ↔ CJK script boundaries: statements print
+      // "HUB 東京オペラシティ店" while receipts OCR as "HUB東京オペラシティ店" —
+      // without segmentation the two tokenize differently and never match.
+      .replace(/([a-z0-9])([぀-ヿ一-龯])/g, "$1 $2")
+      .replace(/([぀-ヿ一-龯])([a-z0-9])/g, "$1 $2")
+      .replace(/\s+/g, " ")
+      .trim()
+  );
 }
 
 /**
@@ -28,6 +35,45 @@ function daysBetween(dateA: string, dateB: string): number {
   const a = new Date(dateA).getTime();
   const b = new Date(dateB).getTime();
   return Math.abs((a - b) / (1000 * 60 * 60 * 24));
+}
+
+// Known descriptor ↔ legal-name pairs. JP card statements often print a
+// booking-service brand while the receipt carries the operator's registered
+// company name, so token matching can never connect them. Each group lists
+// patterns that all refer to the same merchant; a line and a receipt matching
+// any two patterns in one group count as a merchant match. Extend this table
+// as new descriptor mismatches surface in review.
+const MERCHANT_ALIAS_GROUPS: RegExp[][] = [
+  // えきねっと (JR East's booking site) charges appear as the brand; the
+  // 領収書 is issued by 東日本旅客鉄道株式会社.
+  [/えきねっと|エキネット|EKI-?NET/i, /東日本旅客鉄道|JR\s*東日本|JR\s*EAST/i],
+];
+
+// Consolidated-group suggestions never reach the "obvious" (auto-confirm)
+// band — 0.92 in lib/receipts/confidence.ts. A wrong grouping is the
+// costliest reconciliation mistake, so a human confirms each group line.
+const CONSOLIDATED_CONFIDENCE_CAP = 0.9;
+
+function merchantAliasMatch(a: string, b: string): boolean {
+  return MERCHANT_ALIAS_GROUPS.some(
+    (group) => group.some((re) => re.test(a)) && group.some((re) => re.test(b)),
+  );
+}
+
+// Last-resort merchant bridge: the statement brand printed ON the receipt.
+// Franchised operators issue receipts under their legal name (ENEOS station →
+// 株式会社豊島屋) but the brand mark is in the OCR text. A statement-merchant
+// token of ≥4 chars found in the receipt's normalized raw text counts as a
+// merchant signal. Length ≥4 keeps short/generic tokens from false-matching.
+function rawTextMentionsMerchant(
+  rawTextNorm: string | null,
+  lineMerchant: string,
+): boolean {
+  if (!rawTextNorm) return false;
+  const tokens = normalizeDescription(lineMerchant)
+    .split(" ")
+    .filter((t) => t.length >= 4);
+  return tokens.some((t) => rawTextNorm.includes(t));
 }
 
 function descriptionContains(amexDesc: string, receiptMerchant: string): boolean {
@@ -82,6 +128,26 @@ export function matchAmexToReceipts(
       r.status !== "exported" &&
       r.status !== "reconciled",
   );
+
+  // Normalized raw OCR text per receipt, parsed lazily at most once — used by
+  // the brand-on-receipt merchant fallback in the 1:1 bonus and phase-3 gate.
+  const rawTextNormCache = new Map<string, string | null>();
+  const rawTextOf = (receipt: ReceiptRecord): string | null => {
+    let cached = rawTextNormCache.get(receipt.id);
+    if (cached === undefined) {
+      cached = null;
+      if (receipt.extraction_json) {
+        try {
+          const parsed = JSON.parse(receipt.extraction_json) as { rawText?: string };
+          cached = normalizeDescription(parsed.rawText ?? "") || null;
+        } catch {
+          /* malformed extraction JSON — no raw text available */
+        }
+      }
+      rawTextNormCache.set(receipt.id, cached);
+    }
+    return cached;
+  };
 
   // Phase 1: compute best candidate per AMEX line
   const candidates: Array<{ match: ReconciliationMatch; dateDelta: number }> = [];
@@ -149,6 +215,12 @@ export function matchAmexToReceipts(
         if (descriptionContains(line.merchant, receipt.merchant)) {
           score += 0.15;
           reasons.push("merchant match");
+        } else if (merchantAliasMatch(line.merchant, receipt.merchant)) {
+          score += 0.15;
+          reasons.push("known merchant alias");
+        } else if (rawTextMentionsMerchant(rawTextOf(receipt), line.merchant)) {
+          score += 0.15;
+          reasons.push("brand found on receipt text");
         }
       }
 
@@ -192,6 +264,99 @@ export function matchAmexToReceipts(
     assignedReceipts.add(match.receiptId);
     assignedLines.add(match.amexLineId);
     resolved.push(match);
+  }
+
+  // Phase 3: consolidated receipts (領収書 covering several card charges).
+  // Runs only over lines left unmatched by the 1:1 phases. Policy
+  // (deliberately narrow): the same-merchant unmatched lines within the date
+  // window must sum EXACTLY to the receipt's REMAINING amount (total minus
+  // any lines already confirmed against it), with at least two lines in the
+  // full group. No subset search — an exact sum is explainable in an audit;
+  // combinatorial subset picks are not. Confidence is capped below the
+  // auto-confirm band so a human confirms every consolidated group.
+  //
+  // Already-confirmed siblings matter here (Codex review P2, 2026-07-08):
+  // confirming the first line of a group promotes the receipt to
+  // 'reconciled', which the 1:1 eligibility filter excludes — so the
+  // remaining lines must be grouped against a wider receipt set, with the
+  // confirmed lines' sum subtracted from the target.
+  const confirmedSumByReceipt = new Map<string, { sum: number; count: number }>();
+  for (const line of amexLines) {
+    if (line.match_status !== "confirmed" || !line.matched_receipt_id) continue;
+    const entry = confirmedSumByReceipt.get(line.matched_receipt_id) ?? { sum: 0, count: 0 };
+    entry.sum += line.amount_minor;
+    entry.count += 1;
+    confirmedSumByReceipt.set(line.matched_receipt_id, entry);
+  }
+
+  const consolidationReceipts = receipts.filter((r) => {
+    if (r.deleted_at !== null || r.status === "archived" || r.status === "exported") {
+      return false;
+    }
+    // 'reconciled' receipts are only group-eligible when the claim comes from
+    // this month's own confirmed lines — a receipt fully claimed elsewhere
+    // must not be re-offered.
+    if (r.status === "reconciled" && !confirmedSumByReceipt.has(r.id)) return false;
+    return r.payment_path === "AMEX";
+  });
+
+  for (const receipt of consolidationReceipts) {
+    if (assignedReceipts.has(receipt.id)) continue;
+    if (receipt.amount_minor === null || !receipt.merchant) continue;
+    if (!receipt.transaction_date) continue;
+
+    const confirmed = confirmedSumByReceipt.get(receipt.id) ?? { sum: 0, count: 0 };
+    const remaining = receipt.amount_minor - confirmed.sum;
+    if (remaining <= 0) continue; // fully claimed (or over-claimed — a sign-off blocker)
+
+    const group = amexLines.filter(
+      (line) =>
+        !assignedLines.has(line.id) &&
+        line.match_status !== "confirmed" &&
+        line.match_status !== "no_receipt" &&
+        line.currency.toUpperCase() === receipt.currency.toUpperCase() &&
+        !!line.merchant &&
+        (descriptionContains(line.merchant, receipt.merchant!) ||
+          merchantAliasMatch(line.merchant, receipt.merchant!) ||
+          rawTextMentionsMerchant(rawTextOf(receipt), line.merchant)) &&
+        !!line.transaction_date &&
+        // A consolidated 領収書 is issued at (or after) settlement — it can
+        // never cover a charge dated AFTER the receipt. Without this bound,
+        // unrelated later charges at the same brand fall into the ±7-day
+        // window and poison the exact-sum test (observed in prod: two ENEOS
+        // 05-02 fill-ups joining the 04-29 pair → 26,315 ≠ 22,770 → no
+        // suggestion at all). ISO dates compare correctly as strings.
+        line.transaction_date <= receipt.transaction_date! &&
+        daysBetween(line.transaction_date, receipt.transaction_date!) <= 7,
+    );
+    const totalGroupSize = group.length + confirmed.count;
+    if (group.length < 1 || totalGroupSize < 2) continue;
+
+    const groupSum = group.reduce((sum, line) => sum + line.amount_minor, 0);
+    if (groupSum !== remaining) continue;
+
+    for (const line of group) {
+      const dateDelta = daysBetween(line.transaction_date!, receipt.transaction_date);
+      const score = Math.min(
+        0.5 + Math.max(0, 0.35 - 0.05 * dateDelta) + 0.15,
+        CONSOLIDATED_CONFIDENCE_CAP,
+      );
+      assignedLines.add(line.id);
+      resolved.push({
+        amexLineId: line.id,
+        receiptId: receipt.id,
+        confidenceScore: score,
+        matchReasons: [
+          confirmed.count > 0
+            ? `consolidated receipt: ${group.length} remaining line(s) sum to the unclaimed balance (${confirmed.count} already confirmed)`
+            : `consolidated receipt: ${group.length} lines sum to total`,
+          "merchant match",
+          `${dateDelta}-day window`,
+        ],
+        consolidatedGroupSize: totalGroupSize,
+      });
+    }
+    assignedReceipts.add(receipt.id);
   }
 
   return resolved;
