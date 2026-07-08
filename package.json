@@ -8,7 +8,7 @@
     "build:cf": "opennextjs-cloudflare build",
     "preview": "opennextjs-cloudflare preview",
     "cf:dev": "opennextjs-cloudflare preview",
-    "deploy": "opennextjs-cloudflare deploy -- --keep-vars",
+    "deploy": "npm run build:cf && opennextjs-cloudflare deploy -- --keep-vars",
     "upload": "opennextjs-cloudflare upload -- --keep-vars",
     "cf-typegen": "wrangler types cloudflare-env.d.ts --env-interface CloudflareEnv",
     "start": "next start",
