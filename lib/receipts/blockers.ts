@@ -29,6 +29,15 @@ export type Blocker = {
 export function computeExportBlockers(
   receipts: ReceiptRecord[],
   lines: AmexStatementLine[],
+  // Receipts fetched by matched_receipt_id, unscoped by month (a line may be
+  // matched to a receipt dated in a different statement month). Used ONLY for
+  // category resolution: unioned into the receipt map so a cross-month matched
+  // receipt's category resolves the line — matching the finalize gate, which
+  // builds its receiptMap from bundle.receipts (the same ID-fetched set).
+  // `receipts` (month-scoped) still drives the pending / unreviewed / unknown
+  // counts below. Kept pure: callers do the DB fetch (listReceiptRecordsByIds
+  // or reuse bundle.receipts); this function does no I/O.
+  matchedReceipts: ReceiptRecord[] = [],
 ): Blocker[] {
   const blockers: Blocker[] = [];
 
@@ -37,7 +46,12 @@ export function computeExportBlockers(
   // validateAmexLinesForSignoff / month-closing use). Counting the raw line
   // field over-reported "uncategorized" whenever a matched receipt already
   // carried the category, desynchronizing this tile from the finalize gate.
-  const receiptMap = new Map(receipts.map((r) => [r.id, r]));
+  // The map unions the month-scoped receipts with the ID-fetched matched
+  // receipts so cross-month matches resolve (the fix for the 2026-06 "27
+  // uncategorized" that were all matched to April/May receipts).
+  const receiptMap = new Map<string, ReceiptRecord>();
+  for (const r of receipts) receiptMap.set(r.id, r);
+  for (const r of matchedReceipts) receiptMap.set(r.id, r);
   const uncategorized = lines.filter((l) => {
     const receipt = l.matched_receipt_id
       ? receiptMap.get(l.matched_receipt_id)
@@ -52,6 +66,24 @@ export function computeExportBlockers(
       detail: "Pick an expense category for each line.",
       href: "/receipts/reconcile",
       ctaLabel: "Fix in Reconcile",
+    });
+  }
+
+  // payment_path='UNKNOWN' receipts are excluded from the export bundle by
+  // design (their export month is ambiguous) and block finalize at
+  // validateMonthReadyForExport gate 2. Surface them here so the tile and the
+  // gate agree in this direction too — previously a month could read "clear"
+  // on the tile yet 422 on finalize. `receipts` is month-scoped, matching the
+  // gate's `transaction_date LIKE month%` filter.
+  const unknownPath = receipts.filter((r) => r.payment_path === "UNKNOWN").length;
+  if (unknownPath > 0) {
+    blockers.push({
+      severity: "blocker",
+      count: unknownPath,
+      label: "Receipts with unknown payment path",
+      detail: "Classify as AMEX, CASH, or DIGITAL before sealing.",
+      href: "/receipts/review",
+      ctaLabel: "Fix in Review",
     });
   }
 
