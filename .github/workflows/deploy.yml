@@ -1,0 +1,91 @@
+name: deploy
+
+# CI for the receipts module: verify on every push to master, and (when
+# enabled) apply D1 migrations then deploy the Worker + smoke test.
+#
+# Auto-deploy is GATED behind the repo variable AUTO_DEPLOY (default unset /
+# "false"). Until the operator verifies the CLOUDFLARE_API_TOKEN secret has
+# the required scopes, only `verify` runs on push.
+#
+# To enable:
+#   1. Add repo secret CLOUDFLARE_API_TOKEN (Cloudflare API token with scopes:
+#      Workers Scripts:Edit, D1:Edit, Workers KV/Storage if needed, Account
+#      Settings:Read). The common "Edit Workers" template LACKS D1:Edit.
+#   2. Ensure repo variable CLOUDFLARE_ACCOUNT_ID is set (account id, not
+#      sensitive — also in wrangler.jsonc/whoami).
+#   3. Run the `scope-probe` job via workflow_dispatch. If both steps pass,
+#      set AUTO_DEPLOY=true (gh variable set AUTO_DEPLOY --body true) and the
+#      next push to master exercises the full path.
+#   4. If the probe fails with an auth/permission error, the exact missing
+#      scope is in the run log; re-scope the token and re-run the probe.
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm run lint
+      - run: npm test
+
+  # Manual scope probe (workflow_dispatch): validates the token can do what the
+  # deploy job needs, WITHOUT applying migrations or deploying. Fails fast on
+  # missing/under-scoped tokens.
+  scope-probe:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+      - run: npm ci
+      - name: Probe D1 access (migrations list, read-only)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx wrangler d1 migrations list RECEIPTS_DB --remote
+      - name: Probe Workers deploy (dry-run)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          npm run build:cf
+          npx wrangler deploy --dry-run
+
+  # Auto-deploy (gated): on push to master, only when AUTO_DEPLOY == "true".
+  # Migrations apply to remote D1 BEFORE the code that may read them ships.
+  deploy:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && vars.AUTO_DEPLOY == 'true'
+    needs: verify
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+      - run: npm ci
+      - name: Apply D1 migrations (remote, before deploy)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx wrangler d1 migrations apply RECEIPTS_DB --remote
+      - name: Build + deploy Worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: npm run deploy
+      - name: Smoke test
+        run: bash scripts/check-deployment.sh https://dazbeez.com
