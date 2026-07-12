@@ -12,6 +12,7 @@
 
 import { requiresAttendees } from "@/lib/receipts/categories";
 import { isPendingProcessing } from "@/lib/receipts/extraction-state";
+import { resolveLineCategory } from "@/lib/receipts/line-classification";
 import type { AmexStatementLine, ReceiptRecord } from "@/lib/receipts/types";
 
 export type BlockerSeverity = "blocker" | "warn";
@@ -31,7 +32,18 @@ export function computeExportBlockers(
 ): Blocker[] {
   const blockers: Blocker[] = [];
 
-  const uncategorized = lines.filter((l) => !l.expense_category_code).length;
+  // Category authority is the matched receipt, not the line, for confirmed
+  // matches (resolveLineCategory — the same authority
+  // validateAmexLinesForSignoff / month-closing use). Counting the raw line
+  // field over-reported "uncategorized" whenever a matched receipt already
+  // carried the category, desynchronizing this tile from the finalize gate.
+  const receiptMap = new Map(receipts.map((r) => [r.id, r]));
+  const uncategorized = lines.filter((l) => {
+    const receipt = l.matched_receipt_id
+      ? receiptMap.get(l.matched_receipt_id)
+      : undefined;
+    return !resolveLineCategory(l, receipt);
+  }).length;
   if (uncategorized > 0) {
     blockers.push({
       severity: "blocker",
