@@ -147,3 +147,53 @@ test("blockers: dangling match (receipt id set but receipt absent) falls back to
   const blockers = computeExportBlockers([], [line]);
   assert.equal(uncategorizedCount(blockers), 0);
 });
+
+test("blockers: line matched to a receipt dated a DIFFERENT month resolves via matchedReceipts", () => {
+  // The 2026-06 bug: the matched receipt is dated 2026-04, so it is absent
+  // from the month-scoped `receipts` set the page used to pass alone. With the
+  // matchedReceipts param (the ID-fetched set the finalize gate uses), the
+  // line's category resolves from the receipt and is NOT uncategorized.
+  const line = makeLine({
+    matched_receipt_id: "r-apr",
+    match_status: "confirmed",
+    receipt_status: "matched",
+    expense_category_code: null,
+  });
+  // The matched receipt is NOT in the month-scoped receipts array...
+  const monthReceipts: ReceiptRecord[] = [];
+  // ...but IS supplied via matchedReceipts, carrying a category.
+  const matchedReceipts = [
+    makeReceipt({
+      id: "r-apr",
+      transaction_date: "2026-04-20",
+      expense_category_code: "office_supplies",
+    }),
+  ];
+
+  const blockers = computeExportBlockers(monthReceipts, [line], matchedReceipts);
+  assert.equal(
+    uncategorizedCount(blockers),
+    0,
+    `expected 0 uncategorized with matchedReceipts, got: ${JSON.stringify(blockers)}`,
+  );
+
+  // Contrast: without matchedReceipts the same line IS uncategorized — the
+  // param is what resolves it.
+  const withoutFix = computeExportBlockers(monthReceipts, [line]);
+  assert.equal(uncategorizedCount(withoutFix), 1);
+});
+
+test("blockers: receipt with unknown payment path is reported (finalize gate 2)", () => {
+  // The finalize gate blocks on payment_path='UNKNOWN' (the receipt is
+  // excluded from the bundle because its export month is ambiguous). The tile
+  // must surface the same blocker so a month can't read "clear" yet 422 on
+  // finalize.
+  const receipt = makeReceipt({ id: "r-unk", payment_path: "UNKNOWN" });
+
+  const blockers = computeExportBlockers([receipt], []);
+  const unknown = blockers.find(
+    (b) => b.label === "Receipts with unknown payment path",
+  );
+  assert.ok(unknown, `expected an unknown-payment-path blocker, got: ${JSON.stringify(blockers)}`);
+  assert.equal(unknown!.count, 1);
+});

@@ -83,7 +83,15 @@ export default async function ExportPage({
       getExport(month),
     ]);
 
-  const blockers = computeExportBlockers(monthReceipts, monthLines);
+  // bundle.receipts is the ID-fetched matched-receipt set (unscoped by month)
+  // plus in-month CASH/DIGITAL receipts — the same authority the finalize
+  // gate (validateMonthReadyForExport) builds its receiptMap from. Passing it
+  // lets computeExportBlockers resolve a line matched to a receipt dated in a
+  // different statement month, eliminating the tile-vs-gate drift where the
+  // tile over-reported "uncategorized" lines the gate accepted (2026-06's 27
+  // were all matched to April/May receipts). monthReceipts (month-scoped) still
+  // drives the pending / unreviewed / unknown counts.
+  const blockers = computeExportBlockers(monthReceipts, monthLines, bundle.receipts);
   const warnings = computeExportWarnings(monthLines);
 
   const draftStats = computeDraftStats(bundle.rows);
