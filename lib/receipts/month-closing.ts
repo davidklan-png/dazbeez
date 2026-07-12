@@ -218,75 +218,70 @@ export async function buildExportBundle(month: string): Promise<ExportBundle> {
  *      statement lines in more than one month blocks both months until
  *      resolved — overlapping windows make this possible.
  */
-export async function validateMonthReadyForExport(
-  month: string,
-  prebuiltBundle?: ExportBundle,
-  preloadedReconciliation?: AmexReconciliation | null,
-): Promise<string[]> {
+/** Inputs the export-finalize gate needs, fetched by the async wrapper. */
+export interface ValidateMonthReadyInput {
+  month: string;
+  reconciliation: AmexReconciliation | null;
+  bundle: ExportBundle;
+  /** Gate 2: in-month UNKNOWN payment_path receipts (id + merchant). */
+  unknownReceipts: { id: string; merchant: string | null }[];
+  /** Gate 2.5: in-month needs_review receipts (raw; core applies the
+   * isPendingProcessing exclusion to match the tile). */
+  unreviewedReceipts: ReceiptRecord[];
+  /** Gate 4: attendees keyed by AMEX line id. */
+  amexAttendees: Record<string, string[]>;
+  /** Gate 5: open compliance checks summary. */
+  complianceSummary: { blockers: number; warnings: number };
+  /** Gate 5: compliance settings. */
+  complianceSettings: { export_block_on_warnings: boolean };
+  /** Gate 6: raw (statement_month, matched_receipt_id) rows for cross-month
+   * match integrity; core groups them. */
+  crossMonthMatchedLines: { statement_month: string; matched_receipt_id: string }[];
+}
+
+/**
+ * Pure synchronous core of the export-finalize gate. Given the data the gates
+ * need (fetched by {@link validateMonthReadyForExport}), returns the blocker
+ * strings in the gate's canonical order (1 → 2 → 2.5 → 3 → 4 → 5 → 6).
+ * Extracted verbatim from the former inline body so the gate is unit-testable
+ * without D1 and so the tile (Task 3) can share the exact same rule logic.
+ */
+export function validateMonthReadyForExportCore(
+  input: ValidateMonthReadyInput,
+): string[] {
+  const {
+    month,
+    reconciliation,
+    bundle,
+    unknownReceipts,
+    unreviewedReceipts,
+    amexAttendees,
+    complianceSummary,
+    complianceSettings,
+    crossMonthMatchedLines,
+  } = input;
   const blockers: string[] = [];
 
-  // (1) Statement-sealed gate. Callers that already fetched the
-  // reconciliation (e.g. /api/receipts/export/month to populate the manifest
-  // pointer) may pass it in to avoid a second D1 round-trip.
-  const reconciliation =
-    preloadedReconciliation !== undefined
-      ? preloadedReconciliation
-      : await getFinalizedReconciliationForMonth(month);
+  // (1) Statement-sealed gate.
   if (!reconciliation) {
     blockers.push(
       `No finalized reconciliation for ${month}. Sign off the reconciliation first.`,
     );
   }
 
-  // Build (or accept) the bundle. Build is expensive; callers that already
-  // have one should pass it in.
-  const bundle = prebuiltBundle ?? (await buildExportBundle(month));
-
-  // (2) UNKNOWN payment_path gate. UNKNOWN receipts were excluded from the
-  // bundle by design; their existence anywhere in the month is itself the
-  // blocker. Query directly because the bundle intentionally doesn't carry them.
-  const db = getReceiptsDb();
-  const unknownResult = await db
-    .prepare(
-      `SELECT id, merchant FROM receipt_records
-       WHERE deleted_at IS NULL
-         AND payment_path = 'UNKNOWN'
-         AND transaction_date LIKE ?`,
-    )
-    .bind(`${month}%`)
-    .all<{ id: string; merchant: string | null }>();
-  for (const row of unknownResult.results ?? []) {
+  // (2) UNKNOWN payment_path gate.
+  for (const row of unknownReceipts) {
     const label = row.merchant ?? row.id;
     blockers.push(
       `Receipt ${label}: payment_path is UNKNOWN — classify as AMEX, CASH, or DIGITAL before export`,
     );
   }
 
-  // (2.5) Unreviewed-receipt gate. Mirrors computeExportBlockers' "Unreviewed
-  // receipts" tile (status='needs_review' in-month, excluding pending
-  // processing) so the tile's BLOCKER label is enforced at finalize —
-  // previously the tile reported unreviewed receipts as blockers but the gate
-  // never checked review status, so a month could read "blocked" on the tile
-  // yet finalize successfully (reverse tile-vs-gate drift).
-  //
-  // Direct month-scoped query, NOT bundle.receipts: the tile counts receipts by
-  // transaction_date in the statement month (all payment paths), while
-  // bundle.receipts excludes in-month AMEX (validated via lines) and UNKNOWN
-  // (excluded above) and includes cross-month matched receipts. Iterating the
-  // bundle here would read a different set than the tile and re-open the drift.
-  const unreviewedResult = await db
-    .prepare(
-      `SELECT * FROM receipt_records
-       WHERE deleted_at IS NULL
-         AND status = 'needs_review'
-         AND transaction_date LIKE ?`,
-    )
-    .bind(`${month}%`)
-    .all<ReceiptRecord>();
-  for (const r of unreviewedResult.results ?? []) {
-    // Same exclusion the tile applies: a needs_review receipt still in the
-    // extraction queue is "pending processing", not "unreviewed" — it's
-    // surfaced separately and fixed by draining the queue, not by reviewing.
+  // (2.5) Unreviewed-receipt gate. isPendingProcessing exclusion matches the
+  // tile (a needs_review receipt still in the queue is "pending processing",
+  // not "unreviewed"). Direct month-scoped set, NOT bundle.receipts — see the
+  // tile-vs-gate drift note in the former inline body (PR #73).
+  for (const r of unreviewedReceipts) {
     if (isPendingProcessing(r)) continue;
     const label = r.merchant ?? r.id;
     blockers.push(
@@ -296,8 +291,6 @@ export async function validateMonthReadyForExport(
 
   // (3) Receipt-level checks on CASH/DIGITAL receipts in the bundle.
   for (const receipt of bundle.receipts) {
-    // AMEX-path receipts are validated via the line checks below; skip
-    // them here to avoid double-gating.
     if (receipt.payment_path === "AMEX") continue;
     const label = receipt.merchant ?? receipt.id;
     if (!receipt.transaction_date) blockers.push(`Receipt ${receipt.id}: missing date`);
@@ -313,7 +306,6 @@ export async function validateMonthReadyForExport(
   }
 
   // (4) AMEX-line checks.
-  const amexAttendees = await listAmexLineAttendeeNamesByMonth(month);
   const receiptMap = new Map<string, ReceiptRecord>();
   for (const r of bundle.receipts) receiptMap.set(r.id, r);
   blockers.push(
@@ -325,30 +317,94 @@ export async function validateMonthReadyForExport(
     ),
   );
 
-  // (5) Compliance-engine gate. Summarize over the month filter UNION the
-  // bundle's receipt IDs: matched receipts may be dated outside the
-  // statement month, and exported_month isn't stamped until after finalize,
-  // so the month filter alone misses their open checks (Codex P1).
+  // (5) Compliance-engine gate.
+  if (complianceSummary.blockers > 0) {
+    blockers.push(
+      `${complianceSummary.blockers} open compliance blocker(s) on receipts in ${month}`,
+    );
+  }
+  if (complianceSettings.export_block_on_warnings && complianceSummary.warnings > 0) {
+    blockers.push(
+      `${complianceSummary.warnings} open compliance warning(s) in ${month} (export_block_on_warnings=true)`,
+    );
+  }
+
+  // (6) Cross-month match integrity (audit A7). A receipt matched to lines in
+  // two different statement months is ambiguous — both months can't ship it.
+  const monthsByReceipt = new Map<string, Set<string>>();
+  for (const row of crossMonthMatchedLines) {
+    let set = monthsByReceipt.get(row.matched_receipt_id);
+    if (!set) {
+      set = new Set();
+      monthsByReceipt.set(row.matched_receipt_id, set);
+    }
+    set.add(row.statement_month);
+  }
+  for (const [receiptId, months] of monthsByReceipt) {
+    if (months.size > 1 && months.has(month)) {
+      const others = [...months].filter((m) => m !== month).join(", ");
+      blockers.push(
+        `Receipt ${receiptId}: matched to AMEX lines in multiple statement months (${[...months].join(", ")}). Disambiguate before finalizing ${month} (other month(s): ${others}).`,
+      );
+    }
+  }
+
+  return blockers;
+}
+
+export async function validateMonthReadyForExport(
+  month: string,
+  prebuiltBundle?: ExportBundle,
+  preloadedReconciliation?: AmexReconciliation | null,
+): Promise<string[]> {
+  // (1) Statement-sealed gate. Callers that already fetched the reconciliation
+  // (e.g. /api/receipts/export/month to populate the manifest pointer) may
+  // pass it in to avoid a second D1 round-trip.
+  const reconciliation =
+    preloadedReconciliation !== undefined
+      ? preloadedReconciliation
+      : await getFinalizedReconciliationForMonth(month);
+
+  // Build (or accept) the bundle. Build is expensive; callers that already
+  // have one should pass it in.
+  const bundle = prebuiltBundle ?? (await buildExportBundle(month));
+  const db = getReceiptsDb();
+
+  // (2) UNKNOWN payment_path — queried directly; the bundle excludes UNKNOWN.
+  const unknownResult = await db
+    .prepare(
+      `SELECT id, merchant FROM receipt_records
+       WHERE deleted_at IS NULL
+         AND payment_path = 'UNKNOWN'
+         AND transaction_date LIKE ?`,
+    )
+    .bind(`${month}%`)
+    .all<{ id: string; merchant: string | null }>();
+
+  // (2.5) Unreviewed receipts in-month (core applies the pending exclusion).
+  const unreviewedResult = await db
+    .prepare(
+      `SELECT * FROM receipt_records
+       WHERE deleted_at IS NULL
+         AND status = 'needs_review'
+         AND transaction_date LIKE ?`,
+    )
+    .bind(`${month}%`)
+    .all<ReceiptRecord>();
+
+  // (4) AMEX-line attendees.
+  const amexAttendees = await listAmexLineAttendeeNamesByMonth(month);
+
+  // (5) Compliance — month filter UNION bundle receipt IDs (matched receipts
+  // may be dated outside the statement month; Codex P1).
   const settings = await getComplianceSettings();
   const summary = await summarizeOpenChecksForExport(
     db,
     month,
     bundle.receipts.map((r) => r.id),
   );
-  if (summary.blockers > 0) {
-    blockers.push(
-      `${summary.blockers} open compliance blocker(s) on receipts in ${month}`,
-    );
-  }
-  if (settings.export_block_on_warnings && summary.warnings > 0) {
-    blockers.push(
-      `${summary.warnings} open compliance warning(s) in ${month} (export_block_on_warnings=true)`,
-    );
-  }
 
-  // (6) Cross-month match integrity (audit A7). A receipt matched to lines
-  // in two different statement months is ambiguous — both months can't
-  // ship the same receipt. Block both until disambiguated.
+  // (6) Cross-month match integrity.
   const matchedLineMonths = await db
     .prepare(
       `SELECT DISTINCT asl.statement_month, asl.matched_receipt_id
@@ -361,29 +417,18 @@ export async function validateMonthReadyForExport(
          )`,
     )
     .all<{ statement_month: string; matched_receipt_id: string }>();
-  // Group by receipt_id, find any referenced from >1 distinct month.
-  // (The query returns one row per (month, receipt) pair; the same receipt
-  // appearing under two months yields two rows we can collapse.)
-  const monthsByReceipt = new Map<string, Set<string>>();
-  for (const row of matchedLineMonths.results ?? []) {
-    let set = monthsByReceipt.get(row.matched_receipt_id);
-    if (!set) {
-      set = new Set();
-      monthsByReceipt.set(row.matched_receipt_id, set);
-    }
-    set.add(row.statement_month);
-  }
-  // Only block when one of the implicated months is the one we're finalizing.
-  for (const [receiptId, months] of monthsByReceipt) {
-    if (months.size > 1 && months.has(month)) {
-      const others = [...months].filter((m) => m !== month).join(", ");
-      blockers.push(
-        `Receipt ${receiptId}: matched to AMEX lines in multiple statement months (${[...months].join(", ")}). Disambiguate before finalizing ${month} (other month(s): ${others}).`,
-      );
-    }
-  }
 
-  return blockers;
+  return validateMonthReadyForExportCore({
+    month,
+    reconciliation,
+    bundle,
+    unknownReceipts: unknownResult.results ?? [],
+    unreviewedReceipts: unreviewedResult.results ?? [],
+    amexAttendees,
+    complianceSummary: summary,
+    complianceSettings: settings,
+    crossMonthMatchedLines: matchedLineMonths.results ?? [],
+  });
 }
 
 /**
