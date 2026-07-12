@@ -7,6 +7,18 @@
     "nodejs_compat",
     "global_fetch_strictly_public"
   ],
+  // Public Clerk config (non-secret). Checked in so CI deploys — which have no
+  // .dev.vars — still configure Clerk. The secret key is a wrangler secret
+  // (CLERK_SECRET_KEY), not here. Keep in sync with .dev.vars. Without these,
+  // the Clerk middleware throws on every authed route (the CI-deploy outage:
+  // /admin, /receipts → 500).
+  "vars": {
+    "NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY": "pk_live_Y2xlcmsuZGF6YmVlei5jb20k",
+    "NEXT_PUBLIC_CLERK_SIGN_IN_URL": "/receipts/sign-in",
+    "NEXT_PUBLIC_CLERK_SIGN_UP_URL": "/receipts/sign-in",
+    "NEXT_PUBLIC_CLERK_AFTER_SIGN_IN_URL": "/receipts",
+    "NEXT_PUBLIC_CLERK_AFTER_SIGN_UP_URL": "/receipts"
+  },
   // Manual secret setup:
   // npx wrangler secret put RESEND_API_KEY
   // npx wrangler secret put RECEIPTS_PROCESSOR_KEY   // ADR 0001: Mac MLX consumer auth
