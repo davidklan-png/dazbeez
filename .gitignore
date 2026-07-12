@@ -55,3 +55,6 @@ venv/
 
 # legacy local contact form artifacts
 /data/
+
+# D1 database backups (local only — never commit prod financial data)
+d1-backup-*.sql
