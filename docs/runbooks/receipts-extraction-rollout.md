@@ -100,15 +100,18 @@ Then end-to-end:
 3. Run `./run.sh --once`. Within a batch the receipt should advance to **needs_review** with merchant/amount/date populated.
 4. Try to finalize a month that has a pending capture in its window — finalize must return **409 "drain the queue"**. Drain, then finalize succeeds.
 
-## 8. Decommission Google Vision (after the consumer is proven)
+## 8. Decommission Google Vision — DONE
 
-```bash
-npx wrangler secret delete GOOGLE_CLOUD_VISION_API_KEY
-```
+Google Vision is fully retired (ADR 0001; the MLX consumer processed 2026-06
+end-to-end):
 
-The Vision provider in `lib/receipts/extraction.ts` is already marked
-`@deprecated` and is no longer wired to any route; delete that dead code in a
-follow-up PR once you're confident in the MLX path.
+- The Vision provider (`GoogleVisionOcrExtractionProvider`), `getExtractionProvider`,
+  `extractReceiptData`, and `getGoogleCloudVisionApiKey` are deleted from the codebase.
+- `GOOGLE_CLOUD_VISION_API_KEY` is deleted from the Worker secrets.
+
+There is **no in-Worker OCR rollback path**. If the MLX consumer fails, captures
+accumulate safely as `captured` (see Rollback) — they are not lost, and month-close
+stays gated until the queue drains.
 
 ## Rollback
 
