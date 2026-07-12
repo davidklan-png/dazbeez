@@ -5,6 +5,7 @@ import {
   type ExportBundle,
   type ValidateMonthReadyInput,
 } from "@/lib/receipts/month-closing";
+import { computeExportBlockers } from "@/lib/receipts/blockers";
 import type {
   AmexReconciliation,
   AmexStatementLine,
@@ -287,4 +288,68 @@ test("gate 6: receipt matched across months blocks only when this month is impli
     }),
   );
   assert.ok(!single.some((b) => b.includes("r-z")));
+});
+
+// ─── Tile ⇄ gate parity ───────────────────────────────────────────────────
+// The tile (computeExportBlockers) and the gate (validateMonthReadyForExportCore)
+// must agree on the shared rules: a receipt/line the tile counts as a blocker
+// must also produce a gate blocker, and vice versa. These guard against the
+// PR #69→#72 / #73 drift class.
+
+test("parity: uncategorized line — tile count == gate verdict", () => {
+  const line = makeLine({
+    matched_receipt_id: null,
+    match_status: "no_receipt",
+    receipt_status: "no_receipt_required",
+    receipt_missing_reason: "lost",
+    expense_category_code: null,
+  });
+  const tile = computeExportBlockers([], [line], []);
+  const tileCount = tile.find((b) => b.label === "Uncategorized AMEX lines")?.count ?? 0;
+  const gate = validateMonthReadyForExportCore(
+    makeInput({ bundle: makeBundle({ amexLines: [line] }) }),
+  );
+  const gateCount = gate.filter((b) => b.includes("missing expense category")).length;
+  assert.equal(tileCount, gateCount, `tile=${tileCount} gate=${gateCount}`);
+  assert.equal(tileCount, 1);
+});
+
+test("parity: unreviewed receipt — tile count == gate verdict", () => {
+  const receipt = makeReceipt({ id: "r-needs", status: "needs_review", merchant: "LAWSON" });
+  const tile = computeExportBlockers([receipt], [], []);
+  const tileCount = tile.find((b) => b.label === "Unreviewed receipts")?.count ?? 0;
+  const gate = validateMonthReadyForExportCore(
+    makeInput({ unreviewedReceipts: [receipt] }),
+  );
+  const gateCount = gate.filter((b) => b.includes("unreviewed")).length;
+  assert.equal(tileCount, gateCount, `tile=${tileCount} gate=${gateCount}`);
+  assert.equal(tileCount, 1);
+});
+
+test("parity: unknown payment path — tile count == gate verdict", () => {
+  const receipt = makeReceipt({ id: "r-unk", payment_path: "UNKNOWN", merchant: "DAISO" });
+  const tile = computeExportBlockers([receipt], [], []);
+  const tileCount = tile.find((b) => b.label === "Receipts with unknown payment path")?.count ?? 0;
+  const gate = validateMonthReadyForExportCore(
+    makeInput({ unknownReceipts: [{ id: "r-unk", merchant: "DAISO" }] }),
+  );
+  const gateCount = gate.filter((b) => b.includes("payment_path is UNKNOWN")).length;
+  assert.equal(tileCount, gateCount, `tile=${tileCount} gate=${gateCount}`);
+  assert.equal(tileCount, 1);
+});
+
+test("parity: clean fixture — neither tile nor gate flags the shared rules", () => {
+  const tile = computeExportBlockers([], [], []);
+  const sharedLabels = [
+    "Uncategorized AMEX lines",
+    "Unreviewed receipts",
+    "Receipts with unknown payment path",
+  ];
+  for (const label of sharedLabels) {
+    assert.equal(tile.find((b) => b.label === label)?.count ?? 0, 0, `${label} should be 0`);
+  }
+  const gate = validateMonthReadyForExportCore(makeInput());
+  assert.ok(!gate.some((b) => b.includes("missing expense category")));
+  assert.ok(!gate.some((b) => b.includes("unreviewed")));
+  assert.ok(!gate.some((b) => b.includes("payment_path is UNKNOWN")));
 });

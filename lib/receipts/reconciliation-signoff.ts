@@ -1,6 +1,7 @@
 import type { AmexStatementLine, ReceiptRecord } from "@/lib/receipts/types";
 import { requiresAttendees } from "@/lib/receipts/categories";
 import { resolveLineCategory } from "@/lib/receipts/line-classification";
+import { isUncategorizedLine } from "@/lib/receipts/blockers";
 
 function csvEscape(value: string | null | undefined): string {
   if (value === null || value === undefined) return "";
@@ -117,7 +118,7 @@ export function validateAmexLinesForSignoff(
     if (line.match_status === "unmatched" || line.match_status === "matched") {
       blockers.push(`AMEX ${label}: unresolved match status (${line.match_status})`);
     }
-    if (!resolvedCategory) {
+    if (isUncategorizedLine(line, receipt)) {
       blockers.push(`AMEX ${label}: missing expense category`);
     }
     if (
