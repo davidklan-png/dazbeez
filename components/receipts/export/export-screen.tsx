@@ -1,7 +1,8 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useState, type ReactNode } from "react";
+import { useState } from "react";
 import { Btn } from "@/components/ui/btn";
 import { Card } from "@/components/ui/card";
 import { Pill } from "@/components/ui/pill";
@@ -50,14 +51,12 @@ export interface ExportScreenProps {
 
 export function ExportScreen(props: ExportScreenProps) {
   const router = useRouter();
-  const [busy, setBusy] = useState<"build" | "finalize" | null>(null);
+  const [busy, setBusy] = useState<"build" | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [confirmType, setConfirmType] = useState("");
 
   const finalized = props.currentExport?.status === "finalized";
   const draftBuilt = Boolean(props.currentExport);
   const blockerCount = props.blockers.reduce((s, b) => s + b.count, 0);
-  const warningCount = props.warnings.reduce((s, b) => s + b.count, 0);
 
   async function rebuildDraft() {
     setBusy("build");
@@ -80,38 +79,6 @@ export function ExportScreen(props: ExportScreenProps) {
         );
         return;
       }
-      router.refresh();
-    } catch {
-      setError("Network error.");
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function finalize() {
-    if (confirmType.trim().toLowerCase() !== props.monthLabel.toLowerCase()) {
-      setError(`Type "${props.monthLabel.toLowerCase()}" to confirm.`);
-      return;
-    }
-    setBusy("finalize");
-    setError(null);
-    try {
-      const res = await fetch(`/api/receipts/export/${props.month}`, {
-        method: "POST",
-      });
-      if (!res.ok) {
-        const json = (await res.json().catch(() => ({}))) as {
-          error?: string;
-          blockers?: string[];
-        };
-        setError(
-          json.blockers?.length
-            ? `${json.error ?? "Could not finalize"}: ${json.blockers.join("; ")}`
-            : json.error ?? "Finalize failed.",
-        );
-        return;
-      }
-      setConfirmType("");
       router.refresh();
     } catch {
       setError("Network error.");
@@ -188,17 +155,12 @@ export function ExportScreen(props: ExportScreenProps) {
           />
         </div>
 
-        <FinalizePanel
+        <ReviewLinkCard
+          month={props.month}
           monthLabel={props.monthLabel}
           finalized={finalized}
           draftBuilt={draftBuilt}
-          blockers={blockerCount}
-          warnings={warningCount}
-          confirmType={confirmType}
-          setConfirmType={setConfirmType}
-          onFinalize={finalize}
-          busy={busy === "finalize"}
-          rowsInDraft={props.draftStats.rows}
+          blockerCount={blockerCount}
         />
       </div>
 
@@ -650,135 +612,61 @@ function ExportHistory({
 
 // ─── Finalize panel ───────────────────────────────────────────────
 
-function FinalizePanel({
+function ReviewLinkCard({
+  month,
   monthLabel,
   finalized,
   draftBuilt,
-  blockers,
-  warnings,
-  confirmType,
-  setConfirmType,
-  onFinalize,
-  busy,
-  rowsInDraft,
+  blockerCount,
 }: {
+  month: string;
   monthLabel: string;
   finalized: boolean;
   draftBuilt: boolean;
-  blockers: number;
-  warnings: number;
-  confirmType: string;
-  setConfirmType: (v: string) => void;
-  onFinalize: () => void;
-  busy: boolean;
-  rowsInDraft: number;
+  blockerCount: number;
 }) {
-  const canFinalize =
-    !finalized &&
-    draftBuilt &&
-    blockers === 0 &&
-    confirmType.trim().toLowerCase() === monthLabel.toLowerCase();
-
   return (
-    <div className="sticky top-6 flex flex-col gap-4 self-start">
-      <Card pad={0} className="overflow-hidden">
-        <div className="flex items-center gap-2.5 border-b border-gray-150 px-4 py-3.5">
+    <div className="sticky top-6 self-start">
+      <Card pad={20}>
+        <div className="flex items-center gap-2.5">
           <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-gray-900 text-white">
             <LockIcon size={14} className="text-white" />
           </div>
-          <div>
+          <div className="flex-1">
             <div className="text-[13.5px] font-semibold text-gray-900">
               {finalized ? `Sealed: ${monthLabel}` : `Finalize ${monthLabel}`}
             </div>
             <div className="text-[11.5px] text-gray-500">
               {finalized
                 ? "This export is immutable."
-                : "This is the only irreversible action."}
+                : "Review the bundle, then seal on the review page."}
             </div>
           </div>
         </div>
-
-        {finalized ? (
-          <div className="px-5 py-5 text-[12.5px] text-gray-600">
-            All {rowsInDraft} rows are locked. Reconciliation is signed off.
-            Download the archive bundle from history below.
+        <Link
+          href={`/receipts/export/${month}/review`}
+          className="mt-4 flex items-center justify-center gap-1.5 rounded-lg bg-gray-900 px-4 py-2.5 text-[13px] font-semibold text-white hover:bg-gray-800"
+        >
+          {finalized ? "View review" : "Review & finalize"}
+          <ArrowRightIcon size={14} className="text-white" />
+        </Link>
+        {!finalized && !draftBuilt && (
+          <div className="mt-2 text-center text-[11px] text-gray-400">
+            Build the draft first
           </div>
-        ) : (
-          <div className="px-5 py-5">
-            <ul className="m-0 flex list-none flex-col gap-2 p-0 text-[12.5px] text-gray-600">
-              <Bullet>Locks all {rowsInDraft || "—"} receipts to read-only</Bullet>
-              <Bullet>Stages CSV + ZIP archive in R2 immutable bucket</Bullet>
-              <Bullet>Records signoff in audit log</Bullet>
-              <Bullet>Marks AMEX statement as reconciled</Bullet>
-            </ul>
-
-            {warnings > 0 && (
-              <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-[11.5px] text-amber-800">
-                {warnings} non-blocking warning{warnings === 1 ? "" : "s"} will ship as-is.
-              </div>
-            )}
-
-            <div className="mt-5">
-              <div className="mb-1.5 text-[11.5px] text-gray-500">
-                Type{" "}
-                <span className="font-mono text-gray-700">
-                  {monthLabel.toLowerCase()}
-                </span>{" "}
-                to confirm
-              </div>
-              <input
-                type="text"
-                value={confirmType}
-                onChange={(e) => setConfirmType(e.target.value)}
-                placeholder={monthLabel.toLowerCase()}
-                disabled={finalized || blockers > 0}
-                className="h-10 w-full rounded-lg border border-gray-300 bg-white px-3 font-mono text-[13px] text-gray-900 outline-none focus:border-amber-500 disabled:bg-gray-50"
-              />
-            </div>
-
-            <Btn
-              kind="dark"
-              size="lg"
-              full
-              className="mt-3.5"
-              disabled={!canFinalize || busy}
-              onClick={onFinalize}
-              rightIcon={<LockIcon size={14} className="text-white" />}
-            >
-              {busy
-                ? "Finalizing…"
-                : blockers > 0
-                  ? `Finalize · resolve ${blockers} blocker${blockers === 1 ? "" : "s"} first`
-                  : `Finalize ${monthLabel}`}
-            </Btn>
-            <div className="mt-2 text-center text-[11px] text-gray-400">
-              Signoff with your CF Access identity
-            </div>
+        )}
+        {!finalized && draftBuilt && blockerCount > 0 && (
+          <div className="mt-2 text-center text-[11px] text-red-600">
+            {blockerCount} blocker{blockerCount === 1 ? "" : "s"} to resolve first
+          </div>
+        )}
+        {!finalized && draftBuilt && blockerCount === 0 && (
+          <div className="mt-2 text-center text-[11px] text-green-600">
+            Clear to finalize
           </div>
         )}
       </Card>
-
-      <div className="flex items-center gap-3 rounded-xl border border-amber-200 bg-amber-50 p-3.5">
-        <div className="text-2xl">🐝</div>
-        <div className="text-[12px] leading-[1.45] text-gray-700">
-          <b>{finalized ? "Locked." : "One more pass."}</b>{" "}
-          {finalized
-            ? `${monthLabel} is sealed and audit-traceable.`
-            : blockers === 0
-              ? "Type the month to seal — you're clear."
-              : `Knock out ${blockers} blocker${blockers === 1 ? "" : "s"} to unlock finalize.`}
-        </div>
-      </div>
     </div>
-  );
-}
-
-function Bullet({ children }: { children: ReactNode }) {
-  return (
-    <li className="flex gap-2">
-      <span className="text-gray-400">→</span>
-      <span>{children}</span>
-    </li>
   );
 }
 

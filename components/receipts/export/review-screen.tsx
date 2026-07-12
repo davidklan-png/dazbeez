@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { Card } from "@/components/ui/card";
 import { Pill } from "@/components/ui/pill";
+import { FinalizeCard } from "@/components/receipts/export/finalize-card";
 import {
   formatAmountMinor,
   formatPaymentPath,
@@ -74,6 +75,16 @@ export function ReviewScreen(props: ReviewScreenProps) {
           )}
         />
       </div>
+
+      <FinalizeCard
+        month={props.month}
+        monthLabel={props.monthLabel}
+        finalized={finalized}
+        draftBuilt={Boolean(props.currentExport)}
+        blockerCount={props.gateBlockers.length}
+        warningCount={props.warnings.reduce((s, w) => s + w.count, 0)}
+        rowsInDraft={props.rows.length}
+      />
     </div>
   );
 }
