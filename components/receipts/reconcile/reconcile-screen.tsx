@@ -276,11 +276,12 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
     );
     if (candidates.length === 0) return;
     setBulkProgress({ current: 0, total: candidates.length });
+    let failed = 0;
     for (let i = 0; i < candidates.length; i++) {
       setBulkProgress({ current: i + 1, total: candidates.length });
       const c = candidates[i]!;
       try {
-        await fetch("/api/receipts/reconcile", {
+        const res = await fetch("/api/receipts/reconcile", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -289,13 +290,19 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
             matchStatus: "confirmed",
           }),
         });
+        if (!res.ok) failed++;
       } catch {
-        // continue
+        failed++;
       }
     }
     setBulkProgress(null);
     router.refresh();
-  }, [locked, linesWithBand, router]);
+    if (failed > 0) {
+      setError(
+        `${failed} of ${candidates.length} match(es) failed to confirm — retry or check those lines.`,
+      );
+    }
+  }, [locked, linesWithBand, router, setError]);
 
   const finalize = useCallback(async () => {
     if (locked) return;
