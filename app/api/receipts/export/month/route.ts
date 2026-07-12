@@ -5,6 +5,7 @@ import {
   finalizeExport,
   getExport,
   getFinalizedReconciliationForMonth,
+  recordExportBundle,
   replaceExportItems,
 } from "@/lib/receipts/db";
 import {
@@ -215,7 +216,13 @@ export async function POST(request: Request) {
       },
     );
 
-    // Auto-finalize if requested
+    // Persist the staged bundle, then finalize if requested. On the rebuild
+    // path (finalize=false) recordExportBundle is the only row write — it
+    // stores the R2 keys + SHAs + bundle_built_at so the finalize-only route
+    // (/api/receipts/export/[month]) finds them present and "Last draft built"
+    // advances on every rebuild. On the finalize path finalizeExport calls
+    // recordExportBundle internally, so we do NOT call it here again (that
+    // would double-write the bundle columns).
     let finalizeWarnings: string[] = [];
     if (body.finalize) {
       await finalizeExport(
@@ -230,6 +237,14 @@ export async function POST(request: Request) {
       // open. Surfaced in the finalize response so the operator's toast on
       // "Finalize succeeded" can also say "but March is still open."
       finalizeWarnings = await computeEarlierOpenMonthWarnings(month);
+    } else {
+      await recordExportBundle(
+        exportId,
+        archiveKey,
+        manifestKey,
+        sha256,
+        manifestSha256,
+      );
     }
 
     return NextResponse.json(

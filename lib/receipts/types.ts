@@ -387,6 +387,9 @@ export interface ReceiptExport {
   finalized_by?: string | null;
   finalization_hash?: string | null;
   manifest_sha256?: string | null;
+  // When the draft's bundle was last (re)built in R2 (0019). NULL on rows
+  // predating 0019; the UI falls back to created_at.
+  bundle_built_at?: string | null;
 }
 
 /**
