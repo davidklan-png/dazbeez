@@ -228,6 +228,7 @@ export function FormPane(props: FormPaneProps) {
       currency,
       businessPurpose,
       attendees,
+      router,
     ],
   );
 
