@@ -645,7 +645,7 @@ function LinesPane({
         {tab === "lines" && (
           <>
             {groupReview.length > 0 && (
-              <SectionHeader label="Needs review" count={groupReview.length} dot="bg-red-500" />
+              <SectionHeader label="Needs attention" count={groupReview.length} dot="bg-red-500" />
             )}
             {groupReview.map((l) => (
               <LineRow
