@@ -174,3 +174,36 @@ test("manifest CSV: category column uses line value when no receipt linked", () 
   const dataCols = csvLines[1]!.split(",");
   assert.equal(dataCols[catIdx], "office_supplies");
 });
+
+test("manifest CSV: invoice_registration_number comes from the linked receipt", () => {
+  const lines = [makeLine()];
+  const receipts = [
+    makeReceipt({ invoice_registration_number: "T1234567890123" }),
+  ];
+
+  const csv = buildReconciliationManifestCsv(lines, receipts, {}, {});
+  const csvLines = csv.split("\n");
+  const headers = csvLines[0]!.split(",");
+  const idx = headers.indexOf("invoice_registration_number");
+  assert.ok(idx >= 0, "missing invoice_registration_number header");
+  const dataCols = csvLines[1]!.split(",");
+  assert.equal(dataCols[idx], "T1234567890123");
+});
+
+test("manifest CSV: invoice_registration_number empty when no receipt linked", () => {
+  const lines = [
+    makeLine({
+      matched_receipt_id: null,
+      match_status: "no_receipt",
+      receipt_status: "no_receipt_required",
+      receipt_missing_reason: "lost",
+    }),
+  ];
+  const csv = buildReconciliationManifestCsv(lines, [], {}, {});
+  const csvLines = csv.split("\n");
+  const headers = csvLines[0]!.split(",");
+  const idx = headers.indexOf("invoice_registration_number");
+  assert.ok(idx >= 0, "missing invoice_registration_number header");
+  const dataCols = csvLines[1]!.split(",");
+  assert.equal(dataCols[idx], "");
+});
