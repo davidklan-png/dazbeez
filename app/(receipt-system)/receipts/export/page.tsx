@@ -28,6 +28,7 @@ import {
 } from "@/lib/receipts/settings";
 import { buildExportBundle } from "@/lib/receipts/month-closing";
 import { buildMonthlyExportCsv } from "@/lib/receipts/export";
+import { deriveStatementWindow } from "@/lib/receipts/statement-window";
 
 export const dynamic = "force-dynamic";
 
@@ -93,6 +94,11 @@ export default async function ExportPage({
   // drives the pending / unreviewed / unknown counts.
   const blockers = computeExportBlockers(monthReceipts, monthLines, bundle.receipts);
   const warnings = computeExportWarnings(monthLines);
+  // Statement window (transaction-date range the statement covers) for the
+  // manifest-preview header — the operator conflated 2026-06 and 2026-07 rows
+  // partly because the preview didn't restate which month/dates it belongs to.
+  const statementWindow =
+    monthLines.length > 0 ? deriveStatementWindow(monthLines, month) : null;
 
   const draftStats = computeDraftStats(bundle.rows);
   const breakdown = computeBreakdown(bundle.rows);
@@ -127,6 +133,7 @@ export default async function ExportPage({
         breakdown={breakdown}
         manifestSample={manifestSample}
         manifestSize={manifestSize}
+        statementWindow={statementWindow}
       />
       <div className="border-t border-amber-100 bg-amber-50 px-8 py-4 text-xs text-amber-900">
         <p className="font-semibold">Accountant review boundary</p>

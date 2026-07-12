@@ -18,6 +18,7 @@ import {
   buildManifestPreviewCsv,
   type ManifestSampleRow,
 } from "@/lib/receipts/manifest-preview";
+import type { StatementWindow } from "@/lib/receipts/statement-window";
 
 export type { Blocker } from "@/lib/receipts/blockers";
 
@@ -47,6 +48,7 @@ export interface ExportScreenProps {
   breakdown: CategoryBreakdownRow[];
   manifestSample: ManifestSampleRow[];
   manifestSize: { rowsTotal: number; sizeBytes: number; sha256: string | null };
+  statementWindow: StatementWindow | null;
 }
 
 export function ExportScreen(props: ExportScreenProps) {
@@ -168,6 +170,8 @@ export function ExportScreen(props: ExportScreenProps) {
         <div className="px-8 pb-12">
           <ReportFormat
             month={props.month}
+            monthLabel={props.monthLabel}
+            statementWindow={props.statementWindow}
             manifestSample={props.manifestSample}
             manifestSize={props.manifestSize}
             finalized={finalized}
@@ -678,13 +682,21 @@ function ReportFormat({
   manifestSize,
   finalized,
   sha256,
+  monthLabel,
+  statementWindow,
 }: {
   month: string;
   manifestSample: ManifestSampleRow[];
   manifestSize: { rowsTotal: number; sizeBytes: number; sha256: string | null };
   finalized: boolean;
   sha256: string | null;
+  monthLabel: string;
+  statementWindow: StatementWindow | null;
 }) {
+  const windowLabel =
+    statementWindow && statementWindow.start && statementWindow.end
+      ? `${statementWindow.start.slice(0, 10)} – ${statementWindow.end.slice(0, 10)}`
+      : null;
   const [view, setView] = useState<"table" | "raw" | "json">("table");
 
   return (
@@ -724,7 +736,7 @@ function ReportFormat({
             Manifest preview
           </span>
           <span className="text-[11px] text-gray-400">
-            showing first {manifestSample.length} of {manifestSize.rowsTotal} rows
+            {monthLabel} statement{windowLabel ? ` · ${windowLabel}` : ""} · {manifestSize.rowsTotal} rows · showing first {manifestSample.length}
           </span>
           <span className="flex-1" />
           <div className="flex gap-1">
