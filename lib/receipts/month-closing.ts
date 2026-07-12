@@ -18,7 +18,7 @@ import type {
   ReceiptRecord,
 } from "@/lib/receipts/types";
 import { validateAmexLinesForSignoff } from "@/lib/receipts/reconciliation-signoff";
-import { isPendingProcessing } from "@/lib/receipts/extraction-state";
+import { isUnreviewedReceipt } from "@/lib/receipts/blockers";
 
 /**
  * Single source of truth for "what ships in this month's export bundle".
@@ -282,7 +282,7 @@ export function validateMonthReadyForExportCore(
   // not "unreviewed"). Direct month-scoped set, NOT bundle.receipts — see the
   // tile-vs-gate drift note in the former inline body (PR #73).
   for (const r of unreviewedReceipts) {
-    if (isPendingProcessing(r)) continue;
+    if (!isUnreviewedReceipt(r)) continue;
     const label = r.merchant ?? r.id;
     blockers.push(
       `Receipt ${label}: unreviewed (status='needs_review') — mark reviewed before exporting`,

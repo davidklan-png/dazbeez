@@ -15,6 +15,39 @@ import { isPendingProcessing } from "@/lib/receipts/extraction-state";
 import { resolveLineCategory } from "@/lib/receipts/line-classification";
 import type { AmexStatementLine, ReceiptRecord } from "@/lib/receipts/types";
 
+// ─── Shared predicates (tile ⇄ gate) ─────────────────────────────────────
+// Pure rules shared between the export tile (computeExportBlockers) and the
+// finalize gate (validateMonthReadyForExportCore + validateAmexLinesForSignoff)
+// so a rule can never exist in one and not the other. The gate is the
+// authority; the tile mirrors these exactly. Add a rule here AND wire it into
+// the gate if it should block finalize.
+
+/** A line is uncategorized when neither it nor its matched receipt carries a
+ * category (resolveLineCategory — the same authority the gate uses). */
+export function isUncategorizedLine(
+  line: Pick<AmexStatementLine, "matched_receipt_id" | "expense_category_code">,
+  receipt:
+    | Pick<ReceiptRecord, "expense_category_code" | "deleted_at">
+    | undefined
+    | null,
+): boolean {
+  return !resolveLineCategory(line, receipt);
+}
+
+/** A receipt blocks on unknown payment path (finalize gate 2). */
+export function isUnknownPathReceipt(
+  receipt: Pick<ReceiptRecord, "payment_path">,
+): boolean {
+  return receipt.payment_path === "UNKNOWN";
+}
+
+/** A receipt is an unreviewed blocker: needs review and not still pending
+ * extraction (gate 2.5). Pending receipts are a separate "drain the queue"
+ * nudge, not an unreviewed blocker. */
+export function isUnreviewedReceipt(receipt: ReceiptRecord): boolean {
+  return receipt.status === "needs_review" && !isPendingProcessing(receipt);
+}
+
 export type BlockerSeverity = "blocker" | "warn";
 
 export type Blocker = {
@@ -56,7 +89,7 @@ export function computeExportBlockers(
     const receipt = l.matched_receipt_id
       ? receiptMap.get(l.matched_receipt_id)
       : undefined;
-    return !resolveLineCategory(l, receipt);
+    return isUncategorizedLine(l, receipt);
   }).length;
   if (uncategorized > 0) {
     blockers.push({
@@ -75,7 +108,7 @@ export function computeExportBlockers(
   // gate agree in this direction too — previously a month could read "clear"
   // on the tile yet 422 on finalize. `receipts` is month-scoped, matching the
   // gate's `transaction_date LIKE month%` filter.
-  const unknownPath = receipts.filter((r) => r.payment_path === "UNKNOWN").length;
+  const unknownPath = receipts.filter(isUnknownPathReceipt).length;
   if (unknownPath > 0) {
     blockers.push({
       severity: "blocker",
@@ -104,9 +137,7 @@ export function computeExportBlockers(
     });
   }
 
-  const unreviewed = receipts.filter(
-    (r) => r.status === "needs_review" && !isPendingProcessing(r),
-  ).length;
+  const unreviewed = receipts.filter(isUnreviewedReceipt).length;
   if (unreviewed > 0) {
     blockers.push({
       severity: "blocker",
