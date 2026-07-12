@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import { requireReceiptsActor } from "@/lib/receipts/auth";
+import { createAuditEntry } from "@/lib/receipts/audit";
+import { stringifyJson } from "@/lib/receipts/db-utils";
 import {
   createExport,
   finalizeExport,
@@ -245,6 +247,22 @@ export async function POST(request: Request) {
         sha256,
         manifestSha256,
       );
+      // Audit the rebuild (finalize:false) — "export.generated" was defined
+      // for this. The finalize:true path is audited by finalizeExport
+      // ("export.finalized"); recordExportBundle runs inside it there, so we
+      // only audit the standalone rebuild here.
+      await createAuditEntry(getReceiptsDb(), {
+        actor,
+        action: "export.generated",
+        objectType: "export",
+        objectId: exportId,
+        newValueJson: stringifyJson({
+          archiveKey,
+          sha256,
+          manifestSha256,
+          rowCount: bundle.rows.length,
+        }),
+      });
     }
 
     return NextResponse.json(
