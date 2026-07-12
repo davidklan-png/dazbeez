@@ -31,6 +31,7 @@ const MANIFEST_HEADERS = [
   "business_trip_status",
   "business_trip_id",
   "re_review_needed",
+  "invoice_registration_number",
 ];
 
 export function buildReconciliationManifestCsv(
@@ -80,6 +81,9 @@ export function buildReconciliationManifestCsv(
         csvEscape(line.business_trip_status),
         csvEscape(line.business_trip_id),
         csvEscape(String(line.re_review_needed)),
+        // 適格請求書 registration number (T-number) from the linked receipt;
+        // empty when no receipt is linked or the receipt carries none.
+        csvEscape(receipt?.invoice_registration_number),
       ].join(","),
     );
   }
