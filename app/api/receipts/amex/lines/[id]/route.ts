@@ -126,19 +126,33 @@ export async function PATCH(request: Request, { params }: RouteContext) {
         ? body.receiptMissingReason.trim().slice(0, 500) || null
         : body.receiptMissingReason;
 
-    await updateAmexLineCategory(
-      id,
-      {
-        expenseCategory: body.expenseCategory as AmexExpenseCategory | undefined,
-        expenseCategoryCode:
-          body.expenseCategoryCode === undefined ? undefined : expenseCategoryCode,
-        categoryStatus: body.categoryStatus as AmexCategoryStatus | undefined,
-        receiptStatus: body.receiptStatus as AmexReceiptStatus | undefined,
-        receiptMissingReason,
-        businessTripStatus: body.businessTripStatus as AmexBusinessTripStatus | undefined,
-      },
-      actor,
-    );
+    // Build the update input sparsely: only include a key when it was present
+    // in the request body. The DB layer uses `"key" in input` checks for the
+    // nullable fields (expenseCategoryCode, receiptMissingReason) so that an
+    // explicit null clears the column — which means an always-present key with
+    // value undefined would NULL out sibling fields on every save.
+    const updateInput: Parameters<typeof updateAmexLineCategory>[1] = {};
+    if (body.expenseCategory !== undefined) {
+      updateInput.expenseCategory = body.expenseCategory as AmexExpenseCategory;
+    }
+    if ("expenseCategoryCode" in body) {
+      updateInput.expenseCategoryCode = expenseCategoryCode ?? null;
+    }
+    if (body.categoryStatus !== undefined) {
+      updateInput.categoryStatus = body.categoryStatus as AmexCategoryStatus;
+    }
+    if (body.receiptStatus !== undefined) {
+      updateInput.receiptStatus = body.receiptStatus as AmexReceiptStatus;
+    }
+    if ("receiptMissingReason" in body) {
+      updateInput.receiptMissingReason = receiptMissingReason ?? null;
+    }
+    if (body.businessTripStatus !== undefined) {
+      updateInput.businessTripStatus =
+        body.businessTripStatus as AmexBusinessTripStatus;
+    }
+
+    await updateAmexLineCategory(id, updateInput, actor);
 
     return NextResponse.json({ ok: true }, { status: 200 });
   } catch (error) {
