@@ -1,46 +1,7 @@
 import { NextResponse } from "next/server";
 import { requireReceiptsActor } from "@/lib/receipts/auth";
 import { updateAmexLineCategory } from "@/lib/receipts/db";
-import { isCanonicalCode } from "@/lib/receipts/categories";
-import type {
-  AmexCategoryStatus,
-  AmexExpenseCategory,
-  AmexReceiptStatus,
-  AmexBusinessTripStatus,
-} from "@/lib/receipts/types";
-
-const VALID_EXPENSE_CATEGORIES: AmexExpenseCategory[] = [
-  "meeting_no_alcohol",
-  "entertainment_alcohol",
-  "transportation",
-  "books",
-  "research",
-  "insurance",
-  "software",
-  "telecom",
-  "office_supplies",
-  "travel",
-  "business_trip",
-  "misc",
-  "unknown",
-];
-const VALID_CATEGORY_STATUSES: AmexCategoryStatus[] = [
-  "uncategorized",
-  "suggested",
-  "confirmed",
-];
-const VALID_RECEIPT_STATUSES: AmexReceiptStatus[] = [
-  "missing_receipt",
-  "matched",
-  "no_receipt_required",
-  "receipt_not_available",
-];
-const VALID_BUSINESS_TRIP_STATUSES: AmexBusinessTripStatus[] = [
-  "not_applicable",
-  "candidate",
-  "confirmed",
-  "excluded",
-];
+import { parseAmexLinePatch, type AmexLinePatchBody } from "@/lib/receipts/api/amex-line-patch";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -48,111 +9,18 @@ export async function PATCH(request: Request, { params }: RouteContext) {
   try {
     const actor = await requireReceiptsActor(request.headers);
     const { id } = await params;
+    const body = (await request.json()) as AmexLinePatchBody;
 
-    const body = (await request.json()) as {
-      expenseCategory?: string;
-      expenseCategoryCode?: string;
-      categoryStatus?: string;
-      receiptStatus?: string;
-      receiptMissingReason?: string | null;
-      businessTripStatus?: string;
-    };
-
-    // Validate canonical category code if provided
-    const expenseCategoryCode =
-      body.expenseCategoryCode === "" ? null : body.expenseCategoryCode;
-
-    if (expenseCategoryCode && !isCanonicalCode(expenseCategoryCode)) {
-      return NextResponse.json(
-        { error: `Invalid expense category code: ${expenseCategoryCode}` },
-        { status: 400 },
-      );
+    // Parse+validate lives in a pure helper (lib/receipts/api/amex-line-patch)
+    // so the sparse-update contract the DB layer relies on is unit-tested
+    // without D1 — guards the #67 regression (always-present key NULLing
+    // sibling columns).
+    const parsed = parseAmexLinePatch(body);
+    if (!parsed.ok) {
+      return NextResponse.json({ error: parsed.error }, { status: 400 });
     }
 
-    // Validate each enum field if provided — previously these were cast
-    // straight from arbitrary string body input into typed enums and
-    // forwarded to the DB, where invalid values could silently land.
-    if (
-      body.expenseCategory !== undefined &&
-      !VALID_EXPENSE_CATEGORIES.includes(body.expenseCategory as AmexExpenseCategory)
-    ) {
-      return NextResponse.json(
-        { error: `Invalid expenseCategory: ${body.expenseCategory}` },
-        { status: 400 },
-      );
-    }
-    if (
-      body.categoryStatus !== undefined &&
-      !VALID_CATEGORY_STATUSES.includes(body.categoryStatus as AmexCategoryStatus)
-    ) {
-      return NextResponse.json(
-        { error: `Invalid categoryStatus: ${body.categoryStatus}` },
-        { status: 400 },
-      );
-    }
-    if (
-      body.receiptStatus !== undefined &&
-      !VALID_RECEIPT_STATUSES.includes(body.receiptStatus as AmexReceiptStatus)
-    ) {
-      return NextResponse.json(
-        { error: `Invalid receiptStatus: ${body.receiptStatus}` },
-        { status: 400 },
-      );
-    }
-    if (
-      body.businessTripStatus !== undefined &&
-      !VALID_BUSINESS_TRIP_STATUSES.includes(
-        body.businessTripStatus as AmexBusinessTripStatus,
-      )
-    ) {
-      return NextResponse.json(
-        { error: `Invalid businessTripStatus: ${body.businessTripStatus}` },
-        { status: 400 },
-      );
-    }
-    if (
-      body.receiptMissingReason !== undefined &&
-      body.receiptMissingReason !== null &&
-      typeof body.receiptMissingReason !== "string"
-    ) {
-      return NextResponse.json(
-        { error: "receiptMissingReason must be a string or null." },
-        { status: 400 },
-      );
-    }
-
-    const receiptMissingReason =
-      typeof body.receiptMissingReason === "string"
-        ? body.receiptMissingReason.trim().slice(0, 500) || null
-        : body.receiptMissingReason;
-
-    // Build the update input sparsely: only include a key when it was present
-    // in the request body. The DB layer uses `"key" in input` checks for the
-    // nullable fields (expenseCategoryCode, receiptMissingReason) so that an
-    // explicit null clears the column — which means an always-present key with
-    // value undefined would NULL out sibling fields on every save.
-    const updateInput: Parameters<typeof updateAmexLineCategory>[1] = {};
-    if (body.expenseCategory !== undefined) {
-      updateInput.expenseCategory = body.expenseCategory as AmexExpenseCategory;
-    }
-    if ("expenseCategoryCode" in body) {
-      updateInput.expenseCategoryCode = expenseCategoryCode ?? null;
-    }
-    if (body.categoryStatus !== undefined) {
-      updateInput.categoryStatus = body.categoryStatus as AmexCategoryStatus;
-    }
-    if (body.receiptStatus !== undefined) {
-      updateInput.receiptStatus = body.receiptStatus as AmexReceiptStatus;
-    }
-    if ("receiptMissingReason" in body) {
-      updateInput.receiptMissingReason = receiptMissingReason ?? null;
-    }
-    if (body.businessTripStatus !== undefined) {
-      updateInput.businessTripStatus =
-        body.businessTripStatus as AmexBusinessTripStatus;
-    }
-
-    await updateAmexLineCategory(id, updateInput, actor);
+    await updateAmexLineCategory(id, parsed.input, actor);
 
     return NextResponse.json({ ok: true }, { status: 200 });
   } catch (error) {
