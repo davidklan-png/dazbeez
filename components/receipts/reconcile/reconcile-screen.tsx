@@ -514,6 +514,7 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
           }
           onUnlink={(line) => reconcile(line.id, null, "unmatched")}
           onNoReceipt={(line) => reconcile(line.id, null, "no_receipt")}
+          onUnmatch={(line) => reconcile(line.id, null, "unmatched")}
           onUpdateCategory={updateCategory}
           onUpdateLineDetails={updateLineDetails}
         />
@@ -922,6 +923,7 @@ function DetailPane({
   onConfirm,
   onUnlink,
   onNoReceipt,
+  onUnmatch,
   onUpdateCategory,
   onUpdateLineDetails,
 }: {
@@ -938,6 +940,7 @@ function DetailPane({
   onConfirm: (line: AmexStatementLine, receiptId: string) => void;
   onUnlink: (line: AmexStatementLine) => void;
   onNoReceipt: (line: AmexStatementLine) => void;
+  onUnmatch: (line: AmexStatementLine) => void;
   onUpdateCategory: (lineId: string, code: string) => void;
   onUpdateLineDetails: (
     lineId: string,
@@ -1120,6 +1123,21 @@ function DetailPane({
               </Btn>
               <span className="text-[11px] text-gray-400">
                 <Kbd>N</Kbd>
+              </span>
+            </>
+          )}
+          {!locked && line.match_status === "no_receipt" && (
+            <>
+              <Btn
+                kind="ghost"
+                size="md"
+                onClick={() => onUnmatch(line)}
+                disabled={busy}
+              >
+                Return to matching pool
+              </Btn>
+              <span className="text-[11px] text-gray-400">
+                <Kbd>U</Kbd>
               </span>
             </>
           )}
