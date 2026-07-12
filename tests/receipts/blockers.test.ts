@@ -197,3 +197,36 @@ test("blockers: receipt with unknown payment path is reported (finalize gate 2)"
   assert.ok(unknown, `expected an unknown-payment-path blocker, got: ${JSON.stringify(blockers)}`);
   assert.equal(unknown!.count, 1);
 });
+
+test("blockers: needs_review receipt (not pending) is an unreviewed blocker with a status deep-link", () => {
+  // The finalize gate now mirrors this (validateMonthReadyForExport gate 2.5),
+  // so the tile's BLOCKER label is true. The href deep-links into a
+  // status-filtered Review view.
+  const receipt = makeReceipt({ id: "r-needs", status: "needs_review" });
+
+  const blockers = computeExportBlockers([receipt], []);
+  const unreviewed = blockers.find((b) => b.label === "Unreviewed receipts");
+  assert.ok(unreviewed, `expected an unreviewed blocker, got: ${JSON.stringify(blockers)}`);
+  assert.equal(unreviewed!.count, 1);
+  assert.equal(unreviewed!.href, "/receipts/review?status=needs_review");
+});
+
+test("blockers: needs_review receipt still pending processing is NOT unreviewed", () => {
+  // isPendingProcessing wins: a needs_review receipt still in the extraction
+  // queue is surfaced as "pending processing", not "unreviewed" — the fix is
+  // to drain the queue, not to review. The finalize gate mirrors this
+  // exclusion (gate 2.5 skips isPendingProcessing rows).
+  const receipt = makeReceipt({
+    id: "r-pending",
+    status: "needs_review",
+    extraction_state: "queued",
+  });
+
+  const blockers = computeExportBlockers([receipt], []);
+  const unreviewed = blockers.find((b) => b.label === "Unreviewed receipts");
+  assert.equal(
+    unreviewed ?? null,
+    null,
+    `expected no unreviewed blocker for a pending receipt, got: ${JSON.stringify(blockers)}`,
+  );
+});

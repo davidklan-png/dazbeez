@@ -18,6 +18,7 @@ import type {
   ReceiptRecord,
 } from "@/lib/receipts/types";
 import { validateAmexLinesForSignoff } from "@/lib/receipts/reconciliation-signoff";
+import { isPendingProcessing } from "@/lib/receipts/extraction-state";
 
 /**
  * Single source of truth for "what ships in this month's export bundle".
@@ -258,6 +259,38 @@ export async function validateMonthReadyForExport(
     const label = row.merchant ?? row.id;
     blockers.push(
       `Receipt ${label}: payment_path is UNKNOWN — classify as AMEX, CASH, or DIGITAL before export`,
+    );
+  }
+
+  // (2.5) Unreviewed-receipt gate. Mirrors computeExportBlockers' "Unreviewed
+  // receipts" tile (status='needs_review' in-month, excluding pending
+  // processing) so the tile's BLOCKER label is enforced at finalize —
+  // previously the tile reported unreviewed receipts as blockers but the gate
+  // never checked review status, so a month could read "blocked" on the tile
+  // yet finalize successfully (reverse tile-vs-gate drift).
+  //
+  // Direct month-scoped query, NOT bundle.receipts: the tile counts receipts by
+  // transaction_date in the statement month (all payment paths), while
+  // bundle.receipts excludes in-month AMEX (validated via lines) and UNKNOWN
+  // (excluded above) and includes cross-month matched receipts. Iterating the
+  // bundle here would read a different set than the tile and re-open the drift.
+  const unreviewedResult = await db
+    .prepare(
+      `SELECT * FROM receipt_records
+       WHERE deleted_at IS NULL
+         AND status = 'needs_review'
+         AND transaction_date LIKE ?`,
+    )
+    .bind(`${month}%`)
+    .all<ReceiptRecord>();
+  for (const r of unreviewedResult.results ?? []) {
+    // Same exclusion the tile applies: a needs_review receipt still in the
+    // extraction queue is "pending processing", not "unreviewed" — it's
+    // surfaced separately and fixed by draining the queue, not by reviewing.
+    if (isPendingProcessing(r)) continue;
+    const label = r.merchant ?? r.id;
+    blockers.push(
+      `Receipt ${label}: unreviewed (status='needs_review') — mark reviewed before exporting`,
     );
   }
 

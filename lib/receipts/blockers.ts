@@ -82,7 +82,7 @@ export function computeExportBlockers(
       count: unknownPath,
       label: "Receipts with unknown payment path",
       detail: "Classify as AMEX, CASH, or DIGITAL before sealing.",
-      href: "/receipts/review",
+      href: "/receipts/review?payment_path=UNKNOWN",
       ctaLabel: "Fix in Review",
     });
   }
@@ -113,7 +113,7 @@ export function computeExportBlockers(
       count: unreviewed,
       label: "Unreviewed receipts",
       detail: "These receipts must be reviewed before sealing.",
-      href: "/receipts/review",
+      href: "/receipts/review?status=needs_review",
       ctaLabel: "Fix in Review",
     });
   }

@@ -38,9 +38,17 @@ async function renderReviewPage(
 
   const params = await searchParams;
   const filter = String(params.filter ?? "");
+  // Deep-link filters from export blocker hrefs (e.g.
+  // /receipts/review?status=needs_review, ?payment_path=UNKNOWN). Applied in
+  // JS on top of the existing `filter` view param so the page's metrics
+  // (capturedThisMonth, ocrHealth) still reflect the full fetched set.
+  const statusFilter =
+    typeof params.status === "string" ? params.status : undefined;
+  const paymentPathFilter =
+    typeof params.payment_path === "string" ? params.payment_path : undefined;
 
   const receipts = await listReceiptRecords({ limit: 200 });
-  const queue = filterQueue(receipts, filter);
+  const queue = filterQueue(receipts, filter, statusFilter, paymentPathFilter);
   const amexFlags = await getAmexMatchFlagsByReceiptIds(queue.map((r) => r.id));
   const reReviewIds = new Set(
     [...amexFlags.entries()]
@@ -111,21 +119,36 @@ async function renderReviewPage(
   );
 }
 
-function filterQueue(receipts: ReceiptRecord[], filter: string) {
+function filterQueue(
+  receipts: ReceiptRecord[],
+  filter: string,
+  statusFilter?: string,
+  paymentPathFilter?: string,
+) {
+  // Deep-link filters (status / payment_path) narrow the set first; the
+  // existing `filter` view param (reviewed / needs / attendees / purpose) is
+  // then applied on top.
+  let queue = receipts;
+  if (statusFilter) {
+    queue = queue.filter((r) => r.status === statusFilter);
+  }
+  if (paymentPathFilter) {
+    queue = queue.filter((r) => r.payment_path === paymentPathFilter);
+  }
   if (filter === "reviewed") {
-    return receipts.filter((r) => r.status === "reviewed");
+    return queue.filter((r) => r.status === "reviewed");
   }
   if (filter === "needs") {
-    return receipts.filter(
+    return queue.filter(
       (r) => r.status === "needs_review" || r.status === "captured",
     );
   }
   if (filter === "attendees" || filter === "purpose") {
-    return receipts.filter(
+    return queue.filter(
       (r) =>
         (r.status === "needs_review" || r.status === "captured") &&
         !r.business_purpose,
     );
   }
-  return receipts;
+  return queue;
 }
