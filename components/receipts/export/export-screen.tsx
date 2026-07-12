@@ -13,6 +13,10 @@ import {
 } from "@/components/ui/icons";
 import type { ReceiptExport } from "@/lib/receipts/types";
 import type { Blocker } from "@/lib/receipts/blockers";
+import {
+  buildManifestPreviewCsv,
+  type ManifestSampleRow,
+} from "@/lib/receipts/manifest-preview";
 
 export type { Blocker } from "@/lib/receipts/blockers";
 
@@ -42,17 +46,6 @@ export interface ExportScreenProps {
   breakdown: CategoryBreakdownRow[];
   manifestSample: ManifestSampleRow[];
   manifestSize: { rowsTotal: number; sizeBytes: number; sha256: string | null };
-}
-
-export interface ManifestSampleRow {
-  receiptId: string;
-  merchant: string;
-  txnDate: string;
-  amountMinor: number;
-  categoryLabel: string;
-  payment: string;
-  alcohol: boolean;
-  archivePath: string;
 }
 
 export function ExportScreen(props: ExportScreenProps) {
@@ -869,7 +862,7 @@ function ReportFormat({
             <ManifestTable rows={manifestSample} />
           ) : view === "raw" ? (
             <pre className="overflow-auto bg-white px-3 py-2 font-mono text-[11.5px] text-gray-700">
-              {rawCsv(manifestSample)}
+              {buildManifestPreviewCsv(manifestSample)}
             </pre>
           ) : (
             <pre className="overflow-auto bg-white px-3 py-2 font-mono text-[11.5px] text-gray-700">
@@ -1004,33 +997,6 @@ function SchemaTable() {
       ))}
     </div>
   );
-}
-
-function rawCsv(rows: ManifestSampleRow[]): string {
-  const header =
-    "receipt_id,merchant,transaction_date,amount,category,payment_path,alcohol_present,archive_path";
-  const body = rows
-    .map((r) =>
-      [
-        r.receiptId,
-        csvField(r.merchant),
-        r.txnDate,
-        r.amountMinor,
-        csvField(r.categoryLabel),
-        r.payment,
-        r.alcohol ? "true" : "false",
-        csvField(r.archivePath),
-      ].join(","),
-    )
-    .join("\n");
-  return `${header}\n${body}`;
-}
-
-function csvField(s: string): string {
-  if (s.includes(",") || s.includes('"') || s.includes("\n")) {
-    return `"${s.replace(/"/g, '""')}"`;
-  }
-  return s;
 }
 
 function fmtRelative(iso: string): string {

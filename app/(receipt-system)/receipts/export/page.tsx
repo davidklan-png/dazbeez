@@ -14,8 +14,8 @@ import { assertReceiptsPageAccess } from "@/lib/receipts/auth-request";
 import {
   ExportScreen,
   type CategoryBreakdownRow,
-  type ManifestSampleRow,
 } from "@/components/receipts/export/export-screen";
+import type { ManifestSampleRow } from "@/lib/receipts/manifest-preview";
 import { MonthSwitcher, type MonthOption } from "@/components/receipts/month-switcher";
 import { formatMonth } from "@/lib/receipts/format";
 import {
@@ -230,6 +230,7 @@ function buildManifestSample(rows: ExportRowLike[]): ManifestSampleRow[] {
       archivePath: r.originalR2Key
         ? `r2://.../${r.originalR2Key.slice(-12)}`
         : "—",
+      invoiceRegistrationNumber: r.invoiceRegistrationNumber ?? "",
     };
   });
 }
@@ -248,4 +249,5 @@ type ExportRowLike = {
   matchStatus: string | null;
   taxAmountMinor: number | null;
   originalR2Key: string | null;
+  invoiceRegistrationNumber: string | null;
 };
