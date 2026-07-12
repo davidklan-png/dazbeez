@@ -1622,6 +1622,41 @@ export async function listBusinessTripReports(
   return result.results ?? [];
 }
 
+/**
+ * AMEX statement lines linked to each business trip report (via
+ * business_trip_report_lines), keyed by report id. Empty map for no ids.
+ * Used by the export review page to render the lines behind each trip.
+ */
+export async function listAmexLinesForBusinessTripReports(
+  reportIds: string[],
+): Promise<Map<string, AmexStatementLine[]>> {
+  const out = new Map<string, AmexStatementLine[]>();
+  const unique = [...new Set(reportIds.filter(Boolean))];
+  if (unique.length === 0) return out;
+  const db = getReceiptsDb();
+  const CHUNK = 90;
+  for (let i = 0; i < unique.length; i += CHUNK) {
+    const chunk = unique.slice(i, i + CHUNK);
+    const placeholders = chunk.map(() => "?").join(",");
+    const result = await db
+      .prepare(
+        `SELECT btrl.business_trip_report_id AS report_id, asl.*
+         FROM business_trip_report_lines btrl
+         JOIN amex_statement_lines asl ON asl.id = btrl.amex_statement_line_id
+         WHERE btrl.business_trip_report_id IN (${placeholders})`,
+      )
+      .bind(...chunk)
+      .all<AmexStatementLine & { report_id: string }>();
+    for (const row of result.results ?? []) {
+      const { report_id, ...line } = row;
+      const arr = out.get(report_id) ?? [];
+      arr.push(line);
+      out.set(report_id, arr);
+    }
+  }
+  return out;
+}
+
 // ─── Expense categories ───────────────────────────────────────────────────────
 
 export interface ExpenseCategoryDbRow {

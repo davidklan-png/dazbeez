@@ -7,6 +7,8 @@ import {
   getExport,
   getFinalizedReconciliationForMonth,
   listAmexLines,
+  listAmexLinesForBusinessTripReports,
+  listBusinessTripReports,
   listReceiptRecords,
 } from "@/lib/receipts/db";
 import { assertReceiptsPageAccess } from "@/lib/receipts/auth-request";
@@ -32,14 +34,18 @@ export default async function ReviewPage({ params }: { params: Params }) {
   // receipts (never month-scoped receipts for line-category resolution — see
   // PR #72). monthReceipts (month-scoped) feeds only the tile's pending /
   // unreviewed / unknown counts.
-  const [bundle, currentExport, reconciliation, monthLines, monthReceipts] =
+  const [bundle, currentExport, reconciliation, monthLines, monthReceipts, tripReports] =
     await Promise.all([
       buildExportBundle(month),
       getExport(month),
       getFinalizedReconciliationForMonth(month),
       listAmexLines(month),
       listReceiptRecords({ month, limit: 1000 }),
+      listBusinessTripReports(month),
     ]);
+  const tripLines = await listAmexLinesForBusinessTripReports(
+    tripReports.map((r) => r.id),
+  );
 
   const window =
     monthLines.length > 0 ? deriveStatementWindow(monthLines, month) : null;
@@ -70,6 +76,8 @@ export default async function ReviewPage({ params }: { params: Params }) {
       gateBlockers={gateBlockers}
       tileBlockers={tileBlockers}
       warnings={warnings}
+      tripReports={tripReports}
+      tripLines={tripLines}
     />
   );
 }

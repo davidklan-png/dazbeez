@@ -8,6 +8,8 @@ import {
 import { formatCategoryLabel } from "@/lib/receipts/categories";
 import type { Blocker } from "@/lib/receipts/blockers";
 import type {
+  AmexStatementLine,
+  BusinessTripReport,
   ExportRow,
   ReceiptExport,
   ReceiptRecord,
@@ -26,6 +28,8 @@ export interface ReviewScreenProps {
   gateBlockers: string[];
   tileBlockers: Blocker[];
   warnings: Blocker[];
+  tripReports: BusinessTripReport[];
+  tripLines: Map<string, AmexStatementLine[]>;
 }
 
 export function ReviewScreen(props: ReviewScreenProps) {
@@ -62,6 +66,13 @@ export function ReviewScreen(props: ReviewScreenProps) {
         <SummarySection rows={props.rows} receipts={props.receipts} />
         <SideBySideSection amexRows={amexRows} receipts={props.receipts} />
         <AdditionalChargesSection chargeRows={chargeRows} />
+        <BusinessTripsSection
+          tripReports={props.tripReports}
+          tripLines={props.tripLines}
+          candidateRows={amexRows.filter(
+            (r) => r.businessTripStatus === "candidate",
+          )}
+        />
       </div>
     </div>
   );
@@ -457,6 +468,89 @@ function AdditionalChargesSection({ chargeRows }: { chargeRows: ExportRow[] }) {
           ))
         )}
       </Card>
+    </div>
+  );
+}
+
+// ─── Section 4: Business trips ────────────────────────────────────────────
+
+function BusinessTripsSection({
+  tripReports,
+  tripLines,
+  candidateRows,
+}: {
+  tripReports: BusinessTripReport[];
+  tripLines: Map<string, AmexStatementLine[]>;
+  candidateRows: ExportRow[];
+}) {
+  return (
+    <div>
+      <SectionTitle
+        title="Business trips"
+        sub="Trip reports overlapping this statement window"
+      />
+      {candidateRows.length > 0 && (
+        <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2.5 text-[12.5px] text-amber-800">
+          <b>{candidateRows.length} unresolved business-trip candidate line(s)</b> — these block
+          finalize (gate 4). Confirm or dismiss the trip cluster in Reconcile.
+        </div>
+      )}
+      {tripReports.length === 0 ? (
+        <Card pad={20}>
+          <p className="text-[12.5px] text-gray-400">
+            No business trip reports for this month.
+          </p>
+        </Card>
+      ) : (
+        <div className="space-y-3">
+          {tripReports.map((trip) => {
+            const lines = tripLines.get(trip.id) ?? [];
+            const total = lines.reduce((s, l) => s + (l.amount_minor ?? 0), 0);
+            return (
+              <Card key={trip.id} pad={20}>
+                <div className="flex flex-wrap items-baseline justify-between gap-2">
+                  <div>
+                    <span className="text-[13.5px] font-semibold text-gray-900">
+                      {trip.trip_name ?? trip.primary_location ?? "Untitled trip"}
+                    </span>
+                    <span className="ml-2 text-[11.5px] text-gray-500">
+                      {trip.start_date} – {trip.end_date}
+                      {trip.primary_location ? ` · ${trip.primary_location}` : ""}
+                    </span>
+                  </div>
+                  <Pill tone={trip.status === "confirmed" ? "green" : "amber"} size="sm">
+                    {trip.status}
+                  </Pill>
+                </div>
+                {trip.purpose && (
+                  <p className="mt-1 text-[12px] text-gray-500">{trip.purpose}</p>
+                )}
+                <div className="mt-3">
+                  <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-[0.05em] text-gray-500">
+                    Linked lines ({lines.length}) · {formatAmountMinor(total)}
+                  </div>
+                  {lines.length === 0 ? (
+                    <p className="text-[12px] text-gray-400">No linked AMEX lines.</p>
+                  ) : (
+                    <ul className="space-y-0.5 text-[12px] text-gray-700">
+                      {lines.map((l) => (
+                        <li key={l.id} className="flex justify-between gap-3">
+                          <span className="truncate">
+                            {l.transaction_date} · {l.merchant}
+                          </span>
+                          <span className="shrink-0 tabular-nums text-gray-500">
+                            {formatAmountMinor(l.amount_minor, l.currency)}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              </Card>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
