@@ -132,7 +132,11 @@ export function ExportScreen(props: ExportScreenProps) {
       <TopBar
         monthLabel={props.monthLabel}
         finalized={finalized}
-        builtAt={props.currentExport?.created_at ?? null}
+        builtAt={
+          props.currentExport?.bundle_built_at ??
+          props.currentExport?.created_at ??
+          null
+        }
         onRebuild={rebuildDraft}
         busy={busy === "build"}
       />

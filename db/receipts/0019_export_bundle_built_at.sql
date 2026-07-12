@@ -1,0 +1,16 @@
+-- 0019_export_bundle_built_at.sql
+--
+-- Record when an export draft's bundle was last (re)built in R2.
+--
+-- Why: the export screen's "Last draft built" timestamp was sourced from
+-- receipt_exports.created_at, which is set once at row creation and never
+-- updated — createExport() returns the existing draft's id without any
+-- UPDATE on rebuild. So every "Rebuild draft" click left the displayed
+-- timestamp frozen at first creation, making a successful rebuild look like
+-- a no-op (the bundle WAS re-staged in R2 and items replaced, but nothing
+-- on the row advanced). bundle_built_at is written by recordExportBundle()
+-- on every rebuild, giving the UI a value that actually moves.
+--
+-- Additive only — nullable, no backfill. Pre-existing draft rows read as
+-- NULL and the UI falls back to created_at (see export-screen.tsx TopBar).
+ALTER TABLE receipt_exports ADD COLUMN bundle_built_at TEXT;

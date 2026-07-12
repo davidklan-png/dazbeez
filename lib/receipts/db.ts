@@ -1797,6 +1797,44 @@ export async function listExportsContainingReceipt(
   return (result.results ?? []).map((r) => r.export_id);
 }
 
+/**
+ * Persist the staged-bundle metadata onto a draft row: the R2 keys, the
+ * archive + manifest SHA-256s, and bundle_built_at (when the bundle was
+ * last (re)built). Shared between the rebuild path (POST
+ * /api/receipts/export/month with finalize=false) and finalizeExport so a
+ * draft built via the rebuild route carries the same persisted fields the
+ * finalize-only route (/api/receipts/export/[month]) checks before
+ * finalizing — without it, Rebuild→Finalize always 400s with
+ * "Export bundle has not been generated yet."
+ *
+ * Guarded on status='draft' so a finalized row is left untouched, matching
+ * finalizeExport's own guard (callers already reject finalized months with a
+ * 409 before reaching here). This also keeps the no-op-on-finalized behavior
+ * intact: if the row is already finalized, nothing is written.
+ */
+export async function recordExportBundle(
+  exportId: string,
+  archiveR2Key: string,
+  manifestR2Key: string,
+  archiveSha256: string,
+  manifestSha256?: string,
+): Promise<void> {
+  const db = getReceiptsDb();
+  const now = nowIso();
+  await db
+    .prepare(
+      `UPDATE receipt_exports
+       SET archive_r2_key = ?,
+           manifest_r2_key = ?,
+           archive_sha256 = ?,
+           manifest_sha256 = ?,
+           bundle_built_at = ?
+       WHERE id = ? AND status = 'draft'`,
+    )
+    .bind(archiveR2Key, manifestR2Key, archiveSha256, manifestSha256 ?? null, now, exportId)
+    .run();
+}
+
 export async function finalizeExport(
   exportId: string,
   archiveR2Key: string,
@@ -1808,29 +1846,30 @@ export async function finalizeExport(
   const db = getReceiptsDb();
   const now = nowIso();
 
+  // Record the staged bundle (R2 keys + SHAs + bundle_built_at) via the
+  // shared helper so the finalize:true path leaves the same persisted bundle
+  // metadata as the rebuild path. The UPDATE below flips only the
+  // finalize-specific fields — each column is written exactly once (no
+  // double-write) and the end-state is identical to the pre-refactor single
+  // UPDATE, plus the new bundle_built_at column.
+  await recordExportBundle(
+    exportId,
+    archiveR2Key,
+    manifestR2Key,
+    archiveSha256,
+    manifestSha256,
+  );
+
   const result = await db
     .prepare(
       `UPDATE receipt_exports
        SET status = 'finalized',
-           archive_r2_key = ?,
-           manifest_r2_key = ?,
-           archive_sha256 = ?,
-           manifest_sha256 = ?,
            finalization_hash = ?,
            finalized_by = ?,
            finalized_at = ?
        WHERE id = ? AND status = 'draft'`,
     )
-    .bind(
-      archiveR2Key,
-      manifestR2Key,
-      archiveSha256,
-      manifestSha256 ?? null,
-      manifestSha256 ?? archiveSha256,
-      actor,
-      now,
-      exportId,
-    )
+    .bind(manifestSha256 ?? archiveSha256, actor, now, exportId)
     .run();
 
   if ((result.meta.changes ?? 0) === 0) {
