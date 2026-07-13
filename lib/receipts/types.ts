@@ -134,7 +134,11 @@ export type AuditAction =
   | "export.finalized"
   | "export.revision_created"
   | "archive.created"
-  | "settings.updated";
+  | "settings.updated"
+  | "receipt.export_statement_month_assigned"
+  | "receipt.export_statement_month_overridden"
+  | "receipt.export_statement_month_rolled_forward"
+  | "receipt.export_statement_month_window_drift";
 
 // ─── Compliance: source / preservation / qualified-invoice ────────────────
 
@@ -228,6 +232,12 @@ export interface ReceiptRecord {
   extraction_json: string | null;
   legacy: number;
   exported_month: string | null;
+  // Statement-cycle membership (0020_export_statement_month.sql, ADR 0006).
+  // Sticky, stored assignment for non-AMEX receipts: the statement month whose
+  // cycle window covers transaction_date. NULL/undefined = awaiting (date
+  // beyond newest close) or N/A (AMEX/UNKNOWN). Unread until PR #2 flips
+  // buildExportBundle. Optional (matches the 0013-0016 additive-column style).
+  export_statement_month?: string | null;
   expense_category_code: string | null;
   deleted_at: string | null;
   deleted_by: string | null;
@@ -541,6 +551,10 @@ export interface UpdateReceiptInput {
   processedR2Key?: string | null;
   extractionJson?: string | null;
   exportedMonth?: string | null;
+  // ADR 0006: discretionary override of the sticky export_statement_month.
+  // Server asserts the target month is open (no finalized reconciliation)
+  // before applying; audited as receipt.export_statement_month_overridden.
+  exportStatementMonth?: string | null;
   // Compliance fields (0014_compliance.sql)
   sourceType?: SourceType | null;
   invoiceRegistrationNumber?: string | null;
