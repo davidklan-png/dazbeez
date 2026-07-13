@@ -211,3 +211,43 @@ export function computeExportWarnings(lines: AmexStatementLine[]): Blocker[] {
 
   return warnings;
 }
+
+/**
+ * Non-blocking warning when 2+ CASH/DIGITAL receipts share merchant +
+ * amount_minor + transaction_date (e.g. several ¥10,000 Seven-Eleven charges
+ * on the same day). ADR 0006 §D9 / PR #3. Warning only — no auto-dedup, not a
+ * finalize blocker. Deep-links to the first offending receipt's edit view.
+ *
+ * Receipts not in the CASH/DIGITAL paths, or missing merchant/amount/date, are
+ * ignored (they can't form a duplicate cluster on these keys).
+ */
+export function computeDuplicateReceiptWarnings(
+  receipts: ReceiptRecord[],
+): Blocker[] {
+  const groups = new Map<string, ReceiptRecord[]>();
+  for (const r of receipts) {
+    if (r.payment_path !== "CASH" && r.payment_path !== "DIGITAL") continue;
+    if (!r.transaction_date || r.merchant == null || r.amount_minor == null) continue;
+    const key = `${r.merchant} ${r.amount_minor} ${r.transaction_date}`;
+    const g = groups.get(key) ?? [];
+    g.push(r);
+    groups.set(key, g);
+  }
+  const clusters = [...groups.values()].filter((g) => g.length >= 2);
+  if (clusters.length === 0) return [];
+  const totalFlagged = clusters.reduce((s, g) => s + g.length, 0);
+  const first = clusters[0]![0]!;
+  return [
+    {
+      severity: "warn",
+      count: totalFlagged,
+      label: "Possible duplicate cash/digital receipts",
+      detail:
+        `${clusters.length} cluster(s) share merchant + amount + date ` +
+        `(e.g. ${first.merchant} ×${clusters[0]!.length} on ${first.transaction_date}). ` +
+        `Confirm these are distinct charges, not double-captured.`,
+      href: `/receipts/review/${first.id}`,
+      ctaLabel: "Open first",
+    },
+  ];
+}

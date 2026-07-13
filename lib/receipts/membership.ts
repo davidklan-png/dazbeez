@@ -114,6 +114,98 @@ export async function listReceiptsByExportStatementMonth(
   return res.results ?? [];
 }
 
+// ─── Unassigned-receipt surfaces (awaiting / unassignable) ─────────────────
+
+/** Increment a YYYY-MM by n months (n may be negative). */
+function incrementMonth(ym: string, n: number): string {
+  const [y, m] = ym.split("-").map(Number);
+  const total = y * 12 + (m - 1) + n;
+  const ny = Math.floor(total / 12);
+  const nm = (total % 12) + 1;
+  return `${ny}-${String(nm).padStart(2, "0")}`;
+}
+
+/**
+ * Heuristic next statement month for "awaiting" receipts (dated past the
+ * newest close): the statement immediately after the newest imported one. A
+ * rough hint — awaiting receipts are usually recent captures just past the
+ * newest close, so the next statement is the right landing month. Labeled
+ * "expected" in the UI; the operator sees the actual transaction_date too.
+ */
+export async function nextExpectedStatementMonth(): Promise<string | null> {
+  const windows = await loadStatementWindows();
+  if (windows.length === 0) return null;
+  const newest = windows[windows.length - 1]!.statementMonth;
+  return incrementMonth(newest, 1);
+}
+
+/**
+ * CASH/DIGITAL receipts awaiting a covering statement — dated, unassigned
+ * (export_statement_month NULL). Self-resolving: the next AMEX import whose
+ * window covers the date assigns them via the sweep. Informational, not a
+ * blocker.
+ */
+export async function listAwaitingReceipts(): Promise<ReceiptRecord[]> {
+  const db = getReceiptsDb();
+  const res = await db
+    .prepare(
+      `SELECT * FROM receipt_records
+       WHERE export_statement_month IS NULL
+         AND payment_path IN ('CASH', 'DIGITAL')
+         AND deleted_at IS NULL
+         AND transaction_date IS NOT NULL
+       ORDER BY transaction_date ASC`,
+    )
+    .all<ReceiptRecord>();
+  return res.results ?? [];
+}
+
+/**
+ * CASH/DIGITAL receipts that can NEVER be assigned — no transaction_date.
+ * Distinct from awaiting: these need operator action (set a date), will never
+ * auto-resolve, and are invisible to every membership query. Style as
+ * needs-attention; deep-link to the receipt's edit view.
+ */
+export async function listUnassignableReceipts(): Promise<ReceiptRecord[]> {
+  const db = getReceiptsDb();
+  const res = await db
+    .prepare(
+      `SELECT * FROM receipt_records
+       WHERE export_statement_month IS NULL
+         AND payment_path IN ('CASH', 'DIGITAL')
+         AND deleted_at IS NULL
+         AND transaction_date IS NULL
+       ORDER BY captured_at DESC`,
+    )
+    .all<ReceiptRecord>();
+  return res.results ?? [];
+}
+
+/** Imported statement months that are NOT export-sealed — the valid targets for
+ *  a discretionary membership override (ADR §D6). A receipt may be reassigned to
+ *  any open month; sealed months are blocked (the bundle already shipped). */
+export async function listOpenStatementMonths(): Promise<string[]> {
+  const [windows, sealed] = await Promise.all([
+    loadStatementWindows(),
+    loadSealedExportMonths(),
+  ]);
+  return windows
+    .map((w) => w.statementMonth)
+    .filter((m) => !sealed.has(m))
+    .sort();
+}
+
+/** The natural statement month for a date (the cycle it falls in by window
+ *  math), ignoring sealed-state/roll-forward. Used to label the receipt's
+ *  "natural" month next to an override. Null if the date is awaiting. */
+export async function naturalMonthForDate(
+  date: string | null,
+): Promise<string | null> {
+  if (!date) return null;
+  const windows = await loadStatementWindows();
+  return naturalStatementMonth(date, windows);
+}
+
 // ─── Assignment (capture / update / import sweep) ──────────────────────────
 
 /**

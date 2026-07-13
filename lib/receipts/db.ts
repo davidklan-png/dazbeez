@@ -247,6 +247,14 @@ export async function updateReceiptRecord(
   if ("processedR2Key" in input) { sets.push("processed_r2_key = ?"); binds.push(input.processedR2Key ?? null); }
   if ("extractionJson" in input) { sets.push("extraction_json = ?"); binds.push(input.extractionJson ?? null); }
   if ("exportedMonth" in input) { sets.push("exported_month = ?"); binds.push(input.exportedMonth ?? null); }
+  // ADR 0006 §D6: discretionary override of the sticky export_statement_month.
+  // The route guards the target month is export-open and writes the dedicated
+  // audit entry; this just applies the column. Explicit override wins over the
+  // automatic assignment hook below.
+  if ("exportStatementMonth" in input) {
+    sets.push("export_statement_month = ?");
+    binds.push(input.exportStatementMonth ?? null);
+  }
   if ("expenseCategoryCode" in input) { sets.push("expense_category_code = ?"); binds.push(input.expenseCategoryCode ?? null); }
   if ("sourceType" in input) { sets.push("source_type = ?"); binds.push(input.sourceType ?? null); }
   if ("invoiceRegistrationNumber" in input) { sets.push("invoice_registration_number = ?"); binds.push(input.invoiceRegistrationNumber ?? null); }
@@ -305,7 +313,8 @@ export async function updateReceiptRecord(
     "transactionDate" in input &&
     input.transactionDate &&
     (effectivePaymentPath === "CASH" || effectivePaymentPath === "DIGITAL") &&
-    !before.export_statement_month
+    !before.export_statement_month &&
+    !("exportStatementMonth" in input)
   ) {
     try {
       await assignMembershipForReceipt(id, input.transactionDate, actor);

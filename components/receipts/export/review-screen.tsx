@@ -15,12 +15,14 @@ import type {
   ReceiptExport,
   ReceiptRecord,
 } from "@/lib/receipts/types";
-import type { StatementWindow } from "@/lib/receipts/statement-window";
+import type { MembershipWindow, StatementWindow } from "@/lib/receipts/statement-window";
 
 export interface ReviewScreenProps {
   month: string;
   monthLabel: string;
   window: StatementWindow | null;
+  /** ADR 0006 membership cycle window (close(M-1), close(M)] — for the Additional Charges header. */
+  cycleWindow: MembershipWindow | null;
   rows: ExportRow[];
   /** bundle.receipts — ID-fetched matched receipts, for side-by-side lookup. */
   receipts: ReceiptRecord[];
@@ -66,7 +68,11 @@ export function ReviewScreen(props: ReviewScreenProps) {
       <div className="space-y-8 px-8 py-8">
         <SummarySection rows={props.rows} receipts={props.receipts} />
         <SideBySideSection amexRows={amexRows} receipts={props.receipts} />
-        <AdditionalChargesSection chargeRows={chargeRows} />
+        <AdditionalChargesSection
+          chargeRows={chargeRows}
+          monthLabel={props.monthLabel}
+          cycleWindow={props.cycleWindow}
+        />
         <BusinessTripsSection
           tripReports={props.tripReports}
           tripLines={props.tripLines}
@@ -439,12 +445,36 @@ function ConsolidatedGroup({
 
 // ─── Section 3: Additional charges (CASH/DIGITAL) ────────────────────────
 
-function AdditionalChargesSection({ chargeRows }: { chargeRows: ExportRow[] }) {
+/** Format a membership window (startExclusive, endInclusive] as the cash-eligible
+ * date range a receipt must fall in to ship in this statement month. The lower
+ * bound is exclusive, so it displays as startExclusive+1 day (a cash receipt
+ * dated exactly on close(M-1) belongs to M-1, not M). Null start ⇒ open. */
+function formatCycleRange(w: MembershipWindow): string {
+  const end = w.endInclusive;
+  if (!w.startExclusive) return `open – ${end}`;
+  const d = new Date(`${w.startExclusive}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + 1);
+  return `${d.toISOString().slice(0, 10)} – ${end}`;
+}
+
+function AdditionalChargesSection({
+  chargeRows,
+  monthLabel,
+  cycleWindow,
+}: {
+  chargeRows: ExportRow[];
+  monthLabel: string;
+  cycleWindow: MembershipWindow | null;
+}) {
+  const range = cycleWindow ? formatCycleRange(cycleWindow) : null;
+  const sub = range
+    ? `${monthLabel} cycle · ${range} · ${chargeRows.length} receipt${chargeRows.length === 1 ? "" : "s"}`
+    : `${monthLabel} cycle · ${chargeRows.length} receipt${chargeRows.length === 1 ? "" : "s"}`;
   return (
     <div>
       <SectionTitle
         title="Additional charges"
-        sub="Non-AMEX receipts (cash/digital) that ship in the export"
+        sub={sub}
       />
       <Card pad={0}>
         <div className="grid grid-cols-[120px_1fr_120px_140px_100px] border-b border-gray-150 bg-gray-50 px-4 py-2 text-[10.5px] font-bold uppercase tracking-[0.05em] text-gray-500">
@@ -456,7 +486,7 @@ function AdditionalChargesSection({ chargeRows }: { chargeRows: ExportRow[] }) {
         </div>
         {chargeRows.length === 0 ? (
           <div className="px-4 py-8 text-center text-[12.5px] text-gray-400">
-            No cash/digital receipts for this month.
+            No cash/digital receipts in this cycle.
           </div>
         ) : (
           chargeRows.map((r, i) => (
