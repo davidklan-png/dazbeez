@@ -10,7 +10,7 @@ import {
   listAmexLinesForBusinessTripReports,
   listBusinessTripReports,
 } from "@/lib/receipts/db";
-import { listUnknownInScopeReceipts, loadStatementWindows } from "@/lib/receipts/membership";
+import { listUnknownInScopeReceipts } from "@/lib/receipts/membership";
 import { assertReceiptsPageAccess } from "@/lib/receipts/auth-request";
 import {
   computeExportBlockers,
@@ -49,11 +49,6 @@ export default async function ReviewPage({ params }: { params: Params }) {
   // — the same set the finalize gate (validateMonthReadyForExport) uses for its
   // unreviewed check, so the tile and gate cannot drift.
   const monthReceipts = [...bundle.receipts, ...unknownInScope];
-  // ADR 0006 (PR #3): the membership cycle window for the Additional Charges
-  // header — (close(M-1), close(M)] — so the operator can see which
-  // transaction-date range a cash receipt must fall in to ship in this month.
-  const cycleWindow =
-    (await loadStatementWindows()).find((w) => w.statementMonth === month) ?? null;
   const tripLines = await listAmexLinesForBusinessTripReports(
     tripReports.map((r) => r.id),
   );
@@ -83,7 +78,6 @@ export default async function ReviewPage({ params }: { params: Params }) {
       month={month}
       monthLabel={formatMonth(month)}
       window={window}
-      cycleWindow={cycleWindow}
       rows={bundle.rows}
       receipts={bundle.receipts}
       currentExport={currentExport}

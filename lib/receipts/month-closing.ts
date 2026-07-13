@@ -39,9 +39,9 @@ import { isUnreviewedReceipt } from "@/lib/receipts/blockers";
  *     with the matched receipt's fields joined when present.
  *     Missing-receipt and no-receipt lines appear with their reasons.
  *   - One row per CASH/DIGITAL receipt ASSIGNED to statement month M
- *     (RowType=receipt) — selected by export_statement_month, not the
- *     calendar month of transaction_date (ADR 0006). The cycle a receipt
- *     belongs to can lag its date by ~6 weeks.
+ *     (RowType=receipt) — selected by export_statement_month. Under ADR 0008 a
+ *     receipt's stored month is the CALENDAR month of its transaction_date
+ *     (June 11 → 2026-06), so this set is the month's own cash/digital receipts.
  *   - A receipt matched to a line appears once (on the line row), never
  *     twice — even if its payment_path is CASH/DIGITAL and it is also
  *     assigned to M.
@@ -85,15 +85,13 @@ export async function buildExportBundle(month: string): Promise<ExportBundle> {
   const matchedReceiptMap = new Map<string, ReceiptRecord>();
   for (const r of matchedReceipts) matchedReceiptMap.set(r.id, r);
 
-  // (3) Non-AMEX receipts selected by STORED statement-cycle membership
-  // (ADR 0006 / PR #2): export_statement_month = M, not the calendar month
-  // of transaction_date. A receipt whose transaction_date sits in a different
-  // calendar month than its cycle (the ~6-week AMEX lag) ships in the cycle's
-  // statement month. UNKNOWN is intentionally excluded — it has no assigned
-  // month and blocks finalize at gate 2 until classified. Membership is
-  // assigned/stickied at capture, on first date-set, and by the import sweep
-  // (lib/receipts/membership.ts); receipts the sweep hasn't reached stay NULL
-  // and are excluded here.
+  // (3) Non-AMEX receipts selected by STORED membership (ADR 0008 / was ADR
+  // 0006 PR #2): export_statement_month = M. Under the calendar rule a receipt
+  // is assigned to the calendar month of its transaction_date at capture /
+  // first date-set (lib/receipts/membership.ts). UNKNOWN is intentionally
+  // excluded — it has no assigned month and blocks finalize at gate 2 until
+  // classified. Undated cash/digital receipts stay NULL (unassignable) and are
+  // excluded here.
   const nonAmexReceipts = (await listReceiptsByExportStatementMonth(month)).filter(
     (r) => !matchedReceiptMap.has(r.id),
   );
@@ -372,12 +370,11 @@ export async function validateMonthReadyForExport(
   const bundle = prebuiltBundle ?? (await buildExportBundle(month));
   const db = getReceiptsDb();
 
-  // ADR 0006 (PR #2): gate scope is statement-cycle membership, not the
-  // calendar month of transaction_date. CASH/DIGITAL in scope = assigned to M
-  // (already in bundle.receipts, alongside matched AMEX). UNKNOWN has no stored
-  // month, so its scope is computed via listUnknownInScopeReceipts: an UNKNOWN
-  // receipt blocks M only if its transaction_date's natural window is M. An
-  // UNKNOWN receipt dated beyond the newest close is "awaiting" and blocks nothing.
+  // ADR 0008 (was ADR 0006 PR #2): gate scope is membership, not a raw
+  // transaction_date LIKE filter. CASH/DIGITAL in scope = assigned to M (already
+  // in bundle.receipts, alongside matched AMEX). UNKNOWN has no stored month, so
+  // its scope is computed via listUnknownInScopeReceipts: an UNKNOWN receipt
+  // blocks M only if its transaction_date's CALENDAR month is M.
   const unknownInScope = await listUnknownInScopeReceipts(month);
 
   // (2) UNKNOWN payment_path — only those in M's natural window.
@@ -387,9 +384,9 @@ export async function validateMonthReadyForExport(
   }));
 
   // (2.5) Unreviewed receipts in scope for M = the bundle (matched AMEX +
-  // CASH/DIGITAL assigned to M) ∪ UNKNOWN in M's natural window. This supersedes
+  // CASH/DIGITAL assigned to M) ∪ UNKNOWN in M's calendar month. This supersedes
   // PR #73's calendar-scoped (`transaction_date LIKE month%`) query: now that
-  // ADR 0006 defines shipping membership, scoping the unreviewed gate by the
+  // ADR 0008 defines shipping membership, scoping the unreviewed gate by the
   // bundle keeps gate ⇄ bundle consistent. Core applies isUnreviewedReceipt
   // (pending-exclusion) to each.
   const unreviewedReceipts = [...bundle.receipts, ...unknownInScope];

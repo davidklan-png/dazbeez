@@ -6,10 +6,8 @@ import {
   listReconciliationStatusByMonth,
 } from "@/lib/receipts/db";
 import {
-  listAwaitingReceipts,
   listUnassignableReceipts,
   listUnknownInScopeReceipts,
-  nextExpectedStatementMonth,
 } from "@/lib/receipts/membership";
 import {
   formatCategoryLabel,
@@ -81,16 +79,14 @@ export default async function ExportPage({
   // We still fetch the unfiltered month receipts + lines separately for the
   // blockers panel (computeExportBlockers runs over the raw receipt set,
   // including UNKNOWN payment_path that the bundle intentionally excludes).
-  const [bundle, exports, unknownInScope, monthLines, currentExport, awaiting, unassignable, nextExpected] =
+  const [bundle, exports, unknownInScope, monthLines, currentExport, unassignable] =
     await Promise.all([
       buildExportBundle(month),
       listExports(),
       listUnknownInScopeReceipts(month),
       listAmexLines(month),
       getExport(month),
-      listAwaitingReceipts(),
       listUnassignableReceipts(),
-      nextExpectedStatementMonth(),
     ]);
   // ADR 0006 (PR #2): tile counting set = in-scope receipts for M = the bundle
   // (matched AMEX + CASH/DIGITAL assigned to M) ∪ UNKNOWN in M's natural window
@@ -151,9 +147,7 @@ export default async function ExportPage({
         manifestSample={manifestSample}
         manifestSize={manifestSize}
         statementWindow={statementWindow}
-        awaitingReceipts={awaiting}
         unassignableReceipts={unassignable}
-        nextExpectedMonth={nextExpected}
       />
       <div className="border-t border-amber-100 bg-amber-50 px-8 py-4 text-xs text-amber-900">
         <p className="font-semibold">Accountant review boundary</p>

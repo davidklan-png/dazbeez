@@ -66,169 +66,118 @@ export function isReceiptInWindow(
   return receipt.transaction_date >= window.start && receipt.transaction_date <= window.end;
 }
 
-// ─── Statement-cycle membership windows (ADR 0006) ─────────────────────────
+// ─── Calendar-month membership (ADR 0008) ─────────────────────────────────
 //
-// DISTINCT from the slack-5 MATCH window above. Membership windows are slack-0
-// cycle boundaries chained across statements: window(M) = (close(M-1), close(M)]
-// where close(M) = MAX(transaction_date) over statement M's AMEX lines (NOT
-// payment_due_date — see ADR §D1). A transaction_date maps to exactly one
-// window. These functions are PURE (no D1, no Date.now/random); the only thing
-// that persists a membership decision is the receipt_records.export_statement_month
-// column (migration 0020), written by the capture path / import sweep / backfill.
+// DISTINCT from the slack-5 MATCH window above (deriveStatementWindow /
+// isReceiptInWindow), which is used only to find receipt candidates that *might*
+// match AMEX lines during reconcile. That match window is untouched.
 //
-// The freeze rule (ADR §D3): sticky assignments always win over window
-// recomputation. It is NOT enforced here — assignReceiptMembership has no
-// concept of an existing assignment. It is a caller contract: the import sweep
-// only selects `WHERE export_statement_month IS NULL`, so an already-assigned
-// receipt is structurally invisible to re-derivation. Pinned by a contract test.
+// A CASH/DIGITAL receipt's EXPORT month is the CALENDAR month of its
+// transaction_date (June 11 → 2026-06), stored on
+// receipt_records.export_statement_month (migration 0020). This RETIRES the
+// ADR 0006 statement-cycle-window rule (window(M) = (close(M-1), close(M)]
+// chained from AMEX line closes): a cash receipt now ships in the same calendar
+// month as its date, sitting alongside that month's AMEX statement — whose own
+// lines span the PRIOR billing cycle. That asymmetry is intentional and
+// operator-confirmed (2026-07-13). See docs/adr/0008-…md.
+//
+// These functions are PURE (no D1, no Date.now/random). The only thing that
+// persists a membership decision is the export_statement_month column, written by
+// the capture path (createReceiptRecord), the date-set hook
+// (updateReceiptRecord), the discretionary override (PATCH /api/receipts/[id]),
+// and the one-time policy migration (scripts/migrate-membership-to-calendar-month.ts).
+//
+// Sticky / freeze rule (carried over from ADR 0006, restated): an assigned
+// receipt is never re-derived by the automatic hooks. The capture/date-set
+// assignment UPDATEs are gated on `WHERE export_statement_month IS NULL`, so an
+// already-assigned receipt is structurally invisible to re-derivation. The only
+// mutation after assignment is an operator override. Calendar month removes the
+// original drift risk entirely — membership no longer depends on AMEX line data,
+// so no boundary can shift — which is why ADR 0006's drift detection is retired.
 
-/** A statement's cycle close = the latest transaction_date among its lines. */
-export interface StatementClose {
-  statementMonth: string; // YYYY-MM
-  close: string; // YYYY-MM-DD
+/** Increment a YYYY-MM by n months (n may be negative). Pure. */
+export function incrementMonth(ym: string, n: number): string {
+  const [y, m] = ym.split("-").map(Number);
+  const total = y * 12 + (m - 1) + n;
+  const ny = Math.floor(total / 12);
+  const nm = (total % 12) + 1;
+  return `${ny}-${String(nm).padStart(2, "0")}`;
 }
 
 /**
- * A single membership window. Half-open on the left, closed on the right:
- * window(M) = (startExclusive, endInclusive]. startExclusive is null for the
- * earliest statement (open-ended start). By construction
- * windows[i].startExclusive === windows[i-1].endInclusive, so the chain is
- * contiguous and non-overlapping and any date <= the newest close maps to
- * exactly one window.
+ * The calendar month (YYYY-MM) of a YYYY-MM-DD transaction_date — the ADR 0008
+ * "natural month". Returns null for null/empty/malformed input so callers can
+ * pass the raw column value through without conditional branches. This replaced
+ * ADR 0006's naturalStatementMonth (a window lookup).
  */
-export interface MembershipWindow {
-  statementMonth: string;
-  startExclusive: string | null;
-  endInclusive: string;
-}
-
-/**
- * Chain statement closes into contiguous (close(M-1), close(M)] windows.
- *
- * Statements are sorted ascending by statementMonth. Only statements with a
- * usable close anchor a window; entries missing statementMonth/close are
- * dropped (a statement with no dated lines cannot anchor a window and would
- * create a gap — ADR §D2). Callers should pass closes derived from
- * `MAX(transaction_date) ... GROUP BY statement_month` (already non-null).
- *
- * Invariants (unit-tested): sorted ascending; for i > 0,
- * windows[i].startExclusive === windows[i-1].endInclusive; windows[0].startExclusive === null.
- */
-export function computeStatementWindows(
-  closes: StatementClose[],
-): MembershipWindow[] {
-  const usable = closes
-    .filter((c) => !!c && !!c.statementMonth && !!c.close)
-    .sort((a, b) =>
-      a.statementMonth < b.statementMonth
-        ? -1
-        : a.statementMonth > b.statementMonth
-          ? 1
-          : 0,
-    );
-  const windows: MembershipWindow[] = [];
-  let prevClose: string | null = null;
-  for (const c of usable) {
-    windows.push({
-      statementMonth: c.statementMonth,
-      startExclusive: prevClose,
-      endInclusive: c.close,
-    });
-    prevClose = c.close;
-  }
-  return windows;
-}
-
-/**
- * The statement month a transaction_date falls in, or null if the date is
- * beyond the newest close ("awaiting statement") or no windows exist.
- *
- * Single-membership by construction: windows are contiguous with inclusive
- * ends and exclusive starts, so the containing window is the one with the
- * smallest endInclusive >= date. A date exactly equal to a close lands in that
- * window (inclusive end), not the next one.
- */
-export function assignStatementMonth(
-  date: string,
-  windows: MembershipWindow[],
+export function naturalMonth(
+  transactionDate: string | null | undefined,
 ): string | null {
-  if (!date || windows.length === 0) return null;
-  for (const w of windows) {
-    // windows are sorted by statementMonth and (by contiguity) by endInclusive.
-    if (date <= w.endInclusive) return w.statementMonth;
-  }
-  return null; // date > newest close → awaiting
+  if (!transactionDate) return null;
+  const m = /^(\d{4}-\d{2})/.exec(transactionDate);
+  return m ? m[1]! : null;
 }
 
-/**
- * The natural statement month for a date, ignoring sealed-state and
- * roll-forward. Identical to {@link assignStatementMonth}; exposed separately
- * because callers reason about "natural" vs "assigned" (roll-forward) months
- * in different contexts (gate-2 UNKNOWN scoping, the "expected future month"
- * UI hint). See ADR §D4.
- */
-export function naturalStatementMonth(
-  date: string,
-  windows: MembershipWindow[],
-): string | null {
-  return assignStatementMonth(date, windows);
-}
-
-export type AssignmentReason =
-  | "natural"
-  | "roll-forward"
-  | "awaiting"
-  | "awaiting-rolled";
+export type AssignmentReason = "natural" | "roll-forward";
 
 export interface AssignmentResult {
-  /** The assigned statement month, or null when awaiting. */
-  month: string | null;
+  /** The assigned export month (YYYY-MM). Always non-null: a dated receipt is
+   *  always assignable under the calendar rule (roll-forward finds an open
+   *  month, or falls back to natural). */
+  month: string;
   reason: AssignmentReason;
-  /** The natural month when the result is a roll-forward or rolled-awaiting. */
+  /** The natural month when the result is a roll-forward. */
   rolledFrom?: string;
 }
 
+/** Upper bound on the roll-forward walk. With ≤2 open months (ADR 0005) this is
+ *  never reached; it only guards against a pathological all-months-sealed state. */
+const ROLL_FORWARD_MAX_MONTHS = 24;
+
 /**
- * Assign a receipt's export statement month per ADR §D3.
+ * Assign a receipt's export month per ADR 0008.
  *
- *   1. natural = naturalStatementMonth(date). Null date or null natural → awaiting.
- *   2. natural not sealed → { natural, "natural" }.
- *   3. natural sealed:
- *      - rollForward=false → still { natural, "natural" } (a caller that doesn't
- *        roll, e.g. an UNKNOWN receipt that must be classified before it can
- *        be assigned a real export month).
- *      - rollForward=true  → walk forward through windows to the first month
- *        NOT in sealedMonths:
- *          found          → { that month, "roll-forward", rolledFrom: natural }
- *          walked off end → { null, "awaiting-rolled", rolledFrom: natural }
+ *   1. natural = naturalMonth(date). A null date is "unassignable" (undated) and
+ *      is handled by the caller — this function is only called with a non-null
+ *      date. natural is therefore always defined here.
+ *   2. natural not sealed ⇒ { natural, "natural" }.
+ *   3. natural sealed + rollForward ⇒ walk forward by calendar month to the
+ *      first month NOT in sealedMonths:
+ *        found  ⇒ { that month, "roll-forward", rolledFrom: natural }
+ *        bounded walk exhausted (cannot happen with ≤2 open months) ⇒ fall back
+ *        to { natural, "natural" } so the receipt is never left unassigned.
+ *   4. natural sealed + !rollForward ⇒ { natural, "natural" } (UNKNOWN path: an
+ *      UNKNOWN receipt must be classified before it gets a real export month, so
+ *      it never rolls — it keeps its natural month and blocks at gate 2).
  *
- * @param sealedMonths finalized statement_months (amex_reconciliations.status='finalized').
+ * @param sealedMonths export months that have SHIPPED and cannot be reopened —
+ *  `receipt_exports.status='finalized'` with no open draft revision (the
+ *  isMonthLockedForEdits condition, month-lock.ts). CASH/DIGITAL only (policy).
  */
 export function assignReceiptMembership(
-  date: string | null,
-  windows: MembershipWindow[],
+  date: string,
   sealedMonths: Set<string>,
   opts: { rollForward: boolean },
 ): AssignmentResult {
-  if (!date) return { month: null, reason: "awaiting" };
-  const natural = naturalStatementMonth(date, windows);
-  if (natural === null) return { month: null, reason: "awaiting" };
+  const natural = naturalMonth(date);
+  // Defensive: callers guard null dates (undated = unassignable, skipped). If a
+  // null/ malformed date reaches here, treat the empty month as "natural" so the
+  // caller's NULL-only UPDATE writes nothing meaningful — but this never fires
+  // in practice because assignMembershipForReceipt checks the date first.
+  if (natural === null) return { month: "", reason: "natural" };
   if (!sealedMonths.has(natural)) return { month: natural, reason: "natural" };
 
   // Natural month is sealed.
   if (!opts.rollForward) return { month: natural, reason: "natural" };
 
-  // Walk forward (windows are sorted by statementMonth) to the first open month.
-  const startIdx = windows.findIndex((w) => w.statementMonth === natural);
-  for (let i = startIdx + 1; i < windows.length; i++) {
-    if (!sealedMonths.has(windows[i]!.statementMonth)) {
-      return {
-        month: windows[i]!.statementMonth,
-        reason: "roll-forward",
-        rolledFrom: natural,
-      };
+  // Walk forward by calendar month to the first non-sealed month.
+  for (let i = 1; i <= ROLL_FORWARD_MAX_MONTHS; i++) {
+    const candidate = incrementMonth(natural, i);
+    if (!sealedMonths.has(candidate)) {
+      return { month: candidate, reason: "roll-forward", rolledFrom: natural };
     }
   }
-  // No newer open statement → awaiting, but record what it would have rolled from.
-  return { month: null, reason: "awaiting-rolled", rolledFrom: natural };
+  // Every month in range is sealed (pathological). Fall back to natural so the
+  // receipt is never silently unassigned; the operator can override.
+  return { month: natural, reason: "natural" };
 }

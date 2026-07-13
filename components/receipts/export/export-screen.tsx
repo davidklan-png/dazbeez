@@ -13,7 +13,6 @@ import {
   LockIcon,
 } from "@/components/ui/icons";
 import type { ReceiptExport, ReceiptRecord } from "@/lib/receipts/types";
-import { formatAmountMinor } from "@/lib/receipts/format";
 import type { Blocker } from "@/lib/receipts/blockers";
 import {
   buildManifestPreviewCsv,
@@ -50,77 +49,44 @@ export interface ExportScreenProps {
   manifestSample: ManifestSampleRow[];
   manifestSize: { rowsTotal: number; sizeBytes: number; sha256: string | null };
   statementWindow: StatementWindow | null;
-  /** ADR 0006 (PR #3): dated CASH/DIGITAL receipts past the newest close —
-   *  self-resolve when the covering statement imports. Informational. */
-  awaitingReceipts: ReceiptRecord[];
-  /** ADR 0006 (PR #3): undated CASH/DIGITAL receipts — can never be assigned,
-   *  need operator action. Needs-attention. */
+  /** ADR 0008: undated CASH/DIGITAL receipts — can never be assigned to a
+   *  calendar month, need operator action. Needs-attention. (ADR 0006's separate
+   *  "awaiting statement" bucket is retired — a dated receipt is always
+   *  assignable under the calendar rule.) */
   unassignableReceipts: ReceiptRecord[];
-  nextExpectedMonth: string | null;
 }
 
-/** ADR 0006 (PR #3): receipts not yet in any statement-month bundle. Two
- * DISTINCT states — do not lump them:
- *  - Awaiting (amber): dated, past the newest close; self-resolves on next import.
- *  - Unassignable (red): undated; can never be assigned, needs operator action. */
+/** ADR 0008: receipts not yet in any export-month bundle — undated cash/digital
+ * only. The ADR 0006 "awaiting statement" bucket is retired: under the calendar
+ * rule every dated cash/digital receipt is immediately assignable to its
+ * transaction_date's calendar month. */
 function UnassignedReceiptsSection({
-  awaiting,
   unassignable,
-  nextExpectedMonth,
 }: {
-  awaiting: ReceiptRecord[];
   unassignable: ReceiptRecord[];
-  nextExpectedMonth: string | null;
 }) {
-  if (awaiting.length === 0 && unassignable.length === 0) return null;
+  if (unassignable.length === 0) return null;
   return (
-    <div className="space-y-3">
-      {unassignable.length > 0 && (
-        <Card>
-          <div className="flex items-baseline justify-between">
-            <div className="text-[13px] font-semibold text-red-700">
-              Unassignable — missing transaction date
-            </div>
-            <Pill tone="red" size="sm">{unassignable.length}</Pill>
-          </div>
-          <p className="mt-1 text-[12px] text-gray-500">
-            These cash/digital receipts have no date and can never be assigned to a statement cycle. Set a transaction date to assign them.
-          </p>
-          <ul className="mt-2 space-y-0.5 text-[12.5px]">
-            {unassignable.map((r) => (
-              <li key={r.id}>
-                <Link href={`/receipts/review/${r.id}`} className="text-amber-700 hover:underline">
-                  {r.merchant ?? `R-${r.id.slice(0, 8)}`} · captured {r.captured_at.slice(0, 10)}
-                </Link>
-              </li>
-            ))}
-          </ul>
-        </Card>
-      )}
-      {awaiting.length > 0 && (
-        <Card>
-          <div className="flex items-baseline justify-between">
-            <div className="text-[13px] font-semibold text-gray-700">Awaiting statement</div>
-            <Pill tone="amber" size="sm">{awaiting.length}</Pill>
-          </div>
-          <p className="mt-1 text-[12px] text-gray-500">
-            Dated cash/digital receipts past the newest imported statement — they self-assign when the covering statement imports{nextExpectedMonth ? ` (expected ~${nextExpectedMonth})` : ""}.
-          </p>
-          <ul className="mt-2 space-y-0.5 text-[12.5px]">
-            {awaiting.map((r) => (
-              <li key={r.id} className="flex justify-between gap-3">
-                <Link href={`/receipts/review/${r.id}`} className="truncate text-amber-700 hover:underline">
-                  {r.transaction_date} · {r.merchant ?? `R-${r.id.slice(0, 8)}`}
-                </Link>
-                <span className="shrink-0 tabular-nums text-gray-400">
-                  {r.amount_minor != null ? formatAmountMinor(r.amount_minor, r.currency) : ""}
-                </span>
-              </li>
-            ))}
-          </ul>
-        </Card>
-      )}
-    </div>
+    <Card>
+      <div className="flex items-baseline justify-between">
+        <div className="text-[13px] font-semibold text-red-700">
+          Unassignable — missing transaction date
+        </div>
+        <Pill tone="red" size="sm">{unassignable.length}</Pill>
+      </div>
+      <p className="mt-1 text-[12px] text-gray-500">
+        These cash/digital receipts have no date and can never be assigned to an export month. Set a transaction date to assign them.
+      </p>
+      <ul className="mt-2 space-y-0.5 text-[12.5px]">
+        {unassignable.map((r) => (
+          <li key={r.id}>
+            <Link href={`/receipts/review/${r.id}`} className="text-amber-700 hover:underline">
+              {r.merchant ?? `R-${r.id.slice(0, 8)}`} · captured {r.captured_at.slice(0, 10)}
+            </Link>
+          </li>
+        ))}
+      </ul>
+    </Card>
   );
 }
 
@@ -193,9 +159,7 @@ export function ExportScreen(props: ExportScreenProps) {
             <BlockerTriage blockers={props.blockers} warnings={props.warnings} />
           )}
           <UnassignedReceiptsSection
-            awaiting={props.awaitingReceipts}
             unassignable={props.unassignableReceipts}
-            nextExpectedMonth={props.nextExpectedMonth}
           />
           {draftBuilt ? (
             <DraftPreview

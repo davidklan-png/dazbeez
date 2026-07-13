@@ -11,7 +11,7 @@ import { QueueRail } from "@/components/receipts/review/queue-rail";
 import { buildQueueItems } from "@/lib/receipts/queue-items";
 import { ImagePane } from "@/components/receipts/review/image-pane";
 import { FormPane } from "@/components/receipts/review/form-pane";
-import { listOpenStatementMonths, naturalMonthForDate } from "@/lib/receipts/membership";
+import { listOpenExportMonths, naturalMonthForDate } from "@/lib/receipts/membership";
 import {
   InlineServerError,
   isNextInternalError,
@@ -55,10 +55,11 @@ async function renderReceiptPage(params: Promise<{ id: string }>) {
   ]);
   if (!receipt) notFound();
 
-  // ADR 0006 §D6: open statement months (override targets) + the receipt's
-  // natural cycle month, for the discretionary membership override control.
+  // ADR 0008 (reusing 0006 §D6): open export months (override targets) + the
+  // receipt's natural calendar month, for the discretionary membership override
+  // control.
   const [overrideTargetMonths, naturalStatementMonth] = await Promise.all([
-    listOpenStatementMonths(),
+    listOpenExportMonths(),
     naturalMonthForDate(receipt.transaction_date),
   ]);
 

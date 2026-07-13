@@ -620,9 +620,9 @@ export function FormPane(props: FormPaneProps) {
               Statement month
             </div>
             <p className="mt-1 text-[12px] text-gray-500">
-              The cycle this receipt ships in (ADR 0006). Natural cycle:{" "}
+              The export month this receipt ships in (ADR 0008). Natural month (calendar of its date):{" "}
               <span className="font-medium text-gray-700">
-                {props.naturalStatementMonth ?? "— awaiting / no date"}
+                {props.naturalStatementMonth ?? "— no date"}
               </span>
               . Override moves it to a different open month — audited, sealed months blocked.
             </p>

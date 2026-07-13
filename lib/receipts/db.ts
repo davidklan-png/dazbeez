@@ -123,12 +123,11 @@ export async function createReceiptRecord(
     newValueJson: stringifyJson({ paymentPath, expenseType, source: input.source ?? "upload" }),
   });
 
-  // ADR 0006 (PR #2): assign statement-cycle membership at capture for
-  // CASH/DIGITAL receipts that arrive with a date. The async capture path
+  // ADR 0008 (was ADR 0006 PR #2): assign calendar-month membership at capture
+  // for CASH/DIGITAL receipts that arrive with a date. The async capture path
   // inserts with no date (status='captured') and is assigned when the extractor
-  // backfills the date via updateReceiptRecord; the import sweep is the safety
-  // net for anything still NULL. Non-fatal: a failed assignment leaves the
-  // receipt created (NULL month), recoverable by the sweep.
+  // backfills the date via updateReceiptRecord. Non-fatal: a failed assignment
+  // leaves the receipt created (NULL month), recoverable by setting a date.
   if (
     (paymentPath === "CASH" || paymentPath === "DIGITAL") &&
     input.transactionDate
@@ -303,12 +302,13 @@ export async function updateReceiptRecord(
     newValueJson: stringifyJson(input),
   });
 
-  // ADR 0006 (PR #2): if a date is being set on a CASH/DIGITAL receipt that has
-  // no membership yet, assign it now (sticky — only when currently NULL; an
-  // already-assigned receipt is never re-derived here, matching the freeze
-  // rule). If the date CHANGED on an assigned receipt, drift detection (the
-  // import sweep) flags the mismatch for the operator rather than silently
-  // reassigning.
+  // ADR 0008 (was ADR 0006 PR #2): if a date is being set on a CASH/DIGITAL
+  // receipt that has no membership yet, assign it now (sticky — only when
+  // currently NULL; an already-assigned receipt is never re-derived here,
+  // matching the freeze rule). A date CHANGE on an already-assigned receipt is
+  // ignored (sticky); the operator can override explicitly if the new date
+  // should land in a different month. (ADR 0006's drift detection is retired —
+  // calendar month has no AMEX-line dependency to drift.)
   if (
     "transactionDate" in input &&
     input.transactionDate &&

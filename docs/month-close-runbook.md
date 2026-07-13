@@ -24,11 +24,11 @@ An AMEX statement labeled `YYYY-MM` covers a **~6-week transaction window that
 lags the label** — e.g. the 2026-06 statement contains lines dated Apr 10 – May 7.
 
 - **AMEX lines** ship in their `statement_month` (a June-statement line dated in April is correct).
-- **CASH/DIGITAL receipts** ship by **statement-cycle membership** (ADR 0006): each receipt has a stored `export_statement_month` — the cycle its `transaction_date` falls in. `window(M) = (close(M-1), close(M)]` where `close(M)` = MAX `transaction_date` over statement M's AMEX lines, zero slack. A cash receipt dated May 3 belongs to the 2026-06 cycle (Apr 11 – May 7) and ships in **June** — the same cycle as the AMEX lines, not the calendar month of its date.
+- **CASH/DIGITAL receipts** ship by **calendar-month membership** (ADR 0008): each receipt has a stored `export_statement_month` equal to the **calendar month** of its `transaction_date` (June 1–30 → `2026-06`). A cash receipt dated June 11 ships in the **June** export, alongside the June AMEX statement — whose own lines span the *prior* billing cycle. That cycle/calendar asymmetry is intentional and operator-confirmed.
 
-The export bundle is still `buildExportBundle(month)`; PR #2 flipped it to select CASH/DIGITAL by `export_statement_month` instead of `transaction_date LIKE`. The **Additional charges** section header now shows the cycle range and receipt count (e.g. "June 2026 cycle · Apr 11 – May 7 · 0 receipts"). UNKNOWN-path receipts are excluded and block finalize.
+The export bundle is still `buildExportBundle(month)`; it selects CASH/DIGITAL by `export_statement_month = month`. The **Additional charges** section header shows the month and receipt count (e.g. "June 2026 · 11 receipts"). UNKNOWN-path receipts are excluded and block finalize.
 
-Membership is sticky: assigned once (at capture, when a date is first set, or by the AMEX-import sweep) and never re-derived — if a re-import shifts a close, existing assignments stay put and a drift warning is logged. Receipts dated beyond the newest imported statement's close are **awaiting** (NULL); undated cash/digital receipts are **unassignable** — see below.
+Membership is sticky: assigned once (at capture, when a date is first set) and never re-derived. (ADR 0006's window rule, AMEX-import sweep, drift detection, and "awaiting statement" bucket are retired by ADR 0008 — a dated receipt is always immediately assignable to its calendar month.) Undated cash/digital receipts are **unassignable** — see below.
 
 ## Blockers — what each means and where to fix it
 
@@ -65,25 +65,21 @@ If finalize 400s with "Export bundle has not been generated yet", you haven't
 rebuilt since the last deploy — click Rebuild first (it persists the archive
 keys the finalize route checks).
 
-## Membership states & override (ADR 0006)
+## Membership states & override (ADR 0008)
 
-**Awaiting statement** — dated CASH/DIGITAL receipts past the newest imported statement's close (`export_statement_month` NULL). Shown on the export page. Self-resolving: the next AMEX import whose window covers the date assigns them via the import sweep.
+**Unassignable** — cash/digital receipts with no `transaction_date`. These can never be assigned to a calendar month and are invisible to every membership query. Needs-attention on the export page; deep-link to the receipt and set a date. (This is the only NULL state left — ADR 0006's separate "awaiting statement" bucket is retired: under the calendar rule every dated receipt is immediately assignable.)
 
-**Unassignable** — cash/digital receipts with no `transaction_date`. These can never be assigned and are invisible to every membership query. Needs-attention on the export page; deep-link to the receipt and set a date.
-
-**Late-receipt roll-forward** — a receipt captured after its covering month's export shipped is rolled forward to the next **open** statement month (audited `receipt.export_statement_month_rolled_forward`). "Open" = the export is not finalized (two-lock model: the **export** seal, not the reconciliation seal).
+**Late-receipt roll-forward** — a receipt whose calendar month's export already shipped (and has no open draft revision) is rolled forward to the next **open** month when its date is set (audited `receipt.export_statement_month_rolled_forward`). "Open" = the export is not finalized (two-lock model: the **export** seal, not the reconciliation seal).
 
 **Discretionary override** — on a receipt's edit view (CASH/DIGITAL only), the "Statement month" control reassigns `export_statement_month` to a different **open** month. Blocked for sealed months (the export already shipped — use the revision flow). A confirm dialog states the consequence; audited as `receipt.export_statement_month_overridden`.
 
-**Drift warning** — if a statement re-import shifts a close date, existing assignments are held fixed (sticky); each mismatch is logged (`receipt.export_statement_month_window_drift`) and surfaced as a non-blocking warning. Override to correct if needed.
-
 ## Sealing 2026-06 (current state)
 
-After ADR 0006 (PR #1–#3), 2026-06's export is **AMEX-only**: its 10 June-dated cash receipts belong to the 2026-07 cycle (window Apr 11 – May 7 has 0 cash) and now ship in July. The June review page's Additional Charges section is empty with the cycle range in the header. Reconciliation is sealed; gates pass. Click path: export screen → Rebuild draft → "Review & finalize" → confirm 0 additional charges → type "june 2026" → Finalize.
+After ADR 0008, 2026-06's export is **32 AMEX lines + 11 June-dated cash/digital receipts** (the calendar rule puts a June-dated cash receipt in June, alongside the June statement). The June review page's Additional Charges section lists those 11, including a **4× セブン-イレブン 東中野末広橋店 ¥10,000 on 2026-06-11** cluster — confirm the duplicate warning (distinct charges, not double-captured) before finalizing. Reconciliation is sealed; gates pass otherwise. Click path: export screen → Rebuild draft → "Review & finalize" → confirm the 11 additional charges + dismiss the duplicate warning → type "june 2026" → Finalize.
 
 ## Starting 2026-07
 
-2026-07 is the open month: 20 statement lines, 14 uncategorized, 3 confirmed.
-Run the reconcile → review → rebuild → review-page → finalize flow above. The
-manifest-preview header will show "July 2026 statement · <window> · N rows" so
-you can tell it apart from 2026-06.
+2026-07 is the open month: 20 statement lines + 1 July-dated cash/digital receipt
+(calendar rule). Run the reconcile → review → rebuild → review-page → finalize
+flow above. Reconcile the 20 lines (categorize, match receipts, resolve
+missing-receipt reasons) and sign off the reconciliation before finalizing.
