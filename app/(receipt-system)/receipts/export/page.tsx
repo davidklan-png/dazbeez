@@ -5,7 +5,12 @@ import {
   listAmexLineCountsByMonth,
   listReconciliationStatusByMonth,
 } from "@/lib/receipts/db";
-import { listUnknownInScopeReceipts } from "@/lib/receipts/membership";
+import {
+  listAwaitingReceipts,
+  listUnassignableReceipts,
+  listUnknownInScopeReceipts,
+  nextExpectedStatementMonth,
+} from "@/lib/receipts/membership";
 import {
   formatCategoryLabel,
   getCategoryByCode,
@@ -20,6 +25,7 @@ import { MonthSwitcher, type MonthOption } from "@/components/receipts/month-swi
 import { formatMonth } from "@/lib/receipts/format";
 import {
   computeExportBlockers,
+  computeDuplicateReceiptWarnings,
   computeExportWarnings,
 } from "@/lib/receipts/blockers";
 import {
@@ -75,13 +81,16 @@ export default async function ExportPage({
   // We still fetch the unfiltered month receipts + lines separately for the
   // blockers panel (computeExportBlockers runs over the raw receipt set,
   // including UNKNOWN payment_path that the bundle intentionally excludes).
-  const [bundle, exports, unknownInScope, monthLines, currentExport] =
+  const [bundle, exports, unknownInScope, monthLines, currentExport, awaiting, unassignable, nextExpected] =
     await Promise.all([
       buildExportBundle(month),
       listExports(),
       listUnknownInScopeReceipts(month),
       listAmexLines(month),
       getExport(month),
+      listAwaitingReceipts(),
+      listUnassignableReceipts(),
+      nextExpectedStatementMonth(),
     ]);
   // ADR 0006 (PR #2): tile counting set = in-scope receipts for M = the bundle
   // (matched AMEX + CASH/DIGITAL assigned to M) ∪ UNKNOWN in M's natural window
@@ -98,7 +107,10 @@ export default async function ExportPage({
   // were all matched to April/May receipts). monthReceipts (month-scoped) still
   // drives the pending / unreviewed / unknown counts.
   const blockers = computeExportBlockers(monthReceipts, monthLines, bundle.receipts);
-  const warnings = computeExportWarnings(monthLines);
+  const warnings = [
+    ...computeExportWarnings(monthLines),
+    ...computeDuplicateReceiptWarnings(monthReceipts),
+  ];
   // Statement window (transaction-date range the statement covers) for the
   // manifest-preview header — the operator conflated 2026-06 and 2026-07 rows
   // partly because the preview didn't restate which month/dates it belongs to.
@@ -139,6 +151,9 @@ export default async function ExportPage({
         manifestSample={manifestSample}
         manifestSize={manifestSize}
         statementWindow={statementWindow}
+        awaitingReceipts={awaiting}
+        unassignableReceipts={unassignable}
+        nextExpectedMonth={nextExpected}
       />
       <div className="border-t border-amber-100 bg-amber-50 px-8 py-4 text-xs text-amber-900">
         <p className="font-semibold">Accountant review boundary</p>

@@ -9,6 +9,8 @@ import {
 } from "@/lib/receipts/validation";
 import { isCanonicalCode } from "@/lib/receipts/categories";
 import { getReceiptsDb } from "@/lib/cloudflare-runtime";
+import { createAuditEntry } from "@/lib/receipts/audit";
+import { loadSealedExportMonths } from "@/lib/receipts/membership";
 import {
   runComplianceChecksForReceipt,
   listChecksForObject,
@@ -129,6 +131,7 @@ export async function PATCH(request: Request, { params }: RouteContext) {
       taxAmountMinor?: number | null;
       businessPurpose?: string | null;
       expenseCategoryCode?: string | null;
+      exportStatementMonth?: string | null;
       status?: string;
       attendees?: string[];
       // Compliance fields
@@ -251,6 +254,42 @@ export async function PATCH(request: Request, { params }: RouteContext) {
       }
     }
 
+    // ADR 0006 §D6: discretionary export_statement_month override (cash/digital
+    // only). Target must be export-open — the two-lock model's EXPORT seal
+    // (loadSealedExportMonths), not the reconciliation seal. A sealed month's
+    // bundle already shipped; reassigning into it would silently double-ship.
+    let exportStatementMonth: string | null | undefined = undefined;
+    if ("exportStatementMonth" in body) {
+      if (receipt.payment_path !== "CASH" && receipt.payment_path !== "DIGITAL") {
+        return NextResponse.json(
+          { error: "Statement-month override only applies to cash/digital receipts." },
+          { status: 400 },
+        );
+      }
+      const raw = body.exportStatementMonth;
+      if (raw === null || raw === "") {
+        exportStatementMonth = null;
+      } else if (typeof raw === "string" && /^\d{4}-\d{2}$/.test(raw)) {
+        const sealed = await loadSealedExportMonths();
+        if (sealed.has(raw)) {
+          return NextResponse.json(
+            {
+              error:
+                `${raw}'s export is finalized — cannot reassign a receipt into a sealed month. ` +
+                `Pick an open month, or use the export revision flow.`,
+            },
+            { status: 422 },
+          );
+        }
+        exportStatementMonth = raw;
+      } else {
+        return NextResponse.json(
+          { error: "Invalid exportStatementMonth (expected YYYY-MM or null)." },
+          { status: 400 },
+        );
+      }
+    }
+
     await updateReceiptRecord(
       id,
       {
@@ -263,6 +302,7 @@ export async function PATCH(request: Request, { params }: RouteContext) {
         taxAmountMinor: body.taxAmountMinor,
         businessPurpose,
         expenseCategoryCode,
+        exportStatementMonth,
         status: body.status as ReceiptStatus | undefined,
         sourceType,
         invoiceRegistrationNumber,
@@ -272,6 +312,23 @@ export async function PATCH(request: Request, { params }: RouteContext) {
       },
       actor,
     );
+
+    // ADR 0006 §D6: dedicated audit for the override (old → new month + actor),
+    // separate from the generic receipt.updated entry updateReceiptRecord writes.
+    if ("exportStatementMonth" in body) {
+      await createAuditEntry(getReceiptsDb(), {
+        actor,
+        action: "receipt.export_statement_month_overridden",
+        objectType: "receipt",
+        objectId: id,
+        oldValueJson: JSON.stringify({
+          export_statement_month: receipt.export_statement_month ?? null,
+        }),
+        newValueJson: JSON.stringify({
+          export_statement_month: exportStatementMonth,
+        }),
+      });
+    }
 
     if (Array.isArray(body.attendees)) {
       const attendeeInputs: CreateAttendeeInput[] = body.attendees

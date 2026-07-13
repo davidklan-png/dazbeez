@@ -56,6 +56,10 @@ export interface FormPaneProps {
   prevReceiptId: string | null;
   hasAmexMatch: boolean;
   reReviewNeeded: boolean;
+  /** ADR 0006 §D6: open statement months (valid override targets). */
+  overrideTargetMonths: string[];
+  /** The receipt's natural cycle month (label only). */
+  naturalStatementMonth: string | null;
 }
 
 export function FormPane(props: FormPaneProps) {
@@ -108,6 +112,7 @@ export function FormPane(props: FormPaneProps) {
   // Audit B4: post-save warnings from the API (e.g. compliance recompute
   // failed). Save succeeded, so this is a toast — not an error state.
   const [apiWarnings, setApiWarnings] = useState<string[]>([]);
+  const [overrideBusy, setOverrideBusy] = useState(false);
 
   // ─── OCR extraction (delegated to the useExtraction hook) ───────────
   const {
@@ -231,6 +236,37 @@ export function FormPane(props: FormPaneProps) {
       router,
     ],
   );
+
+  // ADR 0006 §D6: discretionary export_statement_month override. Explicit (not
+  // autosaved) — a confirm states the consequence, then a dedicated PATCH. The
+  // server guards the target month is export-open (two-lock model).
+  async function handleOverride(target: string) {
+    const current = receipt.export_statement_month ?? null;
+    if (!target || target === current) return;
+    const ok = window.confirm(
+      `Reassign this receipt's statement month to ${target}?\n\n` +
+        `It will ship in ${target}'s export${current ? ` instead of ${current}` : ""}. This change is audited.`,
+    );
+    if (!ok) return;
+    setOverrideBusy(true);
+    try {
+      const res = await fetch(`/api/receipts/${receipt.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ exportStatementMonth: target }),
+      });
+      const json = (await res.json().catch(() => ({}))) as { error?: string };
+      if (!res.ok) {
+        setSave({ kind: "error", message: json.error ?? "Override failed" });
+        return;
+      }
+      router.refresh();
+    } catch {
+      setSave({ kind: "error", message: "Network error" });
+    } finally {
+      setOverrideBusy(false);
+    }
+  }
 
   useEffect(() => {
     if (initialRenderRef.current) {
@@ -577,6 +613,41 @@ export function FormPane(props: FormPaneProps) {
             </Field>
           </div>
         </FormGroup>
+
+        {(paymentPath === "CASH" || paymentPath === "DIGITAL") && (
+          <div className="rounded-xl border border-gray-200 bg-white p-4">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.05em] text-gray-500">
+              Statement month
+            </div>
+            <p className="mt-1 text-[12px] text-gray-500">
+              The cycle this receipt ships in (ADR 0006). Natural cycle:{" "}
+              <span className="font-medium text-gray-700">
+                {props.naturalStatementMonth ?? "— awaiting / no date"}
+              </span>
+              . Override moves it to a different open month — audited, sealed months blocked.
+            </p>
+            <div className="mt-2.5 flex items-center gap-2">
+              <select
+                value={receipt.export_statement_month ?? ""}
+                onChange={(e) => handleOverride(e.target.value)}
+                disabled={overrideBusy}
+                className="h-[36px] rounded-lg border border-gray-200 bg-white px-3 text-sm text-gray-900 focus:border-amber-500 focus:outline-none"
+              >
+                <option value="">
+                  {receipt.export_statement_month ?? "— unassigned —"}
+                </option>
+                {props.overrideTargetMonths
+                  .filter((m) => m !== receipt.export_statement_month)
+                  .map((m) => (
+                    <option key={m} value={m}>
+                      {m}
+                    </option>
+                  ))}
+              </select>
+              {overrideBusy && <span className="text-[12px] text-gray-400">Reassigning…</span>}
+            </div>
+          </div>
+        )}
 
         <div className="mt-5 flex items-center gap-2.5 rounded-xl bg-gray-50 p-3.5">
           <Btn

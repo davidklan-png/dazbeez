@@ -11,6 +11,7 @@ import { QueueRail } from "@/components/receipts/review/queue-rail";
 import { buildQueueItems } from "@/lib/receipts/queue-items";
 import { ImagePane } from "@/components/receipts/review/image-pane";
 import { FormPane } from "@/components/receipts/review/form-pane";
+import { listOpenStatementMonths, naturalMonthForDate } from "@/lib/receipts/membership";
 import {
   InlineServerError,
   isNextInternalError,
@@ -53,6 +54,13 @@ async function renderReceiptPage(params: Promise<{ id: string }>) {
     listReceiptRecords({ limit: 200 }),
   ]);
   if (!receipt) notFound();
+
+  // ADR 0006 §D6: open statement months (override targets) + the receipt's
+  // natural cycle month, for the discretionary membership override control.
+  const [overrideTargetMonths, naturalStatementMonth] = await Promise.all([
+    listOpenStatementMonths(),
+    naturalMonthForDate(receipt.transaction_date),
+  ]);
 
   // Compute compliance checks fresh on render so the panel always reflects
   // the current state (track_tax_breakdown toggle, backfilled manifest rows,
@@ -137,6 +145,8 @@ async function renderReceiptPage(params: Promise<{ id: string }>) {
             prevReceiptId={prevReceiptId}
             hasAmexMatch={activeFlags?.hasMatch ?? false}
             reReviewNeeded={activeFlags?.reReviewNeeded ?? false}
+            overrideTargetMonths={overrideTargetMonths}
+            naturalStatementMonth={naturalStatementMonth}
           />
         </div>
       }
