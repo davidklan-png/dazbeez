@@ -9,8 +9,8 @@ import {
   listAmexLines,
   listAmexLinesForBusinessTripReports,
   listBusinessTripReports,
-  listReceiptRecords,
 } from "@/lib/receipts/db";
+import { listUnknownInScopeReceipts } from "@/lib/receipts/membership";
 import { assertReceiptsPageAccess } from "@/lib/receipts/auth-request";
 import {
   computeExportBlockers,
@@ -32,17 +32,22 @@ export default async function ReviewPage({ params }: { params: Params }) {
   // Same sources the finalize gate uses: buildExportBundle (single row-assembly
   // authority) + listReceiptRecordsByIds-by-way-of-bundle.receipts for matched
   // receipts (never month-scoped receipts for line-category resolution — see
-  // PR #72). monthReceipts (month-scoped) feeds only the tile's pending /
-  // unreviewed / unknown counts.
-  const [bundle, currentExport, reconciliation, monthLines, monthReceipts, tripReports] =
+  // PR #72). monthReceipts (membership in-scope: bundle ∪ UNKNOWN-in-window)
+  // feeds only the tile's pending / unreviewed / unknown counts.
+  const [bundle, currentExport, reconciliation, monthLines, unknownInScope, tripReports] =
     await Promise.all([
       buildExportBundle(month),
       getExport(month),
       getFinalizedReconciliationForMonth(month),
       listAmexLines(month),
-      listReceiptRecords({ month, limit: 1000 }),
+      listUnknownInScopeReceipts(month),
       listBusinessTripReports(month),
     ]);
+  // ADR 0006 (PR #2): tile counting set = in-scope receipts for M = the bundle
+  // (matched AMEX + CASH/DIGITAL assigned to M) ∪ UNKNOWN in M's natural window
+  // — the same set the finalize gate (validateMonthReadyForExport) uses for its
+  // unreviewed check, so the tile and gate cannot drift.
+  const monthReceipts = [...bundle.receipts, ...unknownInScope];
   const tripLines = await listAmexLinesForBusinessTripReports(
     tripReports.map((r) => r.id),
   );

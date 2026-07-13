@@ -3,10 +3,13 @@ import {
   getFinalizedReconciliationForMonth,
   listAmexLineAttendeeNamesByMonth,
   listAmexLines,
-  listAllReceiptsInMonth,
   listAttendeeNamesByReceiptIds,
   listReceiptRecordsByIds,
 } from "@/lib/receipts/db";
+import {
+  listReceiptsByExportStatementMonth,
+  listUnknownInScopeReceipts,
+} from "@/lib/receipts/membership";
 import { getComplianceSettings } from "@/lib/receipts/settings";
 import { summarizeOpenChecksForExport } from "@/lib/receipts/compliance";
 import { getReceiptsDb } from "@/lib/cloudflare-runtime";
@@ -35,15 +38,16 @@ import { isUnreviewedReceipt } from "@/lib/receipts/blockers";
  *   - One row per AMEX statement line of month M (RowType=amex_line),
  *     with the matched receipt's fields joined when present.
  *     Missing-receipt and no-receipt lines appear with their reasons.
- *   - One row per CASH/DIGITAL receipt with transaction_date in month M
- *     (RowType=receipt). Transaction date is the accounting anchor for
- *     these — they have no statement.
+ *   - One row per CASH/DIGITAL receipt ASSIGNED to statement month M
+ *     (RowType=receipt) — selected by export_statement_month, not the
+ *     calendar month of transaction_date (ADR 0006). The cycle a receipt
+ *     belongs to can lag its date by ~6 weeks.
  *   - A receipt matched to a line appears once (on the line row), never
- *     twice — even if its payment_path is CASH/DIGITAL and its
- *     transaction_date happens to fall in M.
+ *     twice — even if its payment_path is CASH/DIGITAL and it is also
+ *     assigned to M.
  *   - payment_path='UNKNOWN' receipts are intentionally excluded: their
  *     export month is ambiguous. validateMonthReadyForExport blocks
- *     finalize when any are present.
+ *     finalize when any in-scope UNKNOWN receipt is present.
  */
 export interface ExportBundle {
   /** Bundle rows in CSV order: AMEX lines first (by transaction_date), then receipts. */
@@ -81,18 +85,16 @@ export async function buildExportBundle(month: string): Promise<ExportBundle> {
   const matchedReceiptMap = new Map<string, ReceiptRecord>();
   for (const r of matchedReceipts) matchedReceiptMap.set(r.id, r);
 
-  // (3) Non-AMEX receipts anchored by transaction_date in month M. UNKNOWN
-  // is intentionally excluded here (ambiguous export month) — the
-  // validator blocks finalize when any UNKNOWN receipts exist. Pages
-  // internally via listAllReceiptsInMonth and refuses to silently
-  // truncate at the cap (audit A6 — a partial bundle is an audit failure).
-  const [cashReceipts, digitalReceipts] = await Promise.all([
-    listAllReceiptsInMonth(month, { paymentPath: "CASH" }),
-    listAllReceiptsInMonth(month, { paymentPath: "DIGITAL" }),
-  ]);
-  // A receipt matched to a line appears once on the line row — drop it
-  // from the CASH/DIGITAL receipt-rows section so it cannot double-count.
-  const nonAmexReceipts = [...cashReceipts, ...digitalReceipts].filter(
+  // (3) Non-AMEX receipts selected by STORED statement-cycle membership
+  // (ADR 0006 / PR #2): export_statement_month = M, not the calendar month
+  // of transaction_date. A receipt whose transaction_date sits in a different
+  // calendar month than its cycle (the ~6-week AMEX lag) ships in the cycle's
+  // statement month. UNKNOWN is intentionally excluded — it has no assigned
+  // month and blocks finalize at gate 2 until classified. Membership is
+  // assigned/stickied at capture, on first date-set, and by the import sweep
+  // (lib/receipts/membership.ts); receipts the sweep hasn't reached stay NULL
+  // and are excluded here.
+  const nonAmexReceipts = (await listReceiptsByExportStatementMonth(month)).filter(
     (r) => !matchedReceiptMap.has(r.id),
   );
 
@@ -370,27 +372,27 @@ export async function validateMonthReadyForExport(
   const bundle = prebuiltBundle ?? (await buildExportBundle(month));
   const db = getReceiptsDb();
 
-  // (2) UNKNOWN payment_path — queried directly; the bundle excludes UNKNOWN.
-  const unknownResult = await db
-    .prepare(
-      `SELECT id, merchant FROM receipt_records
-       WHERE deleted_at IS NULL
-         AND payment_path = 'UNKNOWN'
-         AND transaction_date LIKE ?`,
-    )
-    .bind(`${month}%`)
-    .all<{ id: string; merchant: string | null }>();
+  // ADR 0006 (PR #2): gate scope is statement-cycle membership, not the
+  // calendar month of transaction_date. CASH/DIGITAL in scope = assigned to M
+  // (already in bundle.receipts, alongside matched AMEX). UNKNOWN has no stored
+  // month, so its scope is computed via listUnknownInScopeReceipts: an UNKNOWN
+  // receipt blocks M only if its transaction_date's natural window is M. An
+  // UNKNOWN receipt dated beyond the newest close is "awaiting" and blocks nothing.
+  const unknownInScope = await listUnknownInScopeReceipts(month);
 
-  // (2.5) Unreviewed receipts in-month (core applies the pending exclusion).
-  const unreviewedResult = await db
-    .prepare(
-      `SELECT * FROM receipt_records
-       WHERE deleted_at IS NULL
-         AND status = 'needs_review'
-         AND transaction_date LIKE ?`,
-    )
-    .bind(`${month}%`)
-    .all<ReceiptRecord>();
+  // (2) UNKNOWN payment_path — only those in M's natural window.
+  const unknownReceipts = unknownInScope.map((r) => ({
+    id: r.id,
+    merchant: r.merchant,
+  }));
+
+  // (2.5) Unreviewed receipts in scope for M = the bundle (matched AMEX +
+  // CASH/DIGITAL assigned to M) ∪ UNKNOWN in M's natural window. This supersedes
+  // PR #73's calendar-scoped (`transaction_date LIKE month%`) query: now that
+  // ADR 0006 defines shipping membership, scoping the unreviewed gate by the
+  // bundle keeps gate ⇄ bundle consistent. Core applies isUnreviewedReceipt
+  // (pending-exclusion) to each.
+  const unreviewedReceipts = [...bundle.receipts, ...unknownInScope];
 
   // (4) AMEX-line attendees.
   const amexAttendees = await listAmexLineAttendeeNamesByMonth(month);
@@ -422,8 +424,8 @@ export async function validateMonthReadyForExport(
     month,
     reconciliation,
     bundle,
-    unknownReceipts: unknownResult.results ?? [],
-    unreviewedReceipts: unreviewedResult.results ?? [],
+    unknownReceipts,
+    unreviewedReceipts,
     amexAttendees,
     complianceSummary: summary,
     complianceSettings: settings,

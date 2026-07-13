@@ -1,11 +1,11 @@
 import {
   listAmexLines,
   listExports,
-  listReceiptRecords,
   getExport,
   listAmexLineCountsByMonth,
   listReconciliationStatusByMonth,
 } from "@/lib/receipts/db";
+import { listUnknownInScopeReceipts } from "@/lib/receipts/membership";
 import {
   formatCategoryLabel,
   getCategoryByCode,
@@ -75,14 +75,19 @@ export default async function ExportPage({
   // We still fetch the unfiltered month receipts + lines separately for the
   // blockers panel (computeExportBlockers runs over the raw receipt set,
   // including UNKNOWN payment_path that the bundle intentionally excludes).
-  const [bundle, exports, monthReceipts, monthLines, currentExport] =
+  const [bundle, exports, unknownInScope, monthLines, currentExport] =
     await Promise.all([
       buildExportBundle(month),
       listExports(),
-      listReceiptRecords({ month, limit: 1000 }),
+      listUnknownInScopeReceipts(month),
       listAmexLines(month),
       getExport(month),
     ]);
+  // ADR 0006 (PR #2): tile counting set = in-scope receipts for M = the bundle
+  // (matched AMEX + CASH/DIGITAL assigned to M) ∪ UNKNOWN in M's natural window
+  // — the same set the finalize gate (validateMonthReadyForExport) uses for its
+  // unreviewed check, so the tile and gate cannot drift.
+  const monthReceipts = [...bundle.receipts, ...unknownInScope];
 
   // bundle.receipts is the ID-fetched matched-receipt set (unscoped by month)
   // plus in-month CASH/DIGITAL receipts — the same authority the finalize

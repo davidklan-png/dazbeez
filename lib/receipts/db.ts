@@ -7,6 +7,7 @@ import {
 } from "@/lib/receipts/month-lock";
 import { shouldOverwriteMerchant } from "@/lib/receipts/reconciliation";
 import { retentionUntilIso } from "@/lib/receipts/retention";
+import { assignMembershipForReceipt } from "@/lib/receipts/membership";
 import { deleteAmexArtifact } from "@/lib/receipts/storage";
 import { PENDING_EXTRACTION_STATES } from "@/lib/receipts/types";
 import type {
@@ -121,6 +122,23 @@ export async function createReceiptRecord(
     objectId: id,
     newValueJson: stringifyJson({ paymentPath, expenseType, source: input.source ?? "upload" }),
   });
+
+  // ADR 0006 (PR #2): assign statement-cycle membership at capture for
+  // CASH/DIGITAL receipts that arrive with a date. The async capture path
+  // inserts with no date (status='captured') and is assigned when the extractor
+  // backfills the date via updateReceiptRecord; the import sweep is the safety
+  // net for anything still NULL. Non-fatal: a failed assignment leaves the
+  // receipt created (NULL month), recoverable by the sweep.
+  if (
+    (paymentPath === "CASH" || paymentPath === "DIGITAL") &&
+    input.transactionDate
+  ) {
+    try {
+      await assignMembershipForReceipt(id, input.transactionDate, actor);
+    } catch (assignErr) {
+      console.error("[createReceiptRecord] membership assignment failed", assignErr);
+    }
+  }
 
   return id;
 }
@@ -276,6 +294,25 @@ export async function updateReceiptRecord(
     oldValueJson: stringifyJson(before),
     newValueJson: stringifyJson(input),
   });
+
+  // ADR 0006 (PR #2): if a date is being set on a CASH/DIGITAL receipt that has
+  // no membership yet, assign it now (sticky — only when currently NULL; an
+  // already-assigned receipt is never re-derived here, matching the freeze
+  // rule). If the date CHANGED on an assigned receipt, drift detection (the
+  // import sweep) flags the mismatch for the operator rather than silently
+  // reassigning.
+  if (
+    "transactionDate" in input &&
+    input.transactionDate &&
+    (effectivePaymentPath === "CASH" || effectivePaymentPath === "DIGITAL") &&
+    !before.export_statement_month
+  ) {
+    try {
+      await assignMembershipForReceipt(id, input.transactionDate, actor);
+    } catch (assignErr) {
+      console.error("[updateReceiptRecord] membership assignment failed", assignErr);
+    }
+  }
 }
 
 async function rejectIfReceiptInFinalizedReconciliation(
