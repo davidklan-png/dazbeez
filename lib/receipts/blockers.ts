@@ -228,7 +228,7 @@ export function computeDuplicateReceiptWarnings(
   for (const r of receipts) {
     if (r.payment_path !== "CASH" && r.payment_path !== "DIGITAL") continue;
     if (!r.transaction_date || r.merchant == null || r.amount_minor == null) continue;
-    const key = `${r.merchant} ${r.amount_minor} ${r.transaction_date}`;
+    const key = `${r.merchant}\u0000${r.amount_minor}\u0000${r.transaction_date}`;
     const g = groups.get(key) ?? [];
     g.push(r);
     groups.set(key, g);
