@@ -1,6 +1,14 @@
 # ADR 0006 — Statement-window membership for non-AMEX receipts
 
-- **Status:** Proposed (design-first; awaiting worker verification of prod before/after counts)
+- **Status:** ~~Proposed~~ → **Superseded in part by [ADR 0008](./0008-calendar-month-membership-for-non-amex-receipts.md)**
+  for non-AMEX membership: the window-based rule (§D1 close-anchor, §D2
+  `computeStatementWindows`, §D3 window recomputation, §D4 UNKNOWN-window
+  scoping), §D8 import sweep + drift detection, §D9 membership-drift warning,
+  §D10.2 "Awaiting statement" card, and §D11 awaiting-state runbook text are all
+  **retired**. What survives (sticky stored `export_statement_month`, override
+  with export-seal guard, roll-forward, unassignable-undated, audit) is carried
+  into ADR 0008 unchanged. This document is kept verbatim as the history of what
+  shipped and what was reversed.
 - **Date:** 2026-07-13
 - **Owner:** David (PM) — policy operator-decided 2026-07-13
 - **Affects:** `db/receipts/0020_*` (new), `lib/receipts/statement-window.ts`, `lib/receipts/month-closing.ts`, `lib/receipts/blockers.ts`, `lib/receipts/db.ts`, `lib/receipts/types.ts`, `lib/receipts/audit.ts`, `app/api/receipts/amex/import/route.ts`, `app/api/receipts/[id]/route.ts`, `components/receipts/export/review-screen.tsx`, `components/receipts/review/form-pane.tsx`, `components/receipts/export/export-screen.tsx`, `docs/month-close-runbook.md`, new `scripts/backfill-export-statement-month.ts`

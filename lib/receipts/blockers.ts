@@ -106,8 +106,8 @@ export function computeExportBlockers(
   // design (their export month is ambiguous) and block finalize at
   // validateMonthReadyForExport gate 2. Surface them here so the tile and the
   // gate agree in this direction too — previously a month could read "clear"
-  // on the tile yet 422 on finalize. `receipts` is month-scoped, matching the
-  // gate's `transaction_date LIKE month%` filter.
+  // on the tile yet 422 on finalize. `receipts` is the membership in-scope set
+  // (bundle.receipts ∪ UNKNOWN in M's calendar month), matching the gate's scope.
   const unknownPath = receipts.filter(isUnknownPathReceipt).length;
   if (unknownPath > 0) {
     blockers.push({

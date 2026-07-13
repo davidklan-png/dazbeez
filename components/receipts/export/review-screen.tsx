@@ -15,14 +15,12 @@ import type {
   ReceiptExport,
   ReceiptRecord,
 } from "@/lib/receipts/types";
-import type { MembershipWindow, StatementWindow } from "@/lib/receipts/statement-window";
+import type { StatementWindow } from "@/lib/receipts/statement-window";
 
 export interface ReviewScreenProps {
   month: string;
   monthLabel: string;
   window: StatementWindow | null;
-  /** ADR 0006 membership cycle window (close(M-1), close(M)] — for the Additional Charges header. */
-  cycleWindow: MembershipWindow | null;
   rows: ExportRow[];
   /** bundle.receipts — ID-fetched matched receipts, for side-by-side lookup. */
   receipts: ReceiptRecord[];
@@ -71,7 +69,6 @@ export function ReviewScreen(props: ReviewScreenProps) {
         <AdditionalChargesSection
           chargeRows={chargeRows}
           monthLabel={props.monthLabel}
-          cycleWindow={props.cycleWindow}
         />
         <BusinessTripsSection
           tripReports={props.tripReports}
@@ -445,31 +442,18 @@ function ConsolidatedGroup({
 
 // ─── Section 3: Additional charges (CASH/DIGITAL) ────────────────────────
 
-/** Format a membership window (startExclusive, endInclusive] as the cash-eligible
- * date range a receipt must fall in to ship in this statement month. The lower
- * bound is exclusive, so it displays as startExclusive+1 day (a cash receipt
- * dated exactly on close(M-1) belongs to M-1, not M). Null start ⇒ open. */
-function formatCycleRange(w: MembershipWindow): string {
-  const end = w.endInclusive;
-  if (!w.startExclusive) return `open – ${end}`;
-  const d = new Date(`${w.startExclusive}T00:00:00Z`);
-  d.setUTCDate(d.getUTCDate() + 1);
-  return `${d.toISOString().slice(0, 10)} – ${end}`;
-}
-
 function AdditionalChargesSection({
   chargeRows,
   monthLabel,
-  cycleWindow,
 }: {
   chargeRows: ExportRow[];
   monthLabel: string;
-  cycleWindow: MembershipWindow | null;
 }) {
-  const range = cycleWindow ? formatCycleRange(cycleWindow) : null;
-  const sub = range
-    ? `${monthLabel} cycle · ${range} · ${chargeRows.length} receipt${chargeRows.length === 1 ? "" : "s"}`
-    : `${monthLabel} cycle · ${chargeRows.length} receipt${chargeRows.length === 1 ? "" : "s"}`;
+  // ADR 0008: a cash/digital receipt ships in the CALENDAR month of its
+  // transaction_date — so this section's population is "receipts assigned to
+  // this export month", labeled by the month itself. (ADR 0006 labeled it by the
+  // statement-cycle window range; that window concept is retired.)
+  const sub = `${monthLabel} · ${chargeRows.length} receipt${chargeRows.length === 1 ? "" : "s"}`;
   return (
     <div>
       <SectionTitle
@@ -486,7 +470,7 @@ function AdditionalChargesSection({
         </div>
         {chargeRows.length === 0 ? (
           <div className="px-4 py-8 text-center text-[12.5px] text-gray-400">
-            No cash/digital receipts in this cycle.
+            No cash/digital receipts in this month.
           </div>
         ) : (
           chargeRows.map((r, i) => (

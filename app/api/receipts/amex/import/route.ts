@@ -24,7 +24,6 @@ import {
 import { getReceiptsDb } from "@/lib/cloudflare-runtime";
 import { createReceiptFile } from "@/lib/receipts/files";
 import { createAuditEntry } from "@/lib/receipts/audit";
-import { sweepUnassignedReceipts, detectMembershipDrift } from "@/lib/receipts/membership";
 
 /*
  * AMEX CSV Import — Dedup Contract
@@ -299,30 +298,11 @@ export async function POST(request: Request) {
       );
     }
 
-    // ── ADR 0006: statement-cycle membership sweep + drift detection ──────
-    // The just-imported statement's window now covers previously-awaiting
-    // CASH/DIGITAL receipts — assign them. Then detect drift: if this was a
-    // re-import/amendment that shifted a close, existing assignments may no
-    // longer match the recomputed windows; the freeze rule holds them fixed
-    // and logs each mismatch for the operator. Non-fatal (lines are committed).
-    try {
-      await sweepUnassignedReceipts(actor);
-      const driftCount = await detectMembershipDrift(actor);
-      if (driftCount > 0) {
-        warnings.push(
-          `${driftCount} assigned receipt(s) drifted after this import (a statement close shifted). ` +
-            `Existing assignments are held fixed (freeze rule) — review and override in Review if needed.`,
-        );
-      }
-    } catch (membershipErr) {
-      console.error(
-        "[amex/import] membership sweep/drift failed (statement lines already committed)",
-        membershipErr,
-      );
-      warnings.push(
-        "Statement lines imported, but statement-cycle membership sweep failed — re-check receipts manually.",
-      );
-    }
+    // ADR 0008: AMEX import no longer touches CASH/DIGITAL membership. Under the
+    // calendar-month rule a cash receipt's export month is fixed by its
+    // transaction_date (assigned at capture / date-set), so importing a statement
+    // changes nothing about cash membership — the ADR 0006 import sweep and drift
+    // detection are retired. (Statement lines and reconciliation are unaffected.)
 
     return NextResponse.json(
       {

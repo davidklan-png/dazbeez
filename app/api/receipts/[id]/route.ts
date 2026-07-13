@@ -254,10 +254,11 @@ export async function PATCH(request: Request, { params }: RouteContext) {
       }
     }
 
-    // ADR 0006 §D6: discretionary export_statement_month override (cash/digital
-    // only). Target must be export-open — the two-lock model's EXPORT seal
-    // (loadSealedExportMonths), not the reconciliation seal. A sealed month's
-    // bundle already shipped; reassigning into it would silently double-ship.
+    // ADR 0008 (reusing ADR 0006 §D6): discretionary export_statement_month
+    // override (cash/digital only). Target must be export-open — the two-lock
+    // model's EXPORT seal (loadSealedExportMonths), not the reconciliation seal.
+    // A sealed month's bundle already shipped; reassigning into it would
+    // silently double-ship.
     let exportStatementMonth: string | null | undefined = undefined;
     if ("exportStatementMonth" in body) {
       if (receipt.payment_path !== "CASH" && receipt.payment_path !== "DIGITAL") {
