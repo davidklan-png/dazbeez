@@ -116,8 +116,23 @@ export interface AssignmentResult {
   rolledFrom?: string;                  // natural month when rolled / rolled-awaiting
 }
 
-/** @param sealedMonths finalized statement_months (amex_reconciliations.status='finalized').
- *  CASH/DIGITAL only (policy). UNKNOWN does not roll — it must be classified first. */
+/** @param sealedMonths statement months whose export has SHIPPED and cannot be
+ *  reopened — `receipt_exports.status='finalized'` with no draft revision (the
+ *  isMonthLockedForEdits condition, month-lock.ts). This is the "can this
+ *  receipt still ship in M?" lock for CASH/DIGITAL, per the two-lock model.
+ *  CASH/DIGITAL only (policy). UNKNOWN does not roll — it must be classified first.
+ *
+ *  CORRECTION (this PR): an earlier draft of this section named
+ *  `amex_reconciliations.status='finalized'` (the reconciliation seal) here.
+ *  That was wrong for CASH/DIGITAL: a month whose reconciliation is sealed but
+ *  whose export is still a draft can still accept a late cash receipt into its
+ *  rebuildable bundle, so the reconciliation seal must NOT trigger roll-forward.
+ *  Roll-forward answers "can this receipt still ship in M?", and shipping is
+ *  locked by the export seal, not the reconciliation seal. Corrected here so
+ *  the design of record matches the implementation (lib/receipts/membership.ts
+ *  `loadSealedExportMonths`). The PR #1 backfill ran under the original
+ *  reconciliation-sealed wording and produced 0 roll-forward — identical to the
+ *  export-sealed result, since no export is finalized either way. */
 export function assignReceiptMembership(
   date: string | null,
   windows: MembershipWindow[],
@@ -188,8 +203,8 @@ CREATE INDEX IF NOT EXISTS idx_receipts_export_statement_month
 
 ### D6. Override (discretionary, audited, open-months-only)
 
-- **UI:** a `SelectInput` of **open** statement months (imported months whose reconciliation is not finalized) added to `components/receipts/review/form-pane.tsx` `FormPane`, plus a read-only "natural month" label. Included in the existing debounced PATCH body (`form-pane.tsx:180-194`) as `exportStatementMonth`.
-- **Server:** `app/api/receipts/[id]/route.ts` PATCH handler accepts `exportStatementMonth`; before writing, assert the **target** month is open (`getFinalizedReconciliationForMonth(target) === null`), else 422. The receipt's **current** month being sealed is already blocked by the existing guards (`rejectIfReceiptInFinalizedReconciliation` `db.ts:281-300`; `assertTransactionMonthEditable` `month-lock.ts:178`), so override only applies to receipts in open months targeting open months.
+- **UI:** a `SelectInput` of **open** statement months (imported months whose export is not sealed — `loadSealedExportMonths`) added to `components/receipts/review/form-pane.tsx` `FormPane`, plus a read-only "natural month" label. Included in the existing debounced PATCH body (`form-pane.tsx:180-194`) as `exportStatementMonth`.
+- **Server:** `app/api/receipts/[id]/route.ts` PATCH handler accepts `exportStatementMonth`; before writing, assert the **target** month is open (not in `loadSealedExportMonths()`), else 422. "Open" = export not shipped / reopenable, matching the roll-forward definition above — NOT the reconciliation seal. The receipt's **current** month being sealed is already blocked by the existing guards (`rejectIfReceiptInFinalizedReconciliation` `db.ts:281-300`; `assertTransactionMonthEditable` `month-lock.ts:178`), so override only applies to receipts in open months targeting open months.
 - **Audit:** `createAuditEntry` with `action: "receipt.export_statement_month_overridden"`, `oldValueJson: {export_statement_month}`, `newValueJson: {export_statement_month: target}`, `actor` = the Clerk user.
 
 ### D7. Backfill — migration-adjacent TS script `scripts/backfill-export-statement-month.ts`
@@ -197,7 +212,7 @@ CREATE INDEX IF NOT EXISTS idx_receipts_export_statement_month
 Precedent: `scripts/reprocess-extraction.ts` (TS one-off that writes D1 + audit). The script:
 
 1. Loads all `StatementClose` from `amex_statement_lines` (`GROUP BY statement_month → MAX(transaction_date)`).
-2. Loads `sealedMonths` from `amex_reconciliations WHERE status='finalized'`.
+2. Loads `sealedMonths` per §D3 (export-sealed: `receipt_exports` finalized with no draft). *(Historical note: the PR #1 backfill script shipped with the original `amex_reconciliations`-sealed wording; it produced 0 roll-forward, identical to export-sealed since no export is finalized. The forward hooks in PR #2 use `loadSealedExportMonths`.)*
 3. Computes `windows = computeStatementWindows(closes)` once.
 4. Selects `WHERE export_statement_month IS NULL AND payment_path IN ('CASH','DIGITAL') AND deleted_at IS NULL AND transaction_date IS NOT NULL`.
 5. For each: `assignReceiptMembership(date, windows, sealedMonths, { rollForward: true })`, `UPDATE receipt_records SET export_statement_month=?`, and `createAuditEntry(action: assigned | rolled_forward, oldValueJson: null, newValueJson: {month, reason, rolledFrom?})`.

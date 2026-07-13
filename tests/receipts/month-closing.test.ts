@@ -183,6 +183,30 @@ test("gate 2.5: needs_review receipt (not pending) blocks; pending is excluded",
   );
 });
 
+// ADR 0006 (PR #2): gate 2.5 now derives its in-scope set from the bundle,
+// which includes matched AMEX receipts. An unreviewed AMEX receipt that ships
+// in M must block M's finalize — it is no longer hidden by calendar-date
+// scoping (the PR #73 behavior this supersedes). The core does not special-case
+// payment_path at gate 2.5; AMEX is skipped only at gate 3 (field checks).
+test("gate 2.5: unreviewed AMEX receipt (in scope via bundle) blocks", () => {
+  const blockers = validateMonthReadyForExportCore(
+    makeInput({
+      unreviewedReceipts: [
+        makeReceipt({
+          id: "r-amex-needs",
+          payment_path: "AMEX",
+          status: "needs_review",
+          merchant: "AMEX MATCH",
+        }),
+      ],
+    }),
+  );
+  assert.ok(
+    blockers.some((b) => b.includes("AMEX MATCH") && b.includes("unreviewed")),
+    `unreviewed AMEX in scope must block: ${JSON.stringify(blockers)}`,
+  );
+});
+
 // (3) Receipt-level (CASH/DIGITAL) field completeness
 test("gate 3: CASH receipt missing expense category blocks; AMEX is skipped here", () => {
   const blockers = validateMonthReadyForExportCore(
