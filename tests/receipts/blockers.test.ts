@@ -1,9 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  buildDuplicateBadgeMap,
   computeExportBlockers,
   computeDuplicateReceiptWarnings,
   computeIcCardTopUpWarnings,
+  groupDuplicateReceipts,
   isIcCardTopUpCandidate,
   isTopUpVenueMerchant,
   type Blocker,
@@ -457,4 +459,88 @@ test("ic-card warning: the full 2026-06 candidate set counts as 8 (not 7)", () =
     8,
     `expected all 8 IC candidates, got: ${warnings[0]!.count}`,
   );
+});
+
+// ─── duplicate cluster membership + badges (PR B) ──────────────────────────
+
+test("groupDuplicateReceipts: exposes cluster membership (ids only)", () => {
+  // 4 receipts at the same canonical merchant + amount + date → one cluster of
+  // 4. A receipt missing a date, and an AMEX-path receipt, are excluded.
+  const cluster = [0, 1, 2, 3].map((i) =>
+    makeReceipt({
+      id: `m-${i}`,
+      payment_path: "CASH",
+      merchant: "セブン-イレブン 東中野末広橋店",
+      amount_minor: 10000,
+      transaction_date: "2026-06-11",
+    }),
+  );
+  const noDate = makeReceipt({
+    id: "m-nodate",
+    payment_path: "CASH",
+    merchant: "セブン-イレブン 東中野末広橋店",
+    amount_minor: 10000,
+    transaction_date: null,
+  });
+  const amex = makeReceipt({
+    id: "m-amex",
+    payment_path: "AMEX",
+    merchant: "セブン-イレブン 東中野末広橋店",
+    amount_minor: 10000,
+    transaction_date: "2026-06-11",
+  });
+
+  const groups = groupDuplicateReceipts([...cluster, noDate, amex]);
+  assert.equal(groups.length, 1, `expected one cluster, got: ${JSON.stringify(groups)}`);
+  assert.equal(groups[0]!.ids.length, 4);
+  assert.deepEqual(
+    [...groups[0]!.ids].sort(),
+    ["m-0", "m-1", "m-2", "m-3"],
+  );
+  // The dateless + AMEX receipts never appear in any cluster.
+  const allIds = new Set(groups.flatMap((g) => g.ids));
+  assert.equal(allIds.has("m-nodate"), false);
+  assert.equal(allIds.has("m-amex"), false);
+});
+
+test("buildDuplicateBadgeMap: every clustered receipt → badge; unclustered absent", () => {
+  // Two clusters: a pair (June-2 garble+canonical) and a triple (same merchant).
+  const pair = [
+    makeReceipt({ id: "p-1", payment_path: "CASH", merchant: "セブンーエレブン", amount_minor: 10000, transaction_date: "2026-06-02" }),
+    makeReceipt({ id: "p-2", payment_path: "CASH", merchant: "セブン-イレブン 東中野末広橋店", amount_minor: 10000, transaction_date: "2026-06-02" }),
+  ];
+  const triple = [0, 1, 2].map((i) =>
+    makeReceipt({ id: `t-${i}`, payment_path: "DIGITAL", merchant: "ローソン", amount_minor: 3000, transaction_date: "2026-06-15" }),
+  );
+  const lone = makeReceipt({ id: "lone-1", payment_path: "CASH", merchant: "PC Depot", amount_minor: 10450, transaction_date: "2026-06-12" });
+
+  const map = buildDuplicateBadgeMap([...pair, ...triple, lone]);
+
+  // Pair: both map to the cluster's first receipt (p-1), count 2.
+  assert.deepEqual(map.get("p-1"), { firstId: "p-1", count: 2 });
+  assert.deepEqual(map.get("p-2"), { firstId: "p-1", count: 2 });
+  // Triple: all map to t-0, count 3.
+  assert.deepEqual(map.get("t-0"), { firstId: "t-0", count: 3 });
+  assert.deepEqual(map.get("t-2"), { firstId: "t-0", count: 3 });
+  // The lone receipt is not in any cluster.
+  assert.equal(map.has("lone-1"), false);
+});
+
+test("computeDuplicateReceiptWarnings: card behavior unchanged after refactor", () => {
+  // The refactor extracted clusterDuplicates + groupDuplicateReceipts; the
+  // aggregate card must still fire with the same count/label/href.
+  const cluster = [0, 1, 2, 3].map((i) =>
+    makeReceipt({
+      id: `c-${i}`,
+      payment_path: "CASH",
+      merchant: "セブン-イレブン 東中野末広橋店",
+      amount_minor: 10000,
+      transaction_date: "2026-06-11",
+    }),
+  );
+  const w = computeDuplicateReceiptWarnings(cluster);
+  assert.equal(w.length, 1);
+  assert.equal(w[0]!.count, 4);
+  assert.equal(w[0]!.label, "Possible duplicate cash/digital receipts");
+  assert.equal(w[0]!.href, "/receipts/review/c-0");
 });

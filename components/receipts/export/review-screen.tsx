@@ -7,7 +7,11 @@ import {
   formatPaymentPath,
 } from "@/lib/receipts/format";
 import { formatCategoryLabel } from "@/lib/receipts/categories";
-import type { Blocker } from "@/lib/receipts/blockers";
+import {
+  buildDuplicateBadgeMap,
+  type Blocker,
+  type DuplicateBadge,
+} from "@/lib/receipts/blockers";
 import type {
   AmexStatementLine,
   BusinessTripReport,
@@ -38,6 +42,13 @@ export function ReviewScreen(props: ReviewScreenProps) {
   const amexRows = props.rows.filter((r) => r.rowType === "amex_line");
   const chargeRows = props.rows.filter((r) => r.rowType === "receipt");
   const gateClear = props.gateBlockers.length === 0;
+  // Per-row duplicate badges for the Additional Charges list — the SAME
+  // clustering (canonicalized merchant + amount + date) the aggregate
+  // "Possible duplicate" warning card uses, so a receipt can never be flagged
+  // on one surface and not the other. Computed from props.receipts
+  // (bundle.receipts), which is CASH/DIGITAL-identical to the page's
+  // monthReceipts grouping set, so badges match the card exactly.
+  const dupBadgeById = buildDuplicateBadgeMap(props.receipts);
 
   return (
     <div className="bg-gray-50 pb-16">
@@ -69,6 +80,7 @@ export function ReviewScreen(props: ReviewScreenProps) {
         <AdditionalChargesSection
           chargeRows={chargeRows}
           monthLabel={props.monthLabel}
+          dupBadgeById={dupBadgeById}
         />
         <BusinessTripsSection
           tripReports={props.tripReports}
@@ -445,9 +457,11 @@ function ConsolidatedGroup({
 function AdditionalChargesSection({
   chargeRows,
   monthLabel,
+  dupBadgeById,
 }: {
   chargeRows: ExportRow[];
   monthLabel: string;
+  dupBadgeById: Map<string, DuplicateBadge>;
 }) {
   // ADR 0008: a cash/digital receipt ships in the CALENDAR month of its
   // transaction_date — so this section's population is "receipts assigned to
@@ -473,24 +487,38 @@ function AdditionalChargesSection({
             No cash/digital receipts in this month.
           </div>
         ) : (
-          chargeRows.map((r, i) => (
-            <div
-              key={i}
-              className="grid grid-cols-[120px_1fr_120px_140px_100px] items-center border-b border-gray-150 px-4 py-2.5 text-[12px]"
-            >
-              <span className="text-gray-600">{r.transactionDate ?? "—"}</span>
-              <span className="truncate font-medium text-gray-900">{r.merchant ?? "—"}</span>
-              <span className="text-right tabular-nums">
-                {formatAmountMinor(r.amountMinor ?? 0, r.currency)}
-              </span>
-              <span className="text-gray-600">{formatCategoryLabel(r.expenseCategoryCode)}</span>
-              <span>
-                <Pill tone="gray" size="sm">
-                  {formatPaymentPath(r.paymentPath)}
-                </Pill>
-              </span>
-            </div>
-          ))
+          chargeRows.map((r, i) => {
+            const dupBadge = r.receiptId ? dupBadgeById.get(r.receiptId) : undefined;
+            return (
+              <div
+                key={i}
+                className="grid grid-cols-[120px_1fr_120px_140px_100px] items-center border-b border-gray-150 px-4 py-2.5 text-[12px]"
+              >
+                <span className="text-gray-600">{r.transactionDate ?? "—"}</span>
+                <div className="flex min-w-0 items-center gap-1.5">
+                  <span className="truncate font-medium text-gray-900">{r.merchant ?? "—"}</span>
+                  {dupBadge && (
+                    <Link
+                      href={`/receipts/review/${dupBadge.firstId}`}
+                      className="inline-flex shrink-0 items-center rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold text-amber-700 hover:bg-amber-200"
+                      title={`Part of a ${dupBadge.count}-receipt duplicate cluster (same canonical merchant + amount + date). Open the first to review.`}
+                    >
+                      dup ×{dupBadge.count}
+                    </Link>
+                  )}
+                </div>
+                <span className="text-right tabular-nums">
+                  {formatAmountMinor(r.amountMinor ?? 0, r.currency)}
+                </span>
+                <span className="text-gray-600">{formatCategoryLabel(r.expenseCategoryCode)}</span>
+                <span>
+                  <Pill tone="gray" size="sm">
+                    {formatPaymentPath(r.paymentPath)}
+                  </Pill>
+                </span>
+              </div>
+            );
+          })
         )}
       </Card>
     </div>

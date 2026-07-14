@@ -55,7 +55,7 @@ export function isUnreviewedReceipt(receipt: ReceiptRecord): boolean {
 // a prepaid IC-card (Suica/PASMO/ICOCA/etc.) charge — a prepayment, not a
 // travel expense at the moment of charge. Informational warning only: it may
 // be entirely business, and the responsible treatment (expense it as trips
-// deplete the card, or treat the card as business-dedicated) is the
+// deplete the card, or treat the card is business-dedicated) is the
 // accountant's call. NOT wired into the finalize gate — it is advisory.
 // False positives are kept low by requiring ALL THREE signals (round sum AND
 // top-up venue AND travel category) on the same receipt.
@@ -271,6 +271,88 @@ export function computeExportWarnings(lines: AmexStatementLine[]): Blocker[] {
   return warnings;
 }
 
+// ─── CASH/DIGITAL duplicate clustering ────────────────────────────────────
+// One canonicalization-aware clustering implementation drives both the
+// aggregate warning card (computeDuplicateReceiptWarnings) and the per-row
+// badge map (buildDuplicateBadgeMap / groupDuplicateReceipts) so a receipt can
+// never be flagged on one surface and not the other.
+
+/**
+ * Build the CASH/DIGITAL duplicate clusters: receipts sharing a canonicalized
+ * merchant (merchant.ts) + amount_minor + transaction_date. Internal — carries
+ * the full receipt objects so the aggregate card can read merchant/date/id.
+ * groupDuplicateReceipts is the public ids-only projection; the key is JSON-
+ * encoded (not NUL-separated) so the file stays grep/git-tooling friendly.
+ * Cluster order is insertion order (first-seen first); within a cluster, input
+ * order — matching the pre-refactor aggregate-card behavior exactly.
+ */
+function clusterDuplicates(
+  receipts: ReceiptRecord[],
+): { key: string; receipts: ReceiptRecord[] }[] {
+  const groups = new Map<string, ReceiptRecord[]>();
+  for (const r of receipts) {
+    if (r.payment_path !== "CASH" && r.payment_path !== "DIGITAL") continue;
+    if (!r.transaction_date || r.merchant == null || r.amount_minor == null) continue;
+    // Canonicalize the merchant in the grouping key so OCR-garbled variants of
+    // the same chain cluster together (2026-06: "セブンーエレブン" + "セブン-イレブン
+    // 東中野末広橋店" — two photos of one PASMO top-up — never clustered because
+    // the raw strings differ). Display still uses r.merchant verbatim.
+    const key = JSON.stringify([
+      canonicalizeMerchant(r.merchant),
+      r.amount_minor,
+      r.transaction_date,
+    ]);
+    const g = groups.get(key) ?? [];
+    g.push(r);
+    groups.set(key, g);
+  }
+  const out: { key: string; receipts: ReceiptRecord[] }[] = [];
+  for (const [key, recs] of groups) {
+    if (recs.length >= 2) out.push({ key, receipts: recs });
+  }
+  return out;
+}
+
+/** A duplicate cluster's membership (ids only) — the display-agnostic view. */
+export type DuplicateCluster = { key: string; ids: string[] };
+
+/**
+ * Group CASH/DIGITAL receipts into duplicate clusters (canonicalized merchant +
+ * amount + date, size ≥ 2). Returns ids only — the pure, display-agnostic view
+ * the review-page badge logic consumes. Callers needing the aggregate warning
+ * card should use computeDuplicateReceiptWarnings (same clustering).
+ */
+export function groupDuplicateReceipts(
+  receipts: ReceiptRecord[],
+): DuplicateCluster[] {
+  return clusterDuplicates(receipts).map((c) => ({
+    key: c.key,
+    ids: c.receipts.map((r) => r.id),
+  }));
+}
+
+/** Badge info for a receipt in a duplicate cluster: deep-link target (the
+ *  cluster's first receipt) + cluster size. */
+export type DuplicateBadge = { firstId: string; count: number };
+
+/**
+ * Map every receipt id that belongs to a duplicate cluster → its badge info
+ * (first receipt id for the deep-link + cluster size). Receipts not in any
+ * cluster are absent. Pure — unit-tested, then consumed by the review-page
+ * Additional Charges list to render per-row "dup ×N" badges.
+ */
+export function buildDuplicateBadgeMap(
+  receipts: ReceiptRecord[],
+): Map<string, DuplicateBadge> {
+  const map = new Map<string, DuplicateBadge>();
+  for (const c of clusterDuplicates(receipts)) {
+    const firstId = c.receipts[0]!.id;
+    const count = c.receipts.length;
+    for (const r of c.receipts) map.set(r.id, { firstId, count });
+  }
+  return map;
+}
+
 /**
  * Non-blocking warning when 2+ CASH/DIGITAL receipts share a CANONICALIZED
  * merchant + amount_minor + transaction_date (e.g. several ¥10,000 Seven-Eleven
@@ -286,23 +368,10 @@ export function computeExportWarnings(lines: AmexStatementLine[]): Blocker[] {
 export function computeDuplicateReceiptWarnings(
   receipts: ReceiptRecord[],
 ): Blocker[] {
-  const groups = new Map<string, ReceiptRecord[]>();
-  for (const r of receipts) {
-    if (r.payment_path !== "CASH" && r.payment_path !== "DIGITAL") continue;
-    if (!r.transaction_date || r.merchant == null || r.amount_minor == null) continue;
-    // Canonicalize the merchant in the grouping key so OCR-garbled variants of
-    // the same chain cluster together (2026-06: "セブンーエレブン" + "セブン-イレブン
-    // 東中野末広橋店" — two photos of one PASMO top-up — never clustered because
-    // the raw strings differ). Display still uses r.merchant verbatim.
-    const key = `${canonicalizeMerchant(r.merchant)}\u0000${r.amount_minor}\u0000${r.transaction_date}`;
-    const g = groups.get(key) ?? [];
-    g.push(r);
-    groups.set(key, g);
-  }
-  const clusters = [...groups.values()].filter((g) => g.length >= 2);
+  const clusters = clusterDuplicates(receipts);
   if (clusters.length === 0) return [];
-  const totalFlagged = clusters.reduce((s, g) => s + g.length, 0);
-  const first = clusters[0]![0]!;
+  const totalFlagged = clusters.reduce((s, c) => s + c.receipts.length, 0);
+  const first = clusters[0]!.receipts[0]!;
   return [
     {
       severity: "warn",
@@ -310,7 +379,7 @@ export function computeDuplicateReceiptWarnings(
       label: "Possible duplicate cash/digital receipts",
       detail:
         `${clusters.length} cluster(s) share merchant + amount + date ` +
-        `(e.g. ${first.merchant} ×${clusters[0]!.length} on ${first.transaction_date}). ` +
+        `(e.g. ${first.merchant} ×${clusters[0]!.receipts.length} on ${first.transaction_date}). ` +
         `Confirm these are distinct charges, not double-captured.`,
       href: `/receipts/review/${first.id}`,
       ctaLabel: "Open first",
