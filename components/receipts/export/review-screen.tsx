@@ -2,6 +2,8 @@ import Link from "next/link";
 import { Card } from "@/components/ui/card";
 import { Pill } from "@/components/ui/pill";
 import { FinalizeCard } from "@/components/receipts/export/finalize-card";
+import { InlineCategoryCell } from "@/components/receipts/export/inline-category-cell";
+import { buildCategoryCellProps } from "@/lib/receipts/category-cell";
 import {
   formatAmountMinor,
   formatPaymentPath,
@@ -76,11 +78,18 @@ export function ReviewScreen(props: ReviewScreenProps) {
 
       <div className="space-y-8 px-8 py-8">
         <SummarySection rows={props.rows} receipts={props.receipts} />
-        <SideBySideSection amexRows={amexRows} receipts={props.receipts} />
+        <SideBySideSection
+          amexRows={amexRows}
+          receipts={props.receipts}
+          finalized={finalized}
+          reconciliationSealed={props.reconciliationSealed}
+        />
         <AdditionalChargesSection
           chargeRows={chargeRows}
           monthLabel={props.monthLabel}
           dupBadgeById={dupBadgeById}
+          finalized={finalized}
+          reconciliationSealed={props.reconciliationSealed}
         />
         <BusinessTripsSection
           tripReports={props.tripReports}
@@ -303,9 +312,13 @@ function SummarySection({
 function SideBySideSection({
   amexRows,
   receipts,
+  finalized,
+  reconciliationSealed,
 }: {
   amexRows: ExportRow[];
   receipts: ReceiptRecord[];
+  finalized: boolean;
+  reconciliationSealed: boolean;
 }) {
   const receiptMap = new Map(receipts.map((r) => [r.id, r]));
   // Group by receiptId to render consolidated-receipt groups together.
@@ -343,13 +356,32 @@ function SideBySideSection({
         ) : (
           <>
             {consolidated.map(([rid, g]) => (
-              <ConsolidatedGroup key={rid} receiptId={rid} rows={g} receipt={receiptMap.get(rid)} />
+              <ConsolidatedGroup
+                key={rid}
+                receiptId={rid}
+                rows={g}
+                receipt={receiptMap.get(rid)}
+                finalized={finalized}
+                reconciliationSealed={reconciliationSealed}
+              />
             ))}
             {singleMatched.map(([rid, g]) => (
-              <SideBySideRow key={rid} row={g[0]!} receipt={receiptMap.get(rid)} />
+              <SideBySideRow
+                key={rid}
+                row={g[0]!}
+                receipt={receiptMap.get(rid)}
+                finalized={finalized}
+                reconciliationSealed={reconciliationSealed}
+              />
             ))}
             {standalone.map((row, i) => (
-              <SideBySideRow key={`none-${i}`} row={row} receipt={undefined} />
+              <SideBySideRow
+                key={`none-${i}`}
+                row={row}
+                receipt={undefined}
+                finalized={finalized}
+                reconciliationSealed={reconciliationSealed}
+              />
             ))}
           </>
         )}
@@ -365,9 +397,13 @@ function SideBySideSection({
 function SideBySideRow({
   row,
   receipt,
+  finalized,
+  reconciliationSealed,
 }: {
   row: ExportRow;
   receipt: ReceiptRecord | undefined;
+  finalized: boolean;
+  reconciliationSealed: boolean;
 }) {
   const amountDelta =
     receipt && receipt.amount_minor !== null && receipt.amount_minor !== row.amountMinor;
@@ -383,6 +419,11 @@ function SideBySideRow({
         <div className="font-medium text-gray-900">{row.merchant ?? "—"}</div>
         <div className="text-[11px] text-gray-500">
           {row.transactionDate} · {formatAmountMinor(row.amountMinor ?? 0, row.currency)}
+        </div>
+        <div className="mt-1.5 max-w-[260px]">
+          <InlineCategoryCell
+            {...buildCategoryCellProps(row, finalized, reconciliationSealed)}
+          />
         </div>
       </div>
       <div className="pr-3">
@@ -426,10 +467,14 @@ function ConsolidatedGroup({
   receiptId,
   rows,
   receipt,
+  finalized,
+  reconciliationSealed,
 }: {
   receiptId: string;
   rows: ExportRow[];
   receipt: ReceiptRecord | undefined;
+  finalized: boolean;
+  reconciliationSealed: boolean;
 }) {
   const lineSum = rows.reduce((s, r) => s + (r.amountMinor ?? 0), 0);
   const balanced = receipt && receipt.amount_minor !== null && receipt.amount_minor === lineSum;
@@ -446,7 +491,13 @@ function ConsolidatedGroup({
         </span>
       </div>
       {rows.map((row, i) => (
-        <SideBySideRow key={i} row={row} receipt={i === 0 ? receipt : undefined} />
+        <SideBySideRow
+          key={i}
+          row={row}
+          receipt={i === 0 ? receipt : undefined}
+          finalized={finalized}
+          reconciliationSealed={reconciliationSealed}
+        />
       ))}
     </div>
   );
@@ -458,10 +509,14 @@ function AdditionalChargesSection({
   chargeRows,
   monthLabel,
   dupBadgeById,
+  finalized,
+  reconciliationSealed,
 }: {
   chargeRows: ExportRow[];
   monthLabel: string;
   dupBadgeById: Map<string, DuplicateBadge>;
+  finalized: boolean;
+  reconciliationSealed: boolean;
 }) {
   // ADR 0008: a cash/digital receipt ships in the CALENDAR month of its
   // transaction_date — so this section's population is "receipts assigned to
@@ -510,7 +565,9 @@ function AdditionalChargesSection({
                 <span className="text-right tabular-nums">
                   {formatAmountMinor(r.amountMinor ?? 0, r.currency)}
                 </span>
-                <span className="text-gray-600">{formatCategoryLabel(r.expenseCategoryCode)}</span>
+                <InlineCategoryCell
+                  {...buildCategoryCellProps(r, finalized, reconciliationSealed)}
+                />
                 <span>
                   <Pill tone="gray" size="sm">
                     {formatPaymentPath(r.paymentPath)}
