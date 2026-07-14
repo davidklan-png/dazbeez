@@ -248,6 +248,22 @@ reconciliation finalized. Design consequences:
     printed T-number (receipt 92418c1a, T2810074043972 visible on image).
     Improve Mac-side extractor recall; consider a re-extract pass over
     existing receipts whose extraction_json lacks the field.
+15. **Canonical merchant at capture (write-side canonicalization).** PR A
+    (merchant.ts) ships READ-side canonicalization: computeDuplicateReceiptWarnings
+    grouping + isTopUpVenueMerchant canonicalize before matching, so OCR-garbled
+    chain variants (2026-06 "セブンーエレブン" vs "セブン-イレブン 東中野末広橋店")
+    cluster/match without touching stored data. Assessed WRITE-side here, did
+    NOT build it: a canonical_merchant column populated at capture would need a
+    schema migration + backfill + edits to THREE write paths (MLX-extraction
+    apply, amex import, the receipt PATCH merchant field) and re-canonicalize on
+    every operator edit — it touches the MLX consumer contract (the garbles
+    originate in extraction.ts parseMerchant VLM output). Recommendation:
+    DEFER until backlog #14 (extraction recall) lands — canonicalizing a
+    column that a noisy extractor keeps re-garbling is churn. When added, a
+    stored canonical key also lets the manifest/export and the reconcile dedup
+    UI show a clean merchant without re-deriving. Read-side canonicalization
+    delivers the user value now (June-2 pair clusters; IC count 7→8) and is the
+    single match authority until then.
 
 ## Two-Agent Workflow: Sandbox (Architect) vs. CLI (Worker)
 

@@ -2,8 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   computeExportBlockers,
+  computeDuplicateReceiptWarnings,
   computeIcCardTopUpWarnings,
   isIcCardTopUpCandidate,
+  isTopUpVenueMerchant,
   type Blocker,
 } from "@/lib/receipts/blockers";
 import type { AmexStatementLine, ReceiptRecord } from "@/lib/receipts/types";
@@ -366,5 +368,93 @@ test("ic-card predicate: convenience store + round sum but non-travel category �
       merchant: "ローソン",
     }),
     false,
+  );
+});
+
+// ─── merchant canonicalization (PR A) ──────────────────────────────────────
+// The 2026-06 gaps: a PASMO top-up stored as the garble "セブンーエレブン"
+// (540a5714) missed the IC venue list (IC warning counted 7, not 8) AND never
+// clustered with its canonical-form re-photograph (0802caae) in the duplicate
+// warning. Canonicalization at the read side fixes both.
+
+test("ic-card venue: OCR-garbled セブンーエレブン now matches (undercount fix)", () => {
+  // Before PR A this returned false (the garble contained neither "セブン-イレブン"
+  // nor "セブンイレブン"), so receipt 540a5714 dropped out of the IC candidate
+  // set and the warning undercounted. detectMerchantChain now recognizes it.
+  assert.equal(isTopUpVenueMerchant("セブンーエレブン"), true);
+  assert.equal(
+    isIcCardTopUpCandidate({
+      payment_path: "CASH",
+      expense_category_code: "travel_transportation",
+      amount_minor: 10000,
+      merchant: "セブンーエレブン",
+    }),
+    true,
+  );
+});
+
+test("duplicate warning: garble + canonical-form pair now clusters (June-2 fix)", () => {
+  // Two photos of one ¥10,000 PASMO top-up on 2026-06-02. The merchant strings
+  // differ in TWO ways (the ー/エ garble AND one carries the branch suffix), so
+  // pre-canonicalization they had different grouping keys and never clustered.
+  // Canonicalizing both to the セブン-イレブン token unifies the key.
+  const receipts: ReceiptRecord[] = [
+    makeReceipt({
+      id: "g-1",
+      payment_path: "CASH",
+      expense_category_code: "travel_transportation",
+      merchant: "セブンーエレブン",
+      amount_minor: 10000,
+      transaction_date: "2026-06-02",
+    }),
+    makeReceipt({
+      id: "g-2",
+      payment_path: "CASH",
+      expense_category_code: "travel_transportation",
+      merchant: "セブン-イレブン 東中野末広橋店",
+      amount_minor: 10000,
+      transaction_date: "2026-06-02",
+    }),
+  ];
+
+  const warnings = computeDuplicateReceiptWarnings(receipts);
+  assert.equal(
+    warnings.length,
+    1,
+    `expected the June-2 pair to cluster, got: ${JSON.stringify(warnings)}`,
+  );
+  assert.equal(warnings[0]!.count, 2);
+});
+
+test("ic-card warning: the full 2026-06 candidate set counts as 8 (not 7)", () => {
+  // Representative of the 8 prod receipts: garble, canonical, different branch,
+  // different dates. All are CASH travel_transportation ¥10k at a セブン — all 8
+  // must now register as IC candidates (the garble was the previous miss).
+  const receipts: ReceiptRecord[] = [
+    ["2026-06-02", "セブンーエレブン"],
+    ["2026-06-02", "セブン-イレブン 東中野末広橋店"],
+    ["2026-06-11", "セブン-イレブン 東中野末広橋店"],
+    ["2026-06-11", "セブン-イレブン 東中野末広橋店"],
+    ["2026-06-11", "セブン-イレブン 東中野末広橋店"],
+    ["2026-06-11", "セブン-イレブン 東中野末広橋店"],
+    ["2026-06-22", "セブン-イレブン 渋谷本町3丁目店"],
+    ["2026-06-27", "セブン-イレブン 東中野末広橋店"],
+  ].map(([date, merchant], i) =>
+    makeReceipt({
+      id: `ic8-${i}`,
+      payment_path: "CASH",
+      expense_category_code: "travel_transportation",
+      merchant,
+      amount_minor: 10000,
+      transaction_date: date,
+    }),
+  );
+
+  const warnings = computeIcCardTopUpWarnings(receipts);
+  assert.equal(warnings.length, 1);
+  assert.equal(
+    warnings[0]!.count,
+    8,
+    `expected all 8 IC candidates, got: ${warnings[0]!.count}`,
   );
 });

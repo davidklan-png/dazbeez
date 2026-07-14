@@ -13,6 +13,7 @@
 import { requiresAttendees } from "@/lib/receipts/categories";
 import { isPendingProcessing } from "@/lib/receipts/extraction-state";
 import { resolveLineCategory } from "@/lib/receipts/line-classification";
+import { canonicalizeMerchant, detectMerchantChain } from "@/lib/receipts/merchant";
 import type { AmexStatementLine, ReceiptRecord } from "@/lib/receipts/types";
 
 // ─── Shared predicates (tile ⇄ gate) ─────────────────────────────────────
@@ -65,39 +66,6 @@ export const IC_CARD_TOPUP_AMOUNTS_MINOR: ReadonlySet<number> = new Set([
   1000, 2000, 3000, 5000, 10000,
 ]);
 
-// Merchant substrings that signal a likely IC-card top-up point: the three
-// major convenience-store chains, the JR NewDays kiosk, and station ticket
-// machines. Matched case-insensitively as substrings of the normalized
-// merchant name (handles chain + branch suffixes like
-// "セブン-イレブン 東中野末広橋店"). Katakana variants are listed explicitly;
-// toLowerCase() only touches the ASCII half.
-const IC_CARD_TOPUP_VENUE_PATTERNS: readonly string[] = [
-  // セブン-イレブン (with / without the hyphen; ASCII spellings)
-  "セブン-イレブン",
-  "セブンイレブン",
-  "seven-eleven",
-  "seven eleven",
-  "7-eleven",
-  "7 eleven",
-  "7eleven",
-  // ローソン
-  "ローソン",
-  "lawson",
-  // ファミリーマート
-  "ファミリーマート",
-  "ファミマ",
-  "familymart",
-  "family mart",
-  "family-mart",
-  // NewDays (JR kiosk)
-  "newdays",
-  "new days",
-  "new-days",
-  // 駅 / station ticket machines
-  "駅",
-  "station",
-];
-
 /** True for a round yen sum typical of an IC-card top-up (¥1k/¥2k/¥3k/¥5k/¥10k). */
 export function isRoundTopUpAmount(
   amountMinor: number | null | undefined,
@@ -105,14 +73,17 @@ export function isRoundTopUpAmount(
   return amountMinor != null && IC_CARD_TOPUP_AMOUNTS_MINOR.has(amountMinor);
 }
 
-/** True when the merchant name matches a top-up-venue signal (convenience
- * store / JR kiosk / station). Null/empty merchants never match. */
+/** True when the merchant is a likely IC-card top-up point: a canonical
+ * convenience-store chain (detected via merchant.ts, so OCR-garbled spellings
+ * like "セブンーエレブン" still match — fixes the 2026-06 IC-warning undercount)
+ * OR a station (駅 / "station"). Null/empty merchants never match. Advisory. */
 export function isTopUpVenueMerchant(
   merchant: string | null | undefined,
 ): boolean {
   if (!merchant) return false;
-  const normalized = merchant.toLowerCase();
-  return IC_CARD_TOPUP_VENUE_PATTERNS.some((p) => normalized.includes(p));
+  if (detectMerchantChain(merchant) !== null) return true;
+  const lower = merchant.toLowerCase();
+  return lower.includes("駅") || lower.includes("station");
 }
 
 /** True when a receipt looks like a prepaid IC-card top-up rather than a
@@ -301,10 +272,13 @@ export function computeExportWarnings(lines: AmexStatementLine[]): Blocker[] {
 }
 
 /**
- * Non-blocking warning when 2+ CASH/DIGITAL receipts share merchant +
- * amount_minor + transaction_date (e.g. several ¥10,000 Seven-Eleven charges
- * on the same day). ADR 0006 §D9 / PR #3. Warning only — no auto-dedup, not a
- * finalize blocker. Deep-links to the first offending receipt's edit view.
+ * Non-blocking warning when 2+ CASH/DIGITAL receipts share a CANONICALIZED
+ * merchant + amount_minor + transaction_date (e.g. several ¥10,000 Seven-Eleven
+ * charges on the same day). Merchant is canonicalized via merchant.ts so
+ * OCR-garbled variants of the same chain cluster together (2026-06 fix:
+ * "セブンーエレブン" + "セブン-イレブン 東中野末広橋店" — two photos of one charge).
+ * ADR 0006 §D9 / PR #3. Warning only — no auto-dedup, not a finalize blocker.
+ * Deep-links to the first offending receipt's edit view.
  *
  * Receipts not in the CASH/DIGITAL paths, or missing merchant/amount/date, are
  * ignored (they can't form a duplicate cluster on these keys).
@@ -316,7 +290,11 @@ export function computeDuplicateReceiptWarnings(
   for (const r of receipts) {
     if (r.payment_path !== "CASH" && r.payment_path !== "DIGITAL") continue;
     if (!r.transaction_date || r.merchant == null || r.amount_minor == null) continue;
-    const key = `${r.merchant}\u0000${r.amount_minor}\u0000${r.transaction_date}`;
+    // Canonicalize the merchant in the grouping key so OCR-garbled variants of
+    // the same chain cluster together (2026-06: "セブンーエレブン" + "セブン-イレブン
+    // 東中野末広橋店" — two photos of one PASMO top-up — never clustered because
+    // the raw strings differ). Display still uses r.merchant verbatim.
+    const key = `${canonicalizeMerchant(r.merchant)}\u0000${r.amount_minor}\u0000${r.transaction_date}`;
     const g = groups.get(key) ?? [];
     g.push(r);
     groups.set(key, g);
