@@ -13,6 +13,7 @@ const BUNDLE_DOWNLOAD_LINKS = [
   { file: "manifest", label: "Manifest" },
   { file: "summary", label: "Summary" },
   { file: "readme", label: "README" },
+  { file: "proofs", label: "領収書ZIP" },
 ] as const;
 
 /**

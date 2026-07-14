@@ -21,7 +21,8 @@ import type {
   ReceiptRecord,
 } from "@/lib/receipts/types";
 import { validateAmexLinesForSignoff } from "@/lib/receipts/reconciliation-signoff";
-import { isUnreviewedReceipt } from "@/lib/receipts/blockers";
+import { isUnreviewedReceipt, receiptsMissingProofFiles } from "@/lib/receipts/blockers";
+import { countReceiptFilesByObjectIds } from "@/lib/receipts/files";
 
 /**
  * Single source of truth for "what ships in this month's export bundle".
@@ -237,6 +238,9 @@ export interface ValidateMonthReadyInput {
   /** Gate 6: raw (statement_month, matched_receipt_id) rows for cross-month
    * match integrity; core groups them. */
   crossMonthMatchedLines: { statement_month: string; matched_receipt_id: string }[];
+  /** Gate 7: receipt_files row count per shipped receipt id (absent = 0). A
+   *  shipped receipt with zero rows has no proof to include in the ZIP. */
+  receiptFileCounts: Map<string, number>;
 }
 
 /**
@@ -259,6 +263,7 @@ export function validateMonthReadyForExportCore(
     complianceSummary,
     complianceSettings,
     crossMonthMatchedLines,
+    receiptFileCounts,
   } = input;
   const blockers: string[] = [];
 
@@ -349,6 +354,17 @@ export function validateMonthReadyForExportCore(
     }
   }
 
+  // (7) Proofs: a shipped receipt with zero receipt_files rows has no proof to
+  // include in the ZIP. Shared predicate with the tile (receiptsMissingProofFiles).
+  // D1-only — R2 existence is the rebuild's layer-2 check, not the gate's.
+  // Missing proof_copy is NOT a blocker (the ZIP falls back to the original).
+  for (const receipt of receiptsMissingProofFiles(bundle.receipts, receiptFileCounts)) {
+    const label = receipt.merchant ?? receipt.id;
+    blockers.push(
+      `Receipt ${label}: no proof file on record (no original or proof_copy) — cannot build the proofs bundle`,
+    );
+  }
+
   return blockers;
 }
 
@@ -417,6 +433,13 @@ export async function validateMonthReadyForExport(
     )
     .all<{ statement_month: string; matched_receipt_id: string }>();
 
+  // (7) Proofs — count receipt_files rows per shipped receipt (D1; no R2 in the
+  // gate — the rebuild's layer-2 check handles R2 existence).
+  const receiptFileCounts = await countReceiptFilesByObjectIds(
+    db,
+    bundle.receipts.map((r) => r.id),
+  );
+
   return validateMonthReadyForExportCore({
     month,
     reconciliation,
@@ -427,6 +450,7 @@ export async function validateMonthReadyForExport(
     complianceSummary: summary,
     complianceSettings: settings,
     crossMonthMatchedLines: matchedLineMonths.results ?? [],
+    receiptFileCounts,
   });
 }
 

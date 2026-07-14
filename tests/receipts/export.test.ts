@@ -102,6 +102,17 @@ test("buildMonthlyExportCsv: one data row per input row", () => {
   assert.equal(lines.length, 3, "header + 2 data rows");
 });
 
+test("buildMonthlyExportCsv: No is the first column and 1-based (proofs join key)", () => {
+  const rows = [makeReceiptRow(), makeReceiptRow({ receiptId: "r-2" }), makeReceiptRow({ receiptId: "r-3" })];
+  const csv = buildMonthlyExportCsv(rows, new Map());
+  const lines = csv.split("\n");
+  assert.equal(lines[0]!.split(",")[0], "No", "No is the header's first column");
+  // 1-based row sequence, first field of each data line.
+  assert.equal(lines[1]!.split(",")[0], "1");
+  assert.equal(lines[2]!.split(",")[0], "2");
+  assert.equal(lines[3]!.split(",")[0], "3");
+});
+
 test("buildMonthlyExportCsv: JPY amounts are not divided by 100", () => {
   const csv = buildMonthlyExportCsv(
     [makeReceiptRow({ amountMinor: 1500, currency: "JPY" })],
@@ -124,8 +135,8 @@ test("buildMonthlyExportCsv: null amount renders as empty string", () => {
   const csv = buildMonthlyExportCsv([row], new Map());
   const dataLine = csv.split("\n")[1]!;
   const cols = dataLine.split(",");
-  // Header: RowType(0), TransactionDate(1), Merchant(2), Amount(3)
-  assert.equal(cols[3], "", "null amount should be empty column");
+  // Header: No(0), RowType(1), TransactionDate(2), Merchant(3), Amount(4)
+  assert.equal(cols[4], "", "null amount should be empty column");
 });
 
 test("buildMonthlyExportCsv: attendees are joined with semicolons and quoted", () => {

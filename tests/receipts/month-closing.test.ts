@@ -128,6 +128,7 @@ function makeInput(overrides: Partial<ValidateMonthReadyInput> = {}): ValidateMo
     complianceSummary: { blockers: 0, warnings: 0 },
     complianceSettings: { export_block_on_warnings: false },
     crossMonthMatchedLines: [],
+    receiptFileCounts: new Map(),
     ...overrides,
   };
 }
@@ -312,6 +313,35 @@ test("gate 6: receipt matched across months blocks only when this month is impli
     }),
   );
   assert.ok(!single.some((b) => b.includes("r-z")));
+});
+
+// ─── Gate 7: proofs (receipt with zero receipt_files rows) ──────────────────
+
+test("gate 7: a shipped receipt with zero receipt_files rows blocks", () => {
+  const receipt = makeReceipt({ id: "r-no-files", merchant: "NoFile Merchant" });
+  const bundle = makeBundle({ receipts: [receipt], rows: [] });
+  const blockers = validateMonthReadyForExportCore(
+    makeInput({ bundle, receiptFileCounts: new Map() }), // r-no-files absent → 0
+  );
+  assert.ok(
+    blockers.some((b) => /no proof file on record/.test(b)),
+    "a receipt with zero file rows must block finalize",
+  );
+});
+
+test("gate 7: a receipt WITH a file row does not block", () => {
+  const receipt = makeReceipt({ id: "r-has-files", merchant: "HasFile" });
+  const bundle = makeBundle({ receipts: [receipt], rows: [] });
+  const blockers = validateMonthReadyForExportCore(
+    makeInput({
+      bundle,
+      receiptFileCounts: new Map([["r-has-files", 1]]),
+    }),
+  );
+  assert.ok(
+    !blockers.some((b) => /no proof file on record/.test(b)),
+    "a receipt with a file row must not block on proofs",
+  );
 });
 
 // ─── Tile ⇄ gate parity ───────────────────────────────────────────────────
