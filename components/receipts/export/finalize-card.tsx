@@ -6,6 +6,15 @@ import { Btn } from "@/components/ui/btn";
 import { Card } from "@/components/ui/card";
 import { LockIcon } from "@/components/ui/icons";
 
+// The four artifacts sealed in RECEIPTS_ARCHIVE_BUCKET, served by
+// GET /api/receipts/export/[month]/download (Content-Disposition: attachment).
+const BUNDLE_DOWNLOAD_LINKS = [
+  { file: "receipts", label: "Receipts CSV" },
+  { file: "manifest", label: "Manifest" },
+  { file: "summary", label: "Summary" },
+  { file: "readme", label: "README" },
+] as const;
+
 /**
  * Finalize action + panel. Extracted from export-screen.tsx so it can render at
  * the bottom of the pre-finalize review page (the new finalize surface). The
@@ -94,8 +103,21 @@ export function FinalizeCard({
 
         {finalized ? (
           <div className="px-5 py-5 text-[12.5px] text-gray-600">
-            All {rowsInDraft} rows are locked. Reconciliation is signed off. Download the archive
-            bundle from the export screen history.
+            <p>
+              All {rowsInDraft} rows are locked. Reconciliation is signed off. Download the sealed
+              bundle:
+            </p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {BUNDLE_DOWNLOAD_LINKS.map(({ file, label }) => (
+                <a
+                  key={file}
+                  href={`/api/receipts/export/${month}/download?file=${file}`}
+                  className="rounded-xl border border-amber-300 bg-amber-50 px-3 py-1.5 text-[11.5px] font-semibold text-amber-900 hover:bg-amber-100"
+                >
+                  {label}
+                </a>
+              ))}
+            </div>
           </div>
         ) : (
           <div className="px-5 py-5">
