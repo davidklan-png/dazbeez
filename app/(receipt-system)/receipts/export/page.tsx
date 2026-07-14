@@ -37,6 +37,16 @@ import { deriveStatementWindow } from "@/lib/receipts/statement-window";
 
 export const dynamic = "force-dynamic";
 
+// The four artifacts finalize seals in RECEIPTS_ARCHIVE_BUCKET, served by
+// GET /api/receipts/export/[month]/download (Content-Disposition: attachment,
+// so plain anchors download without any client-side code).
+const BUNDLE_DOWNLOAD_LINKS = [
+  { file: "receipts", label: "Receipts CSV" },
+  { file: "manifest", label: "Manifest" },
+  { file: "summary", label: "Summary" },
+  { file: "readme", label: "README" },
+] as const;
+
 export default async function ExportPage({
   searchParams,
 }: {
@@ -151,6 +161,26 @@ export default async function ExportPage({
         statementWindow={statementWindow}
         unassignableReceipts={unassignable}
       />
+      {currentExport?.status === "finalized" && (
+        <div className="border-t border-gray-200 bg-white px-8 py-6">
+          <h2 className="text-sm font-bold text-gray-900">Download bundle</h2>
+          <p className="mt-1 text-xs text-gray-500">
+            Finalized {monthLabel} archive files, served byte-for-byte as
+            sealed in R2 — SHA-256 hashes match the manifest.
+          </p>
+          <div className="mt-3 flex flex-wrap gap-3">
+            {BUNDLE_DOWNLOAD_LINKS.map(({ file, label }) => (
+              <a
+                key={file}
+                href={`/api/receipts/export/${month}/download?file=${file}`}
+                className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-2 text-xs font-semibold text-amber-900 hover:bg-amber-100"
+              >
+                {label}
+              </a>
+            ))}
+          </div>
+        </div>
+      )}
       <div className="border-t border-amber-100 bg-amber-50 px-8 py-4 text-xs text-amber-900">
         <p className="font-semibold">Accountant review boundary</p>
         <p className="mt-1">{ACCOUNTANT_DISCLAIMER_EN}</p>

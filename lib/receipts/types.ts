@@ -133,6 +133,7 @@ export type AuditAction =
   | "export.generated"
   | "export.finalized"
   | "export.revision_created"
+  | "export.downloaded"
   | "archive.created"
   | "settings.updated"
   | "receipt.export_statement_month_assigned"

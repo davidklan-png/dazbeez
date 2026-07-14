@@ -305,6 +305,67 @@ export function buildReadmeKey(month: string, exportId: string): string {
   return `exports/${month}/${exportId}-README.txt`;
 }
 
+// ─── Bundle download resolution ───────────────────────────────────────────────
+// Pure mapping from a download request to the R2 key + response headers for
+// the GET /api/receipts/export/[month]/download route. Kept here (next to the
+// key builders) so the download route cannot drift from the keys finalize
+// writes, and so the mapping is unit-testable without R2/D1 mocks.
+
+export const EXPORT_DOWNLOAD_FILES = [
+  "receipts",
+  "manifest",
+  "summary",
+  "readme",
+] as const;
+
+export type ExportDownloadFile = (typeof EXPORT_DOWNLOAD_FILES)[number];
+
+export function isExportDownloadFile(
+  value: string,
+): value is ExportDownloadFile {
+  return (EXPORT_DOWNLOAD_FILES as readonly string[]).includes(value);
+}
+
+export function resolveExportDownload(
+  month: string,
+  exportRecord: {
+    id: string;
+    archive_r2_key: string | null;
+    manifest_r2_key: string | null;
+  },
+  file: ExportDownloadFile,
+): { r2Key: string | null; contentType: string; filename: string } {
+  const csv = "text/csv; charset=utf-8";
+  switch (file) {
+    case "receipts":
+      // Stored key — the exact object finalize sealed (BOM+CRLF bytes whose
+      // SHA-256 is recorded in the manifest). Never re-derive or re-encode.
+      return {
+        r2Key: exportRecord.archive_r2_key,
+        contentType: csv,
+        filename: `export-${month}-receipts.csv`,
+      };
+    case "manifest":
+      return {
+        r2Key: exportRecord.manifest_r2_key,
+        contentType: csv,
+        filename: `export-${month}-manifest.csv`,
+      };
+    case "summary":
+      return {
+        r2Key: buildSummaryKey(month, exportRecord.id),
+        contentType: csv,
+        filename: `export-${month}-summary.csv`,
+      };
+    case "readme":
+      return {
+        r2Key: buildReadmeKey(month, exportRecord.id),
+        contentType: "text/plain; charset=utf-8",
+        filename: `export-${month}-readme.txt`,
+      };
+  }
+}
+
 export function buildExportReadme(opts: {
   exportId: string;
   month: string;
