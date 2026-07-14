@@ -16,6 +16,7 @@ import {
   computeExportBlockers,
   computeDuplicateReceiptWarnings,
   computeExportWarnings,
+  computeIcCardTopUpWarnings,
 } from "@/lib/receipts/blockers";
 import { deriveStatementWindow } from "@/lib/receipts/statement-window";
 import { formatMonth } from "@/lib/receipts/format";
@@ -71,6 +72,7 @@ export default async function ReviewPage({ params }: { params: Params }) {
   const warnings = [
     ...computeExportWarnings(monthLines),
     ...computeDuplicateReceiptWarnings(monthReceipts),
+    ...computeIcCardTopUpWarnings(monthReceipts),
   ];
 
   return (

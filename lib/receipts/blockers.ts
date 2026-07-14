@@ -48,6 +48,94 @@ export function isUnreviewedReceipt(receipt: ReceiptRecord): boolean {
   return receipt.status === "needs_review" && !isPendingProcessing(receipt);
 }
 
+// ─── IC-card top-up heuristic (non-blocking warning) ──────────────────────
+// A CASH/DIGITAL receipt categorized as travel_transportation, charged for a
+// round top-up sum at a top-up venue (convenience store / station), is likely
+// a prepaid IC-card (Suica/PASMO/ICOCA/etc.) charge — a prepayment, not a
+// travel expense at the moment of charge. Informational warning only: it may
+// be entirely business, and the responsible treatment (expense it as trips
+// deplete the card, or treat the card as business-dedicated) is the
+// accountant's call. NOT wired into the finalize gate — it is advisory.
+// False positives are kept low by requiring ALL THREE signals (round sum AND
+// top-up venue AND travel category) on the same receipt.
+
+/** Round yen sums typical of an IC-card top-up. JPY has no minor units, so
+ * amount_minor IS the yen value. */
+export const IC_CARD_TOPUP_AMOUNTS_MINOR: ReadonlySet<number> = new Set([
+  1000, 2000, 3000, 5000, 10000,
+]);
+
+// Merchant substrings that signal a likely IC-card top-up point: the three
+// major convenience-store chains, the JR NewDays kiosk, and station ticket
+// machines. Matched case-insensitively as substrings of the normalized
+// merchant name (handles chain + branch suffixes like
+// "セブン-イレブン 東中野末広橋店"). Katakana variants are listed explicitly;
+// toLowerCase() only touches the ASCII half.
+const IC_CARD_TOPUP_VENUE_PATTERNS: readonly string[] = [
+  // セブン-イレブン (with / without the hyphen; ASCII spellings)
+  "セブン-イレブン",
+  "セブンイレブン",
+  "seven-eleven",
+  "seven eleven",
+  "7-eleven",
+  "7 eleven",
+  "7eleven",
+  // ローソン
+  "ローソン",
+  "lawson",
+  // ファミリーマート
+  "ファミリーマート",
+  "ファミマ",
+  "familymart",
+  "family mart",
+  "family-mart",
+  // NewDays (JR kiosk)
+  "newdays",
+  "new days",
+  "new-days",
+  // 駅 / station ticket machines
+  "駅",
+  "station",
+];
+
+/** True for a round yen sum typical of an IC-card top-up (¥1k/¥2k/¥3k/¥5k/¥10k). */
+export function isRoundTopUpAmount(
+  amountMinor: number | null | undefined,
+): boolean {
+  return amountMinor != null && IC_CARD_TOPUP_AMOUNTS_MINOR.has(amountMinor);
+}
+
+/** True when the merchant name matches a top-up-venue signal (convenience
+ * store / JR kiosk / station). Null/empty merchants never match. */
+export function isTopUpVenueMerchant(
+  merchant: string | null | undefined,
+): boolean {
+  if (!merchant) return false;
+  const normalized = merchant.toLowerCase();
+  return IC_CARD_TOPUP_VENUE_PATTERNS.some((p) => normalized.includes(p));
+}
+
+/** True when a receipt looks like a prepaid IC-card top-up rather than a
+ * travel expense: CASH/DIGITAL path, travel_transportation category, a round
+ * top-up sum, AND a top-up-venue merchant. All four must hold — a real rail
+ * fare (¥1,900 EMot, not a venue and not round) or a non-round store charge
+ * (¥10,450 PC Depot) won't trip it. Never gates finalize; advisory only. */
+export function isIcCardTopUpCandidate(
+  receipt: Pick<
+    ReceiptRecord,
+    "payment_path" | "expense_category_code" | "amount_minor" | "merchant"
+  >,
+): boolean {
+  if (receipt.payment_path !== "CASH" && receipt.payment_path !== "DIGITAL") {
+    return false;
+  }
+  if (receipt.expense_category_code !== "travel_transportation") return false;
+  return (
+    isRoundTopUpAmount(receipt.amount_minor) &&
+    isTopUpVenueMerchant(receipt.merchant)
+  );
+}
+
 export type BlockerSeverity = "blocker" | "warn";
 
 export type Blocker = {
@@ -246,6 +334,40 @@ export function computeDuplicateReceiptWarnings(
         `${clusters.length} cluster(s) share merchant + amount + date ` +
         `(e.g. ${first.merchant} ×${clusters[0]!.length} on ${first.transaction_date}). ` +
         `Confirm these are distinct charges, not double-captured.`,
+      href: `/receipts/review/${first.id}`,
+      ctaLabel: "Open first",
+    },
+  ];
+}
+
+/**
+ * Non-blocking warning when a CASH/DIGITAL travel_transportation receipt looks
+ * like a prepaid IC-card (Suica/PASMO/ICOCA) top-up — round sum + top-up
+ * venue merchant (convenience store / station). Mirrors
+ * computeDuplicateReceiptWarnings: same surfacing (severity "warn", same
+ * BlockerTriage row), no gate change, deep-links to the first matching
+ * receipt. See isIcCardTopUpCandidate for the predicate + false-positive
+ * controls.
+ *
+ * Top-ups are prepayments, not travel expenses at charge time — the warning
+ * asks the operator to confirm business usage, not to reclassify. Final
+ * treatment is the accountant's call (month-close runbook §IC cards).
+ */
+export function computeIcCardTopUpWarnings(
+  receipts: ReceiptRecord[],
+): Blocker[] {
+  const candidates = receipts.filter(isIcCardTopUpCandidate);
+  if (candidates.length === 0) return [];
+  const first = candidates[0]!;
+  return [
+    {
+      severity: "warn",
+      count: candidates.length,
+      label: "Possible IC-card top-ups (categorized as travel)",
+      detail:
+        `Looks like an IC-card top-up. Top-ups are prepayments, not travel ` +
+        `expenses at charge time — confirm business usage (attach the card's ` +
+        `利用履歴) or note that the card is business-dedicated.`,
       href: `/receipts/review/${first.id}`,
       ctaLabel: "Open first",
     },

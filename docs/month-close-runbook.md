@@ -49,6 +49,7 @@ rule definitions. If the tile shows a blocker, the gate will enforce it.
 | Cross-month match | A receipt is matched to AMEX lines in two different statement months. | Disambiguate the match in reconcile so the receipt belongs to one statement. |
 | Business-trip candidate | A line is flagged as a trip candidate, unresolved. | `/receipts/reconcile` — confirm or dismiss the trip cluster. |
 | Possible duplicate cash/digital receipts (warning) | 2+ CASH/DIGITAL receipts share merchant + amount + transaction_date. | `/receipts/review/<id>` — confirm distinct (non-blocking, no auto-dedup). |
+| Possible IC-card top-ups (warning) | A CASH/DIGITAL travel-transportation receipt for a round ¥1k/2k/3k/5k/10k sum at a top-up venue (convenience store / station). | `/receipts/review/<id>` — confirm business usage (non-blocking; see IC cards below). |
 
 ## Rebuild vs finalize
 
@@ -73,9 +74,34 @@ keys the finalize route checks).
 
 **Discretionary override** — on a receipt's edit view (CASH/DIGITAL only), the "Statement month" control reassigns `export_statement_month` to a different **open** month. Blocked for sealed months (the export already shipped — use the revision flow). A confirm dialog states the consequence; audited as `receipt.export_statement_month_overridden`.
 
+## IC cards (Suica / PASMO / ICOCA top-ups)
+
+The export screen and review page raise a non-blocking **"Possible IC-card
+top-ups"** warning when a CASH/DIGITAL receipt categorized as
+`travel_transportation` is a round sum (¥1,000 / ¥2,000 / ¥3,000 / ¥5,000 /
+¥10,000) charged at a top-up venue (セブン-イレブン, ローソン, ファミリーマート,
+NewDays, or a station). All three signals — round sum, venue, and travel
+category — must match on the same receipt; that conjunction is what keeps the
+false-positive rate low (a real ¥1,900 EMot rail fare, or a non-round ¥10,450
+store charge, won't trip it).
+
+An IC-card top-up is a **prepayment, not a travel expense at the moment of
+charge**. Responsible practice — pick whichever fits the card's use:
+
+- **Expense as you go** — keep the card's 利用履歴 (usage history) and claim the
+  actual trip fares as `travel_transportation` as the balance is consumed. The
+  top-up charge itself is then a cash movement, not a deductible travel cost.
+- **Business-dedicated card** — if the card is used only for business travel,
+  note that on the receipt (business_purpose); the top-up can be expensed
+  directly.
+
+The warning is **advisory and does not gate finalize**. Surface the 利用履歴 or
+the business-only note, and let accounting decide — **final treatment is the
+accountant's call**.
+
 ## Sealing 2026-06 (current state)
 
-After ADR 0008, 2026-06's export is **32 AMEX lines + 11 June-dated cash/digital receipts** (the calendar rule puts a June-dated cash receipt in June, alongside the June statement). The June review page's Additional Charges section lists those 11, including a **4× セブン-イレブン 東中野末広橋店 ¥10,000 on 2026-06-11** cluster — confirm the duplicate warning (distinct charges, not double-captured) before finalizing. Reconciliation is sealed; gates pass otherwise. Click path: export screen → Rebuild draft → "Review & finalize" → confirm the 11 additional charges + dismiss the duplicate warning → type "june 2026" → Finalize.
+After ADR 0008, 2026-06's export is **32 AMEX lines + 11 June-dated cash/digital receipts** (the calendar rule puts a June-dated cash receipt in June, alongside the June statement). The June review page's Additional Charges section lists those 11, including a **4× セブン-イレブン 東中野末広橋店 ¥10,000 on 2026-06-11** cluster. That same cluster raises two advisory warnings (both non-blocking): the **duplicate** warning (confirm the four are distinct charges, not double-captured) and, because each is a round ¥10,000 travel_transportation charge at a convenience store, the **IC-card top-up** warning (confirm business usage per §IC cards). Reconciliation is sealed; gates pass otherwise. Click path: export screen → Rebuild draft → "Review & finalize" → confirm the 11 additional charges + acknowledge both warnings → type "june 2026" → Finalize.
 
 ## Starting 2026-07
 
