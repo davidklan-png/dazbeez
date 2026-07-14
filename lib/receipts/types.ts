@@ -406,6 +406,10 @@ export interface ReceiptExport {
   // When the draft's bundle was last (re)built in R2 (0019). NULL on rows
   // predating 0019; the UI falls back to created_at.
   bundle_built_at?: string | null;
+  // Sealed proofs ZIP (0021_export_proofs). The 5th bundle artifact; NULL until
+  // the rebuild builds the zip. The download route serves it via file=proofs.
+  proofs_r2_key?: string | null;
+  proofs_sha256?: string | null;
 }
 
 /**

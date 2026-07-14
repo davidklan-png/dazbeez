@@ -68,3 +68,21 @@ test("stored-key files surface a null key (route 404s) when the record lacks the
   assert.ok(resolveExportDownload(month, bare, "summary").r2Key);
   assert.ok(resolveExportDownload(month, bare, "readme").r2Key);
 });
+
+test("proofs resolves to the stored proofs zip key as application/zip", () => {
+  const withProofs = {
+    ...exportRecord,
+    proofs_r2_key: "exports/2026-06/exp-123-proofs.zip",
+  };
+  const target = resolveExportDownload(month, withProofs, "proofs");
+  assert.equal(target.r2Key, "exports/2026-06/exp-123-proofs.zip");
+  assert.equal(target.contentType, "application/zip");
+  assert.equal(target.filename, "export-2026-06-proofs.zip");
+});
+
+test("proofs surfaces a null key (route 404s) when the record predates the artifact", () => {
+  // A row sealed before PR 2 (no proofs_r2_key) — proofs download 404s.
+  assert.equal(resolveExportDownload(month, exportRecord, "proofs").r2Key, null);
+  const bare = { id: "exp-123", archive_r2_key: null, manifest_r2_key: null };
+  assert.equal(resolveExportDownload(month, bare, "proofs").r2Key, null);
+});

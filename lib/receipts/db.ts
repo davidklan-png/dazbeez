@@ -1899,6 +1899,8 @@ export async function recordExportBundle(
   manifestR2Key: string,
   archiveSha256: string,
   manifestSha256?: string,
+  proofsR2Key?: string | null,
+  proofsSha256?: string | null,
 ): Promise<void> {
   const db = getReceiptsDb();
   const now = nowIso();
@@ -1909,10 +1911,21 @@ export async function recordExportBundle(
            manifest_r2_key = ?,
            archive_sha256 = ?,
            manifest_sha256 = ?,
+           proofs_r2_key = ?,
+           proofs_sha256 = ?,
            bundle_built_at = ?
        WHERE id = ? AND status = 'draft'`,
     )
-    .bind(archiveR2Key, manifestR2Key, archiveSha256, manifestSha256 ?? null, now, exportId)
+    .bind(
+      archiveR2Key,
+      manifestR2Key,
+      archiveSha256,
+      manifestSha256 ?? null,
+      proofsR2Key ?? null,
+      proofsSha256 ?? null,
+      now,
+      exportId,
+    )
     .run();
 }
 
@@ -1923,6 +1936,8 @@ export async function finalizeExport(
   archiveSha256: string,
   actor: string,
   manifestSha256?: string,
+  proofsR2Key?: string | null,
+  proofsSha256?: string | null,
 ): Promise<void> {
   const db = getReceiptsDb();
   const now = nowIso();
@@ -1939,6 +1954,8 @@ export async function finalizeExport(
     manifestR2Key,
     archiveSha256,
     manifestSha256,
+    proofsR2Key,
+    proofsSha256,
   );
 
   const result = await db
@@ -1968,6 +1985,8 @@ export async function finalizeExport(
       archiveR2Key,
       archiveSha256,
       manifestSha256: manifestSha256 ?? null,
+      proofsR2Key: proofsR2Key ?? null,
+      proofsSha256: proofsSha256 ?? null,
     }),
   });
 
