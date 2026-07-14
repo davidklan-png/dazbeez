@@ -25,6 +25,7 @@ import {
   computeExportBlockers,
   computeDuplicateReceiptWarnings,
   computeExportWarnings,
+  computeIcCardTopUpWarnings,
 } from "@/lib/receipts/blockers";
 import {
   ACCOUNTANT_DISCLAIMER_EN,
@@ -106,6 +107,7 @@ export default async function ExportPage({
   const warnings = [
     ...computeExportWarnings(monthLines),
     ...computeDuplicateReceiptWarnings(monthReceipts),
+    ...computeIcCardTopUpWarnings(monthReceipts),
   ];
   // Statement window (transaction-date range the statement covers) for the
   // manifest-preview header — the operator conflated 2026-06 and 2026-07 rows

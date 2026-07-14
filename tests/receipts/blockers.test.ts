@@ -1,6 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { computeExportBlockers, type Blocker } from "@/lib/receipts/blockers";
+import {
+  computeExportBlockers,
+  computeIcCardTopUpWarnings,
+  isIcCardTopUpCandidate,
+  type Blocker,
+} from "@/lib/receipts/blockers";
 import type { AmexStatementLine, ReceiptRecord } from "@/lib/receipts/types";
 
 // Fixture builders mirror tests/receipts/reconciliation-signoff.test.ts so the
@@ -228,5 +233,138 @@ test("blockers: needs_review receipt still pending processing is NOT unreviewed"
     unreviewed ?? null,
     null,
     `expected no unreviewed blocker for a pending receipt, got: ${JSON.stringify(blockers)}`,
+  );
+});
+
+// ─── IC-card top-up warning ────────────────────────────────────────────────
+// Non-blocking advisory. All three signals (CASH/DIGITAL path +
+// travel_transportation category + round top-up sum + top-up-venue merchant)
+// must hold. Mirrors computeDuplicateReceiptWarnings surfacing.
+
+test("ic-card warning: fires on the 4× ¥10,000 セブン-イレブン 06-11 prod cluster", () => {
+  // Real prod case (2026-06): four CASH/DIGITAL travel_transportation
+  // receipts, ¥10,000 each at セブン-イレブン (chain + branch suffix). Round
+  // sum + top-up venue + travel category → all signals → one warning, count 4,
+  // deep-linking to the first receipt.
+  const receipts: ReceiptRecord[] = [0, 1, 2, 3].map((i) =>
+    makeReceipt({
+      id: `ic-${i}`,
+      payment_path: i % 2 === 0 ? "CASH" : "DIGITAL",
+      expense_category_code: "travel_transportation",
+      merchant: "セブン-イレブン 東中野末広橋店",
+      amount_minor: 10000,
+      transaction_date: "2026-06-11",
+    }),
+  );
+
+  const warnings = computeIcCardTopUpWarnings(receipts);
+  assert.equal(
+    warnings.length,
+    1,
+    `expected one IC-card warning, got: ${JSON.stringify(warnings)}`,
+  );
+  const w = warnings[0]!;
+  assert.equal(w.severity, "warn");
+  assert.equal(w.count, 4);
+  assert.equal(w.label, "Possible IC-card top-ups (categorized as travel)");
+  assert.equal(w.href, "/receipts/review/ic-0");
+});
+
+test("ic-card warning: does NOT fire on a ¥10,450 PC Depot charge (non-round, non-travel)", () => {
+  // Fails on every signal: non-round amount (10450), non-travel category
+  // (supplies), non-venue merchant. None of the three conditions hold.
+  const receipts: ReceiptRecord[] = [
+    makeReceipt({
+      id: "pcd-1",
+      payment_path: "CASH",
+      expense_category_code: "supplies",
+      merchant: "PC Depot",
+      amount_minor: 10450,
+      transaction_date: "2026-06-12",
+    }),
+  ];
+
+  const warnings = computeIcCardTopUpWarnings(receipts);
+  assert.equal(
+    warnings.length,
+    0,
+    `expected no IC-card warning, got: ${JSON.stringify(warnings)}`,
+  );
+});
+
+test("ic-card warning: does NOT fire on a ¥1,900 EMot rail fare (actual usage, not a top-up venue)", () => {
+  // Genuine travel expense: travel category + DIGITAL path, but neither a
+  // round top-up sum (1900) nor a top-up venue (EMot). Real usage, not a
+  // top-up, so the warning stays silent.
+  const receipts: ReceiptRecord[] = [
+    makeReceipt({
+      id: "emot-1",
+      payment_path: "DIGITAL",
+      expense_category_code: "travel_transportation",
+      merchant: "EMot",
+      amount_minor: 1900,
+      transaction_date: "2026-06-13",
+    }),
+  ];
+
+  const warnings = computeIcCardTopUpWarnings(receipts);
+  assert.equal(
+    warnings.length,
+    0,
+    `expected no IC-card warning, got: ${JSON.stringify(warnings)}`,
+  );
+});
+
+test("ic-card predicate: AMEX path is out of scope even with round sum + venue + travel", () => {
+  // The trigger is CASH/DIGITAL receipts. An AMEX charge would surface as a
+  // statement line, not a receipt — so an AMEX-path receipt is never a
+  // candidate, regardless of the other signals.
+  assert.equal(
+    isIcCardTopUpCandidate({
+      payment_path: "AMEX",
+      expense_category_code: "travel_transportation",
+      amount_minor: 10000,
+      merchant: "セブン-イレブン",
+    }),
+    false,
+  );
+});
+
+test("ic-card predicate: round ¥3,000 at a station + travel + CASH → candidate", () => {
+  // 駅 (station) is a top-up-venue signal; ¥3,000 is a round top-up sum.
+  assert.equal(
+    isIcCardTopUpCandidate({
+      payment_path: "CASH",
+      expense_category_code: "travel_transportation",
+      amount_minor: 3000,
+      merchant: "新宿駅",
+    }),
+    true,
+  );
+});
+
+test("ic-card predicate: round ¥5,000 travel charge at a non-venue merchant (taxi) → not a candidate", () => {
+  assert.equal(
+    isIcCardTopUpCandidate({
+      payment_path: "CASH",
+      expense_category_code: "travel_transportation",
+      amount_minor: 5000,
+      merchant: "日本交通タクシー",
+    }),
+    false,
+  );
+});
+
+test("ic-card predicate: convenience store + round sum but non-travel category → not a candidate", () => {
+  // Same venue + amount, but categorized as entertainment — the IC-card
+  // hypothesis applies narrowly to travel_transportation.
+  assert.equal(
+    isIcCardTopUpCandidate({
+      payment_path: "CASH",
+      expense_category_code: "entertainment",
+      amount_minor: 10000,
+      merchant: "ローソン",
+    }),
+    false,
   );
 });
