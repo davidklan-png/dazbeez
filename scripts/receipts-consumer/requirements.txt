@@ -7,3 +7,7 @@ mlx-vlm>=0.1.0
 # Apple Silicon — no poppler or other system deps. Lazy-imported inside
 # fetch_image() so --help works without it installed.
 pymupdf>=1.24
+# Image handling: failure classifier (PIL.UnidentifiedImageError) + proof-copy
+# derivative generation at ingest (resize/q75/EXIF strip). Was transitive via
+# mlx-vlm; made explicit since the consumer now depends on it directly.
+pillow>=10.0

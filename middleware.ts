@@ -36,6 +36,7 @@ const isPublicRoute = createRouteMatcher([
   "/api/receipts/:id/file",
   "/api/receipts/:id/extract",
   "/api/receipts/:id/extraction-failed",
+  "/api/receipts/:id/proof",
 ]);
 
 export default clerkMiddleware(async (auth, request) => {

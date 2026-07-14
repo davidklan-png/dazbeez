@@ -50,6 +50,35 @@ export async function getReceiptFile(
   };
 }
 
+// ─── Proof-copy derivatives (PR 1) ─────────────────────────────────────────
+// Compact proof image generated on the Mac consumer at ingest (resize 1600,
+// JPEG q75; PDFs pass through). Stored in the LIVE receipts bucket under a
+// STABLE per-receipt key so the proofs ZIP (sealed-bundle artifact) can prefer
+// it over the original to keep the bundle small.
+
+export function proofCopyR2Key(receiptId: string, ext: "jpg" | "pdf"): string {
+  return `receipts/${receiptId}/proof.${ext}`;
+}
+
+/**
+ * Overwrite-capable put for a proof-copy derivative. Unlike uploadOriginal
+ * (which guards against collisions to protect originals), proof copies are
+ * regenerable — re-ingest and `backfill_proof_copies.py --force` refresh them
+ * in place. The caller deletes any prior proof_copy receipt_files row first so
+ * the r2_key UNIQUE constraint still holds after the fresh insert.
+ */
+export async function putProofCopy(
+  key: string,
+  data: ArrayBuffer,
+  contentType: string,
+): Promise<void> {
+  const bucket = getReceiptsBucket();
+  await bucket.put(key, data, {
+    httpMetadata: { contentType },
+    customMetadata: retentionMetadata(),
+  });
+}
+
 export async function archiveBundle(
   key: string,
   data: ArrayBuffer,

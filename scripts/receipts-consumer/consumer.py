@@ -31,6 +31,7 @@ Config via env (see .env.example):
 """
 from __future__ import annotations
 
+import io
 import json
 import os
 import subprocess
@@ -289,6 +290,139 @@ def post_extraction_failed(receipt_id: str, reason: str) -> None:
         )
 
 
+# ─── Proof-copy derivatives (PR 1) ────────────────────────────────────────────
+# A compact proof image generated at ingest and stored alongside the original
+# (receipt_files role='proof_copy'; R2 key receipts/<id>/proof.<ext>). The
+# sealed proofs ZIP prefers it over the original to keep the accountant bundle
+# small (<5 MB vs ~19 MB raw). ALL image work happens HERE on the Mac (PIL) —
+# the Worker only stores the bytes (CPU budget, no native image codecs).
+#
+# Proof generation is ADVISORY: a failure must never fail extraction. The
+# consumer builds + posts the derivative after a successful /extract, wrapped so
+# any error is logged and swallowed (backfill_proof_copies.py recovers misses).
+
+PROOF_MAX_LONGEST_SIDE = 1600
+PROOF_JPEG_QUALITY = 75
+
+
+def make_proof_derivative(image_path: str) -> tuple[bytes, str] | None:
+    """Build a compact proof derivative from a local image file.
+
+    Raster images: resize the longest side to <=1600px (never upscale), JPEG
+    quality 75, EXIF stripped AFTER baking orientation into the pixels. Returns
+    (jpeg_bytes, "image/jpeg").
+
+    PDFs: pass through unchanged (already compact; rasterizing legal documents
+    loses the selectable text the accountant relies on). Returns (pdf_bytes,
+    "application/pdf").
+
+    Returns None only when a raster image can't be opened (the caller treats
+    that as a skipped proof, not a failure). Any other error propagates so the
+    caller's advisory wrapper can log it.
+    """
+    suffix = os.path.splitext(image_path)[1].lower()
+    if suffix == ".pdf":
+        with open(image_path, "rb") as fh:
+            return fh.read(), "application/pdf"
+
+    from PIL import Image, ImageOps  # lazy: keeps --help + unit tests cheap
+
+    try:
+        img = Image.open(image_path)
+    except Exception:  # noqa: BLE001 — caller treats None as "skip proof"
+        return None
+    try:
+        # Bake EXIF orientation into the pixels, then drop all metadata so no
+        # location/camera data ships to the accountant.
+        transposed = ImageOps.exif_transpose(img)
+        if transposed is not None:
+            img = transposed
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+        # thumbnail() preserves aspect ratio, fits within the box (longest side
+        # <=1600), and never upsizes — exactly the proof sizing we want.
+        img.thumbnail(
+            (PROOF_MAX_LONGEST_SIDE, PROOF_MAX_LONGEST_SIDE),
+            Image.Resampling.LANCZOS,
+        )
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=PROOF_JPEG_QUALITY)
+        return buf.getvalue(), "image/jpeg"
+    finally:
+        img.close()
+
+
+def fetch_original_bytes(receipt_id: str) -> bytes | None:
+    """Fetch the receipt's ORIGINAL file bytes via the Worker /file endpoint.
+
+    Same processor-key proxy as fetch_image, but WITHOUT PDF rasterization.
+    Used for proof generation where PDFs must pass through uncompressed:
+    fetch_image rasterizes PDFs to PNG for MLX and discards the original, so the
+    PDF proof path re-fetches the raw bytes here. Returns None on failure
+    (caller skips the proof for this receipt).
+    """
+    headers = {"x-receipts-processor-key": PROCESSOR_KEY}
+    if CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET:
+        headers["CF-Access-Client-Id"] = CF_ACCESS_CLIENT_ID
+        headers["CF-Access-Client-Secret"] = CF_ACCESS_CLIENT_SECRET
+    try:
+        resp = requests.get(
+            f"{EXTRACT_BASE}/{receipt_id}/file",
+            headers=headers,
+            timeout=60,
+        )
+        resp.raise_for_status()
+        return resp.content
+    except requests.RequestException as exc:
+        print(
+            f"[warn] {receipt_id}: proof original fetch failed ({exc})",
+            file=sys.stderr,
+        )
+        return None
+
+
+def post_proof(receipt_id: str, derivative: bytes, content_type: str) -> None:
+    """POST a proof derivative to the Worker's /proof endpoint.
+
+    Same processor-key + Access-token header pattern as apply_to_worker, but the
+    body is raw bytes (image/jpeg or application/pdf), not JSON. Raises on
+    non-2xx so the caller can log; proof generation is advisory, so callers
+    wrap this in try/except and never let it fail extraction.
+    """
+    headers = {
+        "x-receipts-processor-key": PROCESSOR_KEY,
+        "Content-Type": content_type,
+    }
+    if CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET:
+        headers["CF-Access-Client-Id"] = CF_ACCESS_CLIENT_ID
+        headers["CF-Access-Client-Secret"] = CF_ACCESS_CLIENT_SECRET
+    resp = requests.post(
+        f"{EXTRACT_BASE}/{receipt_id}/proof",
+        headers=headers,
+        data=derivative,
+        timeout=60,
+    )
+    resp.raise_for_status()
+
+
+def generate_proof(
+    receipt_id: str, r2_key: str | None, mlx_image_path: str
+) -> tuple[bytes, str] | None:
+    """Build the proof derivative for a just-extracted receipt.
+
+    For raster images, reuse the file already fetched for MLX (it IS the
+    original). For PDFs, fetch_image rasterized to PNG and discarded the
+    original — re-fetch the raw PDF here so it passes through uncompressed.
+    Returns (bytes, content_type) or None (skip).
+    """
+    if r2_key and r2_key.lower().endswith(".pdf"):
+        raw = fetch_original_bytes(receipt_id)
+        if raw is None:
+            return None
+        return raw, "application/pdf"
+    return make_proof_derivative(mlx_image_path)
+
+
 class PermanentExtractionFailure(Exception):
     """Raised by the consumer for deterministic-permanent local failures we
     detect ourselves (zero-byte download, manifest size mismatch). Distinct
@@ -402,11 +536,17 @@ def _wrangler_env() -> dict[str, str]:
     return env
 
 
-def _d1_query(sql: str) -> list[dict[str, Any]]:
-    """Run a read-only SQL query against remote D1 and return rows as dicts."""
+def _d1_query(sql: str, *, local: bool = False) -> list[dict[str, Any]]:
+    """Run a read-only SQL query against D1 and return rows as dicts.
+
+    local=True targets local D1 (cf:dev) — used by backfill_proof_copies.py
+    --local for the seeded dry-run. Default --remote hits the live DB
+    (operator-only; never in CI/tests).
+    """
     raw = subprocess.check_output(
         ["npx", "wrangler", "d1", "execute", RECEIPTS_DB_NAME,
-         "--remote", "--env-file=/dev/null", "--json", "--command", sql],
+         "--local" if local else "--remote",
+         "--env-file=/dev/null", "--json", "--command", sql],
         text=True,
         env=_wrangler_env(),
     )
@@ -414,11 +554,12 @@ def _d1_query(sql: str) -> list[dict[str, Any]]:
     return (parsed[0] if isinstance(parsed, list) else parsed).get("results", [])
 
 
-def _d1_execute(sql: str) -> None:
-    """Run a write SQL statement against remote D1."""
+def _d1_execute(sql: str, *, local: bool = False) -> None:
+    """Run a write SQL statement against D1 (remote by default; local for cf:dev)."""
     subprocess.check_output(
         ["npx", "wrangler", "d1", "execute", RECEIPTS_DB_NAME,
-         "--remote", "--env-file=/dev/null", "--json", "--command", sql],
+         "--local" if local else "--remote",
+         "--env-file=/dev/null", "--json", "--command", sql],
         text=True,
         env=_wrangler_env(),
     )
@@ -584,16 +725,38 @@ def process_once() -> int:
             # an empty body means R2 has nothing for this key. MLX would
             # either crash or produce gibberish; either way retrying won't
             # help. Post failure + ack.
+            proof: tuple[bytes, str] | None = None  # built while image_path exists
             try:
                 if os.path.getsize(image_path) == 0:
                     raise PermanentExtractionFailure("downloaded file is zero bytes")
                 result = run_mlx(image_path)
+                # Proof derivative (advisory). Built inside the try so the
+                # raster image is still on disk; a build failure is swallowed
+                # — it must never block extraction.
+                try:
+                    proof = generate_proof(receipt_id, r2_key, image_path)
+                except Exception as exc:  # noqa: BLE001
+                    print(
+                        f"[warn] {receipt_id}: proof build failed ({exc})",
+                        file=sys.stderr,
+                    )
             finally:
                 try:
                     os.unlink(image_path)
                 except OSError:
                     pass
             apply_to_worker(receipt_id, result)
+            # Post the proof only after extraction is confirmed. Advisory: a
+            # failure is logged and swallowed (backfill_proof_copies.py recovers
+            # misses; the receipt is already extracted and acked regardless).
+            if proof is not None:
+                try:
+                    post_proof(receipt_id, *proof)
+                except Exception as exc:  # noqa: BLE001
+                    print(
+                        f"[warn] {receipt_id}: proof post failed ({exc})",
+                        file=sys.stderr,
+                    )
             acked.append(lease_id)
             print(f"[ok] {receipt_id}")
         except requests.HTTPError as exc:
