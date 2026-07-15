@@ -49,6 +49,37 @@ export function isUnreviewedReceipt(receipt: ReceiptRecord): boolean {
   return receipt.status === "needs_review" && !isPendingProcessing(receipt);
 }
 
+// ─── Proofs (gate 7) ─────────────────────────────────────────────────────────
+// A shipped receipt with NO receipt_files row at all (no original, no proof_copy)
+// cannot appear in the proofs ZIP → block finalize. Defined here (the shared
+// rule location) and wired into the gate (validateMonthReadyForExportCore). The
+// receipt_files row count is fetched once by the gate (countReceiptFilesByObjectIds)
+// and passed in — this predicate stays pure and D1-free.
+//
+// Tile-vs-gate scope: per the PR 2 spec, this rule lives ONLY in the finalize
+// gate (the authority). The export tile does NOT currently mirror it because the
+// tile has no file-count fetch — a known, rare-case asymmetry (a shipped receipt
+// with zero file rows is an orphan; the gate still enforces it). R2-object
+// existence is NOT checked here — that's the rebuild's layer-2 job (the proofs
+// zip build fails loudly when a file row exists but the object is gone).
+// Missing proof_copy is NOT a blocker (the ZIP falls back to the original).
+
+/** True when a receipt has zero receipt_files rows (no proof to include). */
+export function isReceiptMissingProofFile(
+  receiptId: string,
+  receiptFileCounts: Map<string, number>,
+): boolean {
+  return (receiptFileCounts.get(receiptId) ?? 0) === 0;
+}
+
+/** Shipped receipts that have no proof file on record. */
+export function receiptsMissingProofFiles(
+  receipts: ReceiptRecord[],
+  receiptFileCounts: Map<string, number>,
+): ReceiptRecord[] {
+  return receipts.filter((r) => isReceiptMissingProofFile(r.id, receiptFileCounts));
+}
+
 // ─── IC-card top-up heuristic (non-blocking warning) ──────────────────────
 // A CASH/DIGITAL receipt categorized as travel_transportation, charged for a
 // round top-up sum at a top-up venue (convenience store / station), is likely

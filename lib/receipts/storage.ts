@@ -147,8 +147,11 @@ export async function deleteAmexArtifact(key: string): Promise<void> {
   await bucket.delete(key);
 }
 
-export async function computeSha256Hex(buffer: ArrayBuffer): Promise<string> {
-  const hashBuffer = await crypto.subtle.digest("SHA-256", buffer);
+export async function computeSha256Hex(data: ArrayBuffer | Uint8Array): Promise<string> {
+  // Accept a Uint8Array (e.g. fflate's proofs-zip output, whose buffer is typed
+  // ArrayBufferLike) as well as a plain ArrayBuffer. Cast to BufferSource for
+  // the digest call — at runtime a Uint8Array is a valid BufferSource.
+  const hashBuffer = await crypto.subtle.digest("SHA-256", data as BufferSource);
   const hashArray = Array.from(new Uint8Array(hashBuffer));
   return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
 }

@@ -98,3 +98,37 @@ export async function deleteProofCopyForReceipt(
     .bind(receiptId)
     .run();
 }
+
+/**
+ * Count receipt_files rows per receipt id (any role). Used by the proofs gate
+ * (validateMonthReadyForExportCore) to flag a shipped receipt with ZERO file
+ * rows — no original, no proof_copy → no proof to include → block finalize.
+ * D1-only (the R2-existence check is the rebuild's layer-2 job, not the gate's).
+ * Returns a Map keyed by receipt id; absent ids read as 0.
+ */
+export async function countReceiptFilesByObjectIds(
+  db: D1Database,
+  receiptIds: string[],
+): Promise<Map<string, number>> {
+  const counts = new Map<string, number>();
+  if (receiptIds.length === 0) return counts;
+  // Chunk to respect D1's parameter limit per statement.
+  const CHUNK_SIZE = 90;
+  for (let i = 0; i < receiptIds.length; i += CHUNK_SIZE) {
+    const chunk = receiptIds.slice(i, i + CHUNK_SIZE);
+    const placeholders = chunk.map(() => "?").join(",");
+    const result = await db
+      .prepare(
+        `SELECT object_id, COUNT(*) AS n
+         FROM receipt_files
+         WHERE object_type = 'receipt' AND object_id IN (${placeholders})
+         GROUP BY object_id`,
+      )
+      .bind(...chunk)
+      .all<{ object_id: string; n: number }>();
+    for (const row of result.results ?? []) {
+      counts.set(row.object_id, row.n);
+    }
+  }
+  return counts;
+}

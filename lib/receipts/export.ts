@@ -40,6 +40,7 @@ function formatAmount(amountMinor: number | null, currency: string): string {
 }
 
 const CSV_HEADERS = [
+  "No",
   "RowType",
   "TransactionDate",
   "Merchant",
@@ -86,11 +87,15 @@ export function buildMonthlyExportCsv(
 ): string {
   const lines: string[] = [CSV_HEADERS.join(",")];
 
-  for (const row of rows) {
+  rows.forEach((row, index) => {
     const attendees = row.receiptId
       ? (attendeeMap.get(row.receiptId) ?? row.attendees ?? [])
       : (row.attendees ?? []);
     const line = [
+      // No: 1-based row sequence. The join key between this CSV and the proofs
+      // ZIP filenames (No03_研究開発費_OpenAI_¥108341.pdf) — the accountant
+      // matches a statement line to its proof via this number.
+      csvEscape(String(index + 1)),
       csvEscape(row.rowType),
       csvEscape(row.transactionDate),
       csvEscape(row.merchant),
@@ -125,7 +130,7 @@ export function buildMonthlyExportCsv(
       csvEscape(row.counterpartyName),
     ].join(",");
     lines.push(line);
-  }
+  });
 
   return lines.join("\n");
 }
@@ -222,6 +227,10 @@ export function buildSummaryKey(month: string, exportId: string): string {
   return `exports/${month}/${exportId}-summary.csv`;
 }
 
+export function buildProofsKey(month: string, exportId: string): string {
+  return `exports/${month}/${exportId}-proofs.zip`;
+}
+
 export function buildManifestCsv(
   exportId: string,
   month: string,
@@ -237,6 +246,7 @@ export function buildManifestCsv(
   options?: {
     files?: ReceiptFile[];
     amexArtifact?: { r2Key: string; sha256Hash: string; originalFilename: string } | null;
+    proofsArtifact?: { r2Key: string; sha256Hash: string; originalFilename: string } | null;
     exportRevision?: number;
     supersedesExportId?: string | null;
     correctionReason?: string | null;
@@ -272,6 +282,13 @@ export function buildManifestCsv(
       `AmexArtifactKey,${csvEscape(options.amexArtifact.r2Key)}`,
       `AmexArtifactSha256,${csvEscape(options.amexArtifact.sha256Hash)}`,
       `AmexArtifactFilename,${csvEscape(options.amexArtifact.originalFilename)}`,
+    );
+  }
+  if (options?.proofsArtifact) {
+    lines.push(
+      `ProofsArtifactKey,${csvEscape(options.proofsArtifact.r2Key)}`,
+      `ProofsArtifactSha256,${csvEscape(options.proofsArtifact.sha256Hash)}`,
+      `ProofsArtifactFilename,${csvEscape(options.proofsArtifact.originalFilename)}`,
     );
   }
 
@@ -316,6 +333,7 @@ export const EXPORT_DOWNLOAD_FILES = [
   "manifest",
   "summary",
   "readme",
+  "proofs",
 ] as const;
 
 export type ExportDownloadFile = (typeof EXPORT_DOWNLOAD_FILES)[number];
@@ -332,6 +350,7 @@ export function resolveExportDownload(
     id: string;
     archive_r2_key: string | null;
     manifest_r2_key: string | null;
+    proofs_r2_key?: string | null;
   },
   file: ExportDownloadFile,
 ): { r2Key: string | null; contentType: string; filename: string } {
@@ -363,6 +382,13 @@ export function resolveExportDownload(
         contentType: "text/plain; charset=utf-8",
         filename: `export-${month}-readme.txt`,
       };
+    case "proofs":
+      // Stored key — the sealed proofs ZIP (built at rebuild, SHA in manifest).
+      return {
+        r2Key: exportRecord.proofs_r2_key ?? null,
+        contentType: "application/zip",
+        filename: `export-${month}-proofs.zip`,
+      };
   }
 }
 
@@ -377,6 +403,7 @@ export function buildExportReadme(opts: {
   archiveSha256: string;
   manifestSha256?: string | null;
   summarySha256?: string | null;
+  proofsSha256?: string | null;
 }): string {
   const revisionLine =
     opts.exportRevision > 1
@@ -391,16 +418,20 @@ export function buildExportReadme(opts: {
     `Archive SHA-256: ${opts.archiveSha256}`,
     `Manifest SHA-256: ${opts.manifestSha256 ?? "(pending)"}`,
     `Summary SHA-256: ${opts.summarySha256 ?? "(none)"}`,
+    `Proofs ZIP SHA-256: ${opts.proofsSha256 ?? "(none)"}`,
     "",
-    "── Accountant review ──────────────────────────────────────",
+    "── Accountant review ──────────────────────────────────────────",
     ACCOUNTANT_DISCLAIMER_EN,
     "",
     ACCOUNTANT_DISCLAIMER_JA,
     "",
-    "── Files included ─────────────────────────────────────────",
+    "── Files included ─────────────────────────────────────────────",
     "See the manifest CSV for SHA-256 hashes of every receipt original,",
     "derivative, and the AMEX statement CSV included in this export.",
     "The summary CSV (<exportId>-summary.csv) provides per-category and",
     "per-PaymentPath totals for a quick reconciliation check.",
+    "The proofs ZIP (<exportId>-proofs.zip) bundles one proof per receipt,",
+    "named No<NN>_<勘定科目>_<店舗>_¥<金額> — the No matches the receipts",
+    "CSV's first column. See 目次.csv inside the ZIP for the full index.",
   ].join("\n");
 }
