@@ -4,6 +4,8 @@ import {
   ACCOUNTANT_DISCLAIMER_EN,
   ACCOUNTANT_DISCLAIMER_JA,
 } from "@/lib/receipts/settings";
+import { resolveNotificationRecipient } from "@/lib/receipts/notify";
+import { getAccountantEmail } from "@/lib/cloudflare-runtime";
 import { ComplianceSettingsForm } from "@/components/receipts/ComplianceSettingsForm";
 import Link from "next/link";
 
@@ -12,6 +14,10 @@ export const dynamic = "force-dynamic";
 export default async function ComplianceSettingsPage() {
   await assertReceiptsPageAccess();
   const settings = await getComplianceSettings();
+  const effectiveRecipient = resolveNotificationRecipient(
+    settings.notification_recipient,
+    getAccountantEmail(),
+  );
 
   return (
     <div className="space-y-6 px-8 py-8">
@@ -39,7 +45,7 @@ export default async function ComplianceSettingsPage() {
         <p className="mt-2 text-amber-800">{ACCOUNTANT_DISCLAIMER_JA}</p>
       </div>
 
-      <ComplianceSettingsForm initial={settings} />
+      <ComplianceSettingsForm initial={settings} effectiveRecipient={effectiveRecipient} />
     </div>
   );
 }

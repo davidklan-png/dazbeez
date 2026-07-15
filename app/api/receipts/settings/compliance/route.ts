@@ -5,14 +5,28 @@ import {
   updateComplianceSettings,
 } from "@/lib/receipts/settings";
 import { createAuditEntry } from "@/lib/receipts/audit";
-import { getReceiptsDb } from "@/lib/cloudflare-runtime";
+import { resolveNotificationRecipient } from "@/lib/receipts/notify";
+import { getAccountantEmail, getReceiptsDb } from "@/lib/cloudflare-runtime";
 import type { ComplianceSettings } from "@/lib/receipts/types";
+
+// Effective notification recipient: the stored Settings value if set, else the
+// ACCOUNTANT_EMAIL fallback, else null. Surfaced on GET/PATCH so the form can
+// show what finalize will actually use without guessing client-side.
+function resolveEffectiveRecipient(settings: ComplianceSettings) {
+  return resolveNotificationRecipient(
+    settings.notification_recipient,
+    getAccountantEmail(),
+  );
+}
 
 export async function GET(request: Request) {
   try {
     await requireReceiptsActor(request.headers);
     const settings = await getComplianceSettings();
-    return NextResponse.json({ settings }, { status: 200 });
+    return NextResponse.json(
+      { settings, effectiveRecipient: resolveEffectiveRecipient(settings) },
+      { status: 200 },
+    );
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("Unauthorized")) {
       return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
@@ -53,6 +67,18 @@ export async function PATCH(request: Request) {
       );
     }
 
+    if (
+      body.notification_recipient !== undefined &&
+      body.notification_recipient !== "" &&
+      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.notification_recipient)
+    ) {
+      return NextResponse.json(
+        { error: "notification_recipient must be a valid email address." },
+        { status: 400 },
+      );
+    }
+
+    const before = await getComplianceSettings();
     const settings = await updateComplianceSettings(body, actor);
 
     await createAuditEntry(getReceiptsDb(), {
@@ -63,7 +89,24 @@ export async function PATCH(request: Request) {
       newValueJson: JSON.stringify(body),
     });
 
-    return NextResponse.json({ settings }, { status: 200 });
+    if (
+      body.notification_recipient !== undefined &&
+      body.notification_recipient !== before.notification_recipient
+    ) {
+      await createAuditEntry(getReceiptsDb(), {
+        actor,
+        action: "settings.notification_recipient_changed",
+        objectType: "compliance_settings",
+        objectId: "global",
+        oldValueJson: JSON.stringify({ notification_recipient: before.notification_recipient }),
+        newValueJson: JSON.stringify({ notification_recipient: body.notification_recipient }),
+      });
+    }
+
+    return NextResponse.json(
+      { settings, effectiveRecipient: resolveEffectiveRecipient(settings) },
+      { status: 200 },
+    );
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("Unauthorized")) {
       return NextResponse.json({ error: "Unauthorized." }, { status: 401 });

@@ -69,15 +69,16 @@ export function getReceiptsProcessorKey(): string | null {
 }
 
 /**
- * Finalize notification email (PR 3, Cloudflare Email Routing send_email). Each
- * returns null when unconfigured so the notify helper can fail gracefully (email
- * failure must never fail finalize). The NOTIFY_EMAIL binding's
- * destination_address must equal ACCOUNTANT_EMAIL; NOTIFY_FROM_ADDRESS must be a
- * verified sender on the zone. See docs/month-close-runbook.md.
+ * Finalize notification email (Resend REST transport). Each returns null when
+ * unconfigured so the notify helper can fail gracefully (email failure must
+ * never fail finalize): RESEND_API_KEY is the API credential (shared with the
+ * contact form); NOTIFY_FROM_ADDRESS must be a sender on the Resend-verified
+ * domain; ACCOUNTANT_EMAIL is the fallback recipient when none is set in
+ * Settings → Compliance. See docs/month-close-runbook.md §Notification email.
  */
-export function getNotifyEmail(): SendEmail | null {
-  const env = getCloudflareEnv() as CloudflareEnv & { NOTIFY_EMAIL?: SendEmail };
-  return env.NOTIFY_EMAIL ?? null;
+export function getResendApiKeyOrNull(): string | null {
+  const env = getCloudflareEnv() as CloudflareEnv & { RESEND_API_KEY?: string };
+  return env.RESEND_API_KEY ?? null;
 }
 
 export function getAccountantEmail(): string | null {

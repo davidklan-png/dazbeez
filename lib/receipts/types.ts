@@ -136,8 +136,10 @@ export type AuditAction =
   | "export.downloaded"
   | "export.notification_sent"
   | "export.notification_failed"
+  | "export.notification_test"
   | "archive.created"
   | "settings.updated"
+  | "settings.notification_recipient_changed"
   | "receipt.export_statement_month_assigned"
   | "receipt.export_statement_month_overridden"
   | "receipt.export_statement_month_rolled_forward"
@@ -491,6 +493,9 @@ export interface ComplianceSettings {
   // only; the breakdown is auxiliary, not nagged for by default. Flip to true
   // to re-enable the missing_tax_rate / missing_tax_amount warnings.
   track_tax_breakdown: boolean;
+  /** Notification recipient email (Settings → Compliance). Empty = use the
+   *  ACCOUNTANT_EMAIL var fallback. */
+  notification_recipient: string;
 }
 
 export interface AmexReconciliation {
