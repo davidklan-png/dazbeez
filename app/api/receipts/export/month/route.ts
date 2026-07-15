@@ -26,6 +26,7 @@ import {
 import { archiveBundle, archiveManifest, getReceiptFile, computeSha256Hex } from "@/lib/receipts/storage";
 import {
   assembleProofsZip,
+  verifyProofFileSha256,
   type ProofZipEntry,
   type ProofPaymentPath,
   type TransitionNoticeInput,
@@ -161,6 +162,16 @@ export async function POST(request: Request) {
         );
       }
       const fileBytes = new Uint8Array(await new Response(fetched.body).arrayBuffer());
+      // Layer-2 integrity (review fix for #102): the fetched bytes must hash to
+      // the value recorded on the receipt_files row at capture. Zero extra I/O
+      // (bytes already in memory); refuses to seal a bundle whose proof object
+      // was corrupted or overwritten since capture. Same doctrine as the
+      // missing-object check above.
+      await verifyProofFileSha256(
+        fileBytes,
+        chosen.sha256_hash,
+        `Receipt ${row.receiptId}: proof file "${chosen.r2_key}"`,
+      );
       proofsEntries.push({
         no: i + 1,
         categoryJa: row.expenseCategoryJa ?? row.expenseCategoryCode ?? "",
