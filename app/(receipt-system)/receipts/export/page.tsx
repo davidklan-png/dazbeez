@@ -2,6 +2,7 @@ import {
   listAmexLines,
   listExports,
   getExport,
+  getLatestFinalizedExport,
   listAmexLineCountsByMonth,
   listReconciliationStatusByMonth,
 } from "@/lib/receipts/db";
@@ -92,15 +93,23 @@ export default async function ExportPage({
   // We still fetch the unfiltered month receipts + lines separately for the
   // blockers panel (computeExportBlockers runs over the raw receipt set,
   // including UNKNOWN payment_path that the bundle intentionally excludes).
-  const [bundle, exports, unknownInScope, monthLines, currentExport, unassignable] =
-    await Promise.all([
-      buildExportBundle(month),
-      listExports(),
-      listUnknownInScopeReceipts(month),
-      listAmexLines(month),
-      getExport(month),
-      listUnassignableReceipts(),
-    ]);
+  const [
+    bundle,
+    exports,
+    unknownInScope,
+    monthLines,
+    currentExport,
+    latestFinalized,
+    unassignable,
+  ] = await Promise.all([
+    buildExportBundle(month),
+    listExports(),
+    listUnknownInScopeReceipts(month),
+    listAmexLines(month),
+    getExport(month),
+    getLatestFinalizedExport(month),
+    listUnassignableReceipts(),
+  ]);
   // ADR 0006 (PR #2): tile counting set = in-scope receipts for M = the bundle
   // (matched AMEX + CASH/DIGITAL assigned to M) ∪ UNKNOWN in M's natural window
   // — the same set the finalize gate (validateMonthReadyForExport) uses for its
@@ -163,20 +172,24 @@ export default async function ExportPage({
         statementWindow={statementWindow}
         unassignableReceipts={unassignable}
       />
-      {currentExport?.status === "finalized" && (
+      {/* Sealed bundle — latest FINALIZED revision. Served even while a
+          revision draft is open (getLatestFinalizedExport, NOT getExport, so an
+          open draft never makes the sealed package undownloadable). */}
+      {latestFinalized && (
         <div className="border-t border-gray-200 bg-white px-8 py-6">
-          <h2 className="text-sm font-bold text-gray-900">Download bundle</h2>
+          <h2 className="text-sm font-bold text-gray-900">
+            Download sealed bundle
+            {latestFinalized.export_revision && latestFinalized.export_revision > 1
+              ? ` (revision ${latestFinalized.export_revision})`
+              : ""}
+          </h2>
           <p className="mt-1 text-xs text-gray-500">
-            Finalized {monthLabel} archive files, served byte-for-byte as
-            sealed in R2 — SHA-256 hashes match the manifest.
+            Finalized {monthLabel} archive files, served byte-for-byte as sealed in
+            R2 — SHA-256 hashes match the manifest.
           </p>
           <div className="mt-3 flex flex-wrap gap-3">
             {BUNDLE_DOWNLOAD_LINKS.filter(
-              // 証憑ZIP (proofs) only exists for exports rebuilt after the
-              // proofs code shipped — hide it for proofless finalized exports
-              // (e.g. a month sealed before proofs were added) so the link is
-              // never a dead 404.
-              ({ file }) => file !== "proofs" || !!currentExport?.proofs_r2_key,
+              ({ file }) => file !== "proofs" || !!latestFinalized.proofs_r2_key,
             ).map(({ file, label }) => (
               <a
                 key={file}
@@ -187,13 +200,58 @@ export default async function ExportPage({
               </a>
             ))}
           </div>
-          {!currentExport?.proofs_r2_key && (
+          {!latestFinalized.proofs_r2_key && (
             <p className="mt-2 text-[11px] text-gray-500">
-              証憑ZIP (proofs) is absent — this export was sealed before proofs were
-              added. Create a revision and rebuild to generate it (see the runbook).
+              証憑ZIP (proofs) is absent — this revision was sealed before proofs
+              were added. Create a revision and rebuild to generate it.
             </p>
           )}
-          <CreateRevisionButton month={month} monthLabel={monthLabel} />
+          {/* No open draft yet → offer to create a revision (e.g. to add proofs). */}
+          {currentExport?.status !== "draft" && (
+            <CreateRevisionButton month={month} monthLabel={monthLabel} />
+          )}
+        </div>
+      )}
+
+      {/* Draft bundle — the open revision (verify-before-finalize). Bytes are
+          the candidate seal; only the DRAFT- filename prefix signals it isn't. */}
+      {currentExport?.status === "draft" && (
+        <div className="border-t border-amber-200 bg-amber-50/40 px-8 py-6">
+          <h2 className="text-sm font-bold text-amber-900">
+            下書きダウンロード (DRAFT)
+            {currentExport.export_revision
+              ? ` — revision ${currentExport.export_revision}`
+              : ""}
+          </h2>
+          {currentExport.bundle_built_at ? (
+            <>
+              <p className="mt-1 text-xs text-amber-800">
+                Open draft, NOT yet sealed. These are the candidate-seal bytes
+                (identical to what Finalize will seal). Downloaded filenames are
+                prefixed <code>DRAFT-</code> so they&apos;re unmistakable — verify,
+                then finalize.
+              </p>
+              <div className="mt-3 flex flex-wrap gap-3">
+                {BUNDLE_DOWNLOAD_LINKS.filter(
+                  ({ file }) => file !== "proofs" || !!currentExport.proofs_r2_key,
+                ).map(({ file, label }) => (
+                  <a
+                    key={file}
+                    href={`/api/receipts/export/${month}/download?file=${file}&draft=true`}
+                    className="rounded-xl border border-amber-400 bg-amber-100 px-4 py-2 text-xs font-semibold text-amber-900 hover:bg-amber-200"
+                  >
+                    {`DRAFT-${label}`}
+                  </a>
+                ))}
+              </div>
+            </>
+          ) : (
+            <p className="mt-1 text-xs text-amber-800">
+              Draft revision created but not yet rebuilt. Click{" "}
+              <strong>Rebuild draft</strong> to stage the bundle (CSV + proofs ZIP +
+              notice) for download.
+            </p>
+          )}
         </div>
       )}
       <div className="border-t border-amber-100 bg-amber-50 px-8 py-4 text-xs text-amber-900">

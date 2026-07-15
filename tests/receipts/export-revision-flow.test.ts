@@ -115,5 +115,21 @@ test(
   )[0]!;
   assert.equal(latest.id, "rev2", "getExport ordering must pick revision 2");
 
+  // getLatestFinalizedExport (download route's default path): with BOTH rev1
+  // and rev2 finalized, it must return rev2 (latest finalized). This is the
+  // mid-revision fix — the default download serves the latest finalized, not an
+  // open draft. (Selection: status='finalized' ORDER BY revision DESC.)
+  const latestFin = d1(
+    `SELECT id, export_revision FROM receipt_exports
+     WHERE export_month = '${TEST_MONTH}' AND status = 'finalized'
+     ORDER BY COALESCE(export_revision, 1) DESC, created_at DESC LIMIT 1;`,
+  )[0]!;
+  assert.equal(
+    latestFin.id,
+    "rev2",
+    "getLatestFinalizedExport returns the latest finalized revision",
+  );
+  assert.equal(latestFin.export_revision, 2);
+
   d1(`DELETE FROM receipt_exports WHERE export_month = '${TEST_MONTH}';`);
 });

@@ -1794,6 +1794,31 @@ export async function getExport(month: string): Promise<ReceiptExport | null> {
     .first<ReceiptExport>();
 }
 
+/**
+ * Latest FINALIZED export for a month (highest revision), or null.
+ *
+ * Distinct from {@link getExport} (which returns the highest-revision row
+ * regardless of status): when a revision draft is open, getExport returns the
+ * DRAFT, but the sealed package the operator/accountant should download is the
+ * latest FINALIZED revision. The download route's default path uses this so an
+ * open draft never makes the sealed package undownloadable (the mid-revision
+ * gap: getExport returning the draft caused a 409 on the sealed rev-N package).
+ */
+export async function getLatestFinalizedExport(
+  month: string,
+): Promise<ReceiptExport | null> {
+  const db = getReceiptsDb();
+  return db
+    .prepare(
+      `SELECT * FROM receipt_exports
+       WHERE export_month = ? AND status = 'finalized'
+       ORDER BY COALESCE(export_revision, 1) DESC, created_at DESC
+       LIMIT 1`,
+    )
+    .bind(month)
+    .first<ReceiptExport>();
+}
+
 export async function listExports(): Promise<ReceiptExport[]> {
   const db = getReceiptsDb();
   const result = await db
