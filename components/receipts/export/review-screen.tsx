@@ -108,6 +108,7 @@ export function ReviewScreen(props: ReviewScreenProps) {
         blockerCount={props.gateBlockers.length}
         warningCount={props.warnings.reduce((s, w) => s + w.count, 0)}
         rowsInDraft={props.rows.length}
+        hasProofsZip={Boolean(props.currentExport?.proofs_r2_key)}
       />
     </div>
   );

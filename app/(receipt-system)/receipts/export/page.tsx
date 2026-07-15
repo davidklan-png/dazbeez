@@ -170,7 +170,13 @@ export default async function ExportPage({
             sealed in R2 — SHA-256 hashes match the manifest.
           </p>
           <div className="mt-3 flex flex-wrap gap-3">
-            {BUNDLE_DOWNLOAD_LINKS.map(({ file, label }) => (
+            {BUNDLE_DOWNLOAD_LINKS.filter(
+              // 証憑ZIP (proofs) only exists for exports rebuilt after the
+              // proofs code shipped — hide it for proofless finalized exports
+              // (e.g. a month sealed before proofs were added) so the link is
+              // never a dead 404.
+              ({ file }) => file !== "proofs" || !!currentExport?.proofs_r2_key,
+            ).map(({ file, label }) => (
               <a
                 key={file}
                 href={`/api/receipts/export/${month}/download?file=${file}`}
@@ -180,6 +186,12 @@ export default async function ExportPage({
               </a>
             ))}
           </div>
+          {!currentExport?.proofs_r2_key && (
+            <p className="mt-2 text-[11px] text-gray-500">
+              証憑ZIP (proofs) is absent — this export was sealed before proofs were
+              added. Create a revision and rebuild to generate it (see the runbook).
+            </p>
+          )}
         </div>
       )}
       <div className="border-t border-amber-100 bg-amber-50 px-8 py-4 text-xs text-amber-900">
