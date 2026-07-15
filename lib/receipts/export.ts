@@ -144,16 +144,25 @@ export function bomPrefixedCrlf(csvText: string): string {
 }
 
 /**
- * Summary CSV: per-expense-category count + total, then a PaymentPath
- * breakdown, then a grand total. Generated from the same ExportRow list
- * as the main CSV so the two cannot drift.
+ * 集計 (summary) CSV — a full cost breakdown the accountant reconciles against
+ * their own statement prep: per-勘定科目 (count + subtotal, sorted by subtotal
+ * desc), per-payment-path (AMEX/現金/デジタル), and a grand-total row.
+ *
+ * Amounts are raw amountMinor (yen integers) — the grand total is the EXACT sum
+ * of the receipts CSV's amounts (same arithmetic; no float re-derivation).
+ * Generated from the same ExportRow list as the main CSV so the two cannot drift.
+ * Shipped in two places: the standalone summary artifact (BOM+CRLF applied by
+ * the route) and a byte-identical 集計.csv inside the proofs ZIP.
  */
 export function buildExportSummaryCsv(
   rows: ExportRow[],
   month: string,
   generatedAt: string,
 ): string {
-  const catTotals = new Map<string, { count: number; totalMinor: number }>();
+  const catTotals = new Map<
+    string,
+    { ja: string; count: number; totalMinor: number }
+  >();
   let amexCount = 0;
   let amexTotal = 0;
   let cashCount = 0;
@@ -165,7 +174,11 @@ export function buildExportSummaryCsv(
 
   for (const row of rows) {
     const code = row.expenseCategoryCode ?? "uncategorized";
-    const cat = catTotals.get(code) ?? { count: 0, totalMinor: 0 };
+    const cat = catTotals.get(code) ?? {
+      ja: row.expenseCategoryJa ?? code,
+      count: 0,
+      totalMinor: 0,
+    };
     cat.count += 1;
     cat.totalMinor += row.amountMinor ?? 0;
     catTotals.set(code, cat);
@@ -186,23 +199,23 @@ export function buildExportSummaryCsv(
   }
 
   const lines: string[] = [
-    `Field,Value`,
+    "Field,Value",
     `Month,${csvEscape(month)}`,
     `GeneratedAt,${csvEscape(generatedAt)}`,
-    `RowCount,${grandCount}`,
-    `GrandTotalMinor,${grandTotal}`,
-    ``,
-    `ExpenseCategoryCode,Count,TotalMinor`,
+    "",
+    "勘定科目,件数,合計金額",
   ];
-  const sorted = [...catTotals.entries()].sort((a, b) => b[1].totalMinor - a[1].totalMinor);
-  for (const [code, v] of sorted) {
-    lines.push(`${csvEscape(code)},${v.count},${v.totalMinor}`);
+  const sorted = [...catTotals.values()].sort((a, b) => b.totalMinor - a.totalMinor);
+  for (const c of sorted) {
+    lines.push(`${csvEscape(c.ja)},${c.count},${c.totalMinor}`);
   }
-  lines.push(``);
-  lines.push(`PaymentPath,Count,TotalMinor`);
+  lines.push("");
+  lines.push("支払方法,件数,合計金額");
   lines.push(`AMEX,${amexCount},${amexTotal}`);
-  lines.push(`CASH,${cashCount},${cashTotal}`);
-  lines.push(`DIGITAL,${digitalCount},${digitalTotal}`);
+  lines.push(`現金,${cashCount},${cashTotal}`);
+  lines.push(`デジタル,${digitalCount},${digitalTotal}`);
+  lines.push("");
+  lines.push(`総合計,${grandCount},${grandTotal}`);
   return lines.join("\n");
 }
 

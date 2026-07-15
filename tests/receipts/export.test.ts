@@ -226,7 +226,7 @@ test("bomPrefixedCrlf: handles text that already has CRLF", () => {
 
 // ─── buildExportSummaryCsv (A5 summary CSV) ───────────────────────────────────
 
-test("buildExportSummaryCsv: grand total + PaymentPath breakdown", () => {
+test("buildExportSummaryCsv: 集計 — per-category + payment-path + grand total", () => {
   const rows: ExportRow[] = [
     makeAmexLineRow({ amountMinor: 5000, expenseCategoryCode: "entertainment" }),
     makeReceiptRow({
@@ -242,15 +242,19 @@ test("buildExportSummaryCsv: grand total + PaymentPath breakdown", () => {
   ];
   const csv = buildExportSummaryCsv(rows, "2026-05", "2026-05-19T12:00:00Z");
   assert.match(csv, /Month,2026-05/);
-  assert.match(csv, /RowCount,3/);
-  assert.match(csv, /GrandTotalMinor,9500/);
-  assert.match(csv, /PaymentPath,Count,TotalMinor/);
-  assert.match(csv, /AMEX,1,5000/);
-  assert.match(csv, /CASH,1,1500/);
-  assert.match(csv, /DIGITAL,1,3000/);
-  assert.match(csv, /entertainment,1,5000/);
+  assert.match(csv, /勘定科目,件数,合計金額/);
+  assert.match(csv, /支払方法,件数,合計金額/);
+  // Per-category (Japanese name when present; code fallback when JA is null).
+  assert.match(csv, /接待（飲酒あり）,1,5000/);
   assert.match(csv, /meeting,1,1500/);
   assert.match(csv, /software,1,3000/);
+  // Per-payment-path.
+  assert.match(csv, /AMEX,1,5000/);
+  assert.match(csv, /現金,1,1500/);
+  assert.match(csv, /デジタル,1,3000/);
+  // Grand total = exact sum of the rows' amountMinor (5000+1500+3000 = 9500),
+  // matching what the receipts CSV's amounts sum to — no float re-derivation.
+  assert.match(csv, /総合計,3,9500/);
 });
 
 test("buildExportSummaryCsv: uncategorized bucket when category null", () => {

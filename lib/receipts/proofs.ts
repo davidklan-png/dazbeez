@@ -75,10 +75,9 @@ export interface ProofMokuziRow {
   amountMinor: number;
   currency: string;
   categoryJa: string;
-  statementLineId: string | null;
-  receiptId: string;
-  sha256: string;
-  source: "proof_copy" | "original";
+  /** 出席者: "; "-joined attendees for 会議費/接待交際費 entries (caller-resolved
+   *  from the same attendeeMap the receipts CSV uses); blank for other rows. */
+  attendees: string;
 }
 
 function csvQuote(value: string | null | undefined): string {
@@ -90,12 +89,17 @@ function csvQuote(value: string | null | undefined): string {
   return s;
 }
 
-/** 目次.csv — one row per proof, Excel-safe (BOM + CRLF + quoted comma fields).
- *  `No` is the join key to the receipts CSV; `sha256` is the hash of the file
- *  ACTUALLY shipped in this ZIP (the proof_copy derivative when one ships, the
- *  original on fallback) — the adjacent 出典 column states which (原本 vs
- *  圧縮コピー). Labeling a derivative's hash "original_sha256" would be a false
- *  claim an auditor trips on, so the column is just `sha256`. */
+/** 目次.csv — the accountant's human table of contents (one row per proof),
+ *  Excel-safe (BOM + CRLF + quoted comma fields). Columns:
+ *    No, ファイル名, 取引日, 店舗, 金額, 勘定科目, 出席者
+ *  `No` is the join key to the receipts CSV. 出席者 lists attendees for 会議費 /
+ *  接待交際費 entries (caller-resolved from the receipts CSV's attendee source),
+ *  blank for other categories.
+ *
+ *  Machine fields (statement_line_id, receipt_id, sha256, source) are
+ *  intentionally NOT here — they have no value to a human reader and already
+ *  live in the manifest (per-file SHAs, IDs). 目次 = human layer, manifest =
+ *  machine layer. */
 export function buildProofsMokuziCsv(rows: ProofMokuziRow[]): string {
   const header = [
     "No",
@@ -104,10 +108,7 @@ export function buildProofsMokuziCsv(rows: ProofMokuziRow[]): string {
     "店舗",
     "金額",
     "勘定科目",
-    "statement_line_id",
-    "receipt_id",
-    "sha256",
-    "出典",
+    "出席者",
   ].join(",");
   const body = rows
     .slice()
@@ -120,10 +121,7 @@ export function buildProofsMokuziCsv(rows: ProofMokuziRow[]): string {
         csvQuote(r.merchant),
         csvQuote(formatYenAmount(r.amountMinor, r.currency)),
         csvQuote(r.categoryJa),
-        csvQuote(r.statementLineId),
-        csvQuote(r.receiptId),
-        csvQuote(r.sha256),
-        r.source === "original" ? "原本" : "圧縮コピー",
+        csvQuote(r.attendees),
       ].join(","),
     );
   // BOM (Excel on Windows detects UTF-8 → Japanese renders) + CRLF.
@@ -290,12 +288,10 @@ export interface ProofZipEntry {
   amountMinor: number;
   currency: string;
   ext: "jpg" | "pdf";
-  source: "proof_copy" | "original";
   bytes: Uint8Array;
   transactionDate: string | null;
-  receiptId: string;
-  statementLineId: string | null;
-  sha256: string;
+  /** 出席者 for the 目次 (会議費/接待交際費 only); blank otherwise. */
+  attendees: string;
   paymentPath: ProofPaymentPath;
 }
 
@@ -309,13 +305,18 @@ function folderFor(paymentPath: ProofPaymentPath): string {
 
 /** Build the sealed proofs ZIP. fflate uses a single compression level; we use
  *  level 0 (store) so the bulk JPEG/PDF bytes aren't recompressed (wasted CPU,
- *  ~0 size gain). The two index files are tiny, so storing them uncompressed is
+ *  ~0 size gain). The index files are tiny, so storing them uncompressed is
  *  negligible. UTF-8 entry names: fflate sets the UTF-8 general-purpose bit for
- *  non-ASCII paths, so the Japanese names open correctly in Windows Explorer. */
+ *  non-ASCII paths, so the Japanese names open correctly in Windows Explorer.
+ *
+ *  `summaryCsv` is the SAME bytes as the standalone summary artifact (BOM+CRLF),
+ *  embedded as 集計.csv so the accountant who only opens the ZIP still gets the
+ *  cost breakdown. */
 export function assembleProofsZip(
   month: string,
   entries: ProofZipEntry[],
   noticeInput: TransitionNoticeInput,
+  summaryCsv: string,
 ): Uint8Array {
   const root = ROOT_PREFIX(month);
   const files: Record<string, Uint8Array> = {};
@@ -361,14 +362,12 @@ export function assembleProofsZip(
       amountMinor: entry.amountMinor,
       currency: entry.currency,
       categoryJa: entry.categoryJa,
-      statementLineId: entry.statementLineId,
-      receiptId: entry.receiptId,
-      sha256: entry.sha256,
-      source: entry.source,
+      attendees: entry.attendees,
     });
   }
 
   files[`${root}目次.csv`] = encoder.encode(buildProofsMokuziCsv(mokuziRows));
+  files[`${root}集計.csv`] = encoder.encode(summaryCsv);
   files[`${root}お知らせ.txt`] = encoder.encode(buildTransitionNotice(noticeInput));
 
   return zipSync(files, { level: 0 });

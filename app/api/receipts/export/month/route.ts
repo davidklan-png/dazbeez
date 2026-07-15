@@ -32,6 +32,7 @@ import {
   type ProofPaymentPath,
 } from "@/lib/receipts/proofs";
 import { listFilesForObject } from "@/lib/receipts/files";
+import { requiresAttendees } from "@/lib/receipts/categories";
 import { composeFinalizeNoticeData, notifyAccountantOfFinalize } from "@/lib/receipts/notify";
 import {
   buildExportBundle,
@@ -104,6 +105,16 @@ export async function POST(request: Request) {
     const csvShipped = bomPrefixedCrlf(csvPure);
     const sha256 = await hashCsvContent(csvShipped);
 
+    // generatedAt is baked into the summary, manifest, and README — compute it
+    // once here so every artifact shares the same timestamp.
+    const generatedAt = new Date().toISOString();
+    // Summary (集計) is built up front: its shipped bytes (BOM+CRLF) are also
+    // embedded in the proofs ZIP as 集計.csv — same bytes, so the accountant who
+    // only opens the ZIP still gets the breakdown.
+    const summaryPure = buildExportSummaryCsv(bundle.rows, month, generatedAt);
+    const summaryShipped = bomPrefixedCrlf(summaryPure);
+    const summarySha256 = await hashCsvContent(summaryShipped);
+
     // Create or retrieve export record, then reload to pick up revision
     // metadata (export_revision / supersedes_export_id / correction_reason).
     // createExport() returns just the id; the row's revision fields are needed
@@ -172,6 +183,12 @@ export async function POST(request: Request) {
         chosen.sha256_hash,
         `Receipt ${row.receiptId}: proof file "${chosen.r2_key}"`,
       );
+      // 出席者 (目次 only): meeting/entertainment categories list attendees,
+      // from the same attendeeMap the receipts CSV uses ("; "-joined). Blank
+      // for other categories. No new gate — emit what the bundle provides.
+      const attendees = requiresAttendees(row.expenseCategoryCode)
+        ? (bundle.attendeeMap.get(row.receiptId) ?? row.attendees ?? []).join("; ")
+        : "";
       proofsEntries.push({
         no: i + 1,
         categoryJa: row.expenseCategoryJa ?? row.expenseCategoryCode ?? "",
@@ -179,12 +196,9 @@ export async function POST(request: Request) {
         amountMinor: row.amountMinor ?? 0,
         currency: row.currency,
         ext: chosen.content_type === "application/pdf" ? "pdf" : "jpg",
-        source: chosen.role === "proof_copy" ? "proof_copy" : "original",
         bytes: fileBytes,
         transactionDate: row.transactionDate,
-        receiptId: row.receiptId,
-        statementLineId: row.lineId,
-        sha256: chosen.sha256_hash,
+        attendees,
         paymentPath: (row.paymentPath === "DIGITAL"
           ? "DIGITAL"
           : row.paymentPath === "CASH"
@@ -204,7 +218,12 @@ export async function POST(request: Request) {
     );
 
     const proofsKey = buildProofsKey(month, exportId);
-    const proofsZipBytes = assembleProofsZip(month, proofsEntries, proofsNoticeInput);
+    const proofsZipBytes = assembleProofsZip(
+      month,
+      proofsEntries,
+      proofsNoticeInput,
+      summaryShipped,
+    );
     const proofsSha256 = await computeSha256Hex(proofsZipBytes);
     await getReceiptsArchiveBucket().put(proofsKey, proofsZipBytes, {
       httpMetadata: { contentType: "application/zip" },
@@ -233,7 +252,6 @@ export async function POST(request: Request) {
       }
     }
     const amexArtifact = await getAmexArtifactByMonth(month);
-    const generatedAt = new Date().toISOString();
 
     // Generate and upload manifest
     const manifest = buildManifestCsv(
@@ -273,12 +291,8 @@ export async function POST(request: Request) {
     const manifestSha256 = await hashCsvContent(manifest);
     await archiveManifest(manifestKey, manifestBytes.buffer as ArrayBuffer);
 
-    // Summary CSV (audit A5): per-category and per-PaymentPath totals for
-    // a quick reconciliation check. Same BOM/CRLF treatment as the main
-    // archive so the accountant can open it in Excel without mojibake.
-    const summaryPure = buildExportSummaryCsv(bundle.rows, month, generatedAt);
-    const summaryShipped = bomPrefixedCrlf(summaryPure);
-    const summarySha256 = await hashCsvContent(summaryShipped);
+    // Summary CSV (集計) — same bytes embedded in the proofs ZIP. Uploaded as
+    // the standalone summary artifact; BOM+CRLF for Excel on Windows.
     await getReceiptsArchiveBucket().put(
       summaryKey,
       encoder.encode(summaryShipped).buffer as ArrayBuffer,
