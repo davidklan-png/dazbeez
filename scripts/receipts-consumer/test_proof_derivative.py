@@ -35,7 +35,7 @@ def _write_jpeg(path: str, size: tuple[int, int], exif=None) -> None:
 
 
 class TestMakeProofDerivative(unittest.TestCase):
-    def test_large_image_resized_to_1600_longest(self):
+    def test_large_image_capped_at_max_dim(self):
         fd, path = tempfile.mkstemp(suffix=".jpg")
         os.close(fd)
         try:
@@ -44,7 +44,7 @@ class TestMakeProofDerivative(unittest.TestCase):
             self.assertEqual(ct, "image/jpeg")
             self.assertEqual(data[:2], b"\xff\xd8")  # JPEG SOI magic
             out = Image.open(io.BytesIO(data))
-            self.assertLessEqual(max(out.size), consumer.PROOF_MAX_LONGEST_SIDE)
+            self.assertLessEqual(max(out.size), consumer.PROOF_MAX_DIM)
             # Aspect ratio preserved (3:2), not distorted.
             self.assertAlmostEqual(out.width / out.height, 3000 / 2000, places=2)
         finally:
@@ -62,14 +62,14 @@ class TestMakeProofDerivative(unittest.TestCase):
             os.unlink(path)
 
     def test_portrait_orientation_capped_on_shorter_axis(self):
-        # Portrait 2000x3000 → longest side (height) capped at 1600.
+        # Portrait 2000x3000 → longest side (height) capped at PROOF_MAX_DIM.
         fd, path = tempfile.mkstemp(suffix=".jpg")
         os.close(fd)
         try:
             _write_jpeg(path, (2000, 3000))
             data, _ = consumer.make_proof_derivative(path)
             out = Image.open(io.BytesIO(data))
-            self.assertLessEqual(max(out.size), consumer.PROOF_MAX_LONGEST_SIDE)
+            self.assertLessEqual(max(out.size), consumer.PROOF_MAX_DIM)
             self.assertAlmostEqual(out.width / out.height, 2000 / 3000, places=2)
         finally:
             os.unlink(path)
@@ -111,8 +111,8 @@ class TestMakeProofDerivative(unittest.TestCase):
             os.unlink(path)
 
     def test_derivative_is_smaller_than_a_high_quality_save(self):
-        # q75 recompression of a noisy-ish image must beat q95 — sanity check
-        # that the quality knob is actually applied (keeps the bundle small).
+        # Recompression at PROOF_JPEG_QUALITY of a noisy image must beat q95 —
+        # sanity check that the quality knob is actually applied (small bundle).
         fd, path = tempfile.mkstemp(suffix=".jpg")
         os.close(fd)
         try:

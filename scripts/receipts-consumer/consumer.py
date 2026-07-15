@@ -301,15 +301,15 @@ def post_extraction_failed(receipt_id: str, reason: str) -> None:
 # consumer builds + posts the derivative after a successful /extract, wrapped so
 # any error is logged and swallowed (backfill_proof_copies.py recovers misses).
 
-PROOF_MAX_LONGEST_SIDE = 1600
-PROOF_JPEG_QUALITY = 75
+PROOF_MAX_DIM = 1280
+PROOF_JPEG_QUALITY = 70
 
 
 def make_proof_derivative(image_path: str) -> tuple[bytes, str] | None:
     """Build a compact proof derivative from a local image file.
 
-    Raster images: resize the longest side to <=1600px (never upscale), JPEG
-    quality 75, EXIF stripped AFTER baking orientation into the pixels. Returns
+    Raster images: resize the longest side to <=1280px (never upscale), JPEG
+    quality 70, EXIF stripped AFTER baking orientation into the pixels. Returns
     (jpeg_bytes, "image/jpeg").
 
     PDFs: pass through unchanged (already compact; rasterizing legal documents
@@ -340,9 +340,9 @@ def make_proof_derivative(image_path: str) -> tuple[bytes, str] | None:
         if img.mode not in ("RGB", "L"):
             img = img.convert("RGB")
         # thumbnail() preserves aspect ratio, fits within the box (longest side
-        # <=1600), and never upsizes — exactly the proof sizing we want.
+        # <=1280), and never upsizes — exactly the proof sizing we want.
         img.thumbnail(
-            (PROOF_MAX_LONGEST_SIDE, PROOF_MAX_LONGEST_SIDE),
+            (PROOF_MAX_DIM, PROOF_MAX_DIM),
             Image.Resampling.LANCZOS,
         )
         buf = io.BytesIO()
