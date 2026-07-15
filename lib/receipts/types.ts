@@ -139,6 +139,7 @@ export type AuditAction =
   | "receipt.export_statement_month_assigned"
   | "receipt.export_statement_month_overridden"
   | "receipt.export_statement_month_rolled_forward"
+  | "receipt.proof_uploaded"
   // ADR 0008 one-time policy migration (window → calendar month). Replaces the
   // ADR 0006 _window_drift action — calendar membership has no AMEX-line
   // dependency, so drift detection is retired.
@@ -203,6 +204,7 @@ export type ComplianceCheckSeverity = "info" | "warning" | "blocker";
 export type ReceiptFileRole =
   | "original"
   | "processed"
+  | "proof_copy"
   | "back_side"
   | "continuation"
   | "related_invoice"

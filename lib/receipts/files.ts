@@ -76,3 +76,25 @@ export async function findFileBySha256(
     .bind(sha256)
     .first<ReceiptFile>();
 }
+
+/**
+ * Delete any existing proof_copy row for a receipt (upsert preamble).
+ *
+ * Proof copies live at a STABLE r2_key (`receipts/<id>/proof.<ext>`) and
+ * `receipt_files.r2_key` is UNIQUE, so regenerating a derivative (re-ingest,
+ * backfill --force) must clear the prior row before the fresh INSERT —
+ * otherwise the insert trips the unique constraint. The R2 object itself is
+ * overwritten separately by putProofCopy.
+ */
+export async function deleteProofCopyForReceipt(
+  db: D1Database,
+  receiptId: string,
+): Promise<void> {
+  await db
+    .prepare(
+      `DELETE FROM receipt_files
+       WHERE object_type = 'receipt' AND object_id = ? AND role = 'proof_copy'`,
+    )
+    .bind(receiptId)
+    .run();
+}
