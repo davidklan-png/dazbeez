@@ -392,6 +392,121 @@ export function resolveExportDownload(
   }
 }
 
+// ─── Bundle download resolution (draft ⇄ finalized) ─────────────────────────
+// Pure decision the download route uses to pick which revision's staged artifact
+// to serve. Extracted so the draft/finalized logic, the rebuild-precondition
+// check, and the DRAFT- filename prefix are unit-testable without R2/D1.
+//
+// BYTE-IDENTITY (hard requirement): drafts are the candidate seal. The artifact
+// BYTES are identical between a staged draft and what finalize seals — finalize
+// re-uses the staged R2 objects, it does not rebuild. So draft labeling lives
+// ONLY outside the bytes: the DRAFT- filename prefix (here), the UI label, and
+// the audit entry. No builder takes a draft flag; nothing is marked inside an
+// artifact.
+
+export type DownloadExportRecord = {
+  id: string;
+  archive_r2_key: string | null;
+  manifest_r2_key: string | null;
+  proofs_r2_key?: string | null;
+  /** NULL until the draft is rebuilt (recordExportBundle sets it). */
+  bundle_built_at?: string | null;
+};
+
+export type BundleDownloadResolution =
+  | {
+      ok: true;
+      r2Key: string;
+      contentType: string;
+      filename: string;
+      exportId: string;
+      draft: boolean;
+    }
+  | { ok: false; status: number; message: string };
+
+/**
+ * Resolve a bundle download request to an R2 key + content-type + filename, or
+ * an error {status, message}.
+ *
+ * - Default (draft=false): serve the latest FINALIZED revision's artifact.
+ *   404 if no finalized revision exists.
+ * - ?draft=true: serve the open DRAFT revision's staged artifact. 404 if there
+ *   is no draft, the draft hasn't been rebuilt (no bundle_built_at), or the
+ *   specific file isn't staged yet.
+ *
+ * Draft filenames are prefixed `DRAFT-` (e.g. `DRAFT-export-2026-06-proofs.zip`)
+ * so a draft file is unmistakable at a glance / in an attachment list. The
+ * finalized path keeps clean names. Bytes are served verbatim either way.
+ */
+export function resolveBundleDownload(opts: {
+  month: string;
+  file: ExportDownloadFile;
+  draft: boolean;
+  draftRecord: DownloadExportRecord | null;
+  finalizedRecord: DownloadExportRecord | null;
+}): BundleDownloadResolution {
+  const { month, file, draft, draftRecord, finalizedRecord } = opts;
+
+  if (draft) {
+    if (!draftRecord) {
+      return {
+        ok: false,
+        status: 404,
+        message: `No draft revision for ${month}. Create one from the export page.`,
+      };
+    }
+    if (!draftRecord.bundle_built_at) {
+      return {
+        ok: false,
+        status: 404,
+        message: "Draft not rebuilt yet — click Rebuild draft first.",
+      };
+    }
+    const target = resolveExportDownload(month, draftRecord, file);
+    if (!target.r2Key) {
+      return {
+        ok: false,
+        status: 404,
+        message: `Draft ${file} is not staged yet — rebuild the draft.`,
+      };
+    }
+    return {
+      ok: true,
+      r2Key: target.r2Key,
+      contentType: target.contentType,
+      filename: `DRAFT-${target.filename}`,
+      exportId: draftRecord.id,
+      draft: true,
+    };
+  }
+
+  // Default path: latest finalized revision.
+  if (!finalizedRecord) {
+    return {
+      ok: false,
+      status: 404,
+      message: `No finalized export for ${month} yet.`,
+    };
+  }
+  const target = resolveExportDownload(month, finalizedRecord, file);
+  if (!target.r2Key) {
+    // file-aware message (proofs was sealed before the proofs code shipped).
+    const message =
+      file === "proofs"
+        ? "This export was sealed before the proofs ZIP existed (no proofs_r2_key). Create a revision and rebuild to generate it."
+        : `No archived ${file} key recorded for this export.`;
+    return { ok: false, status: 404, message };
+  }
+  return {
+    ok: true,
+    r2Key: target.r2Key,
+    contentType: target.contentType,
+    filename: target.filename,
+    exportId: finalizedRecord.id,
+    draft: false,
+  };
+}
+
 export function buildExportReadme(opts: {
   exportId: string;
   month: string;

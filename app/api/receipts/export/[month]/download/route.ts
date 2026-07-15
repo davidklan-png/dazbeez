@@ -2,12 +2,13 @@ import { NextResponse } from "next/server";
 import { requireReceiptsActor } from "@/lib/receipts/auth";
 import { createAuditEntry } from "@/lib/receipts/audit";
 import { stringifyJson } from "@/lib/receipts/db-utils";
-import { getExport } from "@/lib/receipts/db";
+import { getExport, getLatestFinalizedExport } from "@/lib/receipts/db";
 import {
   EXPORT_DOWNLOAD_FILES,
   isExportDownloadFile,
-  resolveExportDownload,
+  resolveBundleDownload,
 } from "@/lib/receipts/export";
+import type { ReceiptExport } from "@/lib/receipts/types";
 import {
   getReceiptsArchiveBucket,
   getReceiptsDb,
@@ -16,12 +17,23 @@ import {
 type RouteContext = { params: Promise<{ month: string }> };
 
 /**
- * GET /api/receipts/export/[month]/download?file=receipts|manifest|summary|readme
+ * GET /api/receipts/export/[month]/download?file=receipts|manifest|summary|readme|proofs[&draft=true]
  *
- * Streams one of the four finalized-bundle artifacts from the archive bucket.
- * The body is served byte-for-byte as sealed at finalize (BOM+CRLF CSVs whose
- * SHA-256 is recorded in the manifest) — no re-encoding, or integrity
- * verification against the manifest breaks.
+ * Streams one of the bundle artifacts from the archive bucket, byte-for-byte —
+ * no transform (the SHA-256 in the manifest must match the bytes served).
+ *
+ * - Default (no `draft`): the latest FINALIZED revision's sealed artifact
+ *   (getLatestFinalizedExport — so an open revision draft never makes the
+ *   sealed package undownloadable). 404 if no finalized revision exists.
+ * - `?draft=true`: the open draft revision's STAGED artifact, for the operator's
+ *   verify-before-finalize workflow. 404 if there's no draft, the draft hasn't
+ *   been rebuilt, or the file isn't staged. Filename is prefixed `DRAFT-` so a
+ *   draft file is unmistakable; the finalized path keeps clean names.
+ *
+ * Byte-identity: a draft's staged bytes are bit-identical to what finalize
+ * seals (finalize re-uses the staged R2 objects — it does not rebuild). Draft
+ * labeling lives ONLY in the filename prefix, the audit entry, and the UI —
+ * nothing is marked inside any artifact.
  */
 export async function GET(request: Request, { params }: RouteContext) {
   try {
@@ -32,7 +44,8 @@ export async function GET(request: Request, { params }: RouteContext) {
       return NextResponse.json({ error: "Invalid month format." }, { status: 400 });
     }
 
-    const file = new URL(request.url).searchParams.get("file");
+    const url = new URL(request.url);
+    const file = url.searchParams.get("file");
     if (!file || !isExportDownloadFile(file)) {
       return NextResponse.json(
         {
@@ -41,42 +54,32 @@ export async function GET(request: Request, { params }: RouteContext) {
         { status: 400 },
       );
     }
+    const draft = url.searchParams.get("draft") === "true";
 
-    const exportRecord = await getExport(month);
-    if (!exportRecord) {
-      return NextResponse.json(
-        { error: "No export found for this month." },
-        { status: 404 },
-      );
+    // Draft path needs the OPEN draft (the highest-revision row when it's a
+    // draft). Default path needs the latest FINALIZED revision — NOT getExport,
+    // which returns the open draft when one exists and would 409 the sealed
+    // package (the mid-revision gap this fixes).
+    let draftRecord: ReceiptExport | null = null;
+    if (draft) {
+      const latest = await getExport(month);
+      draftRecord = latest?.status === "draft" ? latest : null;
     }
-    // Only finalized bundles are downloadable — a draft is not sealed, its
-    // artifacts can still be rebuilt, and handing it to the accountant would
-    // circulate an unverified bundle.
-    if (exportRecord.status !== "finalized") {
-      return NextResponse.json(
-        {
-          error:
-            "Export for this month is still a draft. Finalize the month before downloading the bundle.",
-        },
-        { status: 409 },
-      );
-    }
+    const finalizedRecord = !draft ? await getLatestFinalizedExport(month) : null;
 
-    const target = resolveExportDownload(month, exportRecord, file);
-    if (!target.r2Key) {
-      // The proofs ZIP only exists for exports rebuilt after the proofs code
-      // shipped. A finalized export sealed before that (e.g. revision 1) has no
-      // proofs key — point the operator at the revision flow rather than a bare
-      // "key recorded" message.
-      const message =
-        file === "proofs"
-          ? "This export was sealed before the proofs ZIP existed (no proofs_r2_key). Create a revision and rebuild to generate it."
-          : `No archived ${file} key recorded for this export.`;
-      return NextResponse.json({ error: message }, { status: 404 });
+    const resolution = resolveBundleDownload({
+      month,
+      file,
+      draft,
+      draftRecord,
+      finalizedRecord,
+    });
+    if (!resolution.ok) {
+      return NextResponse.json({ error: resolution.message }, { status: resolution.status });
     }
 
     const bucket = getReceiptsArchiveBucket();
-    const object = await bucket.get(target.r2Key);
+    const object = await bucket.get(resolution.r2Key);
     if (!object) {
       return NextResponse.json(
         { error: `Archived ${file} file not found in storage.` },
@@ -88,15 +91,17 @@ export async function GET(request: Request, { params }: RouteContext) {
       actor,
       action: "export.downloaded",
       objectType: "export",
-      objectId: exportRecord.id,
-      newValueJson: stringifyJson({ month, file }),
+      objectId: resolution.exportId,
+      newValueJson: stringifyJson({ month, file, draft: resolution.draft }),
     });
 
-    // Stream the archived bytes as-is — do NOT transform the body.
+    // Stream the bytes VERBATIM. For a draft, the only outward signal that it
+    // isn't sealed is the DRAFT- filename prefix — the bytes themselves are the
+    // candidate seal (identical to what finalize will seal).
     return new Response(object.body, {
       headers: {
-        "Content-Type": target.contentType,
-        "Content-Disposition": `attachment; filename="${target.filename}"`,
+        "Content-Type": resolution.contentType,
+        "Content-Disposition": `attachment; filename="${resolution.filename}"`,
       },
     });
   } catch (error) {
