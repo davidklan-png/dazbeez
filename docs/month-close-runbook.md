@@ -10,7 +10,7 @@ screen's blocker tile mirrors it via shared predicates.
 1. **Reconcile** — `/receipts/reconcile?month=YYYY-MM`: match AMEX statement lines to captured receipts, categorize every line, resolve missing-receipt reasons.
 2. **Review orphans & cash** — `/receipts/review`: mark captured receipts reviewed; classify any `payment_path=UNKNOWN` receipts as AMEX/CASH/DIGITAL.
 3. **Sign off reconciliation** — `/receipts/reconcile` → finalize reconciliation (seals the statement match).
-4. **Rebuild draft** — `/receipts/export?month=YYYY-MM` → "Rebuild draft" (stages the CSV + manifest in R2, writes `bundle_built_at`).
+4. **Rebuild draft** — `/receipts/export?month=YYYY-MM` → "Rebuild draft" (stages the receipts CSV + manifest + summary + README + **proofs ZIP** in R2, writes `bundle_built_at`).
 5. **Pre-finalize review** — click "Review & finalize" → `/receipts/export/YYYY-MM/review`: summary, side-by-side reconciliation, additional charges (cash/digital), business trips, and the gate verdict at the top.
 6. **Finalize** — bottom of the review page: type the month label, click Finalize. Irreversible.
 
@@ -54,9 +54,13 @@ rule definitions. If the tile shows a blocker, the gate will enforce it.
 ## Rebuild vs finalize
 
 - **Rebuild draft** (export screen) is safe to repeat: regenerates the CSV +
-  manifest in R2, replaces `receipt_export_items`, advances "Last draft built"
-  (`bundle_built_at`), and writes an `export.generated` audit entry. It does
-  NOT change receipts/lines, so it cannot change blocker counts.
+  manifest + summary + README + **proofs ZIP** in R2, replaces `receipt_export_items`,
+  advances "Last draft built" (`bundle_built_at`), and writes an `export.generated`
+  audit entry. It does NOT change receipts/lines, so it cannot change blocker counts.
+
+Once finalized, the five artifacts download from the export page (no wrangler
+needed): Receipts CSV, Manifest, Summary, README, and 領収書ZIP (proofs) — via
+`GET /api/receipts/export/<month>/download?file=<name>`.
 - **Finalize** (review page) is irreversible: sets the export to `finalized`,
   locks the receipts to read-only, marks the AMEX statement reconciled, stamps
   `exported_month` on shipped receipts, writes `export.finalized` + per-receipt
@@ -141,4 +145,88 @@ If any are unset/unverified, every finalize records `export.notification_failed`
 with the rejection reason. The bundle still seals; resend manually after fixing
 the config (there is no auto-retry — re-finalize is impossible without a
 revision, so treat the warning as "the email didn't go out, send it by hand").
+
+## Proofs bundle (証憑ZIP)
+
+The 5th sealed artifact — `exports/<month>/<exportId>-proofs.zip` — bundles one
+proof per shipped receipt so the accountant receives every証憑 from the sealed
+bundle alone (no more hand-assembly or wrangler).
+
+- **`No` join column**: the receipts CSV's first column is a 1-based row number.
+  Each proof file is named `No<NN>_<勘定科目>_<店舗>_¥<金額>.<ext>` (e.g.
+  `No03_研究開発費_OpenAI_¥108,341.pdf`) — the accountant matches a statement
+  line to its proof via `No`. Multi-file receipts get `-2`, `-3` suffixes.
+- **Folders** (Japanese): `領収書等証憓_<month>/AMEX明細分/` (receipts matched to
+  AMEX lines) and `…/追加経費_現金デジタル分/` (CASH/DIGITAL receipts). Plus
+  `目次.csv` (full index: No, ファイル名, 取引日, 店舗, 金額, 勘定科目,
+  statement_line_id, receipt_id, original_sha256, 出典) and `お知らせ.txt`
+  (transition notice: what changed vs the manual delivery).
+- **Source (`出典`)**: the ZIP prefers the `proof_copy` derivative (recompressed,
+  ≤1600px JPEG q75 — generated at ingest by the Mac consumer) and falls back to
+  the original if absent. `出典=原本` marks a fallback. PDFs pass through
+  unchanged. Every file's SHA-256 is in the manifest.
+
+### Gate (no proof → no seal)
+
+`validateMonthReadyForExport` gate 7 blocks finalize when a shipped receipt has
+**no `receipt_files` row at all** (no original, no proof_copy) — it cannot appear
+in the ZIP. (A missing `proof_copy` alone is not a blocker; the fallback covers
+it.) At rebuild, if a file row exists but its R2 object is gone, the rebuild
+**fails loudly** with the receipt id — re-run the proof backfill (below) or
+re-ingest before sealing.
+
+## June 2026 revision-2 (format transition)
+
+June 2026 sealed at revision 1 **without** the proofs ZIP / `No` column /
+notice. To deliver the full accountant bundle for June, create a **revision-2
+draft** that supersedes revision 1, rebuild it with the new format, then
+finalize. Revision 1 stays byte-identical (sealed-data preservation — verified
+by `tests/receipts/export-revision-flow.test.ts`).
+
+**Do not run this against production from code.** Operator steps:
+
+1. Ensure every June receipt has a `proof_copy` (see §Backfilling proof copies),
+   so the ZIP isn't all-fallback.
+2. Create the revision-2 draft (supersedes revision 1):
+   ```bash
+   # On the Mac, with the operator's auth (Clerk session cookie):
+   curl -X POST 'https://dazbeez.com/api/receipts/export/2026-06?correction=true' \
+     -H 'Content-Type: application/json' \
+     -H 'Cookie: <clerk session>' \
+     -d '{"correctionReason":"様式移行: 証憑ZIP・No列・お知らせ追加 (format transition: proofs bundle added)"}'
+   # → 201 { ok, exportId, revision: 2, supersedesExportId, month }
+   ```
+3. Export screen (`/receipts/export?month=2026-06`) → **Rebuild draft** (builds
+   the receipts CSV with the `No` column + the proofs ZIP + the notice into the
+   revision-2 draft).
+4. **Review & finalize** (`/receipts/export/2026-06/review`) → confirm the
+   bundle, type "june 2026", Finalize. This also sends the notification email
+   (§Notification email) carrying revision-2 context.
+
+Finalize is operator-only — no automated path calls it.
+
+## Backfilling proof copies (production)
+
+Receipts captured before the PR 1 ingest path shipped have no `proof_copy`. The
+Mac-side `backfill_proof_copies.py` generates + posts them. **Operator-only,
+read-only dry-run first**:
+
+```bash
+cd scripts/receipts-consumer
+# 1. Dry-run against LIVE D1 (read-only SELECT — no writes):
+.venv/bin/python3 backfill_proof_copies.py --remote --dry-run
+#   → prints id / merchant / original_r2_key for receipts lacking a proof_copy.
+
+# 2. Apply (writes: fetch original → recompress → POST /api/receipts/<id>/proof):
+.venv/bin/python3 backfill_proof_copies.py --remote --write
+
+# Re-generate existing ones (e.g. after a quality change): add --force.
+# Narrow to one receipt: --id <uuid>.
+```
+
+Idempotent + resumable: by default it selects only receipts WITHOUT a
+`proof_copy`, so re-running after a partial `--write` picks up the rest. For a
+seeded local demo (no production access), use `--local` against `cf:dev` (see
+`scripts/receipts-consumer/fixtures/seed-local.sql`).
+
 
