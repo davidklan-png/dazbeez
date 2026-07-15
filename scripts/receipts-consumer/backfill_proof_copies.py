@@ -27,16 +27,39 @@ import os
 import sys
 import tempfile
 
-# consumer.py reads these at import time. Default them so --help / --dry-run
-# work without the full runtime env; --write (posting) needs real values.
-os.environ.setdefault("CF_ACCOUNT_ID", "d")
-os.environ.setdefault("CF_QUEUE_ID", "d")
-os.environ.setdefault("CF_API_TOKEN", "d")
-os.environ.setdefault("RECEIPTS_EXTRACT_URL", "http://d")
-os.environ.setdefault("RECEIPTS_PROCESSOR_KEY", "d")
-os.environ.setdefault("MLX_MODEL", "d")
+# consumer.py reads the runtime env at its own import time (bracket access →
+# KeyError if unset), so it is imported lazily inside main()/helpers AFTER the
+# fail-fast check below. That keeps this module importable without the runtime
+# env (tests, --help). The previous module-level setdefault("…", "d") sentinels
+# let a misconfigured run proceed and DNS-fail every fetch (2026-07-15 skip-all);
+# the check below replaces them.
 
-import consumer  # type: ignore  # noqa: E402
+# Env the backfill needs to do real work. Fail fast (exit 2) if any is missing
+# OR still holds a sentinel placeholder — NAMES only, never values.
+_REQUIRED_ENV = (
+    "RECEIPTS_EXTRACT_URL",
+    "RECEIPTS_PROCESSOR_KEY",
+    "CF_ACCOUNT_ID",
+    "CF_API_TOKEN",
+)
+# Sentinel placeholders the old setdefault block used; presence means .env was
+# never sourced.
+_SENTINEL_VALUES = {"d", "http://d"}
+
+
+def _missing_or_sentinel(name: str) -> bool:
+    value = os.environ.get(name)
+    return value is None or value == "" or value in _SENTINEL_VALUES
+
+
+def _assert_required_env() -> None:
+    missing = [name for name in _REQUIRED_ENV if _missing_or_sentinel(name)]
+    if missing:
+        sys.stderr.write(
+            "error: required env not configured: " + ", ".join(missing) + "\n"
+            "hint: source .env first (see run.sh)\n"
+        )
+        sys.exit(2)
 
 
 def list_receipts_needing_proof(
@@ -47,6 +70,7 @@ def list_receipts_needing_proof(
     Default: non-deleted receipts with an original file and NO proof_copy row.
     --force: all non-deleted receipts with an original file (regenerate existing).
     """
+    import consumer  # type: ignore  # lazy import; see _assert_required_env()
     where_id = f" AND r.id = {consumer._sql_escape(only_id)}" if only_id else ""
     if force:
         clause = ""
@@ -79,6 +103,7 @@ def build_proof_from_original(
     Writes the fetched bytes to a temp file with the right suffix so
     make_proof_derivative can branch (PDF pass-through vs JPEG recompress).
     """
+    import consumer  # type: ignore  # lazy import; see _assert_required_env()
     raw = consumer.fetch_original_bytes(receipt_id)
     if raw is None:
         return None
@@ -97,6 +122,8 @@ def build_proof_from_original(
 
 
 def main() -> None:
+    _assert_required_env()
+    import consumer  # type: ignore  # noqa: E402  — lazy; env validated just above
     args = sys.argv[1:]
     dry_run = "--write" not in args
     local = "--local" in args
