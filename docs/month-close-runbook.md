@@ -228,6 +228,9 @@ read-only dry-run first**:
 
 ```bash
 cd scripts/receipts-consumer
+# REQUIRED first: the backfill fails fast (exit 2) unless the consumer .env is
+# sourced — it posts via RECEIPTS_EXTRACT_URL / RECEIPTS_PROCESSOR_KEY.
+set -a; source .env; set +a
 # 1. Dry-run against LIVE D1 (read-only SELECT — no writes):
 .venv/bin/python3 backfill_proof_copies.py --remote --dry-run
 #   → prints id / merchant / original_r2_key for receipts lacking a proof_copy.
@@ -238,6 +241,13 @@ cd scripts/receipts-consumer
 # Re-generate existing ones (e.g. after a quality change): add --force.
 # Narrow to one receipt: --id <uuid>.
 ```
+
+**Derivative parameters** (`scripts/receipts-consumer/consumer.py`):
+`PROOF_MAX_DIM = 1280` (longest side, never upscaled) and
+`PROOF_JPEG_QUALITY = 70`; PDFs pass through unchanged. Tuning either only
+affects proofs generated AFTER the change — existing `proof_copy` rows keep
+their old bytes until you regenerate with `--force` (overwrites all via the
+upsert).
 
 Idempotent + resumable: by default it selects only receipts WITHOUT a
 `proof_copy`, so re-running after a partial `--write` picks up the rest. For a
