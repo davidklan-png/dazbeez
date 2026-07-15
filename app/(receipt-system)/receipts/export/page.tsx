@@ -34,6 +34,7 @@ import {
 import { buildExportBundle } from "@/lib/receipts/month-closing";
 import { buildMonthlyExportCsv } from "@/lib/receipts/export";
 import { deriveStatementWindow } from "@/lib/receipts/statement-window";
+import { CreateRevisionButton } from "@/components/receipts/export/create-revision-button";
 
 export const dynamic = "force-dynamic";
 
@@ -192,6 +193,7 @@ export default async function ExportPage({
               added. Create a revision and rebuild to generate it (see the runbook).
             </p>
           )}
+          <CreateRevisionButton month={month} monthLabel={monthLabel} />
         </div>
       )}
       <div className="border-t border-amber-100 bg-amber-50 px-8 py-4 text-xs text-amber-900">
