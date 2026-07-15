@@ -27,12 +27,12 @@ import { archiveBundle, archiveManifest, getReceiptFile, computeSha256Hex } from
 import {
   assembleProofsZip,
   verifyProofFileSha256,
+  deriveTransitionNoticeInput,
   type ProofZipEntry,
   type ProofPaymentPath,
-  type TransitionNoticeInput,
 } from "@/lib/receipts/proofs";
 import { listFilesForObject } from "@/lib/receipts/files";
-import { isIcCardTopUpCandidate } from "@/lib/receipts/blockers";
+import { composeFinalizeNoticeData, notifyAccountantOfFinalize } from "@/lib/receipts/notify";
 import {
   buildExportBundle,
   validateMonthReadyForExport,
@@ -193,36 +193,15 @@ export async function POST(request: Request) {
       });
     }
 
-    // Transition-notice dynamic sections, derived from the same bundle so the
-    // notice cannot drift from what actually shipped.
-    const noticeMissingReceiptLines = bundle.rows
-      .filter((r) => r.rowType === "amex_line" && r.missingReceiptReason)
-      .map((r) => ({ lineId: r.lineId ?? "?", reason: r.missingReceiptReason ?? "" }));
-    const noticeIcAdvisories: TransitionNoticeInput["icAdvisories"] = [];
-    const icSeen = new Set<string>();
-    bundle.rows.forEach((row, i) => {
-      if (!row.receiptId || icSeen.has(row.receiptId)) return;
-      const receipt = bundle.receipts.find((rr) => rr.id === row.receiptId);
-      if (receipt && isIcCardTopUpCandidate(receipt)) {
-        icSeen.add(row.receiptId);
-        noticeIcAdvisories.push({
-          no: i + 1,
-          merchant: row.merchant ?? "",
-          amountMinor: row.amountMinor ?? 0,
-        });
-      }
-    });
-    const monthLabel = `${month.slice(0, 4)}年${Number(month.slice(5, 7))}月`;
-    const proofsNoticeInput: TransitionNoticeInput = {
-      monthLabel,
-      rowCount: bundle.rows.length,
-      receiptCount: proofsEntries.length,
-      missingReceiptLines: noticeMissingReceiptLines,
-      icAdvisories: noticeIcAdvisories,
-      exportRevision,
-      supersedesExportId,
-      correctionReason,
-    };
+    // Transition notice (shared builder — also used by the finalize email, so
+    // the notice text cannot drift between the ZIP and the notification).
+    const proofsNoticeInput = deriveTransitionNoticeInput(
+      month,
+      bundle.rows,
+      bundle.receipts,
+      { rowCount: bundle.rows.length, receiptCount: proofsEntries.length },
+      { exportRevision, supersedesExportId, correctionReason },
+    );
 
     const proofsKey = buildProofsKey(month, exportId);
     const proofsZipBytes = assembleProofsZip(month, proofsEntries, proofsNoticeInput);
@@ -356,6 +335,31 @@ export async function POST(request: Request) {
       // open. Surfaced in the finalize response so the operator's toast on
       // "Finalize succeeded" can also say "but March is still open."
       finalizeWarnings = await computeEarlierOpenMonthWarnings(month);
+
+      // Notification email (PR 3). Failure never fails finalize — it becomes a
+      // warning in the response + a notification_failed audit entry.
+      if (exportRecord) {
+        const notifyData = composeFinalizeNoticeData(month, bundle, exportRecord);
+        const notifyResult = await notifyAccountantOfFinalize(notifyData);
+        if (notifyResult.ok) {
+          await createAuditEntry(getReceiptsDb(), {
+            actor,
+            action: "export.notification_sent",
+            objectType: "export",
+            objectId: exportId,
+            newValueJson: stringifyJson({ month }),
+          });
+        } else {
+          finalizeWarnings.push(`Finalize notification email not sent: ${notifyResult.error}`);
+          await createAuditEntry(getReceiptsDb(), {
+            actor,
+            action: "export.notification_failed",
+            objectType: "export",
+            objectId: exportId,
+            newValueJson: stringifyJson({ month, error: notifyResult.error }),
+          });
+        }
+      }
     } else {
       await recordExportBundle(
         exportId,

@@ -17,7 +17,15 @@
     "NEXT_PUBLIC_CLERK_SIGN_IN_URL": "/receipts/sign-in",
     "NEXT_PUBLIC_CLERK_SIGN_UP_URL": "/receipts/sign-in",
     "NEXT_PUBLIC_CLERK_AFTER_SIGN_IN_URL": "/receipts",
-    "NEXT_PUBLIC_CLERK_AFTER_SIGN_UP_URL": "/receipts"
+    "NEXT_PUBLIC_CLERK_AFTER_SIGN_UP_URL": "/receipts",
+    // Finalize notification email (PR 3). Recipient + sender for the Cloudflare
+    // Email Routing send_email binding. The NOTIFY_EMAIL binding's
+    // destination_address MUST match ACCOUNTANT_EMAIL (CF requires the runtime
+    // `to` to be authorized by the binding). NOTIFY_FROM_ADDRESS must be a
+    // verified sender on the dazbeez.com zone. Replace the placeholders before
+    // enabling — see docs/month-close-runbook.md §Notification email.
+    "ACCOUNTANT_EMAIL": "accountant@example.com",
+    "NOTIFY_FROM_ADDRESS": "receipts@dazbeez.com"
   },
   // Manual secret setup:
   // npx wrangler secret put RESEND_API_KEY
@@ -96,6 +104,19 @@
       {
         "binding": "RECEIPTS_QUEUE",
         "queue": "dazbeez-receipts-extraction"
+      }
+    ]
+  },
+  // Finalize notification email (PR 3). Cloudflare Email Routing send_email
+  // binding — no third-party vendor. destination_address authorizes the single
+  // recipient (CF requires the runtime `to` to match); it MUST equal the
+  // ACCOUNTANT_EMAIL var. Enable Email Routing on the zone + verify the
+  // destination address first, else sends are rejected. See runbook.
+  "send_email": {
+    "bindings": [
+      {
+        "name": "NOTIFY_EMAIL",
+        "destination_address": "accountant@example.com"
       }
     ]
   },

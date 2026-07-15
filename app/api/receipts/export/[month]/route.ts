@@ -6,9 +6,14 @@ import {
   createExportRevision,
 } from "@/lib/receipts/db";
 import {
+  buildExportBundle,
   validateMonthReadyForExport,
   computeEarlierOpenMonthWarnings,
 } from "@/lib/receipts/month-closing";
+import { composeFinalizeNoticeData, notifyAccountantOfFinalize } from "@/lib/receipts/notify";
+import { createAuditEntry } from "@/lib/receipts/audit";
+import { stringifyJson } from "@/lib/receipts/db-utils";
+import { getReceiptsDb } from "@/lib/cloudflare-runtime";
 
 type RouteContext = { params: Promise<{ month: string }> };
 
@@ -92,7 +97,10 @@ export async function POST(request: Request, { params }: RouteContext) {
     // validateMonthReadyForExport is the single authority — it includes the
     // finalized-reconciliation precondition. The redundant pre-check that
     // used to live here was dropped to keep both finalize paths identical.
-    const blockers = await validateMonthReadyForExport(month);
+    // Build the bundle once: the gate consumes it (avoids an internal rebuild)
+    // and the finalize notification email reuses it.
+    const bundle = await buildExportBundle(month);
+    const blockers = await validateMonthReadyForExport(month, bundle);
     if (blockers.length > 0) {
       return NextResponse.json(
         { error: "Export blocked — resolve these issues first.", blockers },
@@ -116,6 +124,29 @@ export async function POST(request: Request, { params }: RouteContext) {
     // that earlier month will cost a revision once it lands — operators
     // should know that before they walk away thinking the month is "done."
     const warnings = await computeEarlierOpenMonthWarnings(month);
+
+    // Notification email (PR 3). Failure never fails finalize — it becomes a
+    // warning in the response + a notification_failed audit entry.
+    const notifyData = composeFinalizeNoticeData(month, bundle, exportRecord);
+    const notifyResult = await notifyAccountantOfFinalize(notifyData);
+    if (notifyResult.ok) {
+      await createAuditEntry(getReceiptsDb(), {
+        actor,
+        action: "export.notification_sent",
+        objectType: "export",
+        objectId: exportRecord.id,
+        newValueJson: stringifyJson({ month }),
+      });
+    } else {
+      warnings.push(`Finalize notification email not sent: ${notifyResult.error}`);
+      await createAuditEntry(getReceiptsDb(), {
+        actor,
+        action: "export.notification_failed",
+        objectType: "export",
+        objectId: exportRecord.id,
+        newValueJson: stringifyJson({ month, error: notifyResult.error }),
+      });
+    }
 
     return NextResponse.json(
       { ok: true, month, finalized: true, warnings },
