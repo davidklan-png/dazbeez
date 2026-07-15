@@ -112,14 +112,12 @@
   // recipient (CF requires the runtime `to` to match); it MUST equal the
   // ACCOUNTANT_EMAIL var. Enable Email Routing on the zone + verify the
   // destination address first, else sends are rejected. See runbook.
-  "send_email": {
-    "bindings": [
-      {
-        "name": "NOTIFY_EMAIL",
-        "destination_address": "accountant@example.com"
-      }
-    ]
-  },
+  "send_email": [
+    {
+      "name": "NOTIFY_EMAIL",
+      "destination_address": "accountant@example.com"
+    }
+  ],
   "routes": [
     {
       "pattern": "dazbeez.com/*",
