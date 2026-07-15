@@ -136,6 +136,7 @@ export type AuditAction =
   | "export.downloaded"
   | "export.notification_sent"
   | "export.notification_failed"
+  | "export.notification_test"
   | "archive.created"
   | "settings.updated"
   | "receipt.export_statement_month_assigned"

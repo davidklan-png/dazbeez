@@ -108,8 +108,15 @@ function formatYen(minor: number): string {
   return `¥${minor.toLocaleString("ja-JP")}`;
 }
 
-/** Build the Japanese email body. Pure + snapshot-tested. */
-export function buildFinalizeEmailBody(d: FinalizeNoticeData): string {
+/** Build the Japanese email body. Pure + snapshot-tested. In test mode
+ *  (opts.test) the body OPENS with a banner stating this is a channel test, not
+ *  a close notification — so a test send can never be mistaken for the real
+ *  thing. The rest of the body is the real template (the point of a test send is
+ *  to exercise the actual template + binding + destination end to end). */
+export function buildFinalizeEmailBody(
+  d: FinalizeNoticeData,
+  opts?: { test?: boolean },
+): string {
   const lines: string[] = [];
   lines.push("毎月の領収証憑一式の確定（ファイナライズ）が完了しましたのでお知らせします。");
   lines.push("");
@@ -131,7 +138,27 @@ export function buildFinalizeEmailBody(d: FinalizeNoticeData): string {
   lines.push(`https://dazbeez.com/receipts/export?month=${d.month}`);
   lines.push("");
   lines.push("本メールは自動送信されています。ご不明な点があれば別途ご連絡ください。");
-  return lines.join("\r\n");
+  const body = lines.join("\r\n");
+  if (opts?.test) {
+    return (
+      "※これは通知チャネルのテスト送信です。月次確定の通知ではありません。\r\n\r\n" +
+      body
+    );
+  }
+  return body;
+}
+
+/** Build the email subject. In test mode (opts.test) it is prefixed
+ *  【テスト送信】 so a test send is unmistakable in the inbox. Pure. */
+export function buildFinalizeEmailSubject(
+  d: FinalizeNoticeData,
+  opts?: { test?: boolean },
+): string {
+  const base =
+    d.revision > 1
+      ? `【領収証憑】${d.monthLabel}分 確定通知（改訂${d.revision}）`
+      : `【領収証憑】${d.monthLabel}分 確定通知`;
+  return opts?.test ? `【テスト送信】${base}` : base;
 }
 
 export type NotifyResult = { ok: true } | { ok: false; error: string };
@@ -147,25 +174,22 @@ export async function sendFinalizeNotification(
   from: string | null,
   to: string | null,
   data: FinalizeNoticeData,
+  opts?: { test?: boolean },
 ): Promise<NotifyResult> {
   if (!binding) return { ok: false, error: "NOTIFY_EMAIL binding not configured" };
   if (!from) return { ok: false, error: "NOTIFY_FROM_ADDRESS not configured" };
   if (!to) return { ok: false, error: "ACCOUNTANT_EMAIL not configured" };
 
-  const subject =
-    data.revision > 1
-      ? `【領収証憑】${data.monthLabel}分 確定通知（改訂${data.revision}）`
-      : `【領収証憑】${data.monthLabel}分 確定通知`;
   try {
     const msg = createMimeMessage();
     msg.setSender({ addr: from });
     msg.setRecipient({ addr: to });
-    msg.setSubject(subject);
+    msg.setSubject(buildFinalizeEmailSubject(data, opts));
     msg.addMessage({
       // mimetext wants exactly "text/plain" / "text/html" (no charset suffix);
       // it encodes the body as UTF-8 and emits charset=utf-8 in the MIME.
       contentType: "text/plain",
-      data: buildFinalizeEmailBody(data),
+      data: buildFinalizeEmailBody(data, opts),
     });
     await binding.send(msg);
     return { ok: true };
@@ -178,16 +202,34 @@ export async function sendFinalizeNotification(
 }
 
 /**
+ * Test-send (POST /api/receipts/notify/test) is an operator action: Clerk
+ * session ONLY. Unlike /extract, a processor key alone is NOT accepted — the Mac
+ * consumer must never be able to trigger a notification. `clerkActor` is the
+ * resolved Clerk actor (null when there's no session, e.g. a processor-key-only
+ * request). Returns the actor, or throws Unauthorized. Pure + unit-testable.
+ */
+export function authorizeNotifyTest(clerkActor: string | null): string {
+  if (!clerkActor) {
+    throw new Error("Unauthorized receipts request.");
+  }
+  return clerkActor;
+}
+
+/**
  * Production wrapper: reads the NOTIFY_EMAIL binding + env vars and sends.
- * Callers (both finalize routes) use this; it never throws.
+ * Callers (both finalize routes) use this; it never throws. The test-send
+ * endpoint passes { test: true } so the subject is prefixed 【テスト送信】 and the
+ * body opens with a test banner.
  */
 export async function notifyAccountantOfFinalize(
   data: FinalizeNoticeData,
+  opts?: { test?: boolean },
 ): Promise<NotifyResult> {
   return sendFinalizeNotification(
     getNotifyEmail(),
     getNotifyFromAddress(),
     getAccountantEmail(),
     data,
+    opts,
   );
 }

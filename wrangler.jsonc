@@ -18,13 +18,18 @@
     "NEXT_PUBLIC_CLERK_SIGN_UP_URL": "/receipts/sign-in",
     "NEXT_PUBLIC_CLERK_AFTER_SIGN_IN_URL": "/receipts",
     "NEXT_PUBLIC_CLERK_AFTER_SIGN_UP_URL": "/receipts",
-    // Finalize notification email (PR 3). Recipient + sender for the Cloudflare
-    // Email Routing send_email binding. The NOTIFY_EMAIL binding's
-    // destination_address MUST match ACCOUNTANT_EMAIL (CF requires the runtime
-    // `to` to be authorized by the binding). NOTIFY_FROM_ADDRESS must be a
-    // verified sender on the dazbeez.com zone. Replace the placeholders before
-    // enabling — see docs/month-close-runbook.md §Notification email.
-    "ACCOUNTANT_EMAIL": "accountant@example.com",
+    // Finalize notification email. Recipient + sender for the Cloudflare Email
+    // Routing send_email binding. The NOTIFY_EMAIL binding's destination_address
+    // MUST match ACCOUNTANT_EMAIL (CF requires the runtime `to` to be authorized
+    // by the binding). NOTIFY_FROM_ADDRESS must be a verified sender on the
+    // dazbeez.com zone. These are committed vars (not secrets) — the recipient
+    // is a role, not a secret.
+    //
+    // Rollout: the var is named ACCOUNTANT_EMAIL (the notification-recipient
+    // ROLE) but for the first rollout it points at the business manager
+    // (admin@dazbeez.com) while the package is signed off. Swap in the
+    // accountant's address later — one value change here + in the binding below.
+    "ACCOUNTANT_EMAIL": "admin@dazbeez.com",
     "NOTIFY_FROM_ADDRESS": "receipts@dazbeez.com"
   },
   // Manual secret setup:
@@ -115,7 +120,7 @@
   "send_email": [
     {
       "name": "NOTIFY_EMAIL",
-      "destination_address": "accountant@example.com"
+      "destination_address": "admin@dazbeez.com"
     }
   ],
   "routes": [

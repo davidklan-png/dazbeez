@@ -1,7 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  authorizeNotifyTest,
   buildFinalizeEmailBody,
+  buildFinalizeEmailSubject,
   sendFinalizeNotification,
   summarizeByCategory,
   type FinalizeNoticeData,
@@ -90,6 +92,49 @@ test("buildFinalizeEmailBody: revision 1 shows 新規 not 差替え", () => {
   const body = buildFinalizeEmailBody({ ...fixtureData, revision: 1 });
   assert.ok(body.includes("改訹: 新規"));
   assert.ok(!body.includes("差替え"));
+});
+
+// ─── Test-send mode (POST /api/receipts/notify/test) ────────────────────────
+
+test("buildFinalizeEmailSubject: test mode prefixes 【テスト送信】", () => {
+  const real = buildFinalizeEmailSubject(fixtureData);
+  const testSubj = buildFinalizeEmailSubject(fixtureData, { test: true });
+  assert.ok(testSubj.startsWith("【テスト送信】"), "test subject is prefixed");
+  assert.ok(testSubj.endsWith(real), "test subject preserves the real subject");
+  // Non-test subject has no test prefix.
+  assert.ok(!real.startsWith("【テスト送信】"));
+});
+
+test("buildFinalizeEmailBody: test mode opens with a test banner line", () => {
+  const body = buildFinalizeEmailBody(fixtureData, { test: true });
+  // First line states this is a channel test, not a close notification.
+  assert.ok(
+    body.startsWith("※これは通知チャネルのテスト送信です。月次確定の通知ではありません。"),
+    "body opens with the test banner",
+  );
+  // The real template body still follows (the point is to exercise the real template).
+  assert.ok(body.includes("【勘定科目別集計】"), "real template body follows the banner");
+  // Non-test body has no banner.
+  assert.ok(
+    !buildFinalizeEmailBody(fixtureData).startsWith("※これは通知チャネル"),
+    "non-test body has no test banner",
+  );
+});
+
+// ─── Test-send auth: Clerk session ONLY (processor-key-only rejected) ───────
+
+test("authorizeNotifyTest: rejects a processor-key-only request (no Clerk session)", () => {
+  // A processor-key-only request has no Clerk session → clerkActor is null.
+  // authorizeNotifyTest throws — the Mac consumer must never trigger a notify.
+  assert.throws(
+    () => authorizeNotifyTest(null),
+    /Unauthorized/,
+    "no Clerk actor → rejected",
+  );
+});
+
+test("authorizeNotifyTest: accepts a Clerk-authenticated operator", () => {
+  assert.equal(authorizeNotifyTest("op@dazbeez.com"), "op@dazbeez.com");
 });
 
 // ─── sendFinalizeNotification (never throws; non-fatal on failure) ──────────
