@@ -31,6 +31,7 @@ export function FinalizeCard({
   blockerCount,
   warningCount,
   rowsInDraft,
+  hasProofsZip = true,
 }: {
   month: string;
   monthLabel: string;
@@ -39,6 +40,11 @@ export function FinalizeCard({
   blockerCount: number;
   warningCount: number;
   rowsInDraft: number;
+  /** Whether the export has a proofs ZIP (proofs_r2_key). False for exports
+   *  sealed before proofs were added — the 領収書ZIP link is hidden then so it's
+   *  never a dead 404. Defaults true (the common case for a freshly finalized
+   *  export). */
+  hasProofsZip?: boolean;
 }) {
   const router = useRouter();
   const [busy, setBusy] = useState(false);
@@ -109,7 +115,9 @@ export function FinalizeCard({
               bundle:
             </p>
             <div className="mt-3 flex flex-wrap gap-2">
-              {BUNDLE_DOWNLOAD_LINKS.map(({ file, label }) => (
+              {BUNDLE_DOWNLOAD_LINKS.filter(
+                ({ file }) => file !== "proofs" || hasProofsZip,
+              ).map(({ file, label }) => (
                 <a
                   key={file}
                   href={`/api/receipts/export/${month}/download?file=${file}`}

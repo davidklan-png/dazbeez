@@ -64,10 +64,15 @@ export async function GET(request: Request, { params }: RouteContext) {
 
     const target = resolveExportDownload(month, exportRecord, file);
     if (!target.r2Key) {
-      return NextResponse.json(
-        { error: `No archived ${file} key recorded for this export.` },
-        { status: 404 },
-      );
+      // The proofs ZIP only exists for exports rebuilt after the proofs code
+      // shipped. A finalized export sealed before that (e.g. revision 1) has no
+      // proofs key — point the operator at the revision flow rather than a bare
+      // "key recorded" message.
+      const message =
+        file === "proofs"
+          ? "This export was sealed before the proofs ZIP existed (no proofs_r2_key). Create a revision and rebuild to generate it."
+          : `No archived ${file} key recorded for this export.`;
+      return NextResponse.json({ error: message }, { status: 404 });
     }
 
     const bucket = getReceiptsArchiveBucket();
