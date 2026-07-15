@@ -17,6 +17,7 @@ export const COMPLIANCE_DEFAULTS: ComplianceSettings = {
   paper_original_discard_policy: "retain_until_accountant_confirms",
   statement_expected_day: 18,
   track_tax_breakdown: false,
+  notification_recipient: "",
 };
 
 const INVOICE_MODES: ReadonlySet<InvoiceNumberRequirementMode> = new Set([
@@ -83,6 +84,9 @@ export function parseComplianceSettings(
       map.get("track_tax_breakdown"),
       COMPLIANCE_DEFAULTS.track_tax_breakdown,
     ),
+    notification_recipient:
+      map.get("notification_recipient") ??
+      COMPLIANCE_DEFAULTS.notification_recipient,
   };
 }
 

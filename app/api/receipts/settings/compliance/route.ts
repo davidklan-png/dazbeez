@@ -53,6 +53,18 @@ export async function PATCH(request: Request) {
       );
     }
 
+    if (
+      body.notification_recipient !== undefined &&
+      body.notification_recipient !== "" &&
+      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.notification_recipient)
+    ) {
+      return NextResponse.json(
+        { error: "notification_recipient must be a valid email address." },
+        { status: 400 },
+      );
+    }
+
+    const before = await getComplianceSettings();
     const settings = await updateComplianceSettings(body, actor);
 
     await createAuditEntry(getReceiptsDb(), {
@@ -62,6 +74,20 @@ export async function PATCH(request: Request) {
       objectId: "global",
       newValueJson: JSON.stringify(body),
     });
+
+    if (
+      body.notification_recipient !== undefined &&
+      body.notification_recipient !== before.notification_recipient
+    ) {
+      await createAuditEntry(getReceiptsDb(), {
+        actor,
+        action: "settings.notification_recipient_changed",
+        objectType: "compliance_settings",
+        objectId: "global",
+        oldValueJson: JSON.stringify({ notification_recipient: before.notification_recipient }),
+        newValueJson: JSON.stringify({ notification_recipient: body.notification_recipient }),
+      });
+    }
 
     return NextResponse.json({ settings }, { status: 200 });
   } catch (error) {

@@ -1,35 +1,30 @@
-// Finalize notification email (PR 3).
+// Finalize notification email.
 //
-// On successful finalize, email the accountant a Japanese summary: month,
-// revision, row/receipt counts, per-category totals, the full transition-notice
-// text (shared with the proofs ZIP), and download instructions. Sent via the
-// Cloudflare Email Routing `send_email` binding (NOTIFY_EMAIL) — no third-party
-// vendor. MIME built with `mimetext` (Workers-safe).
+// On successful finalize, email the notification recipient a Japanese summary
+// (month, revision, counts, per-category totals, transition notice, download
+// link). Transport: Resend REST API (POST api.resend.com/emails) — replaces the
+// former Cloudflare Email Routing send_email binding.
+//
+// Recipient resolution: Settings → Compliance (notification_recipient) →
+// ACCOUNTANT_EMAIL var fallback → unconfigured {ok:false}.
 //
 // HARD RULE: email failure must never fail finalize. sendFinalizeNotification
 // never throws — it returns {ok, error?}; callers fold the result into the
 // finalize response warnings + an audit entry (notification_sent /
 // notification_failed), and finalize returns 200 regardless.
 
-import { createMimeMessage } from "mimetext";
 import {
   getAccountantEmail,
-  getNotifyEmail,
   getNotifyFromAddress,
+  getResendApiKeyOrNull,
 } from "@/lib/cloudflare-runtime";
+import { getComplianceSettings } from "@/lib/receipts/settings";
 import {
   buildTransitionNotice,
   deriveTransitionNoticeInput,
 } from "@/lib/receipts/proofs";
 import type { ExportBundle } from "@/lib/receipts/month-closing";
 import type { ExportRow, ReceiptExport } from "@/lib/receipts/types";
-
-/** Minimal send_email binding shape (injectable for tests). Returns
- *  Promise<unknown> so the real SendEmail binding (whose send returns
- *  Promise<EmailSendResult>) is assignable. */
-export interface EmailSender {
-  send(message: unknown): Promise<unknown>;
-}
 
 export interface CategoryTotal {
   code: string;
@@ -38,18 +33,11 @@ export interface CategoryTotal {
   totalMinor: number;
 }
 
-/** Per-expense-category count + total. Mirrors buildExportSummaryCsv's grouping
- *  so the email's totals match the summary CSV the accountant also receives. */
 export function summarizeByCategory(rows: ExportRow[]): CategoryTotal[] {
   const map = new Map<string, CategoryTotal>();
   for (const row of rows) {
     const code = row.expenseCategoryCode ?? "uncategorized";
-    const cat = map.get(code) ?? {
-      code,
-      ja: row.expenseCategoryJa ?? code,
-      count: 0,
-      totalMinor: 0,
-    };
+    const cat = map.get(code) ?? { code, ja: row.expenseCategoryJa ?? code, count: 0, totalMinor: 0 };
     cat.count += 1;
     cat.totalMinor += row.amountMinor ?? 0;
     map.set(code, cat);
@@ -58,33 +46,27 @@ export function summarizeByCategory(rows: ExportRow[]): CategoryTotal[] {
 }
 
 export interface FinalizeNoticeData {
-  month: string; // 2026-06
-  monthLabel: string; // 2026年6月
+  month: string;
+  monthLabel: string;
   exportId: string;
   revision: number;
   rowCount: number;
-  receiptCount: number; // distinct receipts in the bundle
+  receiptCount: number;
   categoryTotals: CategoryTotal[];
-  noticeText: string; // the transition notice (お知らせ.txt content)
+  noticeText: string;
 }
 
-/** Assemble the email payload from a finalized month's bundle. Pure. */
 export function composeFinalizeNoticeData(
   month: string,
   bundle: ExportBundle,
-  exportRecord: Pick<
-    ReceiptExport,
-    "id" | "export_revision" | "supersedes_export_id" | "correction_reason"
-  >,
+  exportRecord: Pick<ReceiptExport, "id" | "export_revision" | "supersedes_export_id" | "correction_reason">,
 ): FinalizeNoticeData {
   const distinctReceiptIds = new Set<string>();
   for (const row of bundle.rows) {
     if (row.receiptId) distinctReceiptIds.add(row.receiptId);
   }
   const noticeInput = deriveTransitionNoticeInput(
-    month,
-    bundle.rows,
-    bundle.receipts,
+    month, bundle.rows, bundle.receipts,
     { rowCount: bundle.rows.length, receiptCount: distinctReceiptIds.size },
     {
       exportRevision: exportRecord.export_revision ?? 1,
@@ -93,11 +75,8 @@ export function composeFinalizeNoticeData(
     },
   );
   return {
-    month,
-    monthLabel: noticeInput.monthLabel,
-    exportId: exportRecord.id,
-    revision: noticeInput.exportRevision,
-    rowCount: bundle.rows.length,
+    month, monthLabel: noticeInput.monthLabel, exportId: exportRecord.id,
+    revision: noticeInput.exportRevision, rowCount: bundle.rows.length,
     receiptCount: distinctReceiptIds.size,
     categoryTotals: summarizeByCategory(bundle.rows),
     noticeText: buildTransitionNotice(noticeInput),
@@ -108,8 +87,7 @@ function formatYen(minor: number): string {
   return `¥${minor.toLocaleString("ja-JP")}`;
 }
 
-/** Build the Japanese email body. Pure + snapshot-tested. */
-export function buildFinalizeEmailBody(d: FinalizeNoticeData): string {
+export function buildFinalizeEmailBody(d: FinalizeNoticeData, opts?: { test?: boolean }): string {
   const lines: string[] = [];
   lines.push("毎月の領収証憑一式の確定（ファイナライズ）が完了しましたのでお知らせします。");
   lines.push("");
@@ -119,9 +97,7 @@ export function buildFinalizeEmailBody(d: FinalizeNoticeData): string {
   lines.push(`証憑ファイル数: ${d.receiptCount}`);
   lines.push("");
   lines.push("【勘定科目別集計】");
-  for (const c of d.categoryTotals) {
-    lines.push(`・${c.ja}: ${c.count}件 / ${formatYen(c.totalMinor)}`);
-  }
+  for (const c of d.categoryTotals) lines.push(`・${c.ja}: ${c.count}件 / ${formatYen(c.totalMinor)}`);
   lines.push("");
   lines.push("【変更点・留意事項のお知らせ】");
   lines.push(d.noticeText);
@@ -131,63 +107,100 @@ export function buildFinalizeEmailBody(d: FinalizeNoticeData): string {
   lines.push(`https://dazbeez.com/receipts/export?month=${d.month}`);
   lines.push("");
   lines.push("本メールは自動送信されています。ご不明な点があれば別途ご連絡ください。");
-  return lines.join("\r\n");
+  const body = lines.join("\r\n");
+  if (opts?.test) {
+    return "※これは通知チャネルのテスト送信です。月次確定の通知ではありません。\r\n\r\n" + body;
+  }
+  return body;
+}
+
+export function buildFinalizeEmailSubject(d: FinalizeNoticeData, opts?: { test?: boolean }): string {
+  const base = d.revision > 1
+    ? `【領収証憑】${d.monthLabel}分 確定通知（改訂${d.revision}）`
+    : `【領収証憑】${d.monthLabel}分 確定通知`;
+  return opts?.test ? `【テスト送信】${base}` : base;
+}
+
+/** Minimal HTML wrapper around the text body. Escapes + preserves line breaks
+ *  via white-space:pre-wrap. No template framework. */
+export function buildFinalizeEmailHtml(d: FinalizeNoticeData, opts?: { test?: boolean }): string {
+  const escaped = buildFinalizeEmailBody(d, opts)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return `<!DOCTYPE html><html><body><div style="white-space:pre-wrap;font-family:sans-serif;font-size:14px;line-height:1.6;color:#1a1a1a">${escaped}</div></body></html>`;
 }
 
 export type NotifyResult = { ok: true } | { ok: false; error: string };
 
-/**
- * Send the finalize notification. NEVER throws — returns a result the caller
- * folds into finalize warnings + audit. The binding/from/to are injected so this
- * is unit-testable (pass a fake sender that resolves, or one that rejects, to
- * prove finalize survives a send failure).
- */
-export async function sendFinalizeNotification(
-  binding: EmailSender | null,
-  from: string | null,
-  to: string | null,
-  data: FinalizeNoticeData,
-): Promise<NotifyResult> {
-  if (!binding) return { ok: false, error: "NOTIFY_EMAIL binding not configured" };
-  if (!from) return { ok: false, error: "NOTIFY_FROM_ADDRESS not configured" };
-  if (!to) return { ok: false, error: "ACCOUNTANT_EMAIL not configured" };
+// ─── Resend transport (isolated, mockable seam) ─────────────────────────────
 
-  const subject =
-    data.revision > 1
-      ? `【領収証憑】${data.monthLabel}分 確定通知（改訂${data.revision}）`
-      : `【領収証憑】${data.monthLabel}分 確定通知`;
+export async function sendViaResend(
+  fetchImpl: typeof fetch,
+  apiKey: string,
+  from: string,
+  to: string,
+  subject: string,
+  text: string,
+  html: string,
+): Promise<NotifyResult> {
   try {
-    const msg = createMimeMessage();
-    msg.setSender({ addr: from });
-    msg.setRecipient({ addr: to });
-    msg.setSubject(subject);
-    msg.addMessage({
-      // mimetext wants exactly "text/plain" / "text/html" (no charset suffix);
-      // it encodes the body as UTF-8 and emits charset=utf-8 in the MIME.
-      contentType: "text/plain",
-      data: buildFinalizeEmailBody(data),
+    const res = await fetchImpl("https://api.resend.com/emails", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ from, to: [to], subject, text, html }),
     });
-    await binding.send(msg);
+    if (!res.ok) {
+      const errBody = (await res.json().catch(() => ({}))) as { message?: unknown };
+      const message = typeof errBody.message === "string" ? errBody.message : `Resend API returned ${res.status}`;
+      return { ok: false, error: message };
+    }
     return { ok: true };
   } catch (err) {
-    return {
-      ok: false,
-      error: err instanceof Error ? err.message : String(err),
-    };
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
 }
 
-/**
- * Production wrapper: reads the NOTIFY_EMAIL binding + env vars and sends.
- * Callers (both finalize routes) use this; it never throws.
- */
+export async function sendFinalizeNotification(
+  apiKey: string | null,
+  from: string | null,
+  to: string | null,
+  data: FinalizeNoticeData,
+  opts?: { test?: boolean },
+  fetchImpl: typeof fetch = fetch,
+): Promise<NotifyResult> {
+  if (!apiKey) return { ok: false, error: "RESEND_API_KEY not configured" };
+  if (!from) return { ok: false, error: "NOTIFY_FROM_ADDRESS not configured" };
+  if (!to) return { ok: false, error: "Notification recipient not configured (set it in Settings → Compliance)" };
+  return sendViaResend(
+    fetchImpl, apiKey, from, to,
+    buildFinalizeEmailSubject(data, opts),
+    buildFinalizeEmailBody(data, opts),
+    buildFinalizeEmailHtml(data, opts),
+  );
+}
+
+export function authorizeNotifyTest(clerkActor: string | null): string {
+  if (!clerkActor) throw new Error("Unauthorized receipts request.");
+  return clerkActor;
+}
+
+// ─── Recipient resolution (settings → var fallback → null) ──────────────────
+
+export function resolveNotificationRecipient(
+  settingsValue: string | null | undefined,
+  fallback: string | null,
+): { email: string | null; source: "settings" | "fallback" | null } {
+  if (settingsValue) return { email: settingsValue, source: "settings" };
+  if (fallback) return { email: fallback, source: "fallback" };
+  return { email: null, source: null };
+}
+
 export async function notifyAccountantOfFinalize(
   data: FinalizeNoticeData,
+  opts?: { test?: boolean },
 ): Promise<NotifyResult> {
+  const settings = await getComplianceSettings();
+  const resolved = resolveNotificationRecipient(settings.notification_recipient, getAccountantEmail());
   return sendFinalizeNotification(
-    getNotifyEmail(),
-    getNotifyFromAddress(),
-    getAccountantEmail(),
-    data,
+    getResendApiKeyOrNull(), getNotifyFromAddress(), resolved.email, data, opts,
   );
 }

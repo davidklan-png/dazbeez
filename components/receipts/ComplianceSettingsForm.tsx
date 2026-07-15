@@ -16,6 +16,7 @@ const LABELS: Record<keyof ComplianceSettings, string> = {
   paper_original_discard_policy: "Paper original discard policy",
   statement_expected_day: "AMEX statement expected day",
   track_tax_breakdown: "Track tax rate / amount breakdown",
+  notification_recipient: "通知先 (Notification recipient)",
 };
 
 export function ComplianceSettingsForm({ initial }: Props) {

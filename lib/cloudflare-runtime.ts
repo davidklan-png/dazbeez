@@ -75,9 +75,9 @@ export function getReceiptsProcessorKey(): string | null {
  * destination_address must equal ACCOUNTANT_EMAIL; NOTIFY_FROM_ADDRESS must be a
  * verified sender on the zone. See docs/month-close-runbook.md.
  */
-export function getNotifyEmail(): SendEmail | null {
-  const env = getCloudflareEnv() as CloudflareEnv & { NOTIFY_EMAIL?: SendEmail };
-  return env.NOTIFY_EMAIL ?? null;
+export function getResendApiKeyOrNull(): string | null {
+  const env = getCloudflareEnv() as CloudflareEnv & { RESEND_API_KEY?: string };
+  return env.RESEND_API_KEY ?? null;
 }
 
 export function getAccountantEmail(): string | null {
