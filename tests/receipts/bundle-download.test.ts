@@ -277,12 +277,9 @@ test("byte-identity: the proofs ZIP builder takes no draft flag (draft⇄seal ca
       amountMinor: 108341,
       currency: "JPY",
       ext: "pdf" as const,
-      source: "proof_copy" as const,
       bytes: enc.encode("%PDF-1.4 test"),
       transactionDate: "2026-06-11",
-      receiptId: "r-1",
-      statementLineId: "l-1",
-      sha256: "abc",
+      attendees: "",
       paymentPath: "AMEX" as const,
     },
   ];
@@ -294,7 +291,7 @@ test("byte-identity: the proofs ZIP builder takes no draft flag (draft⇄seal ca
     icAdvisories: [],
     exportRevision: 1,
   };
-  const a = assembleProofsZip(month, entries, notice);
+  const a = assembleProofsZip(month, entries, notice, "﻿Field,Value\r\nMonth,2026-06\r\n");
   assert.ok(a instanceof Uint8Array && a.length > 0);
   // The builder has no draft parameter to branch on — draft and finalize share
   // it. (Cross-call byte equality is not asserted because the zip's own

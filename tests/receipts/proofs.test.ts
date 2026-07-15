@@ -110,7 +110,7 @@ test("buildProofFilename: No zero-pads to 2, 3 digits naturally", () => {
 
 // ─── buildProofsMokuziCsv (目次) ────────────────────────────────────────────
 
-test("buildProofsMokuziCsv: BOM + CRLF + header + 出典 mapping", () => {
+test("buildProofsMokuziCsv: human TOC columns — no machine fields", () => {
   const csv = buildProofsMokuziCsv([
     {
       no: 3,
@@ -120,10 +120,7 @@ test("buildProofsMokuziCsv: BOM + CRLF + header + 出典 mapping", () => {
       amountMinor: 108341,
       currency: "JPY",
       categoryJa: "研究開発費",
-      statementLineId: "amex-line-3",
-      receiptId: "r-3",
-      sha256: "abc123",
-      source: "proof_copy",
+      attendees: "",
     },
     {
       no: 7,
@@ -133,29 +130,48 @@ test("buildProofsMokuziCsv: BOM + CRLF + header + 出典 mapping", () => {
       amountMinor: 69000,
       currency: "JPY",
       categoryJa: "接待交際費",
-      statementLineId: null,
-      receiptId: "r-7",
-      sha256: "def456",
-      source: "original",
+      attendees: "山田太郎; 鈴木花子",
     },
   ]);
   assert.ok(csv.startsWith("﻿"), "目次 must be BOM-prefixed for Excel");
   assert.ok(csv.includes("\r\n"), "目次 must use CRLF for Windows Excel");
-  assert.ok(csv.includes("No,ファイル名,取引日"), "目次 header row");
-  // sha256 column = hash of the file actually shipped (not "original_sha256" —
-  // a derivative's hash mislabeled "original" is a false claim). 出典 states
-  // whether it's 原本 (original) or 圧縮コピー (proof_copy).
-  assert.ok(csv.includes(",sha256,"), "目次 sha256 column (renamed from original_sha256)");
-  assert.ok(!csv.includes("original_sha256"), "目次 must not claim original_sha256");
-  // 出典 maps proof_copy → 圧縮コピー, original → 原本.
-  assert.ok(csv.includes("圧縮コピー"), "proof_copy source label");
-  assert.ok(csv.includes("原本"), "original source label");
+  // Exact header — the accountant's table of contents only.
+  assert.ok(
+    csv.includes("No,ファイル名,取引日,店舗,金額,勘定科目,出席者"),
+    "目次 header is the human TOC",
+  );
+  // Machine fields removed (they live in the manifest).
+  assert.ok(!csv.includes("statement_line_id"), "no statement_line_id column");
+  assert.ok(!csv.includes("receipt_id"), "no receipt_id column");
+  assert.ok(!csv.includes("出典"), "no 出典 column");
+  // 出席者 populated for 接待交際費.
+  assert.ok(csv.includes("山田太郎; 鈴木花子"), "attendees listed for 接待交際費");
   // Quoted filename field (contains a comma in the amount).
   assert.ok(csv.includes('"No03_研究開発費_OpenAI_¥108,341.pdf"'));
-  // Sorted by No ascending.
-  const a = csv.indexOf("No03");
-  const b = csv.indexOf("r-7");
-  assert.ok(a < b, "rows sorted by No");
+});
+
+test("buildProofsMokuziCsv: 出席者 populated for 会議費/接待交際費, empty otherwise", () => {
+  const row = (categoryJa: string, attendees: string) => ({
+    no: 1,
+    filename: "f.jpg",
+    transactionDate: "2026-06-01",
+    merchant: "M",
+    amountMinor: 1000,
+    currency: "JPY",
+    categoryJa,
+    attendees,
+  });
+  assert.ok(
+    buildProofsMokuziCsv([row("会議費", "Alice; Bob")]).includes(",会議費,Alice; Bob"),
+    "会議費 attendees populated",
+  );
+  assert.ok(
+    buildProofsMokuziCsv([row("接待交際費", "Carol")]).includes(",接待交際費,Carol"),
+    "接待交際費 attendees populated",
+  );
+  // Non-meeting/entertainment category → empty 出席者 (trailing empty field).
+  const other = buildProofsMokuziCsv([row("旅費交通費", "")]);
+  assert.match(other, /旅費交通費,\r\n/, "non-meeting category has empty 出席者");
 });
 
 // ─── buildTransitionNotice (お知らせ) ───────────────────────────────────────
@@ -218,18 +234,21 @@ function fakeEntry(over: Partial<ProofZipEntry>): ProofZipEntry {
     amountMinor: 108341,
     currency: "JPY",
     ext: "pdf",
-    source: "proof_copy",
     bytes: enc.encode("%PDF-1.4 test"),
     transactionDate: "2026-03-04",
-    receiptId: "r-1",
-    statementLineId: "amex-line-1",
-    sha256: "abc123",
+    attendees: "",
     paymentPath: "AMEX",
     ...over,
   };
 }
 
-test("assembleProofsZip: UTF-8 names round-trip + folders + index/notice present", () => {
+// The summaryCsv passed to assembleProofsZip == the standalone summary artifact
+// bytes (BOM+CRLF). Embedded as 集計.csv so a ZIP-only accountant gets the
+// breakdown too.
+const SUMMARY_CSV =
+  "﻿Field,Value\r\nMonth,2026-06\r\n\r\n勘定科目,件数,合計金額\r\n研究開発費,1,108341\r\n\r\n総合計,1,108341\r\n";
+
+test("assembleProofsZip: UTF-8 names round-trip + 目次/集計/お知らせ present", () => {
   const entries = [
     fakeEntry({ no: 3, ext: "pdf", paymentPath: "AMEX" }),
     fakeEntry({
@@ -238,13 +257,16 @@ test("assembleProofsZip: UTF-8 names round-trip + folders + index/notice present
       merchant: "セブン-イレブン 東中野末広橋店",
       amountMinor: 10000,
       ext: "jpg",
-      source: "original",
       paymentPath: "CASH",
-      receiptId: "r-33",
       bytes: new Uint8Array([0xff, 0xd8, 0xff, 0xe0]),
     }),
   ];
-  const zip = assembleProofsZip("2026-06", entries, { ...baseNotice, receiptCount: 2 });
+  const zip = assembleProofsZip(
+    "2026-06",
+    entries,
+    { ...baseNotice, receiptCount: 2 },
+    SUMMARY_CSV,
+  );
   const files = unzipSync(zip);
   const names = Object.keys(files);
 
@@ -261,18 +283,35 @@ test("assembleProofsZip: UTF-8 names round-trip + folders + index/notice present
     names.some((n) => n.includes("No33_旅費交通費_セブン-イレブン東中野末広橋店_¥10,000.jpg")),
     "cash proof filename (whitespace-stripped merchant) round-trips",
   );
-  // Index + notice.
+  // Index + summary + notice.
   assert.ok(names.some((n) => n.endsWith("目次.csv")), "目次.csv present");
+  assert.ok(names.some((n) => n.endsWith("集計.csv")), "集計.csv present");
   assert.ok(names.some((n) => n.endsWith("お知らせ.txt")), "お知らせ.txt present");
+  // 集計.csv bytes == the standalone summary artifact (same bytes passed in).
+  // Compare raw bytes — TextDecoder would strip the leading BOM and skew the
+  // comparison.
+  const shukeiKey = names.find((n) => n.endsWith("集計.csv"))!;
+  const shukeiBytes = files[shukeiKey];
+  const expectedShukei = enc.encode(SUMMARY_CSV);
+  assert.equal(shukeiBytes.length, expectedShukei.length, "集計.csv byte length");
+  assert.ok(
+    shukeiBytes.every((b, i) => b === expectedShukei[i]),
+    "集計.csv bytes identical to the standalone summary artifact",
+  );
 });
 
 test("assembleProofsZip: 目次 No column matches entry nos (CSV⇄目次 continuity)", () => {
   const entries = [
-    fakeEntry({ no: 3, receiptId: "r-3" }),
-    fakeEntry({ no: 7, receiptId: "r-7", merchant: "屋形舟", amountMinor: 69000 }),
-    fakeEntry({ no: 33, receiptId: "r-33", merchant: "セブン", amountMinor: 10000 }),
+    fakeEntry({ no: 3 }),
+    fakeEntry({ no: 7, merchant: "屋形舟", amountMinor: 69000 }),
+    fakeEntry({ no: 33, merchant: "セブン", amountMinor: 10000 }),
   ];
-  const zip = assembleProofsZip("2026-06", entries, { ...baseNotice, receiptCount: 3 });
+  const zip = assembleProofsZip(
+    "2026-06",
+    entries,
+    { ...baseNotice, receiptCount: 3 },
+    SUMMARY_CSV,
+  );
   const files = unzipSync(zip);
   const mokuziKey = Object.keys(files).find((k) => k.endsWith("目次.csv"))!;
   const mokuzi = new TextDecoder().decode(files[mokuziKey]);
