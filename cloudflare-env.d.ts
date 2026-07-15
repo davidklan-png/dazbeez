@@ -16,6 +16,10 @@ declare namespace Cloudflare {
 		ASSETS: Fetcher;
 		NEXTJS_ENV: string;
 		WORKER_SELF_REFERENCE: Service<typeof import("./.open-next/worker").default>;
+		// PR 3: finalize notification email (Cloudflare Email Routing).
+		NOTIFY_EMAIL: SendEmail;
+		ACCOUNTANT_EMAIL: string;
+		NOTIFY_FROM_ADDRESS: string;
 	}
 }
 interface CloudflareEnv extends Cloudflare.Env {}

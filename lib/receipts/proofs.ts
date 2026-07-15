@@ -18,6 +18,8 @@
 
 import { zipSync } from "fflate";
 import { computeSha256Hex } from "@/lib/receipts/storage";
+import { isIcCardTopUpCandidate } from "@/lib/receipts/blockers";
+import type { ExportRow, ReceiptRecord } from "@/lib/receipts/types";
 
 // Characters forbidden in zip filenames on Windows (Explorer refuses them).
 // Whitespace is also stripped so the merchant segment stays compact and matches
@@ -230,6 +232,51 @@ export async function verifyProofFileSha256(
         `Re-ingest or re-run backfill.`,
     );
   }
+}
+
+/**
+ * Derive the transition-notice input from a month's bundle + revision context.
+ * Shared by the proofs-zip build (rebuild path) and the finalize notification
+ * email so the notice text cannot drift between the two surfaces. Pure.
+ */
+export function deriveTransitionNoticeInput(
+  month: string,
+  rows: ExportRow[],
+  receipts: ReceiptRecord[],
+  counts: { rowCount: number; receiptCount: number },
+  revCtx: {
+    exportRevision: number;
+    supersedesExportId?: string | null;
+    correctionReason?: string | null;
+  },
+): TransitionNoticeInput {
+  const missingReceiptLines = rows
+    .filter((r) => r.rowType === "amex_line" && r.missingReceiptReason)
+    .map((r) => ({ lineId: r.lineId ?? "?", reason: r.missingReceiptReason ?? "" }));
+  const icAdvisories: TransitionNoticeInput["icAdvisories"] = [];
+  const icSeen = new Set<string>();
+  const receiptById = new Map(receipts.map((r) => [r.id, r]));
+  rows.forEach((row, i) => {
+    if (!row.receiptId || icSeen.has(row.receiptId)) return;
+    const receipt = receiptById.get(row.receiptId);
+    if (receipt && isIcCardTopUpCandidate(receipt)) {
+      icSeen.add(row.receiptId);
+      icAdvisories.push({
+        no: i + 1,
+        merchant: row.merchant ?? "",
+        amountMinor: row.amountMinor ?? 0,
+      });
+    }
+  });
+  const monthLabel = `${month.slice(0, 4)}年${Number(month.slice(5, 7))}月`;
+  return {
+    monthLabel,
+    rowCount: counts.rowCount,
+    receiptCount: counts.receiptCount,
+    missingReceiptLines,
+    icAdvisories,
+    ...revCtx,
+  };
 }
 
 // ─── ZIP assembly ────────────────────────────────────────────────────────────

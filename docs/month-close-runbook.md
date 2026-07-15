@@ -109,3 +109,36 @@ After ADR 0008, 2026-06's export is **32 AMEX lines + 11 June-dated cash/digital
 (calendar rule). Run the reconcile → review → rebuild → review-page → finalize
 flow above. Reconcile the 20 lines (categorize, match receipts, resolve
 missing-receipt reasons) and sign off the reconciliation before finalizing.
+
+## Notification email (finalize → accountant)
+
+Finalizing a month sends the accountant a Japanese email (month label, revision,
+row/receipt counts, per-category totals, the full transition notice, and the
+download link) via Cloudflare Email Routing — no third-party vendor. **Email
+failure never fails finalize**: if the send is rejected, finalize still returns
+200, the failure surfaces as a warning in the response, and an
+`export.notification_failed` audit entry is written (`export.notification_sent`
+on success).
+
+### Ops prerequisites (one-time)
+
+Email Routing sends are **rejected by Cloudflare** until these are in place:
+
+1. **Email Routing enabled** on the `dazbeez.com` zone (Cloudflare dashboard →
+   Email → Email Routing).
+2. **Destination address verified** — the accountant's address must be verified
+   as a destination (Email Routing sends a one-time confirmation email to it).
+3. **`ACCOUNTANT_EMAIL` var** set to the verified accountant address (in
+   `wrangler.jsonc` vars). This is the runtime `to`.
+4. **`NOTIFY_EMAIL` binding `destination_address`** in `wrangler.jsonc` set to
+   the **same** address — Cloudflare requires the runtime `to` to be authorized
+   by the binding. These two must match; if they diverge the send is rejected
+   (caught + audited, finalize unaffected).
+5. **`NOTIFY_FROM_ADDRESS` var** set to a sender on the `dazbeez.com` zone (e.g.
+   `receipts@dazbeez.com`) — the from address must be on the zone.
+
+If any are unset/unverified, every finalize records `export.notification_failed`
+with the rejection reason. The bundle still seals; resend manually after fixing
+the config (there is no auto-retry — re-finalize is impossible without a
+revision, so treat the warning as "the email didn't go out, send it by hand").
+
