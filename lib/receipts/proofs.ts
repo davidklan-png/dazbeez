@@ -17,6 +17,7 @@
 //     お知らせ.txt           ← transition notice (what changed vs manual delivery)
 
 import { zipSync } from "fflate";
+import { computeSha256Hex } from "@/lib/receipts/storage";
 
 // Characters forbidden in zip filenames on Windows (Explorer refuses them).
 // Whitespace is also stripped so the merchant segment stays compact and matches
@@ -88,8 +89,11 @@ function csvQuote(value: string | null | undefined): string {
 }
 
 /** 目次.csv — one row per proof, Excel-safe (BOM + CRLF + quoted comma fields).
- *  `No` is the join key to the receipts CSV; `出典` is 原本 (original) when the
- *  proof_copy derivative was absent and we fell back to the original. */
+ *  `No` is the join key to the receipts CSV; `sha256` is the hash of the file
+ *  ACTUALLY shipped in this ZIP (the proof_copy derivative when one ships, the
+ *  original on fallback) — the adjacent 出典 column states which (原本 vs
+ *  圧縮コピー). Labeling a derivative's hash "original_sha256" would be a false
+ *  claim an auditor trips on, so the column is just `sha256`. */
 export function buildProofsMokuziCsv(rows: ProofMokuziRow[]): string {
   const header = [
     "No",
@@ -100,7 +104,7 @@ export function buildProofsMokuziCsv(rows: ProofMokuziRow[]): string {
     "勘定科目",
     "statement_line_id",
     "receipt_id",
-    "original_sha256",
+    "sha256",
     "出典",
   ].join(",");
   const body = rows
@@ -197,6 +201,35 @@ export function buildTransitionNotice(input: TransitionNoticeInput): string {
   lines.push("");
   lines.push("ご不明な点があればお知らせください。");
   return lines.join("\r\n");
+}
+
+// ─── SHA-256 verification (layer-2 integrity) ───────────────────────────────
+// The proofs loop fetches each file from R2 then (in the route) verifies the
+// bytes hash to the value recorded on the receipt_files row at capture. This
+// upgrades the layer-2 check from "object exists" to "object is the one
+// recorded" — at zero extra I/O (the bytes are already in memory). Extracted as
+// a pure(ish) helper so the mismatch-throws behavior is unit-testable without
+// R2/D1 (the route has no mocking harness).
+
+/**
+ * Hash `bytes` and throw if it doesn't equal `expectedSha256`. Used by the
+ * proofs-zip rebuild to refuse sealing a bundle whose fetched proof object was
+ * corrupted or overwritten since capture. `label` prefixes the error so the
+ * caller can name the receipt + r2_key.
+ */
+export async function verifyProofFileSha256(
+  bytes: Uint8Array | ArrayBuffer,
+  expectedSha256: string,
+  label = "Proof file",
+): Promise<void> {
+  const actual = await computeSha256Hex(bytes);
+  if (actual !== expectedSha256) {
+    throw new Error(
+      `${label}: SHA-256 mismatch (stored ${expectedSha256}, fetched ${actual}) — ` +
+        `object corrupted or overwritten since capture; refusing to seal. ` +
+        `Re-ingest or re-run backfill.`,
+    );
+  }
 }
 
 // ─── ZIP assembly ────────────────────────────────────────────────────────────

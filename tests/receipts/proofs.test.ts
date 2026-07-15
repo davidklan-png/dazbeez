@@ -8,9 +8,11 @@ import {
   buildTransitionNotice,
   formatYenAmount,
   sanitizeZipNameSegment,
+  verifyProofFileSha256,
   type ProofZipEntry,
   type TransitionNoticeInput,
 } from "@/lib/receipts/proofs";
+import { computeSha256Hex } from "@/lib/receipts/storage";
 
 const enc = new TextEncoder();
 
@@ -38,6 +40,26 @@ test("formatYenAmount groups with commas, ¥ prefix, JPY only", () => {
   assert.equal(formatYenAmount(1900, "JPY"), "¥1,900");
   assert.equal(formatYenAmount(-100, "JPY"), "¥-100");
   assert.equal(formatYenAmount(1250, "USD"), "1250"); // non-JPY raw
+});
+
+// ─── verifyProofFileSha256 (layer-2 integrity) ──────────────────────────────
+
+test("verifyProofFileSha256: passes when bytes hash to the recorded value", async () => {
+  const bytes = enc.encode("the actual proof bytes shipped in the zip");
+  const recorded = await computeSha256Hex(bytes);
+  await assert.doesNotReject(() => verifyProofFileSha256(bytes, recorded));
+});
+
+test("verifyProofFileSha256: throws on mismatch (review fix for #102)", async () => {
+  // A receipt_files row whose sha256_hash does NOT match the fetched bytes —
+  // the object was corrupted/overwritten since capture. The rebuild must refuse
+  // to seal rather than ship a proof whose recorded hash is a lie.
+  const bytes = enc.encode("proof bytes");
+  const wrongSha = "0".repeat(64);
+  await assert.rejects(
+    () => verifyProofFileSha256(bytes, wrongSha, 'Receipt r-1: proof file "k"'),
+    /SHA-256 mismatch/,
+  );
 });
 
 // ─── buildProofFilename ─────────────────────────────────────────────────────
@@ -120,6 +142,11 @@ test("buildProofsMokuziCsv: BOM + CRLF + header + 出典 mapping", () => {
   assert.ok(csv.startsWith("﻿"), "目次 must be BOM-prefixed for Excel");
   assert.ok(csv.includes("\r\n"), "目次 must use CRLF for Windows Excel");
   assert.ok(csv.includes("No,ファイル名,取引日"), "目次 header row");
+  // sha256 column = hash of the file actually shipped (not "original_sha256" —
+  // a derivative's hash mislabeled "original" is a false claim). 出典 states
+  // whether it's 原本 (original) or 圧縮コピー (proof_copy).
+  assert.ok(csv.includes(",sha256,"), "目次 sha256 column (renamed from original_sha256)");
+  assert.ok(!csv.includes("original_sha256"), "目次 must not claim original_sha256");
   // 出典 maps proof_copy → 圧縮コピー, original → 原本.
   assert.ok(csv.includes("圧縮コピー"), "proof_copy source label");
   assert.ok(csv.includes("原本"), "original source label");
