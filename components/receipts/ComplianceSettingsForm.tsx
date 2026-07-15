@@ -3,7 +3,19 @@
 import { useState, useTransition } from "react";
 import type { ComplianceSettings } from "@/lib/receipts/types";
 
-type Props = { initial: ComplianceSettings };
+/** Mirrors resolveNotificationRecipient's return (lib/receipts/notify.ts).
+ *  Defined locally to avoid pulling server-only imports into the client bundle. */
+type EffectiveRecipient = {
+  email: string | null;
+  source: "settings" | "fallback" | null;
+};
+
+type TestResult = { ok: true } | { ok: false; error: string };
+
+type Props = {
+  initial: ComplianceSettings;
+  effectiveRecipient: EffectiveRecipient;
+};
 
 const LABELS: Record<keyof ComplianceSettings, string> = {
   business_name: "Business name (事業者名)",
@@ -19,11 +31,22 @@ const LABELS: Record<keyof ComplianceSettings, string> = {
   notification_recipient: "通知先 (Notification recipient)",
 };
 
-export function ComplianceSettingsForm({ initial }: Props) {
+export function ComplianceSettingsForm({
+  initial,
+  effectiveRecipient,
+}: Props) {
   const [settings, setSettings] = useState<ComplianceSettings>(initial);
   const [savedAt, setSavedAt] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
+  const [effective, setEffective] = useState<EffectiveRecipient>(effectiveRecipient);
+  const [persistedRecipient, setPersistedRecipient] = useState(
+    initial.notification_recipient,
+  );
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<TestResult | null>(null);
+
+  const recipientDirty = settings.notification_recipient !== persistedRecipient;
 
   function update<K extends keyof ComplianceSettings>(
     key: K,
@@ -45,10 +68,45 @@ export function ComplianceSettingsForm({ initial }: Props) {
         setError(data.error ?? `Save failed (${res.status}).`);
         return;
       }
-      const data = (await res.json()) as { settings: ComplianceSettings };
+      const data = (await res.json()) as {
+        settings: ComplianceSettings;
+        effectiveRecipient: EffectiveRecipient;
+      };
       setSettings(data.settings);
+      setEffective(data.effectiveRecipient);
+      setPersistedRecipient(data.settings.notification_recipient);
       setSavedAt(new Date().toLocaleTimeString());
     });
+  }
+
+  // Exercises the full Resend path (compose + send) against the PERSISTED
+  // recipient without finalizing. Disabled while the field is dirty so the test
+  // always reflects saved config — the endpoint reads Settings, not this input.
+  async function sendTest() {
+    setTestResult(null);
+    setTesting(true);
+    try {
+      const res = await fetch("/api/receipts/notify/test", { method: "POST" });
+      const data = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        error?: string;
+      };
+      if (data.ok === true) {
+        setTestResult({ ok: true });
+      } else {
+        setTestResult({
+          ok: false,
+          error: data.error ?? `テスト送信に失敗しました (HTTP ${res.status})。`,
+        });
+      }
+    } catch (err) {
+      setTestResult({
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setTesting(false);
+    }
   }
 
   return (
@@ -179,6 +237,51 @@ export function ComplianceSettingsForm({ initial }: Props) {
         />
       </Row>
 
+      <Row
+        label={LABELS.notification_recipient}
+        hint="月次確定通知の送信先。空欄なら ACCOUNTANT_EMAIL フォールバックを使用します。"
+      >
+        <div className="flex w-full flex-col gap-2 sm:w-80">
+          <div className="flex gap-2">
+            <input
+              type="email"
+              value={settings.notification_recipient}
+              onChange={(e) => update("notification_recipient", e.target.value)}
+              className="min-w-0 flex-1 rounded-md border border-gray-300 px-3 py-2 text-sm"
+              maxLength={160}
+              placeholder="accountant@example.com"
+            />
+            <button
+              type="button"
+              onClick={sendTest}
+              disabled={pending || testing || recipientDirty}
+              className="shrink-0 rounded-md border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
+              title={
+                recipientDirty
+                  ? "まず Save してください（テスト送信は保存済み設定を使用します）"
+                  : undefined
+              }
+            >
+              {testing ? "送信中…" : "テスト送信"}
+            </button>
+          </div>
+
+          <EffectiveRecipientLine effective={effective} />
+
+          {testResult ? (
+            <p
+              className={`text-xs ${
+                testResult.ok ? "text-green-700" : "text-red-600"
+              }`}
+            >
+              {testResult.ok
+                ? "テスト送信: 成功 — 送信先の受信トレイを確認してください。"
+                : `テスト送信: 失敗 — ${testResult.error}`}
+            </p>
+          ) : null}
+        </div>
+      </Row>
+
       <div className="flex items-center justify-between border-t border-gray-100 pt-4">
         <div className="text-xs text-gray-500">
           {error ? (
@@ -244,5 +347,37 @@ function Toggle({
         }`}
       />
     </button>
+  );
+}
+
+function EffectiveRecipientLine({
+  effective,
+}: {
+  effective: EffectiveRecipient;
+}) {
+  if (effective.source === "settings") {
+    return (
+      <p className="text-xs text-gray-600">
+        有効な送信先:{" "}
+        <span className="font-medium text-gray-900">{effective.email}</span>{" "}
+        <span className="text-gray-400">（Settings で設定）</span>
+      </p>
+    );
+  }
+  if (effective.source === "fallback") {
+    return (
+      <p className="text-xs text-gray-600">
+        有効な送信先:{" "}
+        <span className="font-medium text-gray-900">{effective.email}</span>{" "}
+        <span className="text-gray-400">
+          （フォールバック: ACCOUNTANT_EMAIL）
+        </span>
+      </p>
+    );
+  }
+  return (
+    <p className="text-xs text-amber-700">
+      送信先が未設定 — 確定通知は送信されません（{`{ok: false}`}）。
+    </p>
   );
 }

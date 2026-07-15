@@ -5,14 +5,28 @@ import {
   updateComplianceSettings,
 } from "@/lib/receipts/settings";
 import { createAuditEntry } from "@/lib/receipts/audit";
-import { getReceiptsDb } from "@/lib/cloudflare-runtime";
+import { resolveNotificationRecipient } from "@/lib/receipts/notify";
+import { getAccountantEmail, getReceiptsDb } from "@/lib/cloudflare-runtime";
 import type { ComplianceSettings } from "@/lib/receipts/types";
+
+// Effective notification recipient: the stored Settings value if set, else the
+// ACCOUNTANT_EMAIL fallback, else null. Surfaced on GET/PATCH so the form can
+// show what finalize will actually use without guessing client-side.
+function resolveEffectiveRecipient(settings: ComplianceSettings) {
+  return resolveNotificationRecipient(
+    settings.notification_recipient,
+    getAccountantEmail(),
+  );
+}
 
 export async function GET(request: Request) {
   try {
     await requireReceiptsActor(request.headers);
     const settings = await getComplianceSettings();
-    return NextResponse.json({ settings }, { status: 200 });
+    return NextResponse.json(
+      { settings, effectiveRecipient: resolveEffectiveRecipient(settings) },
+      { status: 200 },
+    );
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("Unauthorized")) {
       return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
@@ -89,7 +103,10 @@ export async function PATCH(request: Request) {
       });
     }
 
-    return NextResponse.json({ settings }, { status: 200 });
+    return NextResponse.json(
+      { settings, effectiveRecipient: resolveEffectiveRecipient(settings) },
+      { status: 200 },
+    );
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("Unauthorized")) {
       return NextResponse.json({ error: "Unauthorized." }, { status: 401 });

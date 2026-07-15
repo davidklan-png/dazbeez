@@ -118,33 +118,48 @@ missing-receipt reasons) and sign off the reconciliation before finalizing.
 
 Finalizing a month sends the accountant a Japanese email (month label, revision,
 row/receipt counts, per-category totals, the full transition notice, and the
-download link) via Cloudflare Email Routing — no third-party vendor. **Email
-failure never fails finalize**: if the send is rejected, finalize still returns
-200, the failure surfaces as a warning in the response, and an
-`export.notification_failed` audit entry is written (`export.notification_sent`
-on success).
+download link) via the **Resend** REST API (`POST api.resend.com/emails`) — the
+same transport as the contact form. **Email failure never fails finalize**: if
+the send is rejected, finalize still returns 200, the failure surfaces as a
+warning in the response, and an `export.notification_failed` audit entry is
+written (`export.notification_sent` on success).
+
+**Recipient resolution** (`resolveNotificationRecipient`): the
+`notification_recipient` set in **Settings → Compliance** wins; if empty, the
+`ACCOUNTANT_EMAIL` var is the fallback; if both are unset the send returns
+`{ok:false}` and finalize records the failure. The compliance form shows the
+resolved address and its source ("settings" vs "fallback") so you can see what
+finalize will actually use.
 
 ### Ops prerequisites (one-time)
 
-Email Routing sends are **rejected by Cloudflare** until these are in place:
+Resend rejects sends until the domain + key + recipient are configured:
 
-1. **Email Routing enabled** on the `dazbeez.com` zone (Cloudflare dashboard →
-   Email → Email Routing).
-2. **Destination address verified** — the accountant's address must be verified
-   as a destination (Email Routing sends a one-time confirmation email to it).
-3. **`ACCOUNTANT_EMAIL` var** set to the verified accountant address (in
-   `wrangler.jsonc` vars). This is the runtime `to`.
-4. **`NOTIFY_EMAIL` binding `destination_address`** in `wrangler.jsonc` set to
-   the **same** address — Cloudflare requires the runtime `to` to be authorized
-   by the binding. These two must match; if they diverge the send is rejected
-   (caught + audited, finalize unaffected).
-5. **`NOTIFY_FROM_ADDRESS` var** set to a sender on the `dazbeez.com` zone (e.g.
-   `receipts@dazbeez.com`) — the from address must be on the zone.
+1. **Verify `dazbeez.com` in Resend** (Resend dashboard → Domains → Add). Resend
+   publishes the SPF/DKIM/DMARC DNS records on the zone; wait for the domain to
+   reach **Verified** before sending.
+2. **`RESEND_API_KEY`** set as a wrangler secret — `npx wrangler secret put
+   RESEND_API_KEY`. This key is **shared with the contact form** (CRM email
+   sender, `lib/crm-email-sender.ts`); one secret serves both paths.
+3. **`NOTIFY_FROM_ADDRESS` var** (in `wrangler.jsonc`) = a sender on the verified
+   domain (`receipts@dazbeez.com`) — the `from` address. Unverified senders are
+   rejected by Resend.
+4. **`ACCOUNTANT_EMAIL` var** (in `wrangler.jsonc`) = the fallback recipient
+   when nothing is set in Settings. For the first rollout it's the business
+   manager (`admin@dazbeez.com`); swap in the accountant's address later.
+5. **Set the recipient** in **Settings → Compliance → 通知先**, or leave it blank
+   to use the `ACCOUNTANT_EMAIL` fallback.
+6. **テスト送信** to confirm the channel end-to-end: Settings → Compliance →
+   テスト送信, or `POST /api/receipts/notify/test[?month=YYYY-MM]`. It composes
+   + sends a 【テスト送信】-prefixed email to the effective recipient without
+   finalizing — it picks the latest finalized month automatically, or targets a
+   specific one via `?month=`. Requires Clerk auth.
 
-If any are unset/unverified, every finalize records `export.notification_failed`
-with the rejection reason. The bundle still seals; resend manually after fixing
-the config (there is no auto-retry — re-finalize is impossible without a
-revision, so treat the warning as "the email didn't go out, send it by hand").
+If the key / from / recipient are unset, every finalize records
+`export.notification_failed` with the rejection reason. The bundle still seals;
+resend manually after fixing the config (there is no auto-retry — re-finalize is
+impossible without a revision, so treat the warning as "the email didn't go out,
+send it by hand").
 
 ## Proofs bundle (証憑ZIP)
 
