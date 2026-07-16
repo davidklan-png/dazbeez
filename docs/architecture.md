@@ -96,7 +96,8 @@ npm run cf:dev
 Current runtime configuration (verified from `wrangler.jsonc` + code):
 
 - **Clerk** — `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` (checked-in var) + `CLERK_SECRET_KEY` (wrangler secret). The active auth gate (`middleware.ts`, `lib/receipts/auth.ts`).
-- **Receipts extraction processor** — `RECEIPTS_PROCESSOR_KEY` (wrangler secret); authenticates the Mac consumer's queue pulls and `POST /api/receipts/[id]/extract` (ADR 0001).
+- **Receipts extraction — Worker auth** — `RECEIPTS_PROCESSOR_KEY` (wrangler secret); authenticates the Mac consumer's requests to the Worker (`/file`, `/extract`, `/extraction-failed`, `/proof`) via the `x-receipts-processor-key` header (ADR 0001). Does **not** authenticate queue operations.
+- **Receipts extraction — Queues API** — `CF_API_TOKEN` (Mac-side; scoped `queues_read` + `queues_write`); authenticates Cloudflare Queues `/messages/pull` and `/messages/ack`. (Optional Cloudflare Access service-token headers are a separate edge layer when an Access application is configured.)
 - **Resend** — `RESEND_API_KEY` (wrangler secret); sends the finalize notification email. `NOTIFY_FROM_ADDRESS` and `ACCOUNTANT_EMAIL` are checked-in vars.
 - **Workers AI** — `AI` binding (remote); business-card detection and OCR field extraction in admin ingestion.
 

@@ -26,9 +26,14 @@ in [runbooks/clerk-auth-migration.md](runbooks/clerk-auth-migration.md).
 
 **Separate, still-active machine paths:**
 
-- **Processor key** — the Mac MLX consumer authenticates its queue pulls and
-  `POST /api/receipts/[id]/extract` / `extraction-failed` writes with
-  `RECEIPTS_PROCESSOR_KEY` (ADR 0001), independent of Clerk.
+- **Processor key (Worker auth)** — the Mac MLX consumer authenticates its
+  requests to the Worker (`/file`, `/extract`, `/extraction-failed`, `/proof`)
+  with `RECEIPTS_PROCESSOR_KEY` via the `x-receipts-processor-key` header
+  (ADR 0001), independent of Clerk. This does **not** authenticate queue pulls.
+- **Queues API** — the consumer's Cloudflare Queues `/messages/pull` and
+  `/messages/ack` calls use a separate `CF_API_TOKEN` (scoped `queues_read` +
+  `queues_write`), not the processor key. (Optional Cloudflare Access
+  service-token headers are a separate edge layer.)
 - **Device bearer** — `/api/mobile/*` (iOS capture + business-card upload) uses
   a trusted-device cookie/bearer scheme (`lib/receipts/trusted-devices.ts`),
   also independent of Clerk.
