@@ -278,10 +278,11 @@ export async function isReceiptsAuthorized(
 // Middleware-safe: no DB calls. Cookie via HMAC only; CF Access via decode.
 //
 // Phase 2 Clerk cutover: the entire CF-Access/cookie/Basic-auth chain above
-// is now bypassed — auth is enforced by `proxy.ts` via clerkMiddleware.
-// `auth()` here reads the Clerk session that the proxy already established.
-// The legacy helpers (isCfAccessTokenAcceptable, decodeBasicAuthorization,
-// verifyDeviceCookieLight) are kept as dead code, deleted in Phase 4.
+// is now bypassed — auth is enforced by `middleware.ts` via clerkMiddleware.
+// `auth()` here reads the Clerk session that the middleware already
+// established. The legacy helpers (isCfAccessTokenAcceptable,
+// decodeBasicAuthorization, verifyDeviceCookieLight) are kept as dead code,
+// deleted in Phase 4.
 export async function isReceiptsAuthorizedLight(
   _requestHeaders: Headers,
 ): Promise<boolean> {
@@ -294,9 +295,10 @@ export async function isReceiptsAuthorizedLight(
 // route called, which performed verifyDeviceCookie (HMAC + D1 lookup for
 // revocation) twice per request.
 //
-// Phase 2 Clerk cutover: identity comes from Clerk. The proxy gates the route,
-// so by the time we get here the session is valid; the userId check is
-// defense-in-depth. The legacy verification chain above is dead code (Phase 4).
+// Phase 2 Clerk cutover: identity comes from Clerk. Clerk middleware
+// (`middleware.ts`) gates the route, so by the time we get here the session is
+// valid; the userId check is defense-in-depth. The legacy verification chain
+// above is dead code (Phase 4).
 export async function requireReceiptsActor(
   _requestHeaders: Headers,
 ): Promise<string> {

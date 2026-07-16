@@ -1,5 +1,14 @@
 # Product Requirements Document (PRD)
 
+> **Status: HISTORICAL — early marketing-site PRD (v0.1.0).** This document
+> captures the original product vision for the public marketing site and has
+> not been kept current with the deployed system. Several specific claims below
+> are obsolete; inline `Current state` notes mark the known ones rather than
+> rewriting the history. For current architecture see
+> [architecture.md](./architecture.md) and the [root README](../README.md); for
+> the receipts subsystem see the ADRs in [adr/](./adr/) and
+> [dazbeez-receipt-module-prd.md](./dazbeez-receipt-module-prd.md).
+
 ## Product Overview
 
 **Product:** Dazbeez  
@@ -76,6 +85,11 @@ A solo consultant needs a professional web presence that:
 
 **Route:** `/inquiry`
 
+> **Current state (2026-07): RETIRED.** `/inquiry` now 308-redirects to
+> `/contact`. The scripted chat flow below was the original design and is kept
+> here as history (see also [inquiry-workflow.md](./inquiry-workflow.md),
+> likewise historical). Current intake is the `/contact` form.
+
 | Requirement | Detail |
 |-------------|--------|
 | Chat-style UI | Scrollable message thread, user and assistant bubbles |
@@ -107,7 +121,7 @@ greeting
 | Fields | First name, last name, email (required); company, service interest, message |
 | Validation | HTML5 native `required` attributes |
 | Success state | Replaces form with green checkmark card |
-| Backend | Currently front-end only; `handleSubmit` logs to console (TODO: persist) |
+| Backend | ~~Currently front-end only; `handleSubmit` logs to console (TODO: persist)~~ **Current state (2026-07): persists to D1 via `POST /api/contact`** (`DB` binding, `lib/contact-submissions.ts`) |
 | Response SLA | "Within 24 hours" shown in UI |
 
 ### F4: NFC Landing Page
@@ -150,7 +164,7 @@ greeting
 | Lead statuses | new, contacted, proposal, won, lost (color-coded badges) |
 | Recent activity | Timestamped activity feed |
 | Pending actions | Priority-coded todo list (high=red, medium=amber, low=green) |
-| Data source | Static typed seed data in `lib/admin-dashboard-data.ts` (no live DB yet) |
+| Data source | ~~Static typed seed data in `lib/admin-dashboard-data.ts` (no live DB yet)~~ **Current state (2026-07): `/admin` is a live D1-backed CRM** (`CRM_DB`), authenticated via **Clerk**; see [business-card-crm-architecture.md](./business-card-crm-architecture.md) |
 | Rendering | Server component — no client-side data fetching |
 
 ---
@@ -178,4 +192,4 @@ greeting
 | Ollama chatbot integration | Container reserved (`llm` profile); inquiry flow has hook |
 | Admin dashboard live data | Replace seed data with real inquiry/lead sources |
 | Networking card analytics | Tap counts by country/city visible in D1 but not surfaced in admin |
-| Middleware deprecation cleanup | Blocked: Next.js 16 deprecates `middleware.ts`, but the current OpenNext Cloudflare build still rejects `proxy.ts` as unsupported Node middleware |
+| Middleware deprecation cleanup | **Current state (2026-07): `middleware.ts` (not `proxy.ts`) is the required OpenNext-compatible Edge auth path today and runs the Clerk middleware.** The underlying Next.js-deprecation / proxy-compatibility risk is **not resolved or moot** — it must be revisited when OpenNext supports the Node `proxy.ts` runtime or Next.js removes `middleware.ts`. *(Original entry: "Blocked: Next.js 16 deprecates `middleware.ts`, but the current OpenNext Cloudflare build still rejects `proxy.ts` as unsupported Node middleware".)* |

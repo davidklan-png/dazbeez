@@ -130,8 +130,9 @@ export interface AssignmentResult {
   rolledFrom?: string;
 }
 
-/** Upper bound on the roll-forward walk. With ≤2 open months (ADR 0005) this is
- *  never reached; it only guards against a pathological all-months-sealed state. */
+/** Upper bound on the roll-forward walk. With 3–4 concurrent open months
+ *  (ADR 0005, no hard runtime cap) this is never reached; it only guards
+ *  against a pathological all-months-sealed state. */
 const ROLL_FORWARD_MAX_MONTHS = 24;
 
 /**
@@ -144,7 +145,7 @@ const ROLL_FORWARD_MAX_MONTHS = 24;
  *   3. natural sealed + rollForward ⇒ walk forward by calendar month to the
  *      first month NOT in sealedMonths:
  *        found  ⇒ { that month, "roll-forward", rolledFrom: natural }
- *        bounded walk exhausted (cannot happen with ≤2 open months) ⇒ fall back
+ *        bounded walk exhausted (cannot happen with 3–4 concurrent open months) ⇒ fall back
  *        to { natural, "natural" } so the receipt is never left unassigned.
  *   4. natural sealed + !rollForward ⇒ { natural, "natural" } (UNKNOWN path: an
  *      UNKNOWN receipt must be classified before it gets a real export month, so

@@ -122,18 +122,24 @@ Workers Logs 20M events, 7-day retention (use for per-route CPU
 attribution); Workers AI 10K/day and Durable Objects unlocked (unused —
 candidates for future extraction/processing phases, not current design).
 
-## Receipts Data Lifecycle (operator-confirmed, 2026-07)
+## Receipts Data Lifecycle (operator-confirmed, 2026-07; policy per ADR 0005)
 
-Steady state once monthly reconciliation is habitual: **at most 2 statement
-months open at a time**. When a new month starts, the previous month should be
-closed — all receipts reconciled against the monthly AMEX statement and the
-reconciliation finalized. Design consequences:
+Steady state once monthly reconciliation is habitual: the module is designed
+and tested for **3–4 concurrent open statement months** with overlapping
+statement windows (ADR 0005). There is **no hard runtime cap** on open months
+— the design still holds if a fifth month opens — but the normal operator
+habit favors closing the previous month (reconciling all receipts against the
+monthly AMEX statement and finalizing the reconciliation) once a new month
+starts. Design consequences:
 
-- Hot working set is bounded (≤2 open months). Prefer **month-scoped queries**
-  over global `LIMIT n` pagination in list/queue/reconcile views.
+- Hot working set is small in practice. Prefer **month-scoped queries** over
+  global `LIMIT n` pagination in list/queue/reconcile views.
 - Closed months are immutable (finalized-reconciliation guard already enforces
   this) → candidates for archival (R2 `RECEIPTS_ARCHIVE_BUCKET`) and exclusion
   from default views, keeping hot D1 size flat regardless of system age.
+- Out-of-order finalize is allowed with a non-blocking warning (sealing April
+  while March is open is legitimate); a receipt matched to AMEX lines in two
+  statement months blocks finalize on both until disambiguated.
 - Month-close should eventually be a visible gate/checklist in the UI, not
   just operator habit.
 
@@ -211,18 +217,31 @@ reconciliation finalized. Design consequences:
    still open. Note: consumer-level visibility_timeout_ms is 12h — benign
    because consumer.py overrides per-pull (5 min), but a trap for any
    future consumer that doesn't.
-10. **Source provenance: desktop uploads tagged "mobile_capture".** The
-    upload route doesn't validate `source` (free-form string) and the
-    desktop client hardcodes "mobile_capture". Follow-up per worker report
-    (4a08f92): desktop sends source="desktop_upload"; add a VALID_SOURCES
-    constant + route validation; extend the deriveSourceType heuristic so
-    a phone-scanned paper receipt dropped via desktop isn't mislabeled
-    manual_upload. Existing rows keep their historical values.
-11. **Capture client test coverage + cleanup.** No tests existed for
-    use-receipt-upload.ts / receipt-capture-form.tsx — the multi-drop data
-    loss shipped unnoticed. Backfill unit tests: mobile single-flight,
-    desktop concurrent pool (limit 3, FIFO), abort/cancel paths, error
-    rows never silent. Same PR: remove CaptureDesktop's dead `phase` prop.
+10. **Source provenance: desktop uploads tagged "mobile_capture".** DONE
+    (e1005cd, 5514501). `source` is now a typed `VALID_SOURCES` value
+    (`mobile_capture` | `desktop_upload`) in the client-safe
+    `lib/receipts/upload-policy.ts`; the upload route requires and validates
+    it (rejects missing/invalid instead of silently defaulting to
+    `mobile_capture`); the desktop client sends `desktop_upload`, mobile web
+    sends `mobile_capture`. `deriveSourceType` and `VALID_SOURCE_TYPES` are
+    shared/single-sourced (explicit valid `sourceType` wins; else
+    mobile_capture→paper_scanned, PDF→electronic_receipt, otherwise
+    manual_upload). Note: filename-based "paper-scan" detection was
+    deliberately NOT added — the system lacks the information to infer that
+    reliably (architect decision). Existing rows keep their historical values.
+11. **Capture client test coverage + cleanup.** DONE (ee0e5e7). The
+    hand-rolled desktop pool, mobile single-flight guard, AbortController
+    collection, and SessionUpload row transitions were extracted into
+    client-safe, unit-tested modules (`lib/receipts/upload-pool.ts`,
+    `single-flight.ts`, `abort-registry.ts`, `session-upload.ts`). Coverage:
+    desktop concurrency exactly 3 + FIFO ordering + slot release on
+    resolve/reject; mobile single-flight; abort-registry lifecycle
+    (register/unregister/abortAll, unregister-after-abort harmless);
+    success/error/cancellation row transitions (rows never silently removed;
+    BatchTile renders the message). Dead props removed from
+    `CaptureDesktopProps` (`phase` and `initialPayment`); their mobile/form
+    usage is retained. 15 new tests; no jsdom/Testing Library added (pure
+    extraction).
 12. **Error-surfacing hardening pass (theme).** Three loss incidents share
     one property — failures that don't announce themselves: swallowed
     receipt_files manifest writes (#5), silent queue max-deliveries drops
