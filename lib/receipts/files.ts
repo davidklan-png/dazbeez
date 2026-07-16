@@ -1,5 +1,5 @@
 import { getReceiptsDb } from "@/lib/cloudflare-runtime";
-import { newUuid, nowIso } from "@/lib/receipts/db-utils";
+import { D1_ID_CHUNK_SIZE, newUuid, nowIso } from "@/lib/receipts/db-utils";
 import type { ReceiptFile, ReceiptFileRole } from "@/lib/receipts/types";
 
 export interface CreateReceiptFileInput {
@@ -113,9 +113,8 @@ export async function countReceiptFilesByObjectIds(
   const counts = new Map<string, number>();
   if (receiptIds.length === 0) return counts;
   // Chunk to respect D1's parameter limit per statement.
-  const CHUNK_SIZE = 90;
-  for (let i = 0; i < receiptIds.length; i += CHUNK_SIZE) {
-    const chunk = receiptIds.slice(i, i + CHUNK_SIZE);
+  for (let i = 0; i < receiptIds.length; i += D1_ID_CHUNK_SIZE) {
+    const chunk = receiptIds.slice(i, i + D1_ID_CHUNK_SIZE);
     const placeholders = chunk.map(() => "?").join(",");
     const result = await db
       .prepare(
