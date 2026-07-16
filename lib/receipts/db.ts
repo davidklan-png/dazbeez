@@ -1,6 +1,6 @@
 import { getReceiptsDb } from "@/lib/cloudflare-runtime";
 import { createAuditEntry } from "@/lib/receipts/audit";
-import { nowIso, newUuid, stringifyJson } from "@/lib/receipts/db-utils";
+import { D1_ID_CHUNK_SIZE, nowIso, newUuid, stringifyJson } from "@/lib/receipts/db-utils";
 import {
   assertTransactionMonthEditable,
   transactionMonthOf,
@@ -477,10 +477,9 @@ export async function listReceiptRecordsByIds(
 
   const db = getReceiptsDb();
   const records: ReceiptRecord[] = [];
-  const CHUNK_SIZE = 90;
 
-  for (let i = 0; i < uniqueIds.length; i += CHUNK_SIZE) {
-    const chunk = uniqueIds.slice(i, i + CHUNK_SIZE);
+  for (let i = 0; i < uniqueIds.length; i += D1_ID_CHUNK_SIZE) {
+    const chunk = uniqueIds.slice(i, i + D1_ID_CHUNK_SIZE);
     const placeholders = chunk.map(() => "?").join(",");
     const result = await db
       .prepare(
@@ -1637,9 +1636,8 @@ export async function listAmexLinesForBusinessTripReports(
   const unique = [...new Set(reportIds.filter(Boolean))];
   if (unique.length === 0) return out;
   const db = getReceiptsDb();
-  const CHUNK = 90;
-  for (let i = 0; i < unique.length; i += CHUNK) {
-    const chunk = unique.slice(i, i + CHUNK);
+  for (let i = 0; i < unique.length; i += D1_ID_CHUNK_SIZE) {
+    const chunk = unique.slice(i, i + D1_ID_CHUNK_SIZE);
     const placeholders = chunk.map(() => "?").join(",");
     const result = await db
       .prepare(
@@ -1993,9 +1991,8 @@ export async function finalizeExport(
       // allows 'exported'. We do NOT touch 'archived' rows — once archived
       // the lifecycle is terminal and a re-finalize shouldn't unwind it.
       // Chunk to respect D1's parameter limit per statement.
-      const CHUNK_SIZE = 90;
-      for (let i = 0; i < exportedReceiptIds.length; i += CHUNK_SIZE) {
-        const chunk = exportedReceiptIds.slice(i, i + CHUNK_SIZE);
+      for (let i = 0; i < exportedReceiptIds.length; i += D1_ID_CHUNK_SIZE) {
+        const chunk = exportedReceiptIds.slice(i, i + D1_ID_CHUNK_SIZE);
         const placeholders = chunk.map(() => "?").join(",");
         await db
           .prepare(
