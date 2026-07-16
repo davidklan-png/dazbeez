@@ -11,7 +11,7 @@ import {
   listPendingProcessingReceipts,
   listReceiptRecordsByIds,
 } from "@/lib/receipts/db";
-import { RECEIPT_BULK_LIMIT } from "@/lib/receipts/list-policy";
+import { RECEIPT_BULK_LIMIT, hasReceiptBulkOverflow } from "@/lib/receipts/list-policy";
 import { hashCsvContent } from "@/lib/receipts/export";
 import { buildReconciliationManifestCsv, validateAmexLinesForSignoff } from "@/lib/receipts/reconciliation-signoff";
 import { deriveStatementWindow, isReceiptInWindow } from "@/lib/receipts/statement-window";
@@ -55,7 +55,19 @@ export async function POST(request: Request) {
     // backlog masquerades as missing receipts. Captured receipts have no date
     // yet, so isReceiptInWindow treats them as in-window (conservative).
     const window = deriveStatementWindow(amexLines, month);
-    const pendingReceipts = await listPendingProcessingReceipts(RECEIPT_BULK_LIMIT);
+    const pendingReceipts = await listPendingProcessingReceipts(RECEIPT_BULK_LIMIT + 1);
+    if (hasReceiptBulkOverflow(pendingReceipts.length)) {
+      return NextResponse.json(
+        {
+          error:
+            `Cannot finalize ${month}: more than ${RECEIPT_BULK_LIMIT} receipts are still pending extraction. ` +
+            `The statement window cannot be verified safely while the backlog exceeds the safety ceiling. ` +
+            `Drain the Mac MLX consumer queue and retry.`,
+          pendingProcessingAtLeast: pendingReceipts.length,
+        },
+        { status: 409 },
+      );
+    }
     const pendingInWindow = pendingReceipts.filter((r) => isReceiptInWindow(r, window));
     if (pendingInWindow.length > 0) {
       return NextResponse.json(
