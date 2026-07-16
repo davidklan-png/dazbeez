@@ -461,56 +461,13 @@ export async function listAllReceiptsInMonth(
   }
 }
 
-/**
- * Receipts whose extraction has not finished (ADR 0001). Queries
- * `extraction_state` directly rather than prefiltering by status, so it catches
- * a pending receipt regardless of its lifecycle status — e.g. a non-queued
- * insert path that left the column at its default, or a receipt advanced to
- * reviewed without clearing the queue state. The month-close gate relies on
- * this being exhaustive.
- */
-export async function listPendingProcessingReceipts(
-  limit = 1000,
-): Promise<ReceiptRecord[]> {
-  const db = getReceiptsDb();
-  const result = await db
-    .prepare(
-      `SELECT * FROM receipt_records
-       WHERE deleted_at IS NULL
-         AND extraction_state IN ('captured', 'queued', 'processing')
-       ORDER BY captured_at DESC LIMIT ?`,
-    )
-    .bind(limit)
-    .all<ReceiptRecord>();
-  return result.results ?? [];
-}
-
-/**
- * Reconcile a stale pending extraction_state to a terminal one (ADR 0001).
- * Idempotent: only touches rows still in a pending state, so it is safe to call
- * defensively. Used by the extract route when a queued message arrives for a
- * receipt that can no longer be extracted (already reviewed → 'processed') or
- * whose image was unreadable (→ 'failed'), so the consumer can ack the poison
- * pill without leaving the month-close gate blocked. Deliberately bypasses the
- * finalized-reconciliation guard — this only fixes the queue-state mirror, it
- * does not touch business fields.
- */
-export async function reconcileExtractionState(
-  id: string,
-  finalState: "processed" | "failed",
-): Promise<void> {
-  const db = getReceiptsDb();
-  const now = nowIso();
-  await db
-    .prepare(
-      `UPDATE receipt_records
-         SET extraction_state = ?, extraction_processed_at = ?, updated_at = ?
-       WHERE id = ?
-         AND extraction_state IN ('captured', 'queued', 'processing')`,
-    )
-    .bind(finalState, now, now, id)
-    .run();
-}
+// Extraction-queue data access (listPendingProcessingReceipts +
+// reconcileExtractionState) lives in lib/receipts/extraction-queue-db.ts now;
+// re-exported here so existing @/lib/receipts/db import sites are unchanged.
+export {
+  listPendingProcessingReceipts,
+  reconcileExtractionState,
+} from "@/lib/receipts/extraction-queue-db";
 
 export async function listReceiptRecordsByIds(
   ids: string[],
