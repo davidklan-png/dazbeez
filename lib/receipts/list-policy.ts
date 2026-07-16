@@ -17,3 +17,15 @@ export const RECEIPT_VIEW_LIMIT = 200;
  * reads must continue using `listAllReceiptsInMonth`.
  */
 export const RECEIPT_BULK_LIMIT = 1000;
+
+/**
+ * True when a bounded pending-result count exceeds RECEIPT_BULK_LIMIT. Callers
+ * that fetch `RECEIPT_BULK_LIMIT + 1` rows can use this helper to distinguish a
+ * complete bounded result (at most RECEIPT_BULK_LIMIT) from an overflow
+ * sentinel indicating the backlog is deeper than the safety ceiling.
+ *
+ * This consumes an internal array length — it does not parse or validate input.
+ */
+export function hasReceiptBulkOverflow(resultCount: number): boolean {
+  return resultCount > RECEIPT_BULK_LIMIT;
+}

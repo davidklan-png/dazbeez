@@ -1,14 +1,20 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { D1_ID_CHUNK_SIZE } from "@/lib/receipts/db-utils";
+import {
+  D1_ID_CHUNK_FIXED_BIND_HEADROOM,
+  D1_ID_CHUNK_SIZE,
+  D1_MAX_BOUND_PARAMS,
+} from "@/lib/receipts/db-utils";
 
-test("D1_ID_CHUNK_SIZE: exactly 90, a positive integer, below 100 (bind headroom)", () => {
+test("D1 bind-budget policy: values, positivity, and invariant", () => {
+  assert.equal(D1_MAX_BOUND_PARAMS, 100);
+  assert.equal(D1_ID_CHUNK_FIXED_BIND_HEADROOM, 10);
   assert.equal(D1_ID_CHUNK_SIZE, 90);
-  assert.ok(
-    Number.isInteger(D1_ID_CHUNK_SIZE) && D1_ID_CHUNK_SIZE > 0,
-    "must be a positive integer",
+  for (const v of [D1_MAX_BOUND_PARAMS, D1_ID_CHUNK_FIXED_BIND_HEADROOM, D1_ID_CHUNK_SIZE]) {
+    assert.ok(Number.isInteger(v) && v > 0, `${v} must be a positive integer`);
+  }
+  assert.equal(
+    D1_ID_CHUNK_SIZE + D1_ID_CHUNK_FIXED_BIND_HEADROOM,
+    D1_MAX_BOUND_PARAMS,
   );
-  // Stays below D1's ~100 bind-variable ceiling so queries that also bind a
-  // few fixed values keep headroom.
-  assert.ok(D1_ID_CHUNK_SIZE < 100, "must remain below 100");
 });
