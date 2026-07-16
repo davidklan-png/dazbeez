@@ -212,11 +212,16 @@ starts. Design consequences:
    POSTs /api/receipts/:id/extraction-failed (processor-key guarded),
    acks; failed receipts show a red pill in the queue, terminal until
    operator action. (b) shipped — DLQ
-   dazbeez-receipts-extraction-dlq + max_retries=5 (settings documented in
-   wrangler.jsonc; NOT introspectable via CLI). (a) failed-state marking
-   still open. Note: consumer-level visibility_timeout_ms is 12h — benign
-   because consumer.py overrides per-pull (5 min), but a trap for any
-   future consumer that doesn't.
+   dazbeez-receipts-extraction-dlq + max_retries=5. The expected HTTP-pull
+   consumer policy lives in scripts/receipts-consumer/queue_policy.py +
+   docs/runbooks/receipts-queue-control-plane.md, with a safe read-only REST
+   verifier (scripts/receipts-consumer/audit-queue-config.sh); live settings
+   were verified matching on 2026-07-16. HTTP pull is configured out of band
+   (control plane), not declarative in wrangler.jsonc. Note: the configured
+   HTTP-consumer default visibility_timeout_ms is 43200000 (12 hours); the
+   Mac consumer sends an explicit per-pull override of 300000 (5 minutes),
+   which wins for the current consumer — the 12-hour default remains a trap
+   for any future consumer that omits the override.
 10. **Source provenance: desktop uploads tagged "mobile_capture".** DONE
     (e1005cd, 5514501). `source` is now a typed `VALID_SOURCES` value
     (`mobile_capture` | `desktop_upload`) in the client-safe

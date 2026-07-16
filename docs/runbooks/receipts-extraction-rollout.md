@@ -1,6 +1,6 @@
 # Runbook — Receipts extraction rollout (ADR 0001)
 
-Steps to take the store-and-forward extraction live. **All steps run on the Mac M4** with live Cloudflare credentials — the code is already on branch `feat/receipts-extraction-queue-mlx`. Do them in order; each is idempotent unless noted.
+Steps to take the store-and-forward extraction live. **All steps run on the Mac M4** with live Cloudflare credentials — the code is already on branch `feat/receipts-extraction-queue-mlx`. Do them in order. **Not all steps are idempotent**: `wrangler queues create` and `wrangler queues consumer http add/remove` error or have side effects if the resource already exists — see [receipts-queue-control-plane.md](receipts-queue-control-plane.md) for the full policy, the read-only drift verifier, and first-time provisioning.
 
 ## 0. Prerequisites
 
@@ -16,13 +16,32 @@ npx wrangler queues create dazbeez-receipts-extraction
 
 The producer binding (`RECEIPTS_QUEUE`) is already declared in `wrangler.jsonc`.
 
-## 2. Create the HTTP pull consumer + API token
+## 2. Create the DLQ, attach the HTTP pull consumer, and create an API token
 
-Pull consumers are not declared in `wrangler.jsonc`; create one and note its IDs:
+The HTTP-pull consumer and its policy are **control-plane configuration** (not
+`wrangler.jsonc`). Create the **DLQ before** attaching the consumer so the
+consumer can reference it. The full policy table and the read-only drift
+verifier live in [receipts-queue-control-plane.md](receipts-queue-control-plane.md);
+the intended attach flags are:
 
 ```bash
-# Register an HTTP pull consumer on the queue
-npx wrangler queues consumer http add dazbeez-receipts-extraction
+# DLQ first (must exist before the consumer references it)
+npx wrangler queues create dazbeez-receipts-extraction-dlq
+
+# Attach the HTTP pull consumer with the full intended policy
+# (not idempotent — errors if a consumer already exists)
+npx wrangler queues consumer http add dazbeez-receipts-extraction \
+  --batch-size 10 \
+  --message-retries 5 \
+  --dead-letter-queue dazbeez-receipts-extraction-dlq \
+  --visibility-timeout-secs 43200 \
+  --retry-delay-secs 0
+```
+
+After setup, verify the live config matches policy:
+
+```bash
+scripts/receipts-consumer/audit-queue-config.sh   # expect 7 MATCH rows, exit 0
 ```
 
 Then in the Cloudflare dashboard (or via API), create an **API token** scoped to

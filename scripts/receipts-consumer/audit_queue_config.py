@@ -1,0 +1,226 @@
+#!/usr/bin/env python3
+"""Read-only verifier for the receipts extraction-queue HTTP-pull consumer.
+
+Checks the LIVE Cloudflare control-plane configuration against the checked-in
+policy in queue_policy.py. It performs exactly ONE metadata GET to the queue's
+/consumers endpoint and prints a field-by-field MATCH/DRIFT table.
+
+It NEVER calls any /messages/* endpoint — no pull, lease, acknowledge, retry,
+list, or send. Verification is metadata-only and does not touch messages.
+
+Safety:
+  * CF_API_TOKEN is read from the environment and sent only in the
+    Authorization header. Its expanded value is never placed in argv.
+  * Output is restricted to the seven non-secret policy fields. The token,
+    account id, queue id, consumer id, raw response body, and response headers
+    are never printed.
+  * Each field is type-checked: numeric fields require a real int (bool is
+    rejected), string fields require a str. Drift renders bounded placeholders
+    (<missing> / <invalid-type> / <different>) — mismatching strings and
+    containers are never printed verbatim, so identifiers/control characters
+    in the response cannot reach the table.
+  * Exits 0 only when every expected field matches; nonzero for drift, missing
+    environment, malformed response, unexpected consumer count/type, HTTP error,
+    timeout, or JSON failure. Error output stays redacted (HTTP status is OK;
+    response body is not). An unexpected exception prints only a fixed message
+    and the exception class name — never str(e), repr, traceback, URL, or body.
+
+Run via audit-queue-config.sh (which sources the gitignored .env), or directly
+with CF_ACCOUNT_ID / CF_QUEUE_ID / CF_API_TOKEN already in the environment.
+"""
+from __future__ import annotations
+
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+from queue_policy import (
+    DEAD_LETTER_QUEUE_NAME,
+    EXPECTED_CONSUMER_BATCH_SIZE,
+    EXPECTED_CONSUMER_MAX_RETRIES,
+    EXPECTED_CONSUMER_RETRY_DELAY,
+    EXPECTED_CONSUMER_TYPE,
+    EXPECTED_CONSUMER_VISIBILITY_TIMEOUT_MS,
+    PRIMARY_QUEUE_NAME,
+)
+
+NETWORK_TIMEOUT_S = 30
+REQUIRED_ENV = ("CF_ACCOUNT_ID", "CF_QUEUE_ID", "CF_API_TOKEN")
+
+# Ordered (label, expected) pairs. settings.* labels are read from the
+# consumer's `settings` sub-object; the rest are read top-level. A missing key
+# yields None, which is DRIFT (values are never silently defaulted).
+FIELDS = [
+    ("type", EXPECTED_CONSUMER_TYPE),
+    ("queue_name", PRIMARY_QUEUE_NAME),
+    ("dead_letter_queue", DEAD_LETTER_QUEUE_NAME),
+    ("settings.batch_size", EXPECTED_CONSUMER_BATCH_SIZE),
+    ("settings.max_retries", EXPECTED_CONSUMER_MAX_RETRIES),
+    ("settings.retry_delay", EXPECTED_CONSUMER_RETRY_DELAY),
+    ("settings.visibility_timeout_ms", EXPECTED_CONSUMER_VISIBILITY_TIMEOUT_MS),
+]
+
+
+def consumers_url(account_id: str, queue_id: str) -> str:
+    """The read-only consumer-metadata endpoint (never a /messages/ path)."""
+    return (
+        f"https://api.cloudflare.com/client/v4/accounts/{account_id}"
+        f"/queues/{queue_id}/consumers"
+    )
+
+
+def live_for(consumer: dict, label: str):
+    """Live value for a label, or None if absent (None => DRIFT). Pure."""
+    if label.startswith("settings."):
+        settings = consumer.get("settings")
+        if not isinstance(settings, dict):
+            return None
+        return settings.get(label.split(".", 1)[1])
+    return consumer.get(label)
+
+
+# Numeric policy fields must be a real int (bool is an int subclass in Python,
+# so it is rejected explicitly). The remaining FIELDS labels are string fields.
+NUMERIC_FIELDS = {
+    "settings.batch_size",
+    "settings.max_retries",
+    "settings.retry_delay",
+    "settings.visibility_timeout_ms",
+}
+
+# Bounded placeholders for the live column — never an arbitrary live string or
+# container, so malformed/misplaced identifiers, raw response content, or
+# control characters cannot be emitted.
+MISSING = "<missing>"
+INVALID_TYPE = "<invalid-type>"
+DIFFERENT = "<different>"
+
+
+def _is_real_int(value) -> bool:
+    """True only for an int that is not a bool (bool is an int subclass)."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def evaluate(label: str, expected, live):
+    """Return (is_match, rendered_live). Pure.
+
+    Strict typing: numeric fields require a real int; string fields require a
+    str. Missing values and wrong types are DRIFT. The rendered live value is
+    always a bounded token or number — never an arbitrary live string/container
+    — so mismatching/typed-wrong values cannot leak identifiers or content."""
+    if live is None:
+        return False, MISSING
+    if label in NUMERIC_FIELDS:
+        if not _is_real_int(live):
+            return False, INVALID_TYPE
+        return (live == expected), str(live)
+    # string field (type / queue_name / dead_letter_queue)
+    if not isinstance(live, str):
+        return False, INVALID_TYPE
+    if live == expected:
+        return True, expected  # print the checked-in expected value
+    return False, DIFFERENT  # never print the live string
+
+
+def compare(consumer: dict):
+    """Return [(label, expected, rendered_live, is_match), ...]. Pure."""
+    rows = []
+    for label, expected in FIELDS:
+        live = live_for(consumer, label)
+        is_match, rendered = evaluate(label, expected, live)
+        rows.append((label, expected, rendered, is_match))
+    return rows
+
+
+def format_table(rows) -> str:
+    """Render 'field | expected | live | MATCH/DRIFT'. Pure.
+
+    The live column is a bounded placeholder or number (see evaluate). The
+    expected column prints only checked-in policy values. No identifier, token,
+    raw response content, or control character from the response is emitted."""
+    lines = []
+    for label, expected, rendered_live, is_match in rows:
+        verdict = "MATCH" if is_match else "DRIFT"
+        lines.append(f"{label} | {expected} | {rendered_live} | {verdict}")
+    return "\n".join(lines)
+
+
+def _fetch(url: str, token: str):
+    """Perform the single GET. Returns (status, body_bytes). Network seam."""
+    req = urllib.request.Request(
+        url, headers={"Authorization": "Bearer " + token}
+    )
+    with urllib.request.urlopen(req, timeout=NETWORK_TIMEOUT_S) as resp:
+        return resp.status, resp.read()
+
+
+def run() -> int:
+    missing = [k for k in REQUIRED_ENV if not os.environ.get(k)]
+    if missing:
+        print("ERROR: missing environment: " + ",".join(missing), file=sys.stderr)
+        return 2
+
+    url = consumers_url(os.environ["CF_ACCOUNT_ID"], os.environ["CF_QUEUE_ID"])
+    token = os.environ["CF_API_TOKEN"]
+
+    try:
+        _status, body = _fetch(url, token)
+    except urllib.error.HTTPError as e:
+        print(f"ERROR: HTTP {e.code}", file=sys.stderr)
+        return 1
+    except TimeoutError:
+        print("ERROR: network timeout", file=sys.stderr)
+        return 1
+    except urllib.error.URLError as e:
+        reason = type(e.reason).__name__ if e.reason is not None else "URLError"
+        print(f"ERROR: network {reason}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        # Redacted boundary: an unexpected failure must NOT print str(e),
+        # repr, a traceback, the URL, or any response body. Class name only.
+        # (KeyboardInterrupt / SystemExit are BaseException and propagate.)
+        print(f"ERROR: unexpected network failure ({type(e).__name__})", file=sys.stderr)
+        return 1
+
+    try:
+        data = json.loads(body.decode("utf-8", "replace"))
+        if not isinstance(data, dict) or not data.get("success"):
+            print("ERROR: API success=false or malformed envelope", file=sys.stderr)
+            return 1
+        result = data.get("result")
+        if not isinstance(result, list):
+            print("ERROR: malformed result (not a list)", file=sys.stderr)
+            return 1
+        if len(result) == 0:
+            print("ERROR: expected exactly 1 consumer, found 0", file=sys.stderr)
+            return 1
+        if len(result) > 1:
+            print(f"ERROR: expected exactly 1 consumer, found {len(result)}", file=sys.stderr)
+            return 1
+        consumer = result[0]
+        if not isinstance(consumer, dict):
+            print("ERROR: malformed consumer object", file=sys.stderr)
+            return 1
+        rows = compare(consumer)
+        rendered = format_table(rows)
+    except (ValueError, UnicodeDecodeError):
+        print("ERROR: malformed JSON response", file=sys.stderr)
+        return 1
+    except Exception as e:
+        # Redacted boundary for any unexpected response/decoding/comparison
+        # failure — never print str(e), repr, traceback, or response content.
+        print(f"ERROR: unexpected response failure ({type(e).__name__})", file=sys.stderr)
+        return 1
+
+    print(rendered)
+    return 0 if all(is_match for *_unused, is_match in rows) else 1
+
+
+def main() -> None:
+    sys.exit(run())
+
+
+if __name__ == "__main__":
+    main()
