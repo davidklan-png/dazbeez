@@ -132,11 +132,11 @@ class Drift(unittest.TestCase):
         del consumer["settings"]
         code, out, _e, _m = run_with(envelope_bytes([consumer]))
         self.assertEqual(code, 1)
-        # all four settings.* rows drift (live None), none silently match
+        # all four settings.* rows render <missing>, none silently match
         for label in ("settings.batch_size", "settings.max_retries",
                       "settings.retry_delay", "settings.visibility_timeout_ms"):
             line = next(l for l in out.splitlines() if l.startswith(label + " |"))
-            self.assertTrue(line.endswith("None | DRIFT"), line)
+            self.assertTrue(line.endswith("<missing> | DRIFT"), line)
 
     def test_single_missing_setting_is_drift(self):
         consumer = good_consumer()
@@ -144,7 +144,7 @@ class Drift(unittest.TestCase):
         code, out, _e, _m = run_with(envelope_bytes([consumer]))
         self.assertEqual(code, 1)
         line = next(l for l in out.splitlines() if l.startswith("settings.batch_size |"))
-        self.assertTrue(line.endswith("None | DRIFT"), line)
+        self.assertTrue(line.endswith("<missing> | DRIFT"), line)
 
 
 class ConsumerCountAndShape(unittest.TestCase):
@@ -170,7 +170,8 @@ class ConsumerCountAndShape(unittest.TestCase):
         code, out, _e, _m = run_with(envelope_bytes([consumer]))
         self.assertNotEqual(code, 0)
         type_line = next(l for l in out.splitlines() if l.startswith("type |"))
-        self.assertTrue(type_line.endswith("worker | DRIFT"), type_line)
+        # mismatching string renders <different>, never the live value
+        self.assertTrue(type_line.endswith("<different> | DRIFT"), type_line)
 
     def test_result_not_a_list(self):
         code, _o, err, _m = run_with(envelope_bytes({"not": "a list"}))
@@ -257,6 +258,101 @@ class ConsumerImportsPolicy(unittest.TestCase):
         for stale in ("BATCH_SIZE = 10", "VISIBILITY_TIMEOUT_MS = 5 * 60 * 1000",
                       "POLL_INTERVAL_S = 20"):
             self.assertNotIn(stale, src, f"stale literal still present: {stale}")
+
+
+class Hardening(unittest.TestCase):
+    """Strict type validation, bounded-placeholder rendering, and the redacted
+    exception boundary."""
+
+    def _set_field(self, consumer, label, value):
+        if label.startswith("settings."):
+            consumer.setdefault("settings", {})[label.split(".", 1)[1]] = value
+        else:
+            consumer[label] = value
+        return consumer
+
+    def test_retry_delay_false_is_drift_not_match(self):
+        # bool is an int subclass; False must NOT match expected integer 0.
+        consumer = good_consumer()
+        consumer["settings"]["retry_delay"] = False
+        code, out, _e, _m = run_with(envelope_bytes([consumer]))
+        self.assertEqual(code, 1)
+        line = next(l for l in out.splitlines() if l.startswith("settings.retry_delay |"))
+        self.assertTrue(line.endswith("<invalid-type> | DRIFT"), line)
+        row = next(r for r in aqc.compare(consumer) if r[0] == "settings.retry_delay")
+        self.assertFalse(row[3])
+
+    def test_bool_rejected_for_every_numeric_field(self):
+        for label in sorted(aqc.NUMERIC_FIELDS):
+            consumer = good_consumer()
+            self._set_field(consumer, label, True)
+            code, out, _e, _m = run_with(envelope_bytes([consumer]))
+            self.assertEqual(code, 1, label)
+            line = next(l for l in out.splitlines() if l.startswith(label + " |"))
+            self.assertTrue(line.endswith("<invalid-type> | DRIFT"), (label, line))
+
+    def test_containers_render_invalid_type_and_redact_canary(self):
+        canary = "NESTED_RAW_CANARY"
+        for label, _expected in aqc.FIELDS:
+            for bad in ({"raw_response_canary": canary}, [canary]):
+                consumer = good_consumer()
+                self._set_field(consumer, label, bad)
+                code, out, _e, _m = run_with(envelope_bytes([consumer]))
+                self.assertEqual(code, 1, (label, bad))
+                line = next(l for l in out.splitlines() if l.startswith(label + " |"))
+                self.assertTrue(line.endswith("<invalid-type> | DRIFT"), (label, line))
+                self.assertNotIn(canary, out)
+
+    def test_mismatching_string_redacts_canaries(self):
+        for label in ("type", "queue_name", "dead_letter_queue"):
+            for canary in (TOK, ACCT, QID, CID):
+                consumer = good_consumer()
+                self._set_field(consumer, label, "x-" + canary + "-y")
+                code, out, _e, _m = run_with(envelope_bytes([consumer]))
+                self.assertEqual(code, 1, (label, canary))
+                line = next(l for l in out.splitlines() if l.startswith(label + " |"))
+                self.assertTrue(line.endswith("<different> | DRIFT"), (label, line))
+                self.assertNotIn(canary, out)
+
+    def test_control_chars_cannot_inject_rows(self):
+        consumer = good_consumer()
+        consumer["queue_name"] = (
+            "a\nb\rc\td | INJECTED | MATCH\nfake-row | z | y | MATCH"
+        )
+        code, out, _e, _m = run_with(envelope_bytes([consumer]))
+        self.assertEqual(code, 1)
+        self.assertEqual(len(out.splitlines()), 7)  # still exactly seven rows
+        self.assertNotIn("INJECTED", out)
+        self.assertNotIn("fake-row", out)
+        qline = next(l for l in out.splitlines() if l.startswith("queue_name |"))
+        self.assertTrue(qline.endswith("<different> | DRIFT"), qline)
+
+    def test_missing_fields_render_missing_placeholder(self):
+        for label, _expected in aqc.FIELDS:
+            consumer = good_consumer()
+            if label.startswith("settings."):
+                del consumer["settings"][label.split(".", 1)[1]]
+            else:
+                del consumer[label]
+            code, out, _e, _m = run_with(envelope_bytes([consumer]))
+            self.assertEqual(code, 1, label)
+            line = next(l for l in out.splitlines() if l.startswith(label + " |"))
+            self.assertTrue(line.endswith("<missing> | DRIFT"), (label, line))
+
+    def test_unexpected_fetch_exception_is_redacted(self):
+        canary = "EXC_MSG_CANARY_" + TOK
+        code, out, err, _m = run_with(side_effect=RuntimeError(canary))
+        self.assertNotEqual(code, 0)
+        self.assertIn("unexpected network failure (RuntimeError)", err)
+        self.assertNotIn(canary, err)
+        self.assertNotIn(canary, out)
+        self.assertNotIn("Traceback", err)
+
+    def test_exact_match_still_seven_matches_exit_zero(self):
+        code, out, _e, _m = run_with(envelope_bytes([good_consumer()]))
+        self.assertEqual(code, 0)
+        self.assertEqual(out.count("MATCH"), 7)
+        self.assertNotIn("DRIFT", out)
 
 
 if __name__ == "__main__":

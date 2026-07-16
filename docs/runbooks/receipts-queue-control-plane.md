@@ -56,9 +56,13 @@ scripts/receipts-consumer/audit-queue-config.sh
 
 This performs **exactly one metadata `GET` to the queue's `/consumers`
 endpoint** and prints `field | expected | live | MATCH/DRIFT` for the seven
-non-secret fields above. It **never** pulls, leases, acknowledges, retries,
-sends, or inspects messages (no `/messages/*` call), and never prints the
-token, account id, queue id, consumer id, or raw response.
+non-secret fields above. Each field is type-checked (numeric fields reject
+`bool`; strings are never printed verbatim on drift) and the live column uses
+bounded placeholders on drift — `<missing>`, `<invalid-type>`, or
+`<different>` — so malformed or misplaced values never emit raw response
+content. It **never** pulls, leases, acknowledges, retries, sends, or inspects
+messages (no `/messages/*` call), and never prints the token, account id,
+queue id, consumer id, or raw response.
 
 Exit codes:
 
