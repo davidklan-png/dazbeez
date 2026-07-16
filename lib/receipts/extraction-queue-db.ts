@@ -61,9 +61,9 @@ export function buildReconcileExtractionStateQuery(
 }
 
 /**
- * List receipts still in a pending extraction_state (ADR 0001). The month-close
- * gate relies on this being exhaustive over captured/queued/processing.
- * Default limit 1000.
+ * List receipts still in a pending extraction_state (ADR 0001).
+ * Returns at most `limit` rows; the default is RECEIPT_BULK_LIMIT. This is a
+ * bounded operational check, not an exhaustive paging primitive.
  */
 export async function listPendingProcessingReceipts(
   limit = RECEIPT_BULK_LIMIT,
