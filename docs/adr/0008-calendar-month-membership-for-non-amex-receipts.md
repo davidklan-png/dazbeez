@@ -16,8 +16,8 @@
   new `scripts/migrate-membership-to-calendar-month.ts`, deleted
   `scripts/backfill-export-statement-month.ts`
 - **Builds on:** [ADR 0002](./0002-statement-month-export-scope.md) (export unit
-  = statement month), [ADR 0005](./0005-multi-open-month-assumption.md) (≤2 open
-  months), the migration-0017 export-revision machinery
+  = statement month), [ADR 0005](./0005-multi-open-month-assumption.md) (3–4
+  concurrent open months), the migration-0017 export-revision machinery
 - **Supersedes (in part):** [ADR 0006](./0006-statement-window-membership-for-non-amex-receipts.md)
   — its window-based membership rule (§D1 close-anchor, §D2 `computeStatementWindows`,
   §D3 window recomputation, §D4 UNKNOWN-window scoping), §D8 import sweep + drift
@@ -103,7 +103,7 @@ export function assignReceiptMembership(
    are skipped by the caller before this is called.)
 2. `natural` not sealed ⇒ `{ natural, "natural" }`.
 3. `natural` sealed + `rollForward` ⇒ walk forward by calendar month to the first
-   non-sealed month (bounded at 24; with ≤2 open months per ADR 0005 this is never
+   non-sealed month (bounded at 24; with 3–4 concurrent open months per ADR 0005 this is never
    reached, and the fallback returns `natural` so a receipt is never left
    unassigned). `rollForward=false` (UNKNOWN) keeps `natural` and blocks at gate 2.
 
