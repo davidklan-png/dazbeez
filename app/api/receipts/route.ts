@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { requireReceiptsActor } from "@/lib/receipts/auth";
 import { listReceiptRecords } from "@/lib/receipts/db";
+import { RECEIPT_VIEW_LIMIT } from "@/lib/receipts/list-policy";
 
 function intOrUndef(value: string | null): number | undefined {
   if (value === null || value === "") return undefined;
@@ -24,7 +25,7 @@ export async function GET(request: Request) {
       url.searchParams.get("invoiceRegistrationNumber") ?? undefined;
     const minAmountMinor = intOrUndef(url.searchParams.get("minAmountMinor"));
     const maxAmountMinor = intOrUndef(url.searchParams.get("maxAmountMinor"));
-    const limit = Math.min(Number(url.searchParams.get("limit") ?? 100), 200);
+    const limit = Math.min(Number(url.searchParams.get("limit") ?? 100), RECEIPT_VIEW_LIMIT);
     const offset = Number(url.searchParams.get("offset") ?? 0);
 
     const records = await listReceiptRecords({

@@ -11,6 +11,7 @@ import {
   listPendingProcessingReceipts,
   listReceiptRecordsByIds,
 } from "@/lib/receipts/db";
+import { RECEIPT_BULK_LIMIT } from "@/lib/receipts/list-policy";
 import { hashCsvContent } from "@/lib/receipts/export";
 import { buildReconciliationManifestCsv, validateAmexLinesForSignoff } from "@/lib/receipts/reconciliation-signoff";
 import { deriveStatementWindow, isReceiptInWindow } from "@/lib/receipts/statement-window";
@@ -54,7 +55,7 @@ export async function POST(request: Request) {
     // backlog masquerades as missing receipts. Captured receipts have no date
     // yet, so isReceiptInWindow treats them as in-window (conservative).
     const window = deriveStatementWindow(amexLines, month);
-    const pendingReceipts = await listPendingProcessingReceipts(1000);
+    const pendingReceipts = await listPendingProcessingReceipts(RECEIPT_BULK_LIMIT);
     const pendingInWindow = pendingReceipts.filter((r) => isReceiptInWindow(r, window));
     if (pendingInWindow.length > 0) {
       return NextResponse.json(

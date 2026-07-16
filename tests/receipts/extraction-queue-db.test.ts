@@ -4,6 +4,7 @@ import {
   buildPendingProcessingQuery,
   buildReconcileExtractionStateQuery,
 } from "@/lib/receipts/extraction-queue-db";
+import { RECEIPT_BULK_LIMIT } from "@/lib/receipts/list-policy";
 import { PENDING_EXTRACTION_STATES } from "@/lib/receipts/types";
 
 // Pending states as a plain array for comparison (the source is readonly).
@@ -39,9 +40,9 @@ test("buildPendingProcessingQuery: bindings order = states..., custom limit", ()
   assert.deepEqual([...bindings], [...STATES, 50]);
 });
 
-test("buildPendingProcessingQuery: defaults to limit 1000", () => {
+test("buildPendingProcessingQuery: defaults to the bulk policy limit", () => {
   const { bindings } = buildPendingProcessingQuery();
-  assert.equal(bindings[bindings.length - 1], 1000);
+  assert.equal(bindings[bindings.length - 1], RECEIPT_BULK_LIMIT);
 });
 
 test("buildPendingProcessingQuery: SQL retains deleted-row filter, ordering, LIMIT", () => {
