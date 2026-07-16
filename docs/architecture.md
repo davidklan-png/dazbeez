@@ -2,12 +2,27 @@
 
 ## Overview
 
-Dazbeez is a Next.js 16.2.3 consulting website deployed on Cloudflare Workers via OpenNext. It consists of two independent deployable units:
+Dazbeez is a Next.js 16.2.3 consulting website deployed on Cloudflare Workers
+via OpenNext. It is a small system of cooperating Cloudflare units plus one
+off-platform processing component:
 
-| Unit | Purpose | Runtime |
-|------|---------|---------|
-| **Main site** (`/`) | Marketing, inquiry, contact, admin | Cloudflare Workers + D1 |
-| **Networking card** (`networking-card/`) | NFC/QR contact capture | Cloudflare Pages + Functions |
+| Unit | Location | Purpose | Runtime |
+|------|----------|---------|---------|
+| **Main site** | `/` (repo root) | Marketing, contact intake, admin CRM, and the **receipts module** | Cloudflare Worker (`dazbeez`) + D1 + R2 + Queue + Workers AI |
+| **Networking card** | `networking-card/` | NFC/QR contact capture → vCard / GIS / Discord / email | Cloudflare Pages + Functions + D1 |
+| **Email reply capture** | `workers/email-reply-capture/` | Inbound email-reply ingestion into the CRM | Cloudflare Worker (`dazbeez-email-reply-capture`, Email Routing) + D1 |
+| **Receipts extraction consumer** | `scripts/receipts-consumer/` (Mac M4) | Drains the extraction queue and runs MLX VLM extraction | Off-platform HTTP pull consumer (ADR 0001) |
+
+The units share two D1 databases: `CRM_DB` (networking card + admin CRM + email
+replies) and `RECEIPTS_DB` (receipts); the main site additionally owns the
+contact-submission `DB`. R2 holds `CRM_IMAGES`, `RECEIPTS_BUCKET`, and
+`RECEIPTS_ARCHIVE_BUCKET`. Authentication on the main site is **Clerk** for
+`/admin`, `/receipts`, and `/api/receipts` (Phase 2 shipped, PR #59;
+`middleware.ts` + `lib/receipts/auth.ts`); `/api/mobile/*` uses a separate
+device-bearer scheme. Receipts capture is async store-and-forward: the Worker
+enqueues onto `RECEIPTS_QUEUE` and the Mac consumer pulls and extracts
+(ADR 0001). The detailed receipts export pipeline is documented later in this
+file ([Receipts Module — Export Pipeline](#receipts-module--export-pipeline)).
 
 ---
 

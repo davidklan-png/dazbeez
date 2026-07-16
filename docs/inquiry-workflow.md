@@ -1,5 +1,11 @@
 # Inquiry Workflow
 
+> **Status: HISTORICAL / RETIRED.** The `/inquiry` route has been retired and
+> now 308-redirects to `/contact`. This document describes the original
+> scripted chat flow and is kept as design history; it does not describe a live
+> route. Current intake is the `/contact` form (see [prd.md](./prd.md) F3, and
+> the current architecture in [architecture.md](./architecture.md)).
+
 ## Overview
 
 The inquiry flow at `/inquiry` is a chat-style interface that guides prospective clients toward the right Dazbeez service through a scripted decision tree, with a freeform text fallback for unscripted input.
