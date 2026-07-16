@@ -1990,7 +1990,9 @@ export async function finalizeExport(
       // Promote status + stamp exported_month. The status CHECK constraint
       // allows 'exported'. We do NOT touch 'archived' rows — once archived
       // the lifecycle is terminal and a re-finalize shouldn't unwind it.
-      // Chunk to respect D1's parameter limit per statement.
+      // Chunk to respect D1's parameter limit per statement. This query binds
+      // two fixed values (exportMonth, now) plus the ID list, so a full 90-ID
+      // chunk uses 92 of D1's 100-bind ceiling — within the ten-slot headroom.
       for (let i = 0; i < exportedReceiptIds.length; i += D1_ID_CHUNK_SIZE) {
         const chunk = exportedReceiptIds.slice(i, i + D1_ID_CHUNK_SIZE);
         const placeholders = chunk.map(() => "?").join(",");
