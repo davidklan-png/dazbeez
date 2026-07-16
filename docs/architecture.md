@@ -10,7 +10,7 @@ off-platform processing component:
 |------|----------|---------|---------|
 | **Main site** | `/` (repo root) | Marketing, contact intake, admin CRM, and the **receipts module** | Cloudflare Worker (`dazbeez`) + D1 + R2 + Queue + Workers AI |
 | **Networking card** | `networking-card/` | NFC/QR contact capture → vCard / GIS / Discord / email | Cloudflare Pages + Functions + D1 |
-| **Email reply capture** | `workers/email-reply-capture/` | Inbound email-reply ingestion into the CRM | Cloudflare Worker (`dazbeez-email-reply-capture`, Email Routing) + D1 |
+| **Email reply capture** | `workers/email-reply-capture/` | Inbound email-reply ingestion into the CRM | Cloudflare Worker (Email Routing) + D1 — **own `wrangler.jsonc` present; live deployment not verified from this tree** |
 | **Receipts extraction consumer** | `scripts/receipts-consumer/` (Mac M4) | Drains the extraction queue and runs MLX VLM extraction | Off-platform HTTP pull consumer (ADR 0001) |
 
 The units share two D1 databases: `CRM_DB` (networking card + admin CRM + email
@@ -28,17 +28,28 @@ file ([Receipts Module — Export Pipeline](#receipts-module--export-pipeline)).
 
 ## Traffic Flow (Production)
 
-```
-Browser → Cloudflare CDN (dazbeez.com)
-            ↓
-        Cloudflare Worker (`dazbeez`)
-            ↓
-      OpenNext server bundle on Workers
-            ↓
-      Cloudflare D1 (`dazbeez-submissions`) for `/api/contact`
+All public traffic reaches the main Worker (`dazbeez`) via the Cloudflare CDN;
+`www.dazbeez.com` is a Worker custom domain alongside `dazbeez.com`. Within the
+Worker, request paths fan out to different bindings:
+
+```text
+Browser ─▶ Cloudflare CDN (dazbeez.com) ─▶ Worker `dazbeez` (OpenNext)
+                                              │
+  /api/contact ─── dual-write ──┬─▶ D1 `DB`        (contact_submissions)
+                                └─▶ D1 `CRM_DB`    (CRM upsert via lib/crm.ts)
+  /admin ─── Clerk-authed ──────▶ D1 `CRM_DB` + R2 `CRM_IMAGES` (card OCR via Workers AI)
+  /receipts, /api/receipts ─────▶ D1 `RECEIPTS_DB` + R2 `RECEIPTS_BUCKET`
+  /api/receipts/upload ─────────▶ R2 put + D1 insert + Queue send `RECEIPTS_QUEUE`
+                                                                     │
+  Mac MLX consumer (scripts/receipts-consumer/) ◀── HTTP pull ──────┘
+       └─▶ POST /api/receipts/[id]/extract (processor-key) ─▶ D1 update
+  finalize / export ────────────▶ R2 `RECEIPTS_ARCHIVE_BUCKET` (5-artifact bundle)
 ```
 
-`www.dazbeez.com` should be attached as a Worker custom domain alongside `dazbeez.com`.
+`/api/mobile/*` uses a device-bearer scheme, not Clerk. The networking-card
+Pages app and the email-reply-capture Worker are separate deployable units (see
+[Overview](#overview)) and share `CRM_DB`; the email-reply Worker's live
+deployment is not verified from this tree.
 
 ---
 
@@ -46,11 +57,12 @@ Browser → Cloudflare CDN (dazbeez.com)
 
 Core config files:
 
-- `wrangler.jsonc` — Worker entry, D1 binding, assets binding, self-reference binding
+- `wrangler.jsonc` — Worker entry + bindings: D1 (`DB`, `CRM_DB`, `RECEIPTS_DB`), R2 (`CRM_IMAGES`, `RECEIPTS_BUCKET`, `RECEIPTS_ARCHIVE_BUCKET`), Queue producer (`RECEIPTS_QUEUE`), Workers AI (`AI`), self-reference service; checked-in `vars` include the Clerk publishable key and the accountant/notify-from email addresses. Routes: `dazbeez.com/*`, `www.dazbeez.com/*`.
+- `middleware.ts` — Clerk middleware; the active auth gate for `/admin`, `/receipts`, `/api/receipts`. `/api/mobile/*` is intentionally not matched (device-bearer scheme).
 - `open-next.config.ts` — OpenNext adapter config
 - `next.config.ts` — OpenNext dev init, redirects, headers, unoptimized images
-- `db/schema.sql` — D1 schema for contact submissions
-- `lib/contact-submissions.ts` — D1 insert path using `getCloudflareContext()`
+- `db/schema.sql` — D1 schema for contact submissions (`DB`)
+- `lib/contact-submissions.ts` — `DB` insert path; `app/api/contact/route.ts` additionally upserts the same submission into `CRM_DB` via `lib/crm.ts`
 
 Deployment commands:
 
@@ -81,11 +93,17 @@ npm run cf:dev
 
 ### Environment / Secrets
 
-Runtime secrets configured in Cloudflare:
-- `ADMIN_PAGE_USERNAME`
-- `ADMIN_PAGE_PASSWORD`
-- `NFC_ADMIN_API_URL`
-- `NFC_ADMIN_API_KEY`
+Current runtime configuration (verified from `wrangler.jsonc` + code):
+
+- **Clerk** — `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` (checked-in var) + `CLERK_SECRET_KEY` (wrangler secret). The active auth gate (`middleware.ts`, `lib/receipts/auth.ts`).
+- **Receipts extraction processor** — `RECEIPTS_PROCESSOR_KEY` (wrangler secret); authenticates the Mac consumer's queue pulls and `POST /api/receipts/[id]/extract` (ADR 0001).
+- **Resend** — `RESEND_API_KEY` (wrangler secret); sends the finalize notification email. `NOTIFY_FROM_ADDRESS` and `ACCOUNTANT_EMAIL` are checked-in vars.
+- **Workers AI** — `AI` binding (remote); business-card detection and OCR field extraction in admin ingestion.
+
+Legacy / not active for human login — retained in `lib/receipts/auth.ts` as dead or local-only code (pending Phase 4 removal):
+
+- `CF_ACCESS_TEAM` / `CF_ACCESS_AUD` — Cloudflare Access JWT verification. **Legacy/dead** (no live callers; superseded by Clerk).
+- `RECEIPTS_AUTH_USERNAME` / `RECEIPTS_AUTH_PASSWORD` — HTTP Basic. **Local-dev only** (only advertised/accepted when set, e.g. in `.dev.vars`).
 
 ### `ollama` (profile: `llm`)
 - Image: `ollama/ollama:latest`
@@ -94,37 +112,19 @@ Runtime secrets configured in Cloudflare:
 
 ---
 
-## Next.js App Structure (App Router)
+## App Structure (conceptual module map)
 
-```
-app/
-├── layout.tsx              # Root layout: Inter font, SiteNavigation, Footer, OG metadata
-├── page.tsx                # Home — hero, services grid, CTA
-├── globals.css             # Tailwind base + custom globals
-├── opengraph-image.tsx     # OG image (1200×630)
-├── robots.ts               # robots.txt generation
-├── sitemap.ts              # sitemap.xml generation
-├── services/
-│   ├── page.tsx            # Services listing
-│   └── [slug]/page.tsx     # Service detail (SSG via generateStaticParams)
-├── contact/page.tsx        # Contact form (client component)
-├── nfc/page.tsx            # NFC landing widget (client component)
-└── admin/page.tsx          # Internal dashboard (server component, noindex)
+The literal file tree changes often; this is the stable conceptual map of the
+Next.js App Router app.
 
-components/
-├── site-navigation.tsx     # Sticky nav with mobile menu (client component)
-└── admin/
-    └── admin-dashboard.tsx # Dashboard presentation component
+- **Public marketing** — home, `/services` + `/services/[slug]` (SSG via `generateStaticParams`), `/contact`, `/nfc`, `/business-card`, plus legal pages. Mostly server components; the contact form and NFC widget are client components.
+- **Admin CRM** (`app/admin/*`, `app/admin/api/*`) — business-card batch ingestion, contacts/companies, review tasks, drafts, settings. Live D1-backed CRM (`CRM_DB`), Clerk-authed (not the former static seed-data dashboard).
+- **Receipts module** (`app/(receipt-system)/receipts/*` route group + `app/api/receipts/*`) — capture, review, reconcile, amex, export, settings; domain logic in `lib/receipts/*`.
+- **API routes** — `/api/contact` (dual-writes `DB` + `CRM_DB`), `/api/receipts/*` (Clerk), `/api/mobile/*` (device-bearer; iOS capture + business-card upload), `/api/vcard`.
+- **Shared libs** — `lib/receipts/*` (receipts domain + the client-safe `upload-policy.ts` capture policy), `lib/crm*` (CRM domain), `lib/cloudflare-runtime.ts` (binding accessors).
 
-lib/
-├── admin-dashboard-data.ts # Typed seed data for admin dashboard
-└── contact-submissions.ts  # D1-backed submission persistence
-```
-
-**Rendering pattern:**
-- Server components by default
-- `"use client"` only where interactivity is required (inquiry, contact, nfc, site-navigation)
-- Admin page: server component passing static data as props to a pure presentation component
+**Rendering pattern:** server components by default; `"use client"` only where
+interactivity is required (forms, capture, navigation, animations).
 
 ---
 
@@ -184,14 +184,17 @@ ADR: `docs/adr/0002-statement-month-export-scope.md`.
 
 `validateMonthReadyForExport(month, prebuiltBundle?, preloadedReconciliation?)` in `lib/receipts/month-closing.ts` is the **only** gate. Both finalize paths (`POST /api/receipts/export/month {finalize:true}` and `POST /api/receipts/export/[month]`) call it; UI tiles in `lib/receipts/blockers.ts` are presentation-only.
 
-The validator runs six checks, in order:
+The validator runs these gates in order (`validateMonthReadyForExportCore` in
+`lib/receipts/month-closing.ts`):
 
-1. Statement-sealed gate — a finalized reconciliation must exist for the month.
-2. UNKNOWN `payment_path` gate — any UNKNOWN receipt with `transaction_date` in M blocks finalize.
-3. Receipt-level checks (date, merchant, amount, category, attendees-where-required) on every CASH/DIGITAL receipt in the bundle.
-4. AMEX-line checks via `validateAmexLinesForSignoff`.
-5. Compliance-engine gate (`summarizeOpenChecksForMonth`): open `blocker` checks always block; open `warning` checks block only when `receipt_settings.export_block_on_warnings` is true.
-6. Cross-month match integrity — a receipt matched to AMEX lines in two statement months blocks both months.
+1. **Statement-sealed** — a finalized reconciliation must exist for the month.
+2. **UNKNOWN `payment_path`** — any UNKNOWN receipt with `transaction_date` in M blocks finalize.
+2.5. **Unreviewed** — any in-month `needs_review` receipt blocks finalize (pending-processing receipts are excluded, matching the review tile).
+3. **Receipt-level** — date, merchant, amount, expense category, and attendees-where-required on every CASH/DIGITAL receipt in the bundle.
+4. **AMEX-line checks** via `validateAmexLinesForSignoff`.
+5. **Compliance-engine** (`summarizeOpenChecksForMonth`): open `blocker` checks always block; open `warning` checks block only when `receipt_settings.export_block_on_warnings` is true.
+6. **Cross-month match integrity** — a receipt matched to AMEX lines in two statement months blocks both months.
+7. **Proofs presence** — every shipped receipt must have a proof file (original or `proof_copy`) on record; a receipt with zero `receipt_files` rows has nothing to include in the proofs ZIP.
 
 ADR: `docs/adr/0003-compliance-engine-finalize-gate.md`.
 
@@ -220,13 +223,14 @@ The accountant opens the monthly CSV in **Excel on Windows**. Three hardening ru
 
 The route applies all three via `bomPrefixedCrlf(csvText)` before hashing and upload; the SHA-256 in the manifest matches the bytes in R2 exactly. Tests exercise the pure CSV form; the BOM/CRLF wrapper is a route-layer concern.
 
-Each bundle ships four artifacts into the `RECEIPTS_ARCHIVE_BUCKET`:
+Each bundle ships five artifacts into the `RECEIPTS_ARCHIVE_BUCKET`:
 
 | Key | Contents |
 |-----|----------|
 | `exports/<M>/<id>-receipts.csv` | The main CSV (BOM+CRLF) |
 | `exports/<M>/<id>-manifest.csv` | Metadata + per-file SHA-256 table |
-| `exports/<M>/<id>-summary.csv` | Per-category and per-PaymentPath totals |
+| `exports/<M>/<id>-summary.csv` | 集計 — per-category and per-PaymentPath totals |
+| `exports/<M>/<id>-proofs.zip` | Proofs bundle — one proof image per shipped receipt (with the 集計 summary and a transition notice embedded) |
 | `exports/<M>/<id>-README.txt` | Disclaimers (EN/JA), revision context, SHA-256 chain |
 
 Compliance columns on the main CSV (電子帳簿保存法 / インボイス制度): `InvoiceRegistrationNumber`, `QualifiedInvoiceStatus`, `TaxRate`, `TaxAmount`, `SourceType`, `CounterpartyName`.

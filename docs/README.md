@@ -21,10 +21,9 @@ Authoritative descriptions of the system as deployed. Owner: architect + David.
 | [README.md](../README.md) | One-page root overview: tech stack, deployable units, routes, deploy commands. **Current.** |
 | [receipt-module.md](receipt-module.md) | Receipts subsystem route map. **Current (route map).** |
 | [business-card-crm-architecture.md](business-card-crm-architecture.md) | `/admin` CRM + paper business-card ingestion architecture. **Current.** |
-| [admin-dashboard.md](admin-dashboard.md) | `/admin` route data model + component reference. |
-| [nfc-module.md](nfc-module.md) | `/nfc` page + networking-card system. |
-| [ui-ux.md](ui-ux.md) | Design system: palette, typography, component inventory, layouts. |
-| [receipts-operating-manual-ja.pdf](receipts-operating-manual-ja.pdf) | Japanese operator manual for the receipts module (reference PDF; binary — not edited in tree). |
+| [nfc-module.md](nfc-module.md) | `/nfc` page + networking-card system. *Reference; currentness not revalidated.* |
+| [ui-ux.md](ui-ux.md) | Design system: palette, typography, component inventory, layouts. *Reference; currentness not revalidated.* |
+| receipts-operating-manual-ja.pdf | Japanese operator manual for the receipts module. **Local-only operator artifact — NOT in version control (untracked); obtain from the operator.** |
 
 ## 2. Operator Runbooks
 
@@ -32,7 +31,7 @@ Step-by-step operational procedures. Owner: operator (David) + architect.
 
 | Document | Description |
 |----------|-------------|
-| [runbooks/clerk-auth-migration.md](runbooks/clerk-auth-migration.md) | Clerk auth migration (replaced Basic auth); phase status recorded inline. **Authoritative for auth.** |
+| [runbooks/clerk-auth-migration.md](runbooks/clerk-auth-migration.md) | Clerk auth **migration history/status** (replaced Basic/CF Access). Not the current auth spec — for that see [architecture.md](architecture.md) and [receipt-module.md](receipt-module.md). |
 | [runbooks/cf-access-app.md](runbooks/cf-access-app.md) | Cloudflare Access setup for receipts. |
 | [runbooks/receipts-extraction-rollout.md](runbooks/receipts-extraction-rollout.md) | Mac-side rollout of the ADR 0001 store-and-forward extraction consumer. |
 | [month-close-runbook.md](month-close-runbook.md) | Operator runbook for closing a receipts month (incl. finalize notification email). |
@@ -56,6 +55,7 @@ doc is also linked from §1; treat as context for why the system looks as it doe
 |----------|-------------|
 | [prd.md](prd.md) | Original marketing-site PRD (v0.1.0). **Historical** — status banner + inline notes mark obsolete claims. |
 | [inquiry-workflow.md](inquiry-workflow.md) | Scripted `/inquiry` chat flow. **Historical/Retired** — route 308-redirects to `/contact`. |
+| [admin-dashboard.md](admin-dashboard.md) | The **former static, unauthenticated** admin dashboard. **Historical** — `/admin` is now a live Clerk-authed CRM; see [business-card-crm-architecture.md](business-card-crm-architecture.md). |
 | [dazbeez-receipt-module-prd.md](dazbeez-receipt-module-prd.md) | Receipts-module PRD. |
 | [receipt_PRD_update.md](receipt_PRD_update.md) | "Simplified Capture Flow" PRD update. |
 | [PRD_CaptureApp.md](PRD_CaptureApp.md) | iOS Capture-app PRD. |

@@ -18,21 +18,27 @@ All routes and `/api/receipts/*` are protected, noindexed, and not linked from t
 
 ## Authentication
 
-**Production:** Cloudflare Access application protecting `dazbeez.com/receipts*` and `dazbeez.com/api/receipts*`. The Worker validates `Cf-Access-Jwt-Assertion` JWT signatures against the Access JWKS endpoint, checks issuer, expiry, and audience, and production disables direct `workers.dev` and preview URLs. Set as Wrangler secrets:
+**Active human gate — Clerk.** `/receipts` and `/api/receipts/*` are
+authenticated via Clerk (`middleware.ts` + `lib/receipts/auth.ts` →
+`requireReceiptsActor`). Human users no longer go through a separate
+Cloudflare Access or Basic-auth step in production. Migration history/status is
+in [runbooks/clerk-auth-migration.md](runbooks/clerk-auth-migration.md).
 
-```
-npx wrangler secret put CF_ACCESS_TEAM   # e.g. yourteam.cloudflareaccess.com
-npx wrangler secret put CF_ACCESS_AUD    # from the CF Access application settings
-```
+**Separate, still-active machine paths:**
 
-**Local dev:** HTTP Basic Auth fallback. Add to `.dev.vars`:
+- **Processor key** — the Mac MLX consumer authenticates its queue pulls and
+  `POST /api/receipts/[id]/extract` / `extraction-failed` writes with
+  `RECEIPTS_PROCESSOR_KEY` (ADR 0001), independent of Clerk.
+- **Device bearer** — `/api/mobile/*` (iOS capture + business-card upload) uses
+  a trusted-device cookie/bearer scheme (`lib/receipts/trusted-devices.ts`),
+  also independent of Clerk.
 
-```
-RECEIPTS_AUTH_USERNAME=receipts
-RECEIPTS_AUTH_PASSWORD=<your-local-password>
-```
-
-If neither `CF_ACCESS_TEAM` nor `RECEIPTS_AUTH_USERNAME` is configured, the module denies all access (fail-closed).
+**Legacy (not active for login).** Cloudflare Access JWT verification
+(`CF_ACCESS_TEAM` / `CF_ACCESS_AUD`) and HTTP Basic
+(`RECEIPTS_AUTH_USERNAME` / `RECEIPTS_AUTH_PASSWORD`, local-dev only) remain in
+`lib/receipts/auth.ts` as dead / local-only code pending Phase 4 removal. If a
+request is not authenticated by Clerk or any machine path, the module denies
+access (fail-closed).
 
 ## Cloudflare Bindings
 
@@ -98,7 +104,7 @@ The application does not expose hard-delete flows for retained tax records. Soft
 | File | Purpose |
 |------|---------|
 | `types.ts` | All TypeScript types |
-| `auth.ts` | CF Access JWT validation + basic auth fallback |
+| `auth.ts` | Clerk session auth (active human gate); legacy CF-Access/Basic helpers retained as dead/local-only code |
 | `auth-request.ts` | Server-side `assertReceiptsPageAccess()` helper |
 | `db.ts` | D1 data access |
 | `storage.ts` | R2 upload/download/archive |

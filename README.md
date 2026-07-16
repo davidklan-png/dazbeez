@@ -32,7 +32,9 @@ The system is several cooperating Cloudflare units (detail in
 - **Networking card** (`networking-card/`, Cloudflare Pages) — NFC/QR contact
   capture; shares `CRM_DB`.
 - **Email reply capture** (`workers/email-reply-capture/`, a separate Worker on
-  Cloudflare Email Routing) — ingests inbound email replies into `CRM_DB`.
+  Cloudflare Email Routing) — configured to ingest inbound email replies into
+  `CRM_DB`. It has its own `wrangler.jsonc`; **live deployment is not verified
+  from this tree** (do not assume it is running).
 - **Receipts extraction consumer** (`scripts/receipts-consumer/`, Mac M4) —
   off-platform HTTP pull consumer that drains `RECEIPTS_QUEUE` and runs MLX VLM
   extraction ([ADR 0001](docs/adr/0001-receipt-extraction-runtime.md)).
@@ -44,7 +46,8 @@ replaced.)
 
 Key runtime integrations:
 
-- `/api/contact` persists submissions into the `DB` D1 database.
+- `/api/contact` writes each submission to the `DB` D1 table **and** upserts it
+  into `CRM_DB` (`lib/crm.ts`).
 - `/admin/batches` runs business-card batch ingestion against the shared
   `CRM_DB`; Cloudflare AI does card detection and OCR field extraction.
 - Receipts capture is async store-and-forward: the Worker stores the file in

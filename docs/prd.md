@@ -192,4 +192,4 @@ greeting
 | Ollama chatbot integration | Container reserved (`llm` profile); inquiry flow has hook |
 | Admin dashboard live data | Replace seed data with real inquiry/lead sources |
 | Networking card analytics | Tap counts by country/city visible in D1 but not surfaced in admin |
-| Middleware deprecation cleanup | ~~Blocked: Next.js 16 deprecates `middleware.ts`, but the current OpenNext Cloudflare build still rejects `proxy.ts` as unsupported Node middleware~~ **Current state (2026-07): resolved — `middleware.ts` (not `proxy.ts`) is what ships with OpenNext and runs the Clerk middleware; this item is moot.** |
+| Middleware deprecation cleanup | **Current state (2026-07): `middleware.ts` (not `proxy.ts`) is the required OpenNext-compatible Edge auth path today and runs the Clerk middleware.** The underlying Next.js-deprecation / proxy-compatibility risk is **not resolved or moot** — it must be revisited when OpenNext supports the Node `proxy.ts` runtime or Next.js removes `middleware.ts`. *(Original entry: "Blocked: Next.js 16 deprecates `middleware.ts`, but the current OpenNext Cloudflare build still rejects `proxy.ts` as unsupported Node middleware".)* |
