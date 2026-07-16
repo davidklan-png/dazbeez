@@ -10,7 +10,6 @@ import {
   UploadIcon,
   WarningIcon,
 } from "@/components/ui/icons";
-import type { PaymentPath } from "@/lib/receipts/types";
 import {
   MAX_DESKTOP_BATCH_FILES,
   MAX_RECEIPT_FILE_BYTES,
@@ -18,27 +17,16 @@ import {
   formatFileSize,
   partitionBatch,
 } from "@/lib/receipts/upload-policy";
-import type { CapturePhase } from "./use-receipt-upload";
+import type { SessionUpload } from "@/lib/receipts/session-upload";
+
+// SessionUpload lives in the client-safe session-upload module (shared with
+// ReceiptCaptureForm and its pure row transitions); re-exported for importers.
+export type { SessionUpload };
 
 export interface CaptureDesktopProps {
-  initialPayment: PaymentPath | null;
-  phase: CapturePhase;
   onPickFile: (file: File) => void;
   sessionUploads: SessionUpload[];
 }
-
-export type SessionUpload = {
-  id: string;
-  fileName: string;
-  fileSizeBytes: number;
-  state: "uploading" | "ready" | "review" | "error";
-  merchant?: string;
-  amount?: string;
-  date?: string;
-  pct: number;
-  receiptId?: string;
-  errorMessage?: string;
-};
 
 export function CaptureDesktop(props: CaptureDesktopProps) {
   const fileRef = useRef<HTMLInputElement>(null);

@@ -4,15 +4,19 @@ import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "
 import { useIsMobile } from "@/lib/receipts/use-viewport";
 import { useReceiptUpload } from "@/components/receipts/capture/use-receipt-upload";
 import { CaptureMobile } from "@/components/receipts/capture/capture-mobile";
-import {
-  CaptureDesktop,
-  type SessionUpload,
-} from "@/components/receipts/capture/capture-desktop";
+import { CaptureDesktop } from "@/components/receipts/capture/capture-desktop";
 import type { PaymentPath } from "@/lib/receipts/types";
 import {
   DESKTOP_MAX_CONCURRENT_UPLOADS,
   type Source,
 } from "@/lib/receipts/upload-policy";
+import { UploadPool } from "@/lib/receipts/upload-pool";
+import { SingleFlight } from "@/lib/receipts/single-flight";
+import {
+  applyUploadFailure,
+  applyUploadSuccess,
+  type SessionUpload,
+} from "@/lib/receipts/session-upload";
 
 export type PaymentChip = PaymentPath | null;
 
@@ -78,11 +82,6 @@ function persistQueue(items: SessionUpload[]) {
 
 const subscribeNoop = () => () => {};
 
-interface UploadPool {
-  active: number;
-  waiters: Array<() => void>;
-}
-
 export function ReceiptCaptureForm({
   initialPayment = null,
   rapidMode = false,
@@ -100,10 +99,11 @@ export function ReceiptCaptureForm({
     () => EMPTY_QUEUE,
   );
   const [sessionUploads, setSessionUploads] = useState<SessionUpload[]>(persisted);
-  // Per-form concurrency pool — limits simultaneous uploads so a 25-file
-  // drop doesn't fire 25 fetches at once. Held in a ref so waiters survive
-  // re-renders without restarting.
-  const poolRef = useRef<UploadPool>({ active: 0, waiters: [] });
+  // Desktop FIFO concurrency pool (limit DESKTOP_MAX_CONCURRENT_UPLOADS) and
+  // the mobile single-flight gate. Both held in refs so they survive re-renders
+  // without restarting in-flight work.
+  const desktopPoolRef = useRef(new UploadPool(DESKTOP_MAX_CONCURRENT_UPLOADS));
+  const mobileSingleFlightRef = useRef(new SingleFlight());
 
   // Persist on every change so a hard reload doesn't lose the day's work.
   useEffect(() => {
@@ -116,14 +116,23 @@ export function ReceiptCaptureForm({
       // Provenance: mobile web captures are camera-origin, desktop drops are
       // not. The upload route requires this value (no silent default).
       const source: Source = isMobile ? "mobile_capture" : "desktop_upload";
+
       if (isMobile) {
-        await upload(file, initialPayment, source);
+        // Mobile single-flight (explicit rejection): a second capture while one
+        // is uploading is ignored so it cannot overwrite the active upload's
+        // phase. The normal capture -> upload -> re-arm flow is unchanged.
+        if (!mobileSingleFlightRef.current.start()) return;
+        try {
+          await upload(file, initialPayment, source);
+        } finally {
+          mobileSingleFlightRef.current.finish();
+        }
         return;
       }
 
-      // Desktop: register a session row immediately so the user sees the
-      // file appear in the batch grid + sidebar queue, then run the upload
-      // through the concurrency pool and patch the row from the result.
+      // Desktop: register a session row immediately so the user sees the file
+      // appear in the batch grid + sidebar queue, then acquire a concurrency
+      // slot (FIFO) and patch the row from the result via pure transitions.
       const id = crypto.randomUUID();
       setSessionUploads((prev) => [
         {
@@ -136,46 +145,20 @@ export function ReceiptCaptureForm({
         ...prev,
       ]);
 
-      // Acquire a slot. Resolves immediately if under the cap, otherwise
-      // queues until a prior upload releases.
-      const pool = poolRef.current;
-      await new Promise<void>((resolve) => {
-        if (pool.active < DESKTOP_MAX_CONCURRENT_UPLOADS) {
-          pool.active += 1;
-          resolve();
-        } else {
-          pool.waiters.push(() => {
-            pool.active += 1;
-            resolve();
-          });
-        }
-      });
-
+      const slot = await desktopPoolRef.current.acquire();
       try {
         const result = await upload(file, initialPayment, source);
         setSessionUploads((prev) =>
           prev.map((u) =>
             u.id === id
               ? result.ok
-                ? {
-                    ...u,
-                    state: "ready",
-                    pct: 100,
-                    receiptId: result.receiptId,
-                  }
-                : {
-                    ...u,
-                    state: "error",
-                    pct: 100,
-                    errorMessage: result.message,
-                  }
+                ? applyUploadSuccess(u, result.receiptId)
+                : applyUploadFailure(u, result.message)
               : u,
           ),
         );
       } finally {
-        pool.active -= 1;
-        const next = pool.waiters.shift();
-        if (next) next();
+        slot.release();
       }
     },
     [isMobile, upload, initialPayment],
@@ -197,8 +180,6 @@ export function ReceiptCaptureForm({
 
   return (
     <CaptureDesktop
-      initialPayment={initialPayment}
-      phase={phase}
       onPickFile={onPickFile}
       sessionUploads={sessionUploads}
     />
