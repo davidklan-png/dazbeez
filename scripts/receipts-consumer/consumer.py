@@ -42,6 +42,15 @@ from typing import Any
 
 import requests
 
+# Runtime tuning comes from the shared queue-policy module (single source of
+# truth for the Mac per-pull overrides of the HTTP-consumer defaults). Aliased
+# to the historical names so the rest of this file is unchanged.
+from queue_policy import (  # same-dir import; consumer.py runs as a script
+    MAC_PER_PULL_BATCH_SIZE as BATCH_SIZE,
+    MAC_PER_PULL_VISIBILITY_TIMEOUT_MS as VISIBILITY_TIMEOUT_MS,
+    MAC_POLL_INTERVAL_S as POLL_INTERVAL_S,
+)
+
 CF_ACCOUNT_ID = os.environ["CF_ACCOUNT_ID"]
 CF_QUEUE_ID = os.environ["CF_QUEUE_ID"]
 CF_API_TOKEN = os.environ["CF_API_TOKEN"]
@@ -64,10 +73,9 @@ QUEUES_API = (
 CF_HEADERS = {"Authorization": f"Bearer {CF_API_TOKEN}", "Content-Type": "application/json"}
 
 # Batch / lease tuning. The lease (visibility_timeout) must comfortably exceed
-# the model runtime per batch so jobs are not redelivered mid-process.
-BATCH_SIZE = 10
-VISIBILITY_TIMEOUT_MS = 5 * 60 * 1000
-POLL_INTERVAL_S = 20
+# the model runtime per batch so jobs are not redelivered mid-process. Values
+# are imported above from queue_policy.py (the Mac per-pull overrides of the
+# HTTP-consumer defaults).
 
 PROMPT = (
     "You are reading a receipt or tax invoice (Japanese or English). "

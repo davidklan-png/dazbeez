@@ -78,27 +78,16 @@
       "bucket_name": "dazbeez-receipts-archive"
     }
   ],
-  // ADR 0001: extraction queue. The Worker is a producer only; the Mac runs an
-  // HTTP pull consumer (configured via the Cloudflare API/dashboard, not here —
-  // wrangler has no `consumer http update`, only add/remove, so settings can't
-  // be checked in via code). Create the queue first:
-  //   `npx wrangler queues create dazbeez-receipts-extraction`
+  // ADR 0001: extraction queue. The Worker is a producer only (binding below);
+  // the Mac runs an HTTP pull consumer. By current Cloudflare design, HTTP pull
+  // consumers are configured out of band on the control plane (dashboard,
+  // `wrangler queues consumer http`, or the Queues API) and are NOT declarative
+  // in this file — no `queues.consumers[]` block belongs here.
   //
-  // Consumer settings live on the queue (not on the Worker) and are visible
-  // only via the API:
-  //   GET /accounts/{account_id}/queues
-  // As of 2026-07-05 (audit finding A4) the consumer is configured as:
-  //   type                    : http_pull
-  //   batch_size              : 10
-  //   max_retries             : 5      (was 3 before audit remediation)
-  //   visibility_timeout_ms   : 43200000 (12h — long enough for the Mac MLX
-  //                                       model load on a cold start)
-  //   retry_delay             : 0
-  //   dead_letter_queue       : dazbeez-receipts-extraction-dlq
-  // The DLQ is a separate queue with no consumer — messages that exhaust
-  // max_retries land there for investigation. Inspect with:
-  //   npx wrangler queues message list dazbeez-receipts-extraction-dlq
-  // (No worker binding for the DLQ — it's an operator-only inspection sink.)
+  // Expected policy (single source of truth): scripts/receipts-consumer/queue_policy.py.
+  // Operator procedure + first-time provisioning: docs/runbooks/receipts-queue-control-plane.md.
+  // Read-only drift verifier: scripts/receipts-consumer/audit-queue-config.sh.
+  // (Do not verify with `wrangler queues message list` — listing can lease messages.)
   "queues": {
     "producers": [
       {
