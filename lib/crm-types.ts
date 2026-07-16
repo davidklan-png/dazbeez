@@ -207,3 +207,5 @@ export interface CompanyListItem {
   contactCount: number;
   updatedAt: string;
 }
+
+export type BatchImageRole = "batch_original" | "cropped_card" | "enhanced_card";
