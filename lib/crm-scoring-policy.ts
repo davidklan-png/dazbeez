@@ -29,7 +29,7 @@ export function isHighFitSynergyScore(score: number): boolean {
  * human review — `dedupe_review_threshold` remains persisted/operator-
  * configurable elsewhere (lib/crm.ts DEFAULT_THRESHOLDS + admin settings).
  */
-export const CRM_DEDUPE_SCORING_POLICY = {
+export const CRM_DEDUPE_SCORING_POLICY = Object.freeze({
   exactEmailConfidence: 0.99,
   exactPhoneConfidence: 0.93,
   exactLinkedInConfidence: 0.96,
@@ -40,4 +40,4 @@ export const CRM_DEDUPE_SCORING_POLICY = {
   matchingDomainConfidence: 0.72,
   minimumCandidateConfidence: 0.55,
   maxCandidates: 5,
-} as const;
+} as const);

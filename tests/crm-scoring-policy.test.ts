@@ -30,3 +30,16 @@ test("CRM_DEDUPE_SCORING_POLICY deep-equals the specified policy object", () => 
     maxCandidates: 5,
   });
 });
+
+test("CRM_DEDUPE_SCORING_POLICY is frozen — mutation throws and value is unchanged", () => {
+  assert.equal(Object.isFrozen(CRM_DEDUPE_SCORING_POLICY), true);
+  assert.throws(
+    () => {
+      (
+        CRM_DEDUPE_SCORING_POLICY as { exactEmailConfidence: number }
+      ).exactEmailConfidence = 0.01;
+    },
+    TypeError,
+  );
+  assert.equal(CRM_DEDUPE_SCORING_POLICY.exactEmailConfidence, 0.99);
+});
