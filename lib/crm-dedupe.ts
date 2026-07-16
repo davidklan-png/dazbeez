@@ -1,4 +1,5 @@
 import { inferDomainFromEmail, inferDomainFromUrl, normalizeEmail, normalizeLinkedInUrl, normalizePhone } from "@/lib/crm-normalization";
+import { CRM_DEDUPE_SCORING_POLICY } from "@/lib/crm-scoring-policy";
 import type { DuplicateCandidate, ExtractedContactFields } from "@/lib/crm-types";
 
 export interface DedupeComparableContact {
@@ -77,7 +78,7 @@ export function buildDuplicateCandidates(
       const contactCompany = normalizeText(contact.company);
 
       if (extractedEmail && contactEmail && extractedEmail === contactEmail) {
-        score = Math.max(score, 0.99);
+        score = Math.max(score, CRM_DEDUPE_SCORING_POLICY.exactEmailConfidence);
         reasons.push("Exact email match");
       }
 
@@ -85,31 +86,34 @@ export function buildDuplicateCandidates(
         (extractedPhone && contactPhone && extractedPhone === contactPhone) ||
         (extractedMobile && contactMobile && extractedMobile === contactMobile)
       ) {
-        score = Math.max(score, 0.93);
+        score = Math.max(score, CRM_DEDUPE_SCORING_POLICY.exactPhoneConfidence);
         reasons.push("Exact phone match");
       }
 
       if (extractedLinkedIn && contactLinkedIn && extractedLinkedIn === contactLinkedIn) {
-        score = Math.max(score, 0.96);
+        score = Math.max(score, CRM_DEDUPE_SCORING_POLICY.exactLinkedInConfidence);
         reasons.push("Exact LinkedIn URL match");
       }
 
       const nameScore = diceCoefficient(extractedName, contactName);
       const companyScore = diceCoefficient(extractedCompany, contactCompany);
-      if (nameScore >= 0.9 && companyScore >= 0.85) {
-        score = Math.max(score, 0.87);
+      if (
+        nameScore >= CRM_DEDUPE_SCORING_POLICY.strongNameSimilarityThreshold &&
+        companyScore >= CRM_DEDUPE_SCORING_POLICY.strongCompanySimilarityThreshold
+      ) {
+        score = Math.max(score, CRM_DEDUPE_SCORING_POLICY.strongNameCompanyConfidence);
         reasons.push("Strong name + company match");
-      } else if (nameScore >= 0.9) {
-        score = Math.max(score, 0.73);
+      } else if (nameScore >= CRM_DEDUPE_SCORING_POLICY.strongNameSimilarityThreshold) {
+        score = Math.max(score, CRM_DEDUPE_SCORING_POLICY.strongNameOnlyConfidence);
         reasons.push("Strong name match");
       }
 
       if (extractedDomain && contactDomain && extractedDomain === contactDomain) {
-        score = Math.max(score, 0.72);
+        score = Math.max(score, CRM_DEDUPE_SCORING_POLICY.matchingDomainConfidence);
         reasons.push("Matching company domain");
       }
 
-      if (reasons.length === 0 || score < 0.55) {
+      if (reasons.length === 0 || score < CRM_DEDUPE_SCORING_POLICY.minimumCandidateConfidence) {
         return null;
       }
 
@@ -122,5 +126,5 @@ export function buildDuplicateCandidates(
     })
     .filter((candidate): candidate is DuplicateCandidate => Boolean(candidate))
     .sort((left, right) => right.confidence - left.confidence)
-    .slice(0, 5);
+    .slice(0, CRM_DEDUPE_SCORING_POLICY.maxCandidates);
 }

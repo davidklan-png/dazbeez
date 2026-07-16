@@ -6,6 +6,7 @@ import type {
   SynergyAnalysisPayload,
   SynergyReason,
 } from "@/lib/crm-types";
+import { isHighFitSynergyScore } from "@/lib/crm-scoring-policy";
 
 export interface SynergyInput {
   contactName: string | null;
@@ -134,7 +135,7 @@ export function analyzeSynergy(input: SynergyInput): SynergyAnalysisPayload {
       : "Keep the note warm and specific to the event context, and position the connection as a useful ongoing relationship rather than an immediate project ask.";
 
   const recommendedCta =
-    totalScore >= 70
+    isHighFitSynergyScore(totalScore)
       ? "Suggest a short follow-up conversation to compare notes on a practical workflow or transformation problem."
       : "Suggest staying in touch and invite a low-pressure follow-up if a relevant need comes up.";
 
@@ -171,7 +172,7 @@ export function createEmailDraft(args: {
     "The overlap seems to be in practical, maintainable AI and workflow improvement rather than hype-heavy experimentation.";
 
   const softCta =
-    args.synergy.synergyScore >= 70
+    isHighFitSynergyScore(args.synergy.synergyScore)
       ? "If useful, I'd be glad to compare notes on where a small, grounded automation or AI step could create leverage."
       : "If it ever helps, I'd be happy to stay in touch and compare notes on practical AI or workflow improvement.";
 
@@ -205,7 +206,7 @@ export function createEmailDraft(args: {
       : "Good meeting you",
     plainTextBody: body,
     htmlBody: null,
-    rationaleSummary: `${args.synergy.synergyScore >= 70 ? "High-fit" : "Low-pressure"} follow-up grounded in event context and the strongest documented fit signal.`,
+    rationaleSummary: `${isHighFitSynergyScore(args.synergy.synergyScore) ? "High-fit" : "Low-pressure"} follow-up grounded in event context and the strongest documented fit signal.`,
     status:
       hasAllRequiredLinks && args.contactName && args.synergy.reasons.length > 0
         ? "ready"
