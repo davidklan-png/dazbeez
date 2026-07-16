@@ -52,16 +52,27 @@ export const ALLOWED_BUSINESS_CARD_EXTENSIONS = [
   ".heif",
 ] as const;
 
+/** Lowercased ".ext" (including the dot) from a filename; "" if there is none. */
+function fileExtensionOf(name: string): string {
+  const dot = name.lastIndexOf(".");
+  if (dot < 0) return "";
+  return name.slice(dot).toLowerCase();
+}
+
 export function getBusinessCardFileTypeError(file: File): string | null {
-  const ext = `.${file.name.split(".").pop()?.toLowerCase() ?? ""}`;
-  const mimeOk = (
-    ALLOWED_BUSINESS_CARD_MIME_TYPES as readonly string[]
-  ).includes(file.type);
-  const extOk = (
-    ALLOWED_BUSINESS_CARD_EXTENSIONS as readonly string[]
-  ).includes(ext);
-  if (!mimeOk && !extOk) {
-    return "Business card must be an image (JPEG, PNG, or HEIC).";
+  const ext = fileExtensionOf(file.name);
+  const mime = file.type;
+  const errMsg = "Business card must be an image (JPEG, PNG, or HEIC).";
+
+  // Extension is only a fallback when the MIME is absent/generic. A specific
+  // MIME must itself be allowlisted, so a text/html payload named *.jpg or an
+  // image/gif cannot slip through on extension alone.
+  if (mime === "" || mime === "application/octet-stream") {
+    return (ALLOWED_BUSINESS_CARD_EXTENSIONS as readonly string[]).includes(ext)
+      ? null
+      : errMsg;
   }
-  return null;
+  return (ALLOWED_BUSINESS_CARD_MIME_TYPES as readonly string[]).includes(mime)
+    ? null
+    : errMsg;
 }

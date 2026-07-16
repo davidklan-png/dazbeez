@@ -16,6 +16,7 @@ import {
   MAX_RECEIPT_FILE_BYTES,
   RECEIPT_ACCEPT_ATTR,
   formatFileSize,
+  partitionBatch,
 } from "@/lib/receipts/upload-policy";
 import type { CapturePhase } from "./use-receipt-upload";
 
@@ -48,16 +49,17 @@ export function CaptureDesktop(props: CaptureDesktopProps) {
     fileRef.current?.click();
   }
 
-  // Enforce the desktop batch cap at the drop/pick boundary, where the full
-  // file list is known atomically. Files beyond the remaining room are rejected
-  // with a visible count rather than silently dropped.
+  // Per-drop batch cap: at most MAX_DESKTOP_BATCH_FILES from this event,
+  // regardless of what's already in the session (a session-cumulative cap
+  // would lock the session out as ready/review rows accumulate). The remainder
+  // is surfaced as a visible count rather than silently dropped.
   function acceptFiles(files: File[]) {
-    const room = Math.max(
-      MAX_DESKTOP_BATCH_FILES - props.sessionUploads.length,
-      0,
+    const { accepted, rejected } = partitionBatch(
+      files,
+      MAX_DESKTOP_BATCH_FILES,
     );
-    setOverflow(files.length > room ? { rejected: files.length - room } : null);
-    files.slice(0, room).forEach(props.onPickFile);
+    setOverflow(rejected > 0 ? { rejected } : null);
+    accepted.forEach(props.onPickFile);
   }
 
   function onFile(e: ChangeEvent<HTMLInputElement>) {

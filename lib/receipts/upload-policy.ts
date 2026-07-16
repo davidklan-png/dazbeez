@@ -37,9 +37,11 @@ export const ALLOWED_RECEIPT_EXTENSIONS = [
   ".pdf",
 ] as const;
 
-// `<input accept>` for the desktop dropzone, derived from the same source list
-// as the server validator. Deliberately excludes .eml/.html (see header).
-export const RECEIPT_ACCEPT_ATTR = "image/*,application/pdf";
+// `<input accept>` for the desktop dropzone, derived from the same extension
+// list as the server validator. Enumerates accepted formats explicitly — no
+// `image/*` wildcard, which would advertise formats (GIF, BMP, SVG, …) the
+// server rejects. Deliberately excludes .eml/.html (see header).
+export const RECEIPT_ACCEPT_ATTR = ALLOWED_RECEIPT_EXTENSIONS.join(",");
 
 // ─── Size / batch / concurrency limits ─────────────────────────────────────
 
@@ -110,23 +112,50 @@ export function deriveSourceType(
 
 // ─── Validation ────────────────────────────────────────────────────────────
 
+/** Lowercased ".ext" (including the dot) from a filename; "" if there is none. */
+function fileExtensionOf(name: string): string {
+  const dot = name.lastIndexOf(".");
+  if (dot < 0) return "";
+  return name.slice(dot).toLowerCase();
+}
+
 export function validateReceiptFile(file: File): string | null {
   if (file.size > MAX_RECEIPT_FILE_BYTES) {
     const mb = (file.size / (1024 * 1024)).toFixed(1);
     return `File is too large (${mb} MB). Maximum allowed size is ${formatFileSize(MAX_RECEIPT_FILE_BYTES)}.`;
   }
 
-  const ext = `.${file.name.split(".").pop()?.toLowerCase() ?? ""}`;
-  const mimeOk = (ALLOWED_RECEIPT_MIME_TYPES as readonly string[]).includes(
-    file.type,
-  );
-  const extOk = (ALLOWED_RECEIPT_EXTENSIONS as readonly string[]).includes(ext);
+  const ext = fileExtensionOf(file.name);
+  const mime = file.type;
+  const errMsg = "File type not allowed. Accepted: JPEG, PNG, HEIC, PDF.";
 
-  if (!mimeOk && !extOk) {
-    return "File type not allowed. Accepted: JPEG, PNG, HEIC, PDF.";
+  // The extension is only a fallback when the MIME is absent or generic. A
+  // specific MIME must itself be allowlisted — otherwise a text/html payload
+  // named *.jpg, or an image/gif, would slip through on extension alone.
+  if (mime === "" || mime === "application/octet-stream") {
+    return (ALLOWED_RECEIPT_EXTENSIONS as readonly string[]).includes(ext)
+      ? null
+      : errMsg;
   }
+  return (ALLOWED_RECEIPT_MIME_TYPES as readonly string[]).includes(mime)
+    ? null
+    : errMsg;
+}
 
-  return null;
+/**
+ * Split a selection into an accepted prefix (≤ limit) and a rejected count.
+ * Pure. Used to enforce the per-drop desktop batch cap WITHOUT subtracting the
+ * existing session — a session-cumulative cap would lock the session out over
+ * time as ready/review rows accumulate. Each drop is independently capped.
+ */
+export function partitionBatch<T>(
+  items: readonly T[],
+  limit: number,
+): { accepted: T[]; rejected: number } {
+  if (items.length <= limit) {
+    return { accepted: items.slice(), rejected: 0 };
+  }
+  return { accepted: items.slice(0, limit), rejected: items.length - limit };
 }
 
 // ─── Display formatting (client-safe; used in copy so it can't drift) ──────
