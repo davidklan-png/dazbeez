@@ -1,46 +1,17 @@
 import type { ImportAmexLineInput } from "@/lib/receipts/types";
 
-export const ALLOWED_RECEIPT_MIME_TYPES = [
-  "image/jpeg",
-  "image/png",
-  "image/heic",
-  "image/heif",
-  "application/pdf",
-];
-
-export const ALLOWED_RECEIPT_EXTENSIONS = [
-  ".jpg",
-  ".jpeg",
-  ".png",
-  ".heic",
-  ".heif",
-  ".pdf",
-];
-
-// 5 MiB cap on both upload and extraction. The Google Vision request body
-// is base64-encoded (≈ 1.33× the raw size) and JSON.stringified — anything
-// larger pins enough heap in the worker to trip 1102 during back-to-back
-// extractions. Clients should resize before upload (see client-image.ts).
-export const MAX_RECEIPT_FILE_BYTES = 5 * 1024 * 1024; // 5 MiB
+// Receipt file validation, accepted types, and size limits now live in the
+// client-safe upload-policy module (shared with capture components so the UI
+// contract and server enforcement can't drift). Re-exported here for existing
+// callers/tests that import from "@/lib/receipts/validation".
+export {
+  validateReceiptFile,
+  MAX_RECEIPT_FILE_BYTES,
+  ALLOWED_RECEIPT_MIME_TYPES,
+  ALLOWED_RECEIPT_EXTENSIONS,
+} from "@/lib/receipts/upload-policy";
 
 export const ALLOWED_CURRENCIES = ["JPY", "USD", "EUR", "GBP", "AUD", "CNY"];
-
-export function validateReceiptFile(file: File): string | null {
-  if (file.size > MAX_RECEIPT_FILE_BYTES) {
-    const mb = (file.size / (1024 * 1024)).toFixed(1);
-    return `File is too large (${mb} MB). Maximum allowed size is 5 MB.`;
-  }
-
-  const ext = `.${file.name.split(".").pop()?.toLowerCase() ?? ""}`;
-  const mimeOk = ALLOWED_RECEIPT_MIME_TYPES.includes(file.type);
-  const extOk = ALLOWED_RECEIPT_EXTENSIONS.includes(ext);
-
-  if (!mimeOk && !extOk) {
-    return `File type not allowed. Accepted: JPEG, PNG, HEIC, PDF.`;
-  }
-
-  return null;
-}
 
 export function validateReceiptDate(value: string): boolean {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;

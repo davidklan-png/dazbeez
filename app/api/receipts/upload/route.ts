@@ -1,13 +1,19 @@
 import { NextResponse } from "next/server";
 import { requireReceiptsActor } from "@/lib/receipts/auth";
-import { validateReceiptFile } from "@/lib/receipts/validation";
+import {
+  validateReceiptFile,
+  VALID_SOURCES,
+  deriveSourceType,
+  isValidSource,
+  type Source,
+} from "@/lib/receipts/upload-policy";
 import { generateR2Key, uploadOriginal } from "@/lib/receipts/storage";
 import { createReceiptRecord, hardDeleteReceipt, updateReceiptRecord } from "@/lib/receipts/db";
 import { createReceiptFile } from "@/lib/receipts/files";
 import { ExportFinalizedError } from "@/lib/receipts/month-lock";
 import { buildExtractionJob, enqueueExtractionJob } from "@/lib/receipts/queue";
 import { getReceiptsBucket, getReceiptsDb } from "@/lib/cloudflare-runtime";
-import type { PaymentPath, SourceType } from "@/lib/receipts/types";
+import type { PaymentPath } from "@/lib/receipts/types";
 
 async function sha256Hex(data: ArrayBuffer): Promise<string> {
   const hash = await crypto.subtle.digest("SHA-256", data);
@@ -17,30 +23,6 @@ async function sha256Hex(data: ArrayBuffer): Promise<string> {
 }
 
 const VALID_PAYMENT_PATHS: PaymentPath[] = ["AMEX", "CASH", "DIGITAL", "UNKNOWN"];
-const VALID_SOURCE_TYPES: SourceType[] = [
-  "paper_scanned",
-  "electronic_receipt",
-  "digital_invoice",
-  "credit_card_statement",
-  "email_attachment",
-  "manual_upload",
-  "amex_csv",
-];
-
-function deriveSourceType(
-  formValue: string | undefined,
-  source: string,
-  contentType: string,
-): SourceType {
-  if (formValue && VALID_SOURCE_TYPES.includes(formValue as SourceType)) {
-    return formValue as SourceType;
-  }
-  // Heuristic fallback: mobile camera capture → paper scan; PDF →
-  // electronic receipt; anything else → manual upload.
-  if (source === "mobile_capture") return "paper_scanned";
-  if (contentType === "application/pdf") return "electronic_receipt";
-  return "manual_upload";
-}
 
 export async function POST(request: Request) {
   try {
@@ -66,7 +48,23 @@ export async function POST(request: Request) {
         : "UNKNOWN";
 
     const expenseType = formData.get("expenseType")?.toString() || undefined;
-    const source = formData.get("source")?.toString() || "mobile_capture";
+    // source is required provenance — the capture client always sends one
+    // (mobile_capture | desktop_upload). Reject rather than silently default,
+    // since defaulting to "mobile_capture" previously mislabeled every desktop
+    // upload (and corrupted its source_type classification downstream).
+    const rawSource = formData.get("source")?.toString();
+    if (!isValidSource(rawSource)) {
+      return NextResponse.json(
+        {
+          error:
+            "Invalid or missing 'source'. Expected one of: " +
+            VALID_SOURCES.join(", ") +
+            ".",
+        },
+        { status: 400 },
+      );
+    }
+    const source: Source = rawSource;
     const contentType = file.type || "application/octet-stream";
     const sourceType = deriveSourceType(
       formData.get("sourceType")?.toString(),

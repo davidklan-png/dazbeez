@@ -9,6 +9,10 @@ import {
   type SessionUpload,
 } from "@/components/receipts/capture/capture-desktop";
 import type { PaymentPath } from "@/lib/receipts/types";
+import {
+  DESKTOP_MAX_CONCURRENT_UPLOADS,
+  type Source,
+} from "@/lib/receipts/upload-policy";
 
 export type PaymentChip = PaymentPath | null;
 
@@ -27,10 +31,6 @@ const SESSION_QUEUE_TTL_MS = 1000 * 60 * 60 * 6;
 /** Stable empty array reference so useSyncExternalStore doesn't tear when
  *  the server snapshot is read repeatedly. */
 const EMPTY_QUEUE: SessionUpload[] = [];
-/** Max concurrent uploads on the desktop drop path. Drops beyond this are
- *  queued in order (FIFO). 3 is a conservative cap that keeps the browser's
- *  HTTP/2 connection to the Worker saturated without overwhelming it. */
-const MAX_CONCURRENT_UPLOADS = 3;
 
 // useSyncExternalStore requires the snapshot getter to return a
 // referentially-stable value, so we memoise across renders. The cache is
@@ -113,8 +113,11 @@ export function ReceiptCaptureForm({
 
   const onPickFile = useCallback(
     async (file: File) => {
+      // Provenance: mobile web captures are camera-origin, desktop drops are
+      // not. The upload route requires this value (no silent default).
+      const source: Source = isMobile ? "mobile_capture" : "desktop_upload";
       if (isMobile) {
-        await upload(file, initialPayment);
+        await upload(file, initialPayment, source);
         return;
       }
 
@@ -137,7 +140,7 @@ export function ReceiptCaptureForm({
       // queues until a prior upload releases.
       const pool = poolRef.current;
       await new Promise<void>((resolve) => {
-        if (pool.active < MAX_CONCURRENT_UPLOADS) {
+        if (pool.active < DESKTOP_MAX_CONCURRENT_UPLOADS) {
           pool.active += 1;
           resolve();
         } else {
@@ -149,7 +152,7 @@ export function ReceiptCaptureForm({
       });
 
       try {
-        const result = await upload(file, initialPayment);
+        const result = await upload(file, initialPayment, source);
         setSessionUploads((prev) =>
           prev.map((u) =>
             u.id === id

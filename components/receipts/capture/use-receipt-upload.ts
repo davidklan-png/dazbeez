@@ -3,6 +3,7 @@
 import { useCallback, useRef, useState } from "react";
 import { maybeResizeImage } from "@/lib/receipts/client-image";
 import type { PaymentPath } from "@/lib/receipts/types";
+import type { Source } from "@/lib/receipts/upload-policy";
 
 // ADR 0001: extraction is store-and-forward. Capture no longer runs OCR inline
 // — the image is uploaded, enqueued, and processed later by the Mac MLX
@@ -35,6 +36,7 @@ export function useReceiptUpload() {
     async (
       file: File,
       paymentPath: PaymentPath | null,
+      source: Source,
     ): Promise<UploadResult> => {
       const abort = new AbortController();
       controllersRef.current.add(abort);
@@ -57,11 +59,7 @@ export function useReceiptUpload() {
 
         const fd = new FormData();
         fd.append("file", uploadFile);
-        // NOTE: provenance mislabel — desktop uploads also send source=
-        // "mobile_capture" here. The upload route accepts any string for
-        // source (free-form column, no validation) so it doesn't break, but
-        // the value is wrong for desktop. Tracked for a follow-up.
-        fd.append("source", "mobile_capture");
+        fd.append("source", source);
         if (paymentPath) fd.append("paymentPath", paymentPath);
 
         const res = await fetch("/api/receipts/upload", {

@@ -1,7 +1,10 @@
 import { NextResponse } from "next/server";
 import { createMobileBusinessCardCapture } from "@/lib/crm";
 import { extractBusinessCardDetails } from "@/lib/crm-provider";
-import { getImageSizeValidationError } from "@/lib/crm-upload-limits";
+import {
+  getBusinessCardFileTypeError,
+  getImageSizeValidationError,
+} from "@/lib/crm-upload-limits";
 import { requireMobileActor } from "@/lib/receipts/trusted-devices";
 
 export async function POST(request: Request) {
@@ -20,6 +23,11 @@ export async function POST(request: Request) {
     });
     if (sizeError) {
       return NextResponse.json({ error: sizeError }, { status: 413 });
+    }
+
+    const typeError = getBusinessCardFileTypeError(file);
+    if (typeError) {
+      return NextResponse.json({ error: typeError }, { status: 415 });
     }
 
     const clientCaptureId = formData.get("client_capture_id")?.toString().trim();
