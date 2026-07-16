@@ -10,48 +10,57 @@ import {
   UploadIcon,
   WarningIcon,
 } from "@/components/ui/icons";
-import type { PaymentPath } from "@/lib/receipts/types";
-import type { CapturePhase } from "./use-receipt-upload";
+import {
+  MAX_DESKTOP_BATCH_FILES,
+  MAX_RECEIPT_FILE_BYTES,
+  RECEIPT_ACCEPT_ATTR,
+  formatFileSize,
+  partitionBatch,
+} from "@/lib/receipts/upload-policy";
+import type { SessionUpload } from "@/lib/receipts/session-upload";
+
+// SessionUpload lives in the client-safe session-upload module (shared with
+// ReceiptCaptureForm and its pure row transitions); re-exported for importers.
+export type { SessionUpload };
 
 export interface CaptureDesktopProps {
-  initialPayment: PaymentPath | null;
-  phase: CapturePhase;
   onPickFile: (file: File) => void;
   sessionUploads: SessionUpload[];
 }
 
-export type SessionUpload = {
-  id: string;
-  fileName: string;
-  fileSizeBytes: number;
-  state: "uploading" | "ready" | "review" | "error";
-  merchant?: string;
-  amount?: string;
-  date?: string;
-  pct: number;
-  receiptId?: string;
-  errorMessage?: string;
-};
-
 export function CaptureDesktop(props: CaptureDesktopProps) {
   const fileRef = useRef<HTMLInputElement>(null);
   const [dragOver, setDragOver] = useState(false);
+  const [overflow, setOverflow] = useState<{ rejected: number } | null>(null);
 
   function onPick() {
     fileRef.current?.click();
   }
 
+  // Per-drop batch cap: at most MAX_DESKTOP_BATCH_FILES from this event,
+  // regardless of what's already in the session (a session-cumulative cap
+  // would lock the session out as ready/review rows accumulate). The remainder
+  // is surfaced as a visible count rather than silently dropped.
+  function acceptFiles(files: File[]) {
+    const { accepted, rejected } = partitionBatch(
+      files,
+      MAX_DESKTOP_BATCH_FILES,
+    );
+    setOverflow(rejected > 0 ? { rejected } : null);
+    accepted.forEach(props.onPickFile);
+  }
+
   function onFile(e: ChangeEvent<HTMLInputElement>) {
     const files = Array.from(e.target.files ?? []);
     e.target.value = "";
-    files.forEach(props.onPickFile);
+    acceptFiles(files);
   }
 
   function onDrop(e: DragEvent<HTMLDivElement>) {
     e.preventDefault();
     setDragOver(false);
     const files = Array.from(e.dataTransfer.files ?? []);
-    files.forEach(props.onPickFile);
+    acceptFiles(files);
   }
 
   return (
@@ -59,7 +68,7 @@ export function CaptureDesktop(props: CaptureDesktopProps) {
       <input
         ref={fileRef}
         type="file"
-        accept="image/*,application/pdf,.eml,.html"
+        accept={RECEIPT_ACCEPT_ATTR}
         multiple
         className="sr-only"
         onChange={onFile}
@@ -93,7 +102,7 @@ export function CaptureDesktop(props: CaptureDesktopProps) {
             <div className="relative flex flex-col items-center gap-3.5">
               <div className="relative h-[84px] w-[110px]">
                 <FileGlyph kind="PDF" rotate="-9deg" left={6} top={4} />
-                <FileGlyph kind="EML" rotate="2deg" left={36} top={0} />
+                <FileGlyph kind="JPG" rotate="2deg" left={36} top={0} />
                 <FileGlyph kind="PNG" rotate="14deg" left={66} top={2} />
               </div>
               <div className="text-2xl font-bold tracking-[-0.4px] text-gray-900">
@@ -118,11 +127,33 @@ export function CaptureDesktop(props: CaptureDesktopProps) {
                 </Btn>
               </div>
               <div className="mt-2.5 text-xs text-gray-400">
-                Up to 25 files at once · 20&nbsp;MB max per file · HEIC
+                Up to {MAX_DESKTOP_BATCH_FILES} files at once ·{" "}
+                {formatFileSize(MAX_RECEIPT_FILE_BYTES)} max per file · HEIC
                 auto-converted
               </div>
             </div>
           </div>
+
+          {overflow && (
+            <div
+              role="status"
+              className="flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-[13px] text-amber-800"
+            >
+              <WarningIcon size={14} className="shrink-0 text-amber-600" />
+              <span>
+                {overflow.rejected} file{overflow.rejected === 1 ? "" : "s"} not
+                added — a desktop batch is limited to {MAX_DESKTOP_BATCH_FILES}{" "}
+                files at once.
+              </span>
+              <button
+                type="button"
+                onClick={() => setOverflow(null)}
+                className="ml-auto text-[11px] font-semibold text-amber-700 hover:text-amber-800"
+              >
+                Dismiss
+              </button>
+            </div>
+          )}
 
           <div className="grid grid-cols-3 gap-3">
             <AltInputCard
@@ -207,15 +238,14 @@ function DesktopSubHeader() {
         Digital receipts
       </span>
       <span className="hidden text-xs text-gray-500 sm:inline">
-        PDFs, e-mail receipts, screenshots — anything that didn&rsquo;t come from
-        a camera
+        PDFs, screenshots, digital receipts — anything that didn&rsquo;t come
+        from a camera
       </span>
       <span className="flex-1" />
       <div className="hidden gap-1.5 sm:flex">
         <Pill tone="outline">PDF</Pill>
-        <Pill tone="outline">EML / .msg</Pill>
         <Pill tone="outline">PNG · JPG</Pill>
-        <Pill tone="outline">HTML</Pill>
+        <Pill tone="outline">HEIC</Pill>
       </div>
       <div className="hidden h-[18px] w-px bg-gray-200 sm:block" />
       <Link
@@ -234,14 +264,14 @@ function FileGlyph({
   left,
   top,
 }: {
-  kind: "PDF" | "EML" | "PNG";
+  kind: "PDF" | "JPG" | "PNG";
   rotate: string;
   left: number;
   top: number;
 }) {
   const tints: Record<typeof kind, { bg: string; label: string }> = {
     PDF: { bg: "bg-red-100", label: "text-red-600" },
-    EML: { bg: "bg-blue-100", label: "text-blue-700" },
+    JPG: { bg: "bg-blue-100", label: "text-blue-700" },
     PNG: { bg: "bg-amber-100", label: "text-amber-700" },
   };
   const t = tints[kind];

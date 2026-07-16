@@ -24,16 +24,7 @@ import type {
   QualifiedInvoiceStatus,
   SourceType,
 } from "@/lib/receipts/types";
-
-const VALID_SOURCE_TYPES: SourceType[] = [
-  "paper_scanned",
-  "electronic_receipt",
-  "digital_invoice",
-  "credit_card_statement",
-  "email_attachment",
-  "manual_upload",
-  "amex_csv",
-];
+import { VALID_SOURCE_TYPES } from "@/lib/receipts/upload-policy";
 
 type RouteContext = { params: Promise<{ id: string }> };
 

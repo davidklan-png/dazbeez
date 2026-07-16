@@ -3,6 +3,8 @@
 import { useCallback, useRef, useState } from "react";
 import { maybeResizeImage } from "@/lib/receipts/client-image";
 import type { PaymentPath } from "@/lib/receipts/types";
+import type { Source } from "@/lib/receipts/upload-policy";
+import { AbortRegistry } from "@/lib/receipts/abort-registry";
 
 // ADR 0001: extraction is store-and-forward. Capture no longer runs OCR inline
 // — the image is uploaded, enqueued, and processed later by the Mac MLX
@@ -29,15 +31,16 @@ export function useReceiptUpload() {
   // them. The previous design kept a single controller and aborted it on
   // every new upload — which silently killed all but the last file when the
   // desktop drop handler called upload() N times back-to-back.
-  const controllersRef = useRef<Set<AbortController>>(new Set());
+  const registryRef = useRef(new AbortRegistry());
 
   const upload = useCallback(
     async (
       file: File,
       paymentPath: PaymentPath | null,
+      source: Source,
     ): Promise<UploadResult> => {
       const abort = new AbortController();
-      controllersRef.current.add(abort);
+      registryRef.current.register(abort);
 
       setPhase({
         kind: "uploading",
@@ -57,11 +60,7 @@ export function useReceiptUpload() {
 
         const fd = new FormData();
         fd.append("file", uploadFile);
-        // NOTE: provenance mislabel — desktop uploads also send source=
-        // "mobile_capture" here. The upload route accepts any string for
-        // source (free-form column, no validation) so it doesn't break, but
-        // the value is wrong for desktop. Tracked for a follow-up.
-        fd.append("source", "mobile_capture");
+        fd.append("source", source);
         if (paymentPath) fd.append("paymentPath", paymentPath);
 
         const res = await fetch("/api/receipts/upload", {
@@ -107,15 +106,14 @@ export function useReceiptUpload() {
         setPhase({ kind: "error", message });
         return { ok: false, message };
       } finally {
-        controllersRef.current.delete(abort);
+        registryRef.current.unregister(abort);
       }
     },
     [],
   );
 
   const abortAll = useCallback(() => {
-    controllersRef.current.forEach((c) => c.abort());
-    controllersRef.current.clear();
+    registryRef.current.abortAll();
   }, []);
 
   const reset = useCallback(() => {
