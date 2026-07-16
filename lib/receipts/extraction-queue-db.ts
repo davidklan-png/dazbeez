@@ -10,6 +10,7 @@
 
 import { getReceiptsDb } from "@/lib/cloudflare-runtime";
 import { nowIso } from "@/lib/receipts/db-utils";
+import { RECEIPT_BULK_LIMIT } from "@/lib/receipts/list-policy";
 import { PENDING_EXTRACTION_STATES } from "@/lib/receipts/types";
 import type { ReceiptRecord } from "@/lib/receipts/types";
 
@@ -29,7 +30,7 @@ export type TerminalExtractionState = "processed" | "failed";
  *
  * [...PENDING_EXTRACTION_STATES, limit]
  */
-export function buildPendingProcessingQuery(limit = 1000): {
+export function buildPendingProcessingQuery(limit = RECEIPT_BULK_LIMIT): {
   sql: string;
   bindings: readonly unknown[];
 } {
@@ -65,7 +66,7 @@ export function buildReconcileExtractionStateQuery(
  * Default limit 1000.
  */
 export async function listPendingProcessingReceipts(
-  limit = 1000,
+  limit = RECEIPT_BULK_LIMIT,
 ): Promise<ReceiptRecord[]> {
   const db = getReceiptsDb();
   const { sql, bindings } = buildPendingProcessingQuery(limit);

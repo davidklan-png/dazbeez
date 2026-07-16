@@ -6,6 +6,7 @@ import {
   listReconciliationStatusByMonth,
   listAttendeeNamesByReceiptIds,
 } from "@/lib/receipts/db";
+import { RECEIPT_VIEW_LIMIT } from "@/lib/receipts/list-policy";
 import { matchAmexToReceipts } from "@/lib/receipts/reconciliation";
 import {
   deriveStatementWindow,
@@ -51,7 +52,7 @@ export default async function ReconcilePage({
 
   const [amexLines, receipts, reconciliation] = await Promise.all([
     listAmexLines(month),
-    listReceiptRecords({ paymentPath: "AMEX", limit: 200 }),
+    listReceiptRecords({ paymentPath: "AMEX", limit: RECEIPT_VIEW_LIMIT }),
     getReconciliationForMonth(month),
   ]);
 

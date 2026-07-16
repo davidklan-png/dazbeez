@@ -5,6 +5,7 @@ import {
   listExports,
   listReceiptRecords,
 } from "@/lib/receipts/db";
+import { RECEIPT_BULK_LIMIT } from "@/lib/receipts/list-policy";
 import { requireReceiptsActor } from "@/lib/receipts/auth";
 import { assertReceiptsPageAccess } from "@/lib/receipts/auth-request";
 import { headers } from "next/headers";
@@ -82,7 +83,7 @@ export default async function ReceiptsDashboardPage() {
   }
 
   const [monthReceipts, allLines, exports, complianceSummary] = await Promise.all([
-    listReceiptRecords({ month, limit: 1000 }),
+    listReceiptRecords({ month, limit: RECEIPT_BULK_LIMIT }),
     listAmexLineCountsByMonth(),
     listExports(),
     summarizeOpenChecksForMonth(getReceiptsDb(), month).catch(() => ({

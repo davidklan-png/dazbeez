@@ -4,6 +4,7 @@ import {
   getAmexMatchFlagsByReceiptIds,
   listReceiptRecords,
 } from "@/lib/receipts/db";
+import { RECEIPT_VIEW_LIMIT } from "@/lib/receipts/list-policy";
 import { assertReceiptsPageAccess } from "@/lib/receipts/auth-request";
 import { ReviewLayout } from "@/components/receipts/review/review-layout";
 import { QueueRail } from "@/components/receipts/review/queue-rail";
@@ -47,7 +48,7 @@ async function renderReviewPage(
   const paymentPathFilter =
     typeof params.payment_path === "string" ? params.payment_path : undefined;
 
-  const receipts = await listReceiptRecords({ limit: 200 });
+  const receipts = await listReceiptRecords({ limit: RECEIPT_VIEW_LIMIT });
   const queue = filterQueue(receipts, filter, statusFilter, paymentPathFilter);
   const amexFlags = await getAmexMatchFlagsByReceiptIds(queue.map((r) => r.id));
   const reReviewIds = new Set(

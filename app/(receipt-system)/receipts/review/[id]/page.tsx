@@ -5,6 +5,7 @@ import {
   listAttendees,
   listReceiptRecords,
 } from "@/lib/receipts/db";
+import { RECEIPT_VIEW_LIMIT } from "@/lib/receipts/list-policy";
 import { assertReceiptsPageAccess } from "@/lib/receipts/auth-request";
 import { ReviewLayout } from "@/components/receipts/review/review-layout";
 import { QueueRail } from "@/components/receipts/review/queue-rail";
@@ -51,7 +52,7 @@ async function renderReceiptPage(params: Promise<{ id: string }>) {
   const [receipt, attendees, all] = await Promise.all([
     getReceiptRecord(id),
     listAttendees(id),
-    listReceiptRecords({ limit: 200 }),
+    listReceiptRecords({ limit: RECEIPT_VIEW_LIMIT }),
   ]);
   if (!receipt) notFound();
 

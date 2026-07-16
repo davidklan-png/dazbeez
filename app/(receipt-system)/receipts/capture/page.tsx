@@ -1,6 +1,7 @@
 import { ReceiptCaptureForm } from "@/components/receipts/receipt-capture-form";
 import { assertReceiptsPageAccess } from "@/lib/receipts/auth-request";
 import { listReceiptRecords } from "@/lib/receipts/db";
+import { RECEIPT_VIEW_LIMIT } from "@/lib/receipts/list-policy";
 import type { PaymentPath } from "@/lib/receipts/types";
 
 export const dynamic = "force-dynamic";
@@ -45,7 +46,7 @@ export default async function CapturePage({
 // null and the UI shows "—" with a "count unavailable" title attr.
 async function countCapturedToday(): Promise<number | null> {
   try {
-    const rows = await listReceiptRecords({ limit: 200 });
+    const rows = await listReceiptRecords({ limit: RECEIPT_VIEW_LIMIT });
     const startOfDay = new Date();
     startOfDay.setHours(0, 0, 0, 0);
     const startIso = startOfDay.toISOString();
