@@ -150,7 +150,14 @@ export type AuditAction =
   | "receipt.export_statement_month_policy_migrated"
   // Attendee directory (migration 0022): a new entry registered from the
   // review UI. Attended identity = directory name; company/title NOT NULL.
-  | "attendee_directory.created";
+  | "attendee_directory.created"
+  // Business trips as first-class entities (ADR 0010). The trip screen owns
+  // the lifecycle; detection only suggests ('candidate').
+  | "business_trip.created"
+  | "business_trip.updated"
+  | "business_trip.confirmed"
+  | "business_trip.rejected"
+  | "business_trip.members_changed";
 
 // ─── Compliance: source / preservation / qualified-invoice ────────────────
 
@@ -499,6 +506,14 @@ export interface ComplianceSettings {
   /** Notification recipient email (Settings → Compliance). Empty = use the
    *  ACCOUNTANT_EMAIL var fallback. */
   notification_recipient: string;
+  /**
+   * Homebase location signals (ADR 0010 D3). A merchant whose string carries
+   * one of these is treated as an at-homebase charge (not a trip anchor).
+   * Default reproduces the former hardcoded TOKYO_SIGNALS list verbatim —
+   * zero behavior change until the operator edits Settings → Compliance.
+   * Stored as a JSON array string under key `homebase_signals`.
+   */
+  homebase_signals: string[];
 }
 
 export interface AmexReconciliation {

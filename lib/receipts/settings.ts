@@ -1,5 +1,6 @@
 import { getReceiptsDb } from "@/lib/cloudflare-runtime";
 import { nowIso } from "@/lib/receipts/db-utils";
+import { DEFAULT_HOMEBASE_SIGNALS } from "@/lib/receipts/validation";
 import type {
   ComplianceSettings,
   InvoiceNumberRequirementMode,
@@ -18,6 +19,9 @@ export const COMPLIANCE_DEFAULTS: ComplianceSettings = {
   statement_expected_day: 18,
   track_tax_breakdown: false,
   notification_recipient: "",
+  // ADR 0010 D3: verbatim former TOKYO_SIGNALS. Behavior unchanged until the
+  // operator edits Settings → Compliance.
+  homebase_signals: DEFAULT_HOMEBASE_SIGNALS,
 };
 
 const INVOICE_MODES: ReadonlySet<InvoiceNumberRequirementMode> = new Set([
@@ -41,6 +45,27 @@ function parseInt10(v: string | undefined, fallback: number): number {
   if (v === undefined) return fallback;
   const n = Number.parseInt(v, 10);
   return Number.isFinite(n) ? n : fallback;
+}
+
+/**
+ * Parse the `homebase_signals` JSON-array string. Falls back to a copy of the
+ * default list on missing/corrupt/non-array values (ADR 0010 D3). Returns a
+ * fresh array so callers/tests can't mutate the shared default.
+ */
+function parseHomebaseSignals(v: string | undefined): string[] {
+  if (v === undefined) return [...COMPLIANCE_DEFAULTS.homebase_signals];
+  try {
+    const parsed: unknown = JSON.parse(v);
+    if (
+      Array.isArray(parsed) &&
+      parsed.every((entry) => typeof entry === "string")
+    ) {
+      return parsed as string[];
+    }
+  } catch {
+    // fall through to default
+  }
+  return [...COMPLIANCE_DEFAULTS.homebase_signals];
 }
 
 export function parseComplianceSettings(
@@ -87,6 +112,7 @@ export function parseComplianceSettings(
     notification_recipient:
       map.get("notification_recipient") ??
       COMPLIANCE_DEFAULTS.notification_recipient,
+    homebase_signals: parseHomebaseSignals(map.get("homebase_signals")),
   };
 }
 
@@ -106,8 +132,17 @@ export async function updateComplianceSettings(
   const now = nowIso();
   const entries = Object.entries(updates).filter(([, v]) => v !== undefined);
   for (const [key, value] of entries) {
+    // Arrays (homebase_signals) serialize as JSON; booleans as true/false;
+    // everything else via String(). The previous `String(value)` would have
+    // stored an array as a comma-joined string, corrupting the round-trip.
     const stringValue =
-      typeof value === "boolean" ? (value ? "true" : "false") : String(value);
+      typeof value === "boolean"
+        ? value
+          ? "true"
+          : "false"
+        : Array.isArray(value)
+          ? JSON.stringify(value)
+          : String(value);
     await db
       .prepare(
         `INSERT INTO receipt_settings (key, value, updated_at, updated_by)
