@@ -12,6 +12,14 @@ import {
   computeTripStatusLineUpdates,
   validateTripDates,
   validateTripTransition,
+  shiftDate,
+  candidateWindow,
+  isInCandidateWindow,
+  filterAttachCandidates,
+  candidateDisableReason,
+  filterTripsByTab,
+  tripStatusTone,
+  type CandidateRow,
   type ExistingTrip,
 } from "@/lib/receipts/business-trips";
 
@@ -184,4 +192,135 @@ test("validateTripTransition: exported rejected; candidate/confirmed transitions
   assert.equal(validateTripTransition("candidate", "confirmed").ok, true);
   assert.equal(validateTripTransition("confirmed", "rejected").ok, true);
   assert.equal(validateTripTransition("candidate", "exported").ok, false); // only confirmed/rejected
+});
+
+// ─── Picker window/date arithmetic (ADR 0010 D2) ─────────────────────────────
+
+test("shiftDate: adds/subtracts days, crosses month/year boundaries", () => {
+  assert.equal(shiftDate("2026-03-10", 5), "2026-03-15");
+  assert.equal(shiftDate("2026-03-31", 1), "2026-04-01"); // month boundary
+  assert.equal(shiftDate("2026-01-01", -1), "2025-12-31"); // year boundary
+  assert.equal(shiftDate("2026-03-10", -45), "2026-01-24");
+});
+
+test("candidateWindow: [start − windowDays, end + windowDays]", () => {
+  assert.deepEqual(
+    candidateWindow({ startDate: "2026-06-10", endDate: "2026-06-15" }, 45),
+    { start: "2026-04-26", end: "2026-07-30" }, // spans Apr–Jul (cross-month)
+  );
+});
+
+test("isInCandidateWindow: inclusive boundaries", () => {
+  const w = { start: "2026-04-26", end: "2026-07-30" };
+  assert.equal(isInCandidateWindow("2026-04-26", w), true); // start edge
+  assert.equal(isInCandidateWindow("2026-07-30", w), true); // end edge
+  assert.equal(isInCandidateWindow("2026-06-10", w), true);
+  assert.equal(isInCandidateWindow("2026-04-25", w), false); // just before
+  assert.equal(isInCandidateWindow("2026-07-31", w), false); // just after
+});
+
+// ─── filterAttachCandidates: member exclusion + window + q + all ─────────────
+
+function cand(over: Partial<CandidateRow> & { kind: "line" | "receipt"; id: string }): CandidateRow {
+  return {
+    transactionDate: "2026-06-10",
+    merchant: "OpenAI",
+    amountMinor: 1000,
+    currency: "JPY",
+    month: "2026-06",
+    status: "confirmed",
+    ownedByTripId: null,
+    ...over,
+  };
+}
+
+test("filterAttachCandidates: excludes current members of this trip", () => {
+  const rows = [
+    cand({ kind: "line", id: "l-mem", merchant: "Member Line" }),
+    cand({ kind: "receipt", id: "r-mem", merchant: "Member Receipt" }),
+    cand({ kind: "line", id: "l-new", merchant: "New Line" }),
+  ];
+  const out = filterAttachCandidates(rows, {
+    memberLineIds: new Set(["l-mem"]),
+    memberReceiptIds: new Set(["r-mem"]),
+    window: null,
+    q: "",
+  });
+  assert.deepEqual(
+    out.map((r) => r.id),
+    ["l-new"],
+  );
+});
+
+test("filterAttachCandidates: applies window (all=true passes null window)", () => {
+  const rows = [
+    cand({ kind: "line", id: "in", transactionDate: "2026-06-10" }),
+    cand({ kind: "receipt", id: "out", transactionDate: "2025-01-01" }),
+  ];
+  const windowed = filterAttachCandidates(rows, {
+    memberLineIds: new Set(),
+    memberReceiptIds: new Set(),
+    window: { start: "2026-04-26", end: "2026-07-30" },
+    q: "",
+  });
+  assert.deepEqual(windowed.map((r) => r.id), ["in"]);
+
+  const all = filterAttachCandidates(rows, {
+    memberLineIds: new Set(),
+    memberReceiptIds: new Set(),
+    window: null, // "show all"
+    q: "",
+  });
+  assert.equal(all.length, 2);
+});
+
+test("filterAttachCandidates: q filters merchant (case-insensitive)", () => {
+  const rows = [
+    cand({ kind: "line", id: "a", merchant: "Ekinet" }),
+    cand({ kind: "receipt", id: "b", merchant: "Hotel Odawara" }),
+  ];
+  const out = filterAttachCandidates(rows, {
+    memberLineIds: new Set(),
+    memberReceiptIds: new Set(),
+    window: null,
+    q: "ekinet",
+  });
+  assert.deepEqual(out.map((r) => r.id), ["a"]);
+});
+
+// ─── candidateDisableReason (ownedByTripId flag) ─────────────────────────────
+
+test("candidateDisableReason: different-trip owner → reason; same trip / receipt → null", () => {
+  assert.equal(
+    candidateDisableReason(cand({ kind: "line", id: "l1", ownedByTripId: "other-trip" }), "this-trip"),
+    `Owned by another trip — detach it there first.`,
+  );
+  assert.equal(
+    candidateDisableReason(cand({ kind: "line", id: "l1", ownedByTripId: "this-trip" }), "this-trip"),
+    null,
+  );
+  assert.equal(
+    candidateDisableReason(cand({ kind: "receipt", id: "r1", ownedByTripId: "other" }), "this-trip"),
+    null, // receipts are never "owned" — attach is always allowed
+  );
+});
+
+// ─── Pure UI helpers (trips screen) ──────────────────────────────────────────
+
+test("filterTripsByTab: candidate/confirmed filtered; rejected only under all", () => {
+  const trips = [
+    { status: "candidate" },
+    { status: "confirmed" },
+    { status: "rejected" },
+  ];
+  assert.equal(filterTripsByTab(trips, "candidate").length, 1);
+  assert.equal(filterTripsByTab(trips, "confirmed").length, 1);
+  assert.equal(filterTripsByTab(trips, "all").length, 3);
+});
+
+test("tripStatusTone: candidate=amber, confirmed=green, rejected=gray, exported=blue", () => {
+  assert.equal(tripStatusTone("candidate"), "amber");
+  assert.equal(tripStatusTone("confirmed"), "green");
+  assert.equal(tripStatusTone("rejected"), "gray");
+  assert.equal(tripStatusTone("exported"), "blue");
 });

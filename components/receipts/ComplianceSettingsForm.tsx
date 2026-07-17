@@ -17,9 +17,7 @@ type Props = {
   effectiveRecipient: EffectiveRecipient;
 };
 
-// homebase_signals (ADR 0010 D3) is an array setting whose UI is Phase B, so it
-// is intentionally absent from this scalar-label map until then.
-const LABELS: Record<Exclude<keyof ComplianceSettings, "homebase_signals">, string> = {
+const LABELS: Record<keyof ComplianceSettings, string> = {
   business_name: "Business name (事業者名)",
   taxpayer_type: "Taxpayer type",
   retention_years: "Retention years",
@@ -31,6 +29,7 @@ const LABELS: Record<Exclude<keyof ComplianceSettings, "homebase_signals">, stri
   statement_expected_day: "AMEX statement expected day",
   track_tax_breakdown: "Track tax rate / amount breakdown",
   notification_recipient: "通知先 (Notification recipient)",
+  homebase_signals: "Homebase signals (ADR 0010)",
 };
 
 export function ComplianceSettingsForm({
@@ -47,6 +46,12 @@ export function ComplianceSettingsForm({
   );
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<TestResult | null>(null);
+  // homebase_signals is edited as a textarea (one signal per line). Keep the
+  // raw text for editing; mirror the parsed array into settings.homebase_signals
+  // so Save serializes it (Phase A serializer JSON-stringifies arrays).
+  const [homebaseText, setHomebaseText] = useState(
+    initial.homebase_signals.join("\n"),
+  );
 
   const recipientDirty = settings.notification_recipient !== persistedRecipient;
 
@@ -282,6 +287,29 @@ export function ComplianceSettingsForm({
             </p>
           ) : null}
         </div>
+      </Row>
+
+      <Row
+        label={LABELS.homebase_signals}
+        hint="Merchant name fragments that indicate homebase (charges here never anchor a business trip). One per line."
+      >
+        <textarea
+          value={homebaseText}
+          onChange={(e) => {
+            const text = e.target.value;
+            setHomebaseText(text);
+            update(
+              "homebase_signals",
+              text
+                .split("\n")
+                .map((s) => s.trim())
+                .filter(Boolean),
+            );
+          }}
+          rows={5}
+          className="w-full rounded-md border border-gray-300 px-3 py-2 font-mono text-sm sm:w-96"
+          placeholder={"東京\n新宿\n渋谷"}
+        />
       </Row>
 
       <div className="flex items-center justify-between border-t border-gray-100 pt-4">

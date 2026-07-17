@@ -16,6 +16,7 @@ import {
   findOverlappingTrip,
   decideWiden,
   validateTripTransition,
+  type CandidateRow,
   type ExistingTrip,
   type TripTransition,
 } from "@/lib/receipts/business-trips";
@@ -2261,6 +2262,122 @@ export async function detachTripMembers(
     newValueJson: stringifyJson({ detach: { lineIds, receiptIds } }),
   });
   return { lines: lineIds.length, receipts: receiptIds.length };
+}
+
+/** Current member line + receipt ids for a trip (for the picker's exclusion set). */
+export async function listTripMemberIds(
+  tripId: string,
+): Promise<{ lineIds: string[]; receiptIds: string[] }> {
+  const db = getReceiptsDb();
+  const lines = await db
+    .prepare(
+      `SELECT amex_statement_line_id AS id FROM business_trip_report_lines WHERE business_trip_report_id = ?`,
+    )
+    .bind(tripId)
+    .all<{ id: string }>();
+  const receipts = await db
+    .prepare(
+      `SELECT receipt_id AS id FROM business_trip_report_receipts WHERE business_trip_report_id = ?`,
+    )
+    .bind(tripId)
+    .all<{ id: string }>();
+  return {
+    lineIds: (lines.results ?? []).map((r) => r.id),
+    receiptIds: (receipts.results ?? []).map((r) => r.id),
+  };
+}
+
+/**
+ * Charges attachable to a trip (ADR 0010 D2 picker). Returns AMEX lines +
+ * receipts whose transaction_date falls in `window` (null = all), optionally
+ * filtered by merchant `q` (LIKE). Lines carry `ownedByTripId` so the UI can
+ * flag a different-trip owner (attach will 409). Does NOT exclude current
+ * members of THIS trip — the candidates route applies {@link filterAttachCandidates}
+ * for that (pure, tested). Cross-month by construction (the window spans months).
+ */
+export async function listTripAttachCandidates(
+  opts: { window: { start: string; end: string } | null; q: string },
+): Promise<CandidateRow[]> {
+  const db = getReceiptsDb();
+  const hasQ = opts.q.trim().length > 0;
+  const qPattern = `%${opts.q.trim()}%`;
+  const rows: CandidateRow[] = [];
+
+  const datePred = opts.window ? "transaction_date BETWEEN ? AND ?" : "1=1";
+
+  const lines = await db
+    .prepare(
+      `SELECT id, transaction_date, merchant, amount_minor, currency,
+              statement_month, match_status, business_trip_id
+       FROM amex_statement_lines
+       WHERE ${datePred} ${hasQ ? "AND merchant LIKE ?" : ""}
+       ORDER BY transaction_date ASC`,
+    )
+    .bind(...(opts.window ? [opts.window.start, opts.window.end] : []), ...(hasQ ? [qPattern] : []))
+    .all<{
+      id: string;
+      transaction_date: string;
+      merchant: string;
+      amount_minor: number;
+      currency: string;
+      statement_month: string;
+      match_status: string | null;
+      business_trip_id: string | null;
+    }>();
+  for (const l of lines.results ?? []) {
+    rows.push({
+      kind: "line",
+      id: l.id,
+      transactionDate: l.transaction_date,
+      merchant: l.merchant,
+      amountMinor: l.amount_minor,
+      currency: l.currency,
+      month: l.statement_month,
+      status: l.match_status,
+      ownedByTripId: l.business_trip_id,
+    });
+  }
+
+  const recs = await db
+    .prepare(
+      `SELECT id, transaction_date, merchant, amount_minor, currency,
+              export_statement_month, status
+       FROM receipt_records
+       WHERE deleted_at IS NULL
+         AND ${datePred} ${hasQ ? "AND merchant LIKE ?" : ""}
+       ORDER BY transaction_date ASC`,
+    )
+    .bind(...(opts.window ? [opts.window.start, opts.window.end] : []), ...(hasQ ? [qPattern] : []))
+    .all<{
+      id: string;
+      transaction_date: string | null;
+      merchant: string | null;
+      amount_minor: number | null;
+      currency: string;
+      export_statement_month: string | null;
+      status: string;
+    }>();
+  for (const r of recs.results ?? []) {
+    rows.push({
+      kind: "receipt",
+      id: r.id,
+      transactionDate: r.transaction_date,
+      merchant: r.merchant,
+      amountMinor: r.amount_minor,
+      currency: r.currency,
+      month:
+        r.export_statement_month ??
+        (r.transaction_date ? r.transaction_date.slice(0, 7) : null),
+      status: r.status,
+      ownedByTripId: null,
+    });
+  }
+
+  // Mixed sort by transactionDate (nulls last).
+  rows.sort((a, b) =>
+    (a.transactionDate ?? "9999-99-99").localeCompare(b.transactionDate ?? "9999-99-99"),
+  );
+  return rows;
 }
 
 // ─── Expense categories ───────────────────────────────────────────────────────
