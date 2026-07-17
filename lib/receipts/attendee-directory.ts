@@ -5,7 +5,14 @@ export interface ReceiptAttendeeDirectoryEntry {
   name: string;
 }
 
-export const RECEIPT_ATTENDEE_DIRECTORY: ReceiptAttendeeDirectoryEntry[] = [
+/**
+ * The seed reference for the `attendee_directory` D1 table (migration 0022).
+ * Runtime reads the directory from D1 via `listAttendeeDirectory()`; this array
+ * is the one-time seed data and the unit-test fixture. The 66 ids (1–66) are
+ * preserved verbatim — they are the join key the receipts CSV's `AttendeeIds`
+ * column carries, so renaming/renumbering here would break every sealed export.
+ */
+export const ATTENDEE_DIRECTORY_SEED: ReceiptAttendeeDirectoryEntry[] = [
   { id: 1, company: "合同会社Dazbeez", title: "代表社員", name: "村上多寿子" },
   { id: 2, company: "合同会社Dazbeez", title: "代表社員", name: "クランデイビット" },
   { id: 3, company: "Manulife", title: "Program Director", name: "Murray Duke" },
@@ -73,3 +80,35 @@ export const RECEIPT_ATTENDEE_DIRECTORY: ReceiptAttendeeDirectoryEntry[] = [
   { id: 65, company: "Palette814", title: "Owner", name: "柴山哲也" },
   { id: 66, company: "日進ビルサービス株式会社", title: "代表取締役", name: "島　義行" },
 ];
+
+/**
+ * Resolve attendee names against a directory by EXACT string equality after
+ * `.trim()` (no fuzzy matching — attendee identity = directory name, per the
+ * locked design). Shared by the receipts-CSV builder (`AttendeeIds` column),
+ * the finalize gate (receipt + AMEX-line attendee checks), and tests.
+ *
+ * Returns `entries[i]` aligned positionally to `names[i]` (null = unresolved)
+ * and the deduplicated list of unresolved names. Positional alignment is what
+ * keeps the CSV's `Attendees` and `AttendeeIds` columns in lockstep — the
+ * builder emits `?` for every unresolved position so the two stay parallel.
+ */
+export function resolveAttendeeNames(
+  names: string[],
+  directory: ReceiptAttendeeDirectoryEntry[],
+): { entries: (ReceiptAttendeeDirectoryEntry | null)[]; unresolved: string[] } {
+  const byName = new Map<string, ReceiptAttendeeDirectoryEntry>();
+  for (const entry of directory) {
+    // name is UNIQUE in the table; seed entries are unique by construction.
+    byName.set(entry.name.trim(), entry);
+  }
+  const entries: (ReceiptAttendeeDirectoryEntry | null)[] = [];
+  const unresolvedSet = new Set<string>();
+  for (const raw of names) {
+    const trimmed = raw.trim();
+    const found = trimmed.length > 0 ? byName.get(trimmed) ?? null : null;
+    entries.push(found);
+    if (!found && trimmed.length > 0) unresolvedSet.add(trimmed);
+  }
+  return { entries, unresolved: [...unresolvedSet] };
+}
+

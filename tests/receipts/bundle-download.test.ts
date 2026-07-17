@@ -223,8 +223,8 @@ test("byte-identity: text artifacts are deterministic (no draft-conditional cont
   const generatedAt = "2026-07-15T00:00:00Z";
 
   // Same inputs twice → identical bytes (and identical SHA-256).
-  const csvA = buildMonthlyExportCsv(rows, attendeeMap);
-  const csvB = buildMonthlyExportCsv(rows, attendeeMap);
+  const csvA = buildMonthlyExportCsv(rows, attendeeMap, [], {});
+  const csvB = buildMonthlyExportCsv(rows, attendeeMap, [], {});
   assert.equal(csvA, csvB);
 
   const sumA = buildExportSummaryCsv(rows, month, generatedAt);
@@ -291,7 +291,7 @@ test("byte-identity: the proofs ZIP builder takes no draft flag (draft⇄seal ca
     icAdvisories: [],
     exportRevision: 1,
   };
-  const a = assembleProofsZip(month, entries, notice, "﻿Field,Value\r\nMonth,2026-06\r\n");
+  const a = assembleProofsZip(month, entries, notice, "﻿Field,Value\r\nMonth,2026-06\r\n", "﻿AttendeeId,Name,Company,Title\r\n");
   assert.ok(a instanceof Uint8Array && a.length > 0);
   // The builder has no draft parameter to branch on — draft and finalize share
   // it. (Cross-call byte equality is not asserted because the zip's own

@@ -311,12 +311,16 @@ function folderFor(paymentPath: ProofPaymentPath): string {
  *
  *  `summaryCsv` is the SAME bytes as the standalone summary artifact (BOM+CRLF),
  *  embedded as 集計.csv so the accountant who only opens the ZIP still gets the
- *  cost breakdown. */
+ *  cost breakdown. `attendeesCsv` is likewise the same bytes as the standalone
+ *  attendees artifact, embedded as 参加者一覧.csv next to 集計.csv so the
+ *  AttendeeIds column can be decoded into name/company/title without a second
+ *  download. */
 export function assembleProofsZip(
   month: string,
   entries: ProofZipEntry[],
   noticeInput: TransitionNoticeInput,
   summaryCsv: string,
+  attendeesCsv: string,
 ): Uint8Array {
   const root = ROOT_PREFIX(month);
   const files: Record<string, Uint8Array> = {};
@@ -368,6 +372,7 @@ export function assembleProofsZip(
 
   files[`${root}目次.csv`] = encoder.encode(buildProofsMokuziCsv(mokuziRows));
   files[`${root}集計.csv`] = encoder.encode(summaryCsv);
+  files[`${root}参加者一覧.csv`] = encoder.encode(attendeesCsv);
   files[`${root}お知らせ.txt`] = encoder.encode(buildTransitionNotice(noticeInput));
 
   return zipSync(files, { level: 0 });

@@ -111,6 +111,8 @@ function makeBundle(overrides: Partial<ExportBundle> = {}): ExportBundle {
     receipts: [],
     amexLines: [],
     attendeeMap: new Map(),
+    attendeeDirectory: [],
+    amexAttendees: {},
     items: [],
     ...overrides,
   };
@@ -233,6 +235,55 @@ test("gate 3: CASH receipt missing expense category blocks; AMEX is skipped here
   assert.ok(
     !amex.some((b) => b.includes("r-amex") && b.includes("missing expense category")),
     `AMEX receipt must not hit gate 3: ${JSON.stringify(amex)}`,
+  );
+});
+
+// (3b) Attendee-directory resolution (migration 0022): a receipt whose
+// category requires attendees must have every attendee name resolve to a
+// directory entry (company/title). Unresolved → blocker.
+const ATTENDEE_DIR = [
+  { id: 1, company: "Acme", title: "Director", name: "Alice" },
+];
+
+test("gate 3b: CASH receipt with an unresolved attendee name blocks", () => {
+  const receipt = makeReceipt({
+    id: "r-cash",
+    payment_path: "CASH",
+    expense_category_code: "meeting",
+  });
+  const bundle = makeBundle({
+    receipts: [receipt],
+    attendeeMap: new Map([["r-cash", ["Alice", "Ghost"]]]),
+    attendeeDirectory: ATTENDEE_DIR,
+  });
+  const blockers = validateMonthReadyForExportCore(
+    makeInput({ bundle, receiptFileCounts: new Map([["r-cash", 1]]) }),
+  );
+  assert.ok(
+    blockers.some(
+      (b) => b.includes("Ghost") && b.includes("not registered in the attendee directory"),
+    ),
+    JSON.stringify(blockers),
+  );
+});
+
+test("gate 3b: CASH receipt with all attendees resolved passes (no directory blocker)", () => {
+  const receipt = makeReceipt({
+    id: "r-cash",
+    payment_path: "CASH",
+    expense_category_code: "meeting",
+  });
+  const bundle = makeBundle({
+    receipts: [receipt],
+    attendeeMap: new Map([["r-cash", ["Alice"]]]),
+    attendeeDirectory: ATTENDEE_DIR,
+  });
+  const blockers = validateMonthReadyForExportCore(
+    makeInput({ bundle, receiptFileCounts: new Map([["r-cash", 1]]) }),
+  );
+  assert.ok(
+    !blockers.some((b) => b.includes("not registered in the attendee directory")),
+    `resolved attendees must not block: ${JSON.stringify(blockers)}`,
   );
 });
 

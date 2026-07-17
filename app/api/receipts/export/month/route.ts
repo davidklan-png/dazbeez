@@ -14,10 +14,13 @@ import {
   bomPrefixedCrlf,
   buildMonthlyExportCsv,
   buildExportSummaryCsv,
+  buildAttendeesExportCsv,
+  resolveRowAttendees,
   hashCsvContent,
   buildArchiveKey,
   buildManifestKey,
   buildSummaryKey,
+  buildAttendeesKey,
   buildProofsKey,
   buildManifestCsv,
   buildReadmeKey,
@@ -101,7 +104,12 @@ export async function POST(request: Request) {
     // SHA-256 in the manifest matches the bytes in R2 exactly. The
     // accountant opens this CSV in Excel on Windows — without BOM/CRLF the
     // Japanese merchant names render as mojibake.
-    const csvPure = buildMonthlyExportCsv(bundle.rows, bundle.attendeeMap);
+    const csvPure = buildMonthlyExportCsv(
+      bundle.rows,
+      bundle.attendeeMap,
+      bundle.attendeeDirectory,
+      bundle.amexAttendees,
+    );
     const csvShipped = bomPrefixedCrlf(csvPure);
     const sha256 = await hashCsvContent(csvShipped);
 
@@ -114,6 +122,25 @@ export async function POST(request: Request) {
     const summaryPure = buildExportSummaryCsv(bundle.rows, month, generatedAt);
     const summaryShipped = bomPrefixedCrlf(summaryPure);
     const summarySha256 = await hashCsvContent(summaryShipped);
+
+    // 参加者一覧 (attendees) — maps the receipts CSV's AttendeeIds column to
+    // name/company/title. Built from the union of attendee names referenced
+    // across the bundle's rows (receipt attendees + the line-attendee fallback
+    // in resolveRowAttendees). Same BOM+CRLF bytes are embedded in the proofs
+    // ZIP as 参加者一覧.csv next to 集計.csv.
+    const referencedAttendeeNames = [
+      ...new Set(
+        bundle.rows.flatMap((r) =>
+          resolveRowAttendees(r, bundle.attendeeMap, bundle.amexAttendees),
+        ),
+      ),
+    ];
+    const attendeesPure = buildAttendeesExportCsv(
+      referencedAttendeeNames,
+      bundle.attendeeDirectory,
+    );
+    const attendeesShipped = bomPrefixedCrlf(attendeesPure);
+    const attendeesSha256 = await hashCsvContent(attendeesShipped);
 
     // Create or retrieve export record, then reload to pick up revision
     // metadata (export_revision / supersedes_export_id / correction_reason).
@@ -136,6 +163,7 @@ export async function POST(request: Request) {
     const archiveKey = buildArchiveKey(month, exportId);
     const manifestKey = buildManifestKey(month, exportId);
     const summaryKey = buildSummaryKey(month, exportId);
+    const attendeesKey = buildAttendeesKey(month, exportId);
 
     // Upload CSV to archive bucket
     const encoder = new TextEncoder();
@@ -223,6 +251,7 @@ export async function POST(request: Request) {
       proofsEntries,
       proofsNoticeInput,
       summaryShipped,
+      attendeesShipped,
     );
     const proofsSha256 = await computeSha256Hex(proofsZipBytes);
     await getReceiptsArchiveBucket().put(proofsKey, proofsZipBytes, {
@@ -302,6 +331,18 @@ export async function POST(request: Request) {
       },
     );
 
+    // Attendees CSV (参加者一覧) — same bytes embedded in the proofs ZIP. Derived
+    // key like summary (no column on receipt_exports); csv content type +
+    // retention metadata, mirroring the summary block.
+    await getReceiptsArchiveBucket().put(
+      attendeesKey,
+      encoder.encode(attendeesShipped).buffer as ArrayBuffer,
+      {
+        httpMetadata: { contentType: "text/csv; charset=utf-8" },
+        customMetadata: retentionMetadata(),
+      },
+    );
+
     // README accompanies every bundle. Disclaimer text + revision context.
     const readme = buildExportReadme({
       exportId,
@@ -314,6 +355,7 @@ export async function POST(request: Request) {
       archiveSha256: sha256,
       manifestSha256,
       summarySha256,
+      attendeesSha256,
       proofsSha256,
     });
     const readmeKey = buildReadmeKey(month, exportId);
@@ -410,10 +452,12 @@ export async function POST(request: Request) {
         sha256,
         manifestSha256,
         summarySha256,
+        attendeesSha256,
         proofsSha256,
         archiveKey,
         manifestKey,
         summaryKey,
+        attendeesKey,
         readmeKey,
         proofsKey,
         finalized: body.finalize ?? false,

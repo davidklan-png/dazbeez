@@ -3,12 +3,17 @@ import assert from "node:assert/strict";
 import {
   buildMonthlyExportCsv,
   buildExportSummaryCsv,
+  resolveRowAttendees,
   bomPrefixedCrlf,
   hashCsvContent,
   buildArchiveKey,
   buildManifestKey,
   buildSummaryKey,
+  buildAttendeesKey,
+  resolveExportDownload,
+  buildExportReadme,
 } from "@/lib/receipts/export";
+import type { ReceiptAttendeeDirectoryEntry } from "@/lib/receipts/attendee-directory";
 import {
   ExportFinalizedError,
   transactionMonthOf,
@@ -86,7 +91,7 @@ function makeAmexLineRow(overrides: Partial<ExportRow> = {}): ExportRow {
 // ─── buildMonthlyExportCsv ────────────────────────────────────────────────────
 
 test("buildMonthlyExportCsv: produces header row with RowType", () => {
-  const csv = buildMonthlyExportCsv([], new Map());
+  const csv = buildMonthlyExportCsv([], new Map(), [], {});
   const header = csv.split("\n")[0]!;
   assert.ok(header.includes("RowType"), "header must include RowType");
   assert.ok(header.includes("Merchant"), "header must include Merchant");
@@ -97,14 +102,14 @@ test("buildMonthlyExportCsv: produces header row with RowType", () => {
 
 test("buildMonthlyExportCsv: one data row per input row", () => {
   const rows = [makeReceiptRow(), makeReceiptRow({ receiptId: "r-def-456" })];
-  const csv = buildMonthlyExportCsv(rows, new Map());
+  const csv = buildMonthlyExportCsv(rows, new Map(), [], {});
   const lines = csv.split("\n").filter((l) => l.trim());
   assert.equal(lines.length, 3, "header + 2 data rows");
 });
 
 test("buildMonthlyExportCsv: No is the first column and 1-based (proofs join key)", () => {
   const rows = [makeReceiptRow(), makeReceiptRow({ receiptId: "r-2" }), makeReceiptRow({ receiptId: "r-3" })];
-  const csv = buildMonthlyExportCsv(rows, new Map());
+  const csv = buildMonthlyExportCsv(rows, new Map(), [], {});
   const lines = csv.split("\n");
   assert.equal(lines[0]!.split(",")[0], "No", "No is the header's first column");
   // 1-based row sequence, first field of each data line.
@@ -117,6 +122,8 @@ test("buildMonthlyExportCsv: JPY amounts are not divided by 100", () => {
   const csv = buildMonthlyExportCsv(
     [makeReceiptRow({ amountMinor: 1500, currency: "JPY" })],
     new Map(),
+    [],
+    {},
   );
   assert.ok(csv.includes("1500"), "JPY amount should be 1500, not 15.00");
   assert.ok(!csv.includes("15.00"), "JPY should not be divided");
@@ -126,13 +133,15 @@ test("buildMonthlyExportCsv: USD amounts are divided by 100", () => {
   const csv = buildMonthlyExportCsv(
     [makeReceiptRow({ amountMinor: 1250, currency: "USD" })],
     new Map(),
+    [],
+    {},
   );
   assert.ok(csv.includes("12.50"), "USD 1250 minor units should display as 12.50");
 });
 
 test("buildMonthlyExportCsv: null amount renders as empty string", () => {
   const row = makeReceiptRow({ amountMinor: null });
-  const csv = buildMonthlyExportCsv([row], new Map());
+  const csv = buildMonthlyExportCsv([row], new Map(), [], {});
   const dataLine = csv.split("\n")[1]!;
   const cols = dataLine.split(",");
   // Header: No(0), RowType(1), TransactionDate(2), Merchant(3), Amount(4)
@@ -142,7 +151,7 @@ test("buildMonthlyExportCsv: null amount renders as empty string", () => {
 test("buildMonthlyExportCsv: attendees are joined with semicolons and quoted", () => {
   const row = makeReceiptRow({ receiptId: "r-1" });
   const attendeeMap = new Map([["r-1", ["Alice Nakamura", "Bob Smith"]]]);
-  const csv = buildMonthlyExportCsv([row], attendeeMap);
+  const csv = buildMonthlyExportCsv([row], attendeeMap, [], {});
   assert.ok(
     csv.includes('"Alice Nakamura; Bob Smith"'),
     "attendees should be semicolon-joined and quoted",
@@ -151,18 +160,18 @@ test("buildMonthlyExportCsv: attendees are joined with semicolons and quoted", (
 
 test("buildMonthlyExportCsv: merchant with commas is properly quoted", () => {
   const row = makeReceiptRow({ merchant: "Shop, Ltd." });
-  const csv = buildMonthlyExportCsv([row], new Map());
+  const csv = buildMonthlyExportCsv([row], new Map(), [], {});
   assert.ok(csv.includes('"Shop, Ltd."'), "comma in merchant must be quoted");
 });
 
 test("buildMonthlyExportCsv: merchant with double-quotes is escaped", () => {
   const row = makeReceiptRow({ merchant: 'Shop "Best" Ltd.' });
-  const csv = buildMonthlyExportCsv([row], new Map());
+  const csv = buildMonthlyExportCsv([row], new Map(), [], {});
   assert.ok(csv.includes('"Shop ""Best"" Ltd."'), "double quotes must be escaped");
 });
 
 test("buildMonthlyExportCsv: AMEX line row carries line-only fields", () => {
-  const csv = buildMonthlyExportCsv([makeAmexLineRow()], new Map());
+  const csv = buildMonthlyExportCsv([makeAmexLineRow()], new Map(), [], {});
   assert.ok(csv.includes("amex_line"), "rowType=amex_line must appear");
   assert.ok(csv.includes("amex-line-1"), "lineId must be present");
   assert.ok(csv.includes("David Klan"), "cardholderName must be present");
@@ -181,7 +190,7 @@ test("buildMonthlyExportCsv: missing-receipt line ships with reason in CSV", () 
     merchant: "Airport Coffee",
     attendees: [],
   });
-  const csv = buildMonthlyExportCsv([row], new Map());
+  const csv = buildMonthlyExportCsv([row], new Map(), [], {});
   assert.ok(csv.includes("missing_receipt"), "receiptStatus must be present");
   assert.ok(csv.includes("Lost during travel"), "missingReceiptReason must be present");
 });
@@ -191,7 +200,7 @@ test("buildMonthlyExportCsv: formula-injection guard prefixes = + - @", () => {
   // so Excel does not evaluate it as a formula on open.
   for (const prefix of ["=", "+", "-", "@"]) {
     const row = makeReceiptRow({ merchant: `${prefix}cmd|'/c calc'!A1` });
-    const csv = buildMonthlyExportCsv([row], new Map());
+    const csv = buildMonthlyExportCsv([row], new Map(), [], {});
     assert.ok(
       csv.includes(`'${prefix}cmd`),
       `merchant starting with ${prefix} must be single-quote prefixed`,
@@ -203,7 +212,7 @@ test("buildMonthlyExportCsv: matched receipt attendees read from bundle.attendee
   // A receipt matched to a line should still surface its attendees even if
   // the caller passed an empty attendeeMap (the bundle row carries them).
   const row = makeAmexLineRow({ attendees: ["Inline Attendee"] });
-  const csv = buildMonthlyExportCsv([row], new Map());
+  const csv = buildMonthlyExportCsv([row], new Map(), [], {});
   assert.ok(csv.includes("Inline Attendee"), "row.attendees used as fallback");
 });
 
@@ -279,6 +288,8 @@ test("buildMonthlyExportCsv: compliance columns populated from receipt", () => {
       counterpartyName: "Power Lunch Sushi K.K.",
     })],
     new Map(),
+    [],
+    {},
   );
   assert.ok(csv.includes("T2810074043972"), "invoice registration number");
   assert.ok(csv.includes("valid"), "qualified invoice status");
@@ -289,7 +300,7 @@ test("buildMonthlyExportCsv: compliance columns populated from receipt", () => {
 });
 
 test("buildMonthlyExportCsv: header carries compliance column names", () => {
-  const csv = buildMonthlyExportCsv([], new Map());
+  const csv = buildMonthlyExportCsv([], new Map(), [], {});
   const header = csv.split("\n")[0]!;
   for (const col of [
     "InvoiceRegistrationNumber",
@@ -380,4 +391,85 @@ test("buildArchiveKey: uses correct path pattern", () => {
 test("buildManifestKey: uses correct path pattern", () => {
   const key = buildManifestKey("2024-01", "export-uuid");
   assert.equal(key, "exports/2024-01/export-uuid-manifest.csv");
+});
+
+// ─── AttendeeIds column + attendees CSV (migration 0022) ─────────────────────
+
+const DIR: ReceiptAttendeeDirectoryEntry[] = [
+  { id: 5, company: "Acme", title: "Director", name: "Alice Nakamura" },
+  { id: 3, company: "Beta", title: "CFO", name: "Bob Smith" },
+];
+
+test("buildMonthlyExportCsv: AttendeeIds sits right after Attendees; resolved ids + ? for unresolved", () => {
+  const row = makeReceiptRow({ receiptId: "r-1" });
+  const attendeeMap = new Map([["r-1", ["Alice Nakamura", "Bob Smith", "Nobody Here"]]]);
+  const csv = buildMonthlyExportCsv([row], attendeeMap, DIR, {});
+  const dataLine = csv.split("\n")[1]!;
+  const cols = dataLine.split(",");
+  // Header layout: …(11) BusinessPurpose, (12) Attendees, (13) AttendeeIds, (14) LineId…
+  assert.equal(cols[12], '"Alice Nakamura; Bob Smith; Nobody Here"', "Attendees column");
+  assert.equal(cols[13], '"5; 3; ?"', "AttendeeIds: resolved ids '; '-joined, ? for unresolved");
+});
+
+test("buildMonthlyExportCsv: empty attendees row → empty Attendees + empty AttendeeIds", () => {
+  const row = makeReceiptRow({ receiptId: "r-1" });
+  const csv = buildMonthlyExportCsv([row], new Map(), DIR, {});
+  const cols = csv.split("\n")[1]!.split(",");
+  assert.equal(cols[12], '""', "empty Attendees column is quoted-empty");
+  assert.equal(cols[13], '""', "empty AttendeeIds column is quoted-empty");
+});
+
+test("buildMonthlyExportCsv: amex_line with no receipt attendees falls back to line attendees", () => {
+  // Closes the gap where line-level attendees satisfied the gate but vanished
+  // from the CSV. resolveRowAttendees returns the line's direct attendees when
+  // the row is an amex_line with no receipt attendees.
+  const row = makeAmexLineRow({ receiptId: "r-x", attendees: [] });
+  const attendeeMap = new Map<string, string[]>();
+  const amexAttendees: Record<string, string[]> = { "amex-line-1": ["Alice Nakamura"] };
+  const csv = buildMonthlyExportCsv([row], attendeeMap, DIR, amexAttendees);
+  assert.ok(csv.includes('"Alice Nakamura"'), "Attendees col shows line-attendee fallback");
+  assert.ok(csv.includes('"5"'), "AttendeeIds col resolves the line attendee");
+});
+
+test("resolveRowAttendees: receipt attendees win over line attendees when present", () => {
+  const row = makeAmexLineRow({ receiptId: "r-x" });
+  const attendeeMap = new Map([["r-x", ["Bob Smith"]]]);
+  const amexAttendees: Record<string, string[]> = { "amex-line-1": ["Alice Nakamura"] };
+  const names = resolveRowAttendees(row, attendeeMap, amexAttendees);
+  assert.deepEqual(names, ["Bob Smith"], "receipt attendees take precedence; no fallback");
+});
+
+test("buildAttendeesKey: uses correct path pattern", () => {
+  assert.equal(
+    buildAttendeesKey("2024-01", "export-uuid"),
+    "exports/2024-01/export-uuid-attendees.csv",
+  );
+});
+
+test("resolveExportDownload: attendees → derived key + csv content type", () => {
+  const r = resolveExportDownload(
+    "2026-06",
+    { id: "e1", archive_r2_key: "a", manifest_r2_key: "m" },
+    "attendees",
+  );
+  assert.equal(r.r2Key, "exports/2026-06/e1-attendees.csv");
+  assert.equal(r.contentType, "text/csv; charset=utf-8");
+  assert.equal(r.filename, "export-2026-06-attendees.csv");
+});
+
+test("buildExportReadme: lists Attendees CSV SHA-256 + files-included sentence", () => {
+  const readme = buildExportReadme({
+    exportId: "e1",
+    month: "2026-06",
+    rowCount: 3,
+    generatedAt: "t",
+    exportRevision: 1,
+    archiveSha256: "a",
+    manifestSha256: "m",
+    summarySha256: "s",
+    attendeesSha256: "att",
+    proofsSha256: "p",
+  });
+  assert.match(readme, /Attendees CSV SHA-256: att/);
+  assert.match(readme, /attendees CSV.*AttendeeIds/);
 });

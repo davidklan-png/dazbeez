@@ -247,8 +247,12 @@ function fakeEntry(over: Partial<ProofZipEntry>): ProofZipEntry {
 // breakdown too.
 const SUMMARY_CSV =
   "﻿Field,Value\r\nMonth,2026-06\r\n\r\n勘定科目,件数,合計金額\r\n研究開発費,1,108341\r\n\r\n総合計,1,108341\r\n";
+// 参加者一覧 (attendees) — same shape as the standalone attendees artifact
+// (BOM+CRLF), embedded byte-identical into the ZIP next to 集計.csv.
+const ATTENDEES_CSV =
+  "﻿AttendeeId,Name,Company,Title\r\n5,Alice Nakamura,Acme,Director\r\n";
 
-test("assembleProofsZip: UTF-8 names round-trip + 目次/集計/お知らせ present", () => {
+test("assembleProofsZip: UTF-8 names round-trip + 目次/集計/参加者一覧/お知らせ present", () => {
   const entries = [
     fakeEntry({ no: 3, ext: "pdf", paymentPath: "AMEX" }),
     fakeEntry({
@@ -266,6 +270,7 @@ test("assembleProofsZip: UTF-8 names round-trip + 目次/集計/お知らせ pre
     entries,
     { ...baseNotice, receiptCount: 2 },
     SUMMARY_CSV,
+    ATTENDEES_CSV,
   );
   const files = unzipSync(zip);
   const names = Object.keys(files);
@@ -283,9 +288,10 @@ test("assembleProofsZip: UTF-8 names round-trip + 目次/集計/お知らせ pre
     names.some((n) => n.includes("No33_旅費交通費_セブン-イレブン東中野末広橋店_¥10,000.jpg")),
     "cash proof filename (whitespace-stripped merchant) round-trips",
   );
-  // Index + summary + notice.
+  // Index + summary + attendees + notice.
   assert.ok(names.some((n) => n.endsWith("目次.csv")), "目次.csv present");
   assert.ok(names.some((n) => n.endsWith("集計.csv")), "集計.csv present");
+  assert.ok(names.some((n) => n.endsWith("参加者一覧.csv")), "参加者一覧.csv present");
   assert.ok(names.some((n) => n.endsWith("お知らせ.txt")), "お知らせ.txt present");
   // 集計.csv bytes == the standalone summary artifact (same bytes passed in).
   // Compare raw bytes — TextDecoder would strip the leading BOM and skew the
@@ -297,6 +303,15 @@ test("assembleProofsZip: UTF-8 names round-trip + 目次/集計/お知らせ pre
   assert.ok(
     shukeiBytes.every((b, i) => b === expectedShukei[i]),
     "集計.csv bytes identical to the standalone summary artifact",
+  );
+  // 参加者一覧.csv bytes == the standalone attendees artifact (same bytes in).
+  const sankashaKey = names.find((n) => n.endsWith("参加者一覧.csv"))!;
+  const sankashaBytes = files[sankashaKey];
+  const expectedSankasha = enc.encode(ATTENDEES_CSV);
+  assert.equal(sankashaBytes.length, expectedSankasha.length, "参加者一覧.csv byte length");
+  assert.ok(
+    sankashaBytes.every((b, i) => b === expectedSankasha[i]),
+    "参加者一覧.csv bytes identical to the standalone attendees artifact",
   );
 });
 
@@ -311,6 +326,7 @@ test("assembleProofsZip: 目次 No column matches entry nos (CSV⇄目次 contin
     entries,
     { ...baseNotice, receiptCount: 3 },
     SUMMARY_CSV,
+    ATTENDEES_CSV,
   );
   const files = unzipSync(zip);
   const mokuziKey = Object.keys(files).find((k) => k.endsWith("目次.csv"))!;

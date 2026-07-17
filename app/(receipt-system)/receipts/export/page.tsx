@@ -48,6 +48,7 @@ const BUNDLE_DOWNLOAD_LINKS = [
   { file: "summary", label: "Summary" },
   { file: "readme", label: "README" },
   { file: "proofs", label: "領収書ZIP" },
+  { file: "attendees", label: "参加者一覧" },
 ] as const;
 
 export default async function ExportPage({
@@ -142,7 +143,12 @@ export default async function ExportPage({
   // Honest CSV size: build the pure CSV (same call the route makes before
   // applying BOM/CRLF) and measure its UTF-8 byte length. BOM+CRLF add a
   // small constant overhead we ignore — the operator only needs a ballpark.
-  const pureCsv = buildMonthlyExportCsv(bundle.rows, bundle.attendeeMap);
+  const pureCsv = buildMonthlyExportCsv(
+    bundle.rows,
+    bundle.attendeeMap,
+    bundle.attendeeDirectory,
+    bundle.amexAttendees,
+  );
   const manifestSize = {
     rowsTotal: draftStats.rows,
     sizeBytes: new TextEncoder().encode(pureCsv).byteLength,

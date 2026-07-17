@@ -10,6 +10,7 @@ import { retentionUntilIso } from "@/lib/receipts/retention";
 import { assignMembershipForReceipt } from "@/lib/receipts/membership";
 import { deleteAmexArtifact } from "@/lib/receipts/storage";
 import { PENDING_EXTRACTION_STATES } from "@/lib/receipts/types";
+import type { ReceiptAttendeeDirectoryEntry } from "@/lib/receipts/attendee-directory";
 import type {
   AmexMatchStatus,
   AmexReceiptStatus,
@@ -616,6 +617,75 @@ export async function listAttendeeNamesByReceiptIds(
     arr.push(row.attendee_name);
   }
   return out;
+}
+
+// ─── Attendee directory (migration 0022) ──────────────────────────────────────
+// The company/title lookup the monthly export bundle joins attendee ids against.
+// Resolution against receipt_attendees / amex_line_attendees is by EXACT name
+// match (see resolveAttendeeNames); this table is the single source of those
+// names + their company/title. Runtime reads live data — the TS seed array
+// (ATTENDEE_DIRECTORY_SEED) populated the table once and is now a test fixture.
+
+export async function listAttendeeDirectory(): Promise<ReceiptAttendeeDirectoryEntry[]> {
+  const db = getReceiptsDb();
+  const result = await db
+    .prepare(`SELECT id, name, company, title FROM attendee_directory ORDER BY id ASC`)
+    .all<ReceiptAttendeeDirectoryEntry>();
+  return result.results ?? [];
+}
+
+/**
+ * Register a new attendee directory entry. Id is omitted (SQLite assigns a
+ * rowid > 66 so seeded ids 1–66 stay stable). Inputs are trimmed; empty
+ * strings are rejected before the call (the route validates), and this is the
+ * last line of defense. The UNIQUE(name) constraint is surfaced to the caller
+ * via a thrown Error whose message contains "UNIQUE" so the route can map it
+ * to a 409 "already registered".
+ */
+export async function createAttendeeDirectoryEntry(
+  input: { name: string; company: string; title: string },
+  actor: string,
+): Promise<ReceiptAttendeeDirectoryEntry> {
+  const name = input.name.trim();
+  const company = input.company.trim();
+  const title = input.title.trim();
+  if (!name || !company || !title) {
+    throw new Error("name, company, and title are all required (non-empty).");
+  }
+
+  const db = getReceiptsDb();
+  const now = nowIso();
+
+  // INSERT without id → SQLite picks the next rowid. RETURNING gives us the
+  // assigned id so the caller gets back the exact entry written.
+  const inserted = await db
+    .prepare(
+      `INSERT INTO attendee_directory (name, company, title, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?)
+       RETURNING id, name, company, title`,
+    )
+    .bind(name, company, title, now, now)
+    .first<ReceiptAttendeeDirectoryEntry>();
+
+  // D1 supports RETURNING; if it ever returned null, fall back to a lookup.
+  const entry = inserted ?? await db
+    .prepare(`SELECT id, name, company, title FROM attendee_directory WHERE name = ?`)
+    .bind(name)
+    .first<ReceiptAttendeeDirectoryEntry>();
+
+  if (!entry) {
+    throw new Error("attendee_directory insert returned no row unexpectedly.");
+  }
+
+  await createAuditEntry(db, {
+    actor,
+    action: "attendee_directory.created",
+    objectType: "attendee_directory",
+    objectId: String(entry.id),
+    newValueJson: stringifyJson({ name: entry.name, company: entry.company, title: entry.title }),
+  });
+
+  return entry;
 }
 
 // ─── AMEX statement lines ─────────────────────────────────────────────────────

@@ -147,7 +147,10 @@ export type AuditAction =
   // ADR 0008 one-time policy migration (window → calendar month). Replaces the
   // ADR 0006 _window_drift action — calendar membership has no AMEX-line
   // dependency, so drift detection is retired.
-  | "receipt.export_statement_month_policy_migrated";
+  | "receipt.export_statement_month_policy_migrated"
+  // Attendee directory (migration 0022): a new entry registered from the
+  // review UI. Attended identity = directory name; company/title NOT NULL.
+  | "attendee_directory.created";
 
 // ─── Compliance: source / preservation / qualified-invoice ────────────────
 

@@ -2,6 +2,16 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { validateAmexLinesForSignoff } from "@/lib/receipts/reconciliation-signoff";
 import type { AmexStatementLine, ReceiptRecord } from "@/lib/receipts/types";
+import type { ReceiptAttendeeDirectoryEntry } from "@/lib/receipts/attendee-directory";
+
+// Attendee-directory fixtures (migration 0022). EMPTY_DIR = nothing resolves
+// (so attendee-present + requires-attendees lines would block on resolution,
+// unless the line has no attendees at all). ATTENDEES_DIR resolves Alice & Bob.
+const EMPTY_DIR: ReceiptAttendeeDirectoryEntry[] = [];
+const ATTENDEES_DIR: ReceiptAttendeeDirectoryEntry[] = [
+  { id: 1, company: "C", title: "T", name: "Alice" },
+  { id: 2, company: "C", title: "T", name: "Bob" },
+];
 
 function makeLine(overrides: Partial<AmexStatementLine> = {}): AmexStatementLine {
   return {
@@ -83,7 +93,7 @@ test("signoff validator: no-receipt line uses line category", () => {
     receipt_missing_reason: "lost",
     expense_category_code: "office_supplies",
   });
-  const blockers = validateAmexLinesForSignoff([line], {}, new Map(), new Map());
+  const blockers = validateAmexLinesForSignoff([line], {}, new Map(), new Map(), EMPTY_DIR);
   // Office supplies doesn't require attendees; line category is set; no blockers.
   assert.deepEqual(blockers, []);
 });
@@ -96,7 +106,7 @@ test("signoff validator: no-receipt line with null line category still blocks", 
     receipt_missing_reason: "lost",
     expense_category_code: null,
   });
-  const blockers = validateAmexLinesForSignoff([line], {}, new Map(), new Map());
+  const blockers = validateAmexLinesForSignoff([line], {}, new Map(), new Map(), EMPTY_DIR);
   assert.ok(blockers.some((b) => b.includes("missing expense category")));
 });
 
@@ -119,6 +129,7 @@ test("signoff validator: receipt-linked line with null LINE category and categor
     {},
     new Map(),
     receiptMap,
+    EMPTY_DIR,
   );
   assert.deepEqual(blockers, []);
 });
@@ -141,6 +152,7 @@ test("signoff validator: receipt-linked line with categorized RECEIPT requiring 
     {},
     receiptAttendeeMap,
     receiptMap,
+    ATTENDEES_DIR,
   );
   assert.deepEqual(blockers, []);
 });
@@ -163,8 +175,61 @@ test("signoff validator: receipt-linked line with categorized RECEIPT but no att
     {},
     new Map(),
     receiptMap,
+    EMPTY_DIR,
   );
   assert.ok(blockers.some((b) => b.includes("requires attendees")));
+});
+
+test("signoff validator: meeting line with an unresolved attendee name blocks on the directory", () => {
+  // Attendees ARE present (so "requires attendees" does not fire), but one name
+  // doesn't resolve to the directory → company/title blocker (migration 0022).
+  const line = makeLine({
+    matched_receipt_id: "r-1",
+    match_status: "confirmed",
+    receipt_status: "matched",
+    expense_category_code: null,
+  });
+  const receipt = makeReceipt({ id: "r-1", expense_category_code: "meeting" });
+  const receiptMap = new Map([[receipt.id, receipt]]);
+  const receiptAttendeeMap = new Map([["r-1", ["Alice", "Ghost"]]]);
+  const blockers = validateAmexLinesForSignoff(
+    [line],
+    {},
+    receiptAttendeeMap,
+    receiptMap,
+    ATTENDEES_DIR, // resolves Alice, NOT Ghost
+  );
+  assert.ok(
+    blockers.some(
+      (b) => b.includes("Ghost") && b.includes("not registered in the attendee directory"),
+    ),
+    JSON.stringify(blockers),
+  );
+});
+
+test("signoff validator: direct line attendees also resolve against the directory", () => {
+  // amexAttendees (line-level, no linked receipt) join the union and resolve too.
+  const line = makeLine({
+    matched_receipt_id: null,
+    match_status: "no_receipt",
+    receipt_status: "no_receipt_required",
+    receipt_missing_reason: "lost",
+    expense_category_code: "meeting",
+  });
+  const amexAttendees = { "line-1": ["Ghost"] };
+  const blockers = validateAmexLinesForSignoff(
+    [line],
+    amexAttendees,
+    new Map(),
+    new Map(),
+    ATTENDEES_DIR,
+  );
+  assert.ok(
+    blockers.some(
+      (b) => b.includes("Ghost") && b.includes("not registered in the attendee directory"),
+    ),
+    JSON.stringify(blockers),
+  );
 });
 
 test("signoff validator: dangling match (matched_receipt_id set, receipt missing) falls back to line", () => {
@@ -177,7 +242,7 @@ test("signoff validator: dangling match (matched_receipt_id set, receipt missing
     expense_category_code: "office_supplies",
   });
   // Empty receiptMap — receipt was deleted.
-  const blockers = validateAmexLinesForSignoff([line], {}, new Map(), new Map());
+  const blockers = validateAmexLinesForSignoff([line], {}, new Map(), new Map(), EMPTY_DIR);
   assert.deepEqual(blockers, []);
 });
 
@@ -209,13 +274,13 @@ function makeConsolidatedPair(receiptTotal: number) {
 
 test("signoff validator: consolidated receipt with exact group sum passes", () => {
   const { lines, receiptMap } = makeConsolidatedPair(2864 + 4185);
-  const blockers = validateAmexLinesForSignoff(lines, {}, new Map(), receiptMap);
+  const blockers = validateAmexLinesForSignoff(lines, {}, new Map(), receiptMap, EMPTY_DIR);
   assert.deepEqual(blockers, []);
 });
 
 test("signoff validator: consolidated receipt with mismatched group sum blocks", () => {
   const { lines, receiptMap } = makeConsolidatedPair(9999);
-  const blockers = validateAmexLinesForSignoff(lines, {}, new Map(), receiptMap);
+  const blockers = validateAmexLinesForSignoff(lines, {}, new Map(), receiptMap, EMPTY_DIR);
   assert.ok(
     blockers.some((b) => b.includes("Consolidated receipt") && b.includes("9999")),
     `expected consolidated-sum blocker, got: ${JSON.stringify(blockers)}`,
@@ -234,6 +299,7 @@ test("signoff validator: single-line amount mismatch is NOT a consolidated block
     {},
     new Map(),
     new Map([[receipt.id, receipt]]),
+    EMPTY_DIR,
   );
   assert.deepEqual(blockers, []);
 });
@@ -245,7 +311,7 @@ test("signoff validator: unmatched line still blocks on missing receipt confirma
     receipt_status: "missing_receipt",
     expense_category_code: "office_supplies",
   });
-  const blockers = validateAmexLinesForSignoff([line], {}, new Map(), new Map());
+  const blockers = validateAmexLinesForSignoff([line], {}, new Map(), new Map(), EMPTY_DIR);
   // Should have at least: unresolved match status, missing receipt requires reason.
   assert.ok(blockers.length >= 2, `expected at least 2 blockers, got: ${JSON.stringify(blockers)}`);
 });
