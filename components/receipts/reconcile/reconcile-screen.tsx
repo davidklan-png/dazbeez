@@ -14,6 +14,7 @@ import Link from "next/link";
 import { Btn } from "@/components/ui/btn";
 import { Card } from "@/components/ui/card";
 import { Pill } from "@/components/ui/pill";
+import { BusinessTripStrip } from "@/components/receipts/reconcile/business-trip-strip";
 import { Field, SelectInput, TextInput } from "@/components/ui/field";
 import { Kbd } from "@/components/ui/kbd";
 import {
@@ -1270,49 +1271,19 @@ function DetailPane({
         </div>
       </Card>
 
-      {/* Business trip strip */}
+      {/* Business trip strip — delegates to the trip when linked (ADR 0010 D4) */}
       {line.business_trip_status === "candidate" && (
-        <div
-          className="mt-4 flex items-center gap-3.5 rounded-xl border border-amber-200 px-5 py-3.5"
-          style={{
-            background: "linear-gradient(135deg, #FFFBEB, #FEF3C7)",
-          }}
-        >
-          <div className="text-[22px]">🐝</div>
-          <div className="flex-1">
-            <div className="text-[13px] font-semibold text-gray-900">
-              Part of a candidate business trip
-            </div>
-              <div className="mt-0.5 text-[12px] text-gray-600">
-              Linked to a trip cluster. Review & confirm the trip to lock the
-              window.
-            </div>
-          </div>
-          {!locked && (
-            <div className="flex gap-2">
-              <Btn
-                kind="primary"
-                size="sm"
-                disabled={busy}
-                onClick={() =>
-                  onUpdateLineDetails(line.id, { businessTripStatus: "confirmed" })
-                }
-              >
-                Confirm
-              </Btn>
-              <Btn
-                kind="ghost"
-                size="sm"
-                disabled={busy}
-                onClick={() =>
-                  onUpdateLineDetails(line.id, { businessTripStatus: "excluded" })
-                }
-              >
-                Exclude
-              </Btn>
-            </div>
-          )}
-        </div>
+        <BusinessTripStrip
+          tripId={line.business_trip_id}
+          locked={locked}
+          busy={busy}
+          onLegacyConfirm={() =>
+            onUpdateLineDetails(line.id, { businessTripStatus: "confirmed" })
+          }
+          onLegacyExclude={() =>
+            onUpdateLineDetails(line.id, { businessTripStatus: "excluded" })
+          }
+        />
       )}
 
       {/* Keyboard hints */}

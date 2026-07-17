@@ -11,6 +11,7 @@ const NAV = [
   { href: "/receipts/review", label: "Review" },
   { href: "/receipts/amex", label: "AMEX" },
   { href: "/receipts/reconcile", label: "Reconcile" },
+  { href: "/receipts/trips", label: "Trips" },
   { href: "/receipts/export", label: "Export" },
   { href: "/receipts/settings", label: "Settings" },
 ] as const;

@@ -47,3 +47,21 @@ export function formatPaymentPath(path: string | null | undefined): string {
       return path ?? "—";
   }
 }
+
+/**
+ * Format a YYYY-MM-DD date as "Oct 12, 2026". Falls back to the raw input.
+ */
+export function formatDate(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const [y, m, d] = iso.split("-").map(Number);
+  if (!y || !m || !d) return iso;
+  try {
+    return new Date(y, m - 1, d).toLocaleDateString("en-US", {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+    });
+  } catch {
+    return iso;
+  }
+}
