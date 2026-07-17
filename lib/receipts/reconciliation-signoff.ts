@@ -1,4 +1,6 @@
 import type { AmexStatementLine, ReceiptRecord } from "@/lib/receipts/types";
+import type { ReceiptAttendeeDirectoryEntry } from "@/lib/receipts/attendee-directory";
+import { resolveAttendeeNames } from "@/lib/receipts/attendee-directory";
 import { requiresAttendees } from "@/lib/receipts/categories";
 import { resolveLineCategory } from "@/lib/receipts/line-classification";
 import { isUncategorizedLine } from "@/lib/receipts/blockers";
@@ -99,12 +101,21 @@ export function buildReconciliationManifestCsv(
  * `receiptMap` carries the matched receipts so category can be resolved
  * from the receipt (not the line) when a match exists. Callers must build
  * it from the matched_receipt_id set of the lines being validated.
+ *
+ * `attendeeDirectory` (5th param, migration 0022): when a line's resolved
+ * category requires attendees AND attendees are present, every attendee name
+ * (the union of the linked receipt's attendees + the line's direct attendees)
+ * must resolve to a directory entry — a name with no company/title on file is
+ * a blocker (business-manager review requirement: every 会議費/接待交際費 attendee
+ * must show company + title). Directory rows enforce company/title NOT NULL, so
+ * resolution alone proves completeness.
  */
 export function validateAmexLinesForSignoff(
   amexLines: AmexStatementLine[],
   amexAttendees: Record<string, string[]>,
   receiptAttendeeMap: Map<string, string[]>,
   receiptMap: Map<string, ReceiptRecord>,
+  attendeeDirectory: ReceiptAttendeeDirectoryEntry[],
 ): string[] {
   const blockers: string[] = [];
 
@@ -140,8 +151,18 @@ export function validateAmexLinesForSignoff(
         ? receiptAttendeeMap.get(line.matched_receipt_id) ?? []
         : [];
       const directAmexAttendees = amexAttendees[line.id] ?? [];
-      if (linkedReceiptAttendees.length === 0 && directAmexAttendees.length === 0) {
+      const names = [...linkedReceiptAttendees, ...directAmexAttendees];
+      if (names.length === 0) {
         blockers.push(`AMEX ${label}: requires attendees`);
+      } else {
+        // Attendees present → every name must resolve to a directory entry
+        // (company/title). Unresolved names block finalize.
+        const { unresolved } = resolveAttendeeNames(names, attendeeDirectory);
+        for (const name of unresolved) {
+          blockers.push(
+            `AMEX ${label}: attendee "${name}" is not registered in the attendee directory (company/title required)`,
+          );
+        }
       }
     }
     if (line.business_trip_status === "candidate") {

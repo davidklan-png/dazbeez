@@ -12,7 +12,7 @@ import { PaymentPathSeg } from "@/components/receipts/ui/payment-path-seg";
 import { AttendeeEditor } from "@/components/receipts/attendee-editor";
 import { useKeyboardShortcuts } from "@/lib/receipts/keyboard";
 import { isPendingProcessing } from "@/lib/receipts/extraction-state";
-import { RECEIPT_ATTENDEE_DIRECTORY } from "@/lib/receipts/attendee-directory";
+import type { ReceiptAttendeeDirectoryEntry } from "@/lib/receipts/attendee-directory";
 import {
   EXPENSE_CATEGORIES,
   getCategoryByCode,
@@ -113,6 +113,32 @@ export function FormPane(props: FormPaneProps) {
   // failed). Save succeeded, so this is a toast — not an error state.
   const [apiWarnings, setApiWarnings] = useState<string[]>([]);
   const [overrideBusy, setOverrideBusy] = useState(false);
+
+  // Attendee directory (migration 0022): loaded client-side from D1 on mount
+  // and passed to AttendeeEditor. The editor lets the operator register a new
+  // attendee inline (company/title); a freshly-registered entry is merged into
+  // this list so it resolves for the rest of the session without a reload.
+  const [directory, setDirectory] = useState<ReceiptAttendeeDirectoryEntry[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetch("/api/receipts/attendee-directory");
+        if (!res.ok) return;
+        const json = (await res.json().catch(() => ({}))) as {
+          entries?: ReceiptAttendeeDirectoryEntry[];
+        };
+        if (!cancelled && Array.isArray(json.entries)) {
+          setDirectory(json.entries);
+        }
+      } catch {
+        // Non-fatal: the editor still works as free-text without the datalist.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // ─── OCR extraction (delegated to the useExtraction hook) ───────────
   const {
@@ -608,7 +634,12 @@ export function FormPane(props: FormPaneProps) {
               <AttendeeEditor
                 attendees={attendees}
                 onChange={setAttendees}
-                directory={RECEIPT_ATTENDEE_DIRECTORY}
+                directory={directory}
+                onRegister={(entry) =>
+                  setDirectory((prev) =>
+                    prev.some((e) => e.id === entry.id) ? prev : [...prev, entry],
+                  )
+                }
               />
             </Field>
           </div>

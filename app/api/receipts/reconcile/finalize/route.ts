@@ -7,6 +7,7 @@ import {
   getFinalizedReconciliationForMonth,
   listAmexLineAttendeeNamesByMonth,
   listAmexLines,
+  listAttendeeDirectory,
   listAttendees,
   listPendingProcessingReceipts,
   listReceiptRecordsByIds,
@@ -85,6 +86,7 @@ export async function POST(request: Request) {
 
     // Validate: all lines must be resolved
     const amexAttendees = await listAmexLineAttendeeNamesByMonth(month);
+    const attendeeDirectory = await listAttendeeDirectory();
     const receiptIds = amexLines
       .map((line) => line.matched_receipt_id)
       .filter((id): id is string => Boolean(id));
@@ -101,7 +103,13 @@ export async function POST(request: Request) {
       if (entry) receiptAttendeeMap.set(entry[0], entry[1]);
     }
 
-    const blockers = validateAmexLinesForSignoff(amexLines, amexAttendees, receiptAttendeeMap, receiptMap);
+    const blockers = validateAmexLinesForSignoff(
+      amexLines,
+      amexAttendees,
+      receiptAttendeeMap,
+      receiptMap,
+      attendeeDirectory,
+    );
 
     if (blockers.length > 0) {
       return NextResponse.json(

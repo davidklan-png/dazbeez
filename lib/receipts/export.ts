@@ -1,4 +1,6 @@
 import type { ExportRow, ReceiptFile } from "@/lib/receipts/types";
+import type { ReceiptAttendeeDirectoryEntry } from "@/lib/receipts/attendee-directory";
+import { resolveAttendeeNames } from "@/lib/receipts/attendee-directory";
 import {
   ACCOUNTANT_DISCLAIMER_EN,
   ACCOUNTANT_DISCLAIMER_JA,
@@ -53,6 +55,9 @@ const CSV_HEADERS = [
   "ExpenseCategoryEn",
   "BusinessPurpose",
   "Attendees",
+  // Directory id per attendee position ("; "-joined, "?" for unresolved),
+  // aligned 1:1 with the Attendees column. Joins to the attendees CSV.
+  "AttendeeIds",
   // Line identity / status
   "LineId",
   "StatementMonth", // unused on receipt rows; populated from line when present
@@ -77,20 +82,55 @@ const CSV_HEADERS = [
 ];
 
 /**
+ * The effective attendee-name list for a row. Receipt attendees come from
+ * `attendeeMap` (the bundle's batched lookup); for `amex_line` rows with NO
+ * receipt attendees we fall back to the line's direct attendees
+ * (`amexAttendees[lineId]`). That fallback closes the gap where line-level
+ * attendees satisfied the finalize gate but vanished from the CSV. Shared by
+ * the receipts CSV builder (Attendees + AttendeeIds columns) and the route
+ * (to collect the union of referenced names for the attendees CSV).
+ */
+export function resolveRowAttendees(
+  row: ExportRow,
+  attendeeMap: Map<string, string[]>,
+  amexAttendees: Record<string, string[]>,
+): string[] {
+  const receiptAttendees = row.receiptId
+    ? (attendeeMap.get(row.receiptId) ?? row.attendees ?? [])
+    : (row.attendees ?? []);
+  if (row.rowType === "amex_line" && receiptAttendees.length === 0 && row.lineId) {
+    return amexAttendees[row.lineId] ?? receiptAttendees;
+  }
+  return receiptAttendees;
+}
+
+/**
  * Build the monthly export CSV body (no BOM, LF newlines). The route
  * prepends the UTF-8 BOM and converts to CRLF before upload so Excel on
  * Windows parses Japanese text correctly. Tests exercise this pure form.
+ *
+ * `attendeeDirectory` + `amexAttendees` drive the new `AttendeeIds` column
+ * (directory ids joined "; ", "?" for unresolved, positionally aligned with
+ * the `Attendees` column) and the line-attendee fallback (see
+ * {@link resolveRowAttendees}).
  */
 export function buildMonthlyExportCsv(
   rows: ExportRow[],
   attendeeMap: Map<string, string[]>,
+  attendeeDirectory: ReceiptAttendeeDirectoryEntry[],
+  amexAttendees: Record<string, string[]>,
 ): string {
   const lines: string[] = [CSV_HEADERS.join(",")];
 
   rows.forEach((row, index) => {
-    const attendees = row.receiptId
-      ? (attendeeMap.get(row.receiptId) ?? row.attendees ?? [])
-      : (row.attendees ?? []);
+    const attendees = resolveRowAttendees(row, attendeeMap, amexAttendees);
+    // AttendeeIds: directory id per position ("?" when unresolved) so the two
+    // columns stay aligned. Unresolved names are expected in DRAFTS (the
+    // operator sees gaps); the finalize gate blocks them before sealing.
+    const { entries } = resolveAttendeeNames(attendees, attendeeDirectory);
+    const attendeeIds = entries
+      .map((e) => (e ? String(e.id) : "?"))
+      .join("; ");
     const line = [
       // No: 1-based row sequence. The join key between this CSV and the proofs
       // ZIP filenames (No03_研究開発費_OpenAI_¥108341.pdf) — the accountant
@@ -108,6 +148,7 @@ export function buildMonthlyExportCsv(
       csvEscape(row.expenseCategoryEn),
       csvEscape(row.businessPurpose),
       csvQuoteAlways(attendees.join("; ")),
+      csvQuoteAlways(attendeeIds),
       csvEscape(row.lineId),
       // StatementMonth column is intentionally empty here; line.statement_month
       // matches the bundle's month so it's redundant on line rows and
@@ -240,6 +281,38 @@ export function buildSummaryKey(month: string, exportId: string): string {
   return `exports/${month}/${exportId}-summary.csv`;
 }
 
+export function buildAttendeesKey(month: string, exportId: string): string {
+  return `exports/${month}/${exportId}-attendees.csv`;
+}
+
+/**
+ * 参加者一覧 (attendees) CSV — maps the receipts CSV's `AttendeeIds` column to
+ * each attendee's name/company/title. Contains ONLY directory entries
+ * referenced by this bundle's rows (the caller passes the union of attendee
+ * names across rows), deduped and sorted by id. `csvEscape` every cell: names
+ * and companies contain commas in Japanese punctuation contexts.
+ */
+export function buildAttendeesExportCsv(
+  referencedNames: string[],
+  directory: ReceiptAttendeeDirectoryEntry[],
+): string {
+  const { entries } = resolveAttendeeNames(referencedNames, directory);
+  const seen = new Set<number>();
+  const rows: ReceiptAttendeeDirectoryEntry[] = [];
+  for (const entry of entries) {
+    if (entry && !seen.has(entry.id)) {
+      seen.add(entry.id);
+      rows.push(entry);
+    }
+  }
+  rows.sort((a, b) => a.id - b.id);
+  const header = "AttendeeId,Name,Company,Title";
+  const body = rows.map((r) =>
+    [String(r.id), r.name, r.company, r.title].map((c) => csvEscape(c)).join(","),
+  );
+  return [header, ...body].join("\n");
+}
+
 export function buildProofsKey(month: string, exportId: string): string {
   return `exports/${month}/${exportId}-proofs.zip`;
 }
@@ -347,6 +420,7 @@ export const EXPORT_DOWNLOAD_FILES = [
   "summary",
   "readme",
   "proofs",
+  "attendees",
 ] as const;
 
 export type ExportDownloadFile = (typeof EXPORT_DOWNLOAD_FILES)[number];
@@ -388,6 +462,14 @@ export function resolveExportDownload(
         r2Key: buildSummaryKey(month, exportRecord.id),
         contentType: csv,
         filename: `export-${month}-summary.csv`,
+      };
+    case "attendees":
+      // Derived key (like summary — no column on receipt_exports). Old sealed
+      // revisions predate this artifact and simply 404 from R2.
+      return {
+        r2Key: buildAttendeesKey(month, exportRecord.id),
+        contentType: csv,
+        filename: `export-${month}-attendees.csv`,
       };
     case "readme":
       return {
@@ -531,6 +613,7 @@ export function buildExportReadme(opts: {
   archiveSha256: string;
   manifestSha256?: string | null;
   summarySha256?: string | null;
+  attendeesSha256?: string | null;
   proofsSha256?: string | null;
 }): string {
   const revisionLine =
@@ -546,6 +629,7 @@ export function buildExportReadme(opts: {
     `Archive SHA-256: ${opts.archiveSha256}`,
     `Manifest SHA-256: ${opts.manifestSha256 ?? "(pending)"}`,
     `Summary SHA-256: ${opts.summarySha256 ?? "(none)"}`,
+    `Attendees CSV SHA-256: ${opts.attendeesSha256 ?? "(none)"}`,
     `Proofs ZIP SHA-256: ${opts.proofsSha256 ?? "(none)"}`,
     "",
     "── Accountant review ──────────────────────────────────────────",
@@ -558,6 +642,8 @@ export function buildExportReadme(opts: {
     "derivative, and the AMEX statement CSV included in this export.",
     "The summary CSV (<exportId>-summary.csv) provides per-category and",
     "per-PaymentPath totals for a quick reconciliation check.",
+    "The attendees CSV (<exportId>-attendees.csv) maps the AttendeeIds",
+    "column to each attendee's name, company, and title.",
     "The proofs ZIP (<exportId>-proofs.zip) bundles one proof per receipt,",
     "named No<NN>_<勘定科目>_<店舗>_¥<金額> — the No matches the receipts",
     "CSV's first column. See 目次.csv inside the ZIP for the full index.",

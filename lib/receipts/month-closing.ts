@@ -1,8 +1,11 @@
 import { getCategoryByCode, requiresAttendees } from "@/lib/receipts/categories";
+import type { ReceiptAttendeeDirectoryEntry } from "@/lib/receipts/attendee-directory";
+import { resolveAttendeeNames } from "@/lib/receipts/attendee-directory";
 import {
   getFinalizedReconciliationForMonth,
   listAmexLineAttendeeNamesByMonth,
   listAmexLines,
+  listAttendeeDirectory,
   listAttendeeNamesByReceiptIds,
   listReceiptRecordsByIds,
 } from "@/lib/receipts/db";
@@ -60,6 +63,22 @@ export interface ExportBundle {
   /** Attendees for every receipt in `receipts`, keyed by receipt id. */
   attendeeMap: Map<string, string[]>;
   /**
+   * Attendee directory (migration 0022): the company/title lookup the receipts
+   * CSV's `AttendeeIds` column joins against and the finalize gate resolves
+   * attendee names against. Single load point — the route, the page preview,
+   * and the validator all read it from here.
+   */
+  attendeeDirectory: ReceiptAttendeeDirectoryEntry[];
+  /**
+   * Attendee names attached directly to AMEX lines for the month, keyed by
+   * line id. Moved out of `validateMonthReadyForExport` (its former private
+   * `listAmexLineAttendeeNamesByMonth` call) into the bundle so the receipts
+   * CSV builder can also see line-level attendees (the gap where line
+   * attendees satisfied the gate but vanished from the CSV). The bundle is the
+   * single row-assembly authority (audit A4).
+   */
+  amexAttendees: Record<string, string[]>;
+  /**
    * Per-row items to write into receipt_export_items at bundle-build time.
    * itemType 'receipt' covers BOTH matched-to-line and CASH/DIGITAL receipt
    * rows — the audit story is "what shipped", not "how it got there".
@@ -103,6 +122,15 @@ export async function buildExportBundle(month: string): Promise<ExportBundle> {
   const attendeeMap = allReceiptIds.length > 0
     ? await listAttendeeNamesByReceiptIds(allReceiptIds)
     : new Map<string, string[]>();
+
+  // (4b) Attendee directory (migration 0022) + line-level attendees. Both feed
+  // the CSV builder (AttendeeIds column / line-attendee fallback) and the
+  // finalize gate (name resolution). Single load point — the route, the page
+  // preview, and the validator all read them from the bundle.
+  const [attendeeDirectory, amexAttendees] = await Promise.all([
+    listAttendeeDirectory(),
+    listAmexLineAttendeeNamesByMonth(month),
+  ]);
 
   // (5) Assemble rows. AMEX-line rows first (in line order —
   // listAmexLines already sorts by transaction_date), then receipt rows.
@@ -186,7 +214,7 @@ export async function buildExportBundle(month: string): Promise<ExportBundle> {
     items.push({ itemType: "receipt", itemId: receipt.id });
   }
 
-  return { rows, receipts: allReceipts, amexLines, attendeeMap, items };
+  return { rows, receipts: allReceipts, amexLines, attendeeMap, attendeeDirectory, amexAttendees, items };
 }
 
 /**
@@ -306,7 +334,19 @@ export function validateMonthReadyForExportCore(
     }
     if (requiresAttendees(receipt.expense_category_code)) {
       const attendees = bundle.attendeeMap.get(receipt.id) ?? [];
-      if (attendees.length === 0) blockers.push(`Receipt ${label}: requires attendees`);
+      if (attendees.length === 0) {
+        blockers.push(`Receipt ${label}: requires attendees`);
+      } else {
+        // Attendees present → every name must resolve to a directory entry
+        // (company/title). Unresolved names block finalize (business-manager
+        // review: every 会議費/接待交際費 attendee must show company + title).
+        const { unresolved } = resolveAttendeeNames(attendees, bundle.attendeeDirectory);
+        for (const name of unresolved) {
+          blockers.push(
+            `Receipt ${label}: attendee "${name}" is not registered in the attendee directory (company/title required)`,
+          );
+        }
+      }
     }
   }
 
@@ -319,6 +359,7 @@ export function validateMonthReadyForExportCore(
       amexAttendees,
       bundle.attendeeMap,
       receiptMap,
+      bundle.attendeeDirectory,
     ),
   );
 
@@ -407,8 +448,11 @@ export async function validateMonthReadyForExport(
   // (pending-exclusion) to each.
   const unreviewedReceipts = [...bundle.receipts, ...unknownInScope];
 
-  // (4) AMEX-line attendees.
-  const amexAttendees = await listAmexLineAttendeeNamesByMonth(month);
+  // (4) AMEX-line attendees — sourced from the bundle (buildExportBundle loads
+  // them once). The validator input field stays; it now reflects the bundle so
+  // the route, the page preview, and the validator share one row-assembly
+  // authority (audit A4).
+  const amexAttendees = bundle.amexAttendees;
 
   // (5) Compliance — month filter UNION bundle receipt IDs (matched receipts
   // may be dated outside the statement month; Codex P1).
