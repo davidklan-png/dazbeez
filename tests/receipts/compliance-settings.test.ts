@@ -66,3 +66,29 @@ test("settings: bool parsing accepts true/false/1/0", () => {
   assert.equal(settings.require_attendees_for_entertainment, false);
   assert.equal(settings.export_block_on_warnings, true);
 });
+
+// ─── homebase_signals (ADR 0010 D3) ──────────────────────────────────────────
+
+test("settings: homebase_signals JSON array round-trips", () => {
+  const settings = parseComplianceSettings([
+    { key: "homebase_signals", value: JSON.stringify(["大阪", "京都"]) },
+  ]);
+  assert.deepEqual(settings.homebase_signals, ["大阪", "京都"]);
+});
+
+test("settings: homebase_signals missing → default (former TOKYO_SIGNALS)", () => {
+  const settings = parseComplianceSettings([]);
+  assert.deepEqual(settings.homebase_signals, COMPLIANCE_DEFAULTS.homebase_signals);
+});
+
+test("settings: homebase_signals corrupt/non-array value falls back to default", () => {
+  const notJson = parseComplianceSettings([
+    { key: "homebase_signals", value: "not-json" },
+  ]);
+  assert.deepEqual(notJson.homebase_signals, COMPLIANCE_DEFAULTS.homebase_signals);
+
+  const nonStringArray = parseComplianceSettings([
+    { key: "homebase_signals", value: "[1, 2, 3]" },
+  ]);
+  assert.deepEqual(nonStringArray.homebase_signals, COMPLIANCE_DEFAULTS.homebase_signals);
+});

@@ -24,6 +24,7 @@ import {
 import { getReceiptsDb } from "@/lib/cloudflare-runtime";
 import { createReceiptFile } from "@/lib/receipts/files";
 import { createAuditEntry } from "@/lib/receipts/audit";
+import { getComplianceSettings } from "@/lib/receipts/settings";
 
 /*
  * AMEX CSV Import — Dedup Contract
@@ -263,7 +264,7 @@ export async function POST(request: Request) {
       const db = getReceiptsDb();
       const inserted = await db
         .prepare(
-          `SELECT id, cardholder_name, transaction_date, merchant
+          `SELECT id, cardholder_name, transaction_date, merchant, expense_category_code
            FROM amex_statement_lines
            WHERE statement_artifact_id = ?
            ORDER BY raw_csv_line_number ASC`,
@@ -274,6 +275,7 @@ export async function POST(request: Request) {
           cardholder_name: string | null;
           transaction_date: string;
           merchant: string;
+          expense_category_code: string | null;
         }>();
 
       const realLines = (inserted.results ?? []).map((r) => ({
@@ -281,9 +283,16 @@ export async function POST(request: Request) {
         cardholderName: r.cardholder_name,
         transactionDate: r.transaction_date,
         merchant: r.merchant,
+        expenseCategoryCode: r.expense_category_code,
       }));
 
-      const candidates = detectBusinessTripCandidates(realLines);
+      // ADR 0010 D3: homebase signals come from Settings → Compliance (was a
+      // hardcoded Tokyo list). Categories aren't set at first import, so the
+      // category-boost fires mainly on re-imports after the operator
+      // categorizes lines — which is also when the dedupe (createBusinessTripReports)
+      // matters most.
+      const homebaseSignals = (await getComplianceSettings()).homebase_signals;
+      const candidates = detectBusinessTripCandidates(realLines, homebaseSignals);
       if (candidates.length > 0) {
         await createBusinessTripReports(candidates, actor);
         businessTripCandidatesCount = candidates.length;

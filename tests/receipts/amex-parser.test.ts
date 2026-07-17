@@ -3,8 +3,9 @@ import assert from "node:assert/strict";
 import {
   parseAmexNetanswer,
   netanswerLinesToImportInputs,
-  isOutsideTokyo,
+  isOutsideHomebase,
   detectBusinessTripCandidates,
+  DEFAULT_HOMEBASE_SIGNALS,
 } from "@/lib/receipts/validation";
 
 // ─── Helper: build ArrayBuffer from a UTF-8 string ────────────────────────────
@@ -170,25 +171,31 @@ test("netanswerLinesToImportInputs: maps all fields correctly", () => {
   assert.equal(inputs[0]!.rawCsvLineNumber, lines[0]!.lineNumber);
 });
 
-// ─── isOutsideTokyo ────────────────────────────────────────────────────────────
+// ─── isOutsideHomebase (default signals reproduce former isOutsideTokyo) ────────
 
-test("isOutsideTokyo: Tokyo merchants return false", () => {
-  assert.equal(isOutsideTokyo("HUB 東京オペラシティ店"), false);
-  assert.equal(isOutsideTokyo("スターバックス 渋谷店"), false);
-  assert.equal(isOutsideTokyo("新宿レストラン"), false);
-  assert.equal(isOutsideTokyo("東京駅近くの店"), false);
+test("isOutsideHomebase: homebase (Tokyo) merchants return false", () => {
+  assert.equal(isOutsideHomebase("HUB 東京オペラシティ店", DEFAULT_HOMEBASE_SIGNALS), false);
+  assert.equal(isOutsideHomebase("スターバックス 渋谷店", DEFAULT_HOMEBASE_SIGNALS), false);
+  assert.equal(isOutsideHomebase("新宿レストラン", DEFAULT_HOMEBASE_SIGNALS), false);
+  assert.equal(isOutsideHomebase("東京駅近くの店", DEFAULT_HOMEBASE_SIGNALS), false);
 });
 
-test("isOutsideTokyo: outside-Tokyo merchants return true", () => {
-  assert.equal(isOutsideTokyo("ピーシーデポ バリューパック -神奈川県 横浜市"), true);
-  assert.equal(isOutsideTokyo("JTB KANAGAWANISHI"), true);
-  assert.equal(isOutsideTokyo("大阪駅前ホテル"), true);
-  assert.equal(isOutsideTokyo("京都レストラン"), true);
+test("isOutsideHomebase: outside-homebase merchants return true", () => {
+  assert.equal(isOutsideHomebase("ピーシーデポ バリューパック -神奈川県 横浜市", DEFAULT_HOMEBASE_SIGNALS), true);
+  assert.equal(isOutsideHomebase("JTB KANAGAWANISHI", DEFAULT_HOMEBASE_SIGNALS), true);
+  assert.equal(isOutsideHomebase("大阪駅前ホテル", DEFAULT_HOMEBASE_SIGNALS), true);
+  assert.equal(isOutsideHomebase("京都レストラン", DEFAULT_HOMEBASE_SIGNALS), true);
 });
 
-test("isOutsideTokyo: generic merchants return false", () => {
-  assert.equal(isOutsideTokyo("コンビニ"), false);
-  assert.equal(isOutsideTokyo("Amazon.com"), false);
+test("isOutsideHomebase: generic merchants return false", () => {
+  assert.equal(isOutsideHomebase("コンビニ", DEFAULT_HOMEBASE_SIGNALS), false);
+  assert.equal(isOutsideHomebase("Amazon.com", DEFAULT_HOMEBASE_SIGNALS), false);
+});
+
+test("isOutsideHomebase: homebase is configurable (Osaka as homebase → Osaka merchant no longer anchors)", () => {
+  // ADR 0010 D3: homebase is a setting, not a hardcoded city.
+  assert.equal(isOutsideHomebase("大阪駅前ホテル", [...DEFAULT_HOMEBASE_SIGNALS, "大阪"]), false);
+  assert.equal(isOutsideHomebase("京都レストラン", [...DEFAULT_HOMEBASE_SIGNALS, "大阪"]), true);
 });
 
 // ─── detectBusinessTripCandidates ─────────────────────────────────────────────
@@ -202,7 +209,7 @@ test("detectBusinessTripCandidates: single outside-Tokyo line does not create ca
       merchant: "ピーシーデポ バリューパック -神奈川県 横浜市",
     },
   ];
-  const candidates = detectBusinessTripCandidates(lines);
+  const candidates = detectBusinessTripCandidates(lines, DEFAULT_HOMEBASE_SIGNALS);
   assert.equal(candidates.length, 0);
 });
 
@@ -221,7 +228,7 @@ test("detectBusinessTripCandidates: two outside-Tokyo lines within window create
       merchant: "JTB KANAGAWANISHI",
     },
   ];
-  const candidates = detectBusinessTripCandidates(lines);
+  const candidates = detectBusinessTripCandidates(lines, DEFAULT_HOMEBASE_SIGNALS);
   assert.equal(candidates.length, 1);
   assert.equal(candidates[0]!.cardholderName, "David");
   assert.equal(candidates[0]!.startDate, "2026-03-10");
@@ -256,7 +263,7 @@ test("detectBusinessTripCandidates: lines beyond window are separate candidates"
       merchant: "札幌ホテル",
     },
   ];
-  const candidates = detectBusinessTripCandidates(lines);
+  const candidates = detectBusinessTripCandidates(lines, DEFAULT_HOMEBASE_SIGNALS);
   assert.equal(candidates.length, 2);
 });
 
@@ -287,7 +294,7 @@ test("detectBusinessTripCandidates: different cardholders are separate candidate
       merchant: "京都レストラン",
     },
   ];
-  const candidates = detectBusinessTripCandidates(lines);
+  const candidates = detectBusinessTripCandidates(lines, DEFAULT_HOMEBASE_SIGNALS);
   assert.equal(candidates.length, 2);
   const cardholders = candidates.map((c) => c.cardholderName).sort();
   assert.deepEqual(cardholders, ["Alice", "Bob"]);
@@ -308,7 +315,7 @@ test("detectBusinessTripCandidates: Tokyo-only lines do not generate candidates"
       merchant: "新宿レストラン",
     },
   ];
-  const candidates = detectBusinessTripCandidates(lines);
+  const candidates = detectBusinessTripCandidates(lines, DEFAULT_HOMEBASE_SIGNALS);
   assert.equal(candidates.length, 0);
 });
 

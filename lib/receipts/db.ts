@@ -11,6 +11,14 @@ import { assignMembershipForReceipt } from "@/lib/receipts/membership";
 import { deleteAmexArtifact } from "@/lib/receipts/storage";
 import { PENDING_EXTRACTION_STATES } from "@/lib/receipts/types";
 import type { ReceiptAttendeeDirectoryEntry } from "@/lib/receipts/attendee-directory";
+import {
+  computeTripStatusLineUpdates,
+  findOverlappingTrip,
+  decideWiden,
+  validateTripTransition,
+  type ExistingTrip,
+  type TripTransition,
+} from "@/lib/receipts/business-trips";
 import type {
   AmexMatchStatus,
   AmexReceiptStatus,
@@ -19,6 +27,7 @@ import type {
   AmexStatementArtifact,
   BusinessTripReport,
   BusinessTripCandidate,
+  BusinessTripStatus,
   CreateAmexArtifactInput,
   CreateAttendeeInput,
   CreateReceiptInput,
@@ -1587,72 +1596,87 @@ export async function getMissingStatementAlerts(
 export async function createBusinessTripReports(
   candidates: BusinessTripCandidate[],
   actor: string,
-): Promise<string[]> {
-  if (candidates.length === 0) return [];
+): Promise<{
+  created: number;
+  linked: number;
+  widened: number;
+  widenedSkipped: number;
+}> {
+  if (candidates.length === 0) {
+    return { created: 0, linked: 0, widened: 0, widenedSkipped: 0 };
+  }
   const db = getReceiptsDb();
   const now = nowIso();
-  const ids: string[] = [];
+  let created = 0;
+  let linked = 0;
+  let widened = 0;
+  let widenedSkipped = 0;
 
   for (const candidate of candidates) {
-    const tripId = newUuid();
+    // ADR 0010 D1 dedupe: link to an existing same-cardholder overlapping trip
+    // instead of minting a fresh UUID each run (the re-import duplicate defect).
+    const existing = await db
+      .prepare(
+        `SELECT id, cardholder_name, start_date, end_date, status
+         FROM business_trip_reports
+         WHERE cardholder_name = ? AND status IN ('candidate','confirmed')`,
+      )
+      .bind(candidate.cardholderName)
+      .all<ExistingTrip>();
+    const match = findOverlappingTrip(candidate, existing.results ?? []);
 
-    // One D1 batch per candidate: trip INSERT + chunked line-links INSERTs +
-    // chunked line UPDATEs. D1's 100-bind-variable per-statement limit means
-    // we can't put all line links in one statement (4 params each = 25 lines
-    // max), so we chunk both the inserts (20 lines × 4 = 80 binds) and the
-    // updates (2 + 20 ids = 22 binds).
-    const TRIP_CHUNK = 20;
-    const stmts = [
-      db
-        .prepare(
-          `INSERT INTO business_trip_reports
-            (id, cardholder_name, start_date, end_date, primary_location,
-             status, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, 'candidate', ?, ?)`,
-        )
-        .bind(
-          tripId,
-          candidate.cardholderName,
-          candidate.startDate,
-          candidate.endDate,
-          candidate.primaryLocation,
-          now,
-          now,
-        ),
-    ];
-
-    for (let j = 0; j < candidate.lineIds.length; j += TRIP_CHUNK) {
-      const chunkIds = candidate.lineIds.slice(j, j + TRIP_CHUNK);
-      const linkPlaceholders = chunkIds.map(() => "(?, ?, ?, ?)").join(",");
-      const linkBinds = chunkIds.flatMap((lineId) => [
-        newUuid(),
-        tripId,
-        lineId,
-        now,
-      ]);
-      stmts.push(
-        db
-          .prepare(
-            `INSERT OR IGNORE INTO business_trip_report_lines
-              (id, business_trip_report_id, amex_statement_line_id, created_at)
-             VALUES ${linkPlaceholders}`,
-          )
-          .bind(...linkBinds),
-      );
-
-      const idPlaceholders = chunkIds.map(() => "?").join(",");
-      stmts.push(
-        db
-          .prepare(
-            `UPDATE amex_statement_lines
-             SET business_trip_id = ?, business_trip_status = 'candidate', updated_at = ?
-             WHERE id IN (${idPlaceholders})`,
-          )
-          .bind(tripId, now, ...chunkIds),
-      );
+    if (match) {
+      const stmts = buildTripLineLinkStmts(db, match.id, candidate.lineIds, now);
+      const widen = decideWiden(match, candidate);
+      if (widen.kind === "widen") {
+        stmts.push(
+          db
+            .prepare(
+              `UPDATE business_trip_reports
+               SET start_date = ?, end_date = ?, updated_at = ?
+               WHERE id = ?`,
+            )
+            .bind(widen.range.start, widen.range.end, now, match.id),
+        );
+      }
+      await batchWrite(db, stmts);
+      await createAuditEntry(db, {
+        actor,
+        action: "business_trip.members_changed",
+        objectType: "business_trip",
+        objectId: match.id,
+        newValueJson: stringifyJson({
+          source: "detection_dedupe",
+          lineIds: candidate.lineIds,
+          range: widen.kind,
+        }),
+      });
+      linked += 1;
+      if (widen.kind === "widen") widened += 1;
+      else if (widen.kind === "skip") widenedSkipped += 1;
+      continue;
     }
 
-    await db.batch(stmts);
+    // No overlap → create a new candidate trip (detection suggestion).
+    const tripId = newUuid();
+    const insertStmt = db
+      .prepare(
+        `INSERT INTO business_trip_reports
+          (id, cardholder_name, start_date, end_date, primary_location,
+           status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 'candidate', ?, ?)`,
+      )
+      .bind(
+        tripId,
+        candidate.cardholderName,
+        candidate.startDate,
+        candidate.endDate,
+        candidate.primaryLocation,
+        now,
+        now,
+      );
+    const linkStmts = buildTripLineLinkStmts(db, tripId, candidate.lineIds, now);
+    await batchWrite(db, [insertStmt, ...linkStmts]);
 
     await createAuditEntry(db, {
       actor,
@@ -1661,11 +1685,65 @@ export async function createBusinessTripReports(
       objectId: tripId,
       newValueJson: stringifyJson(candidate),
     });
-
-    ids.push(tripId);
+    created += 1;
   }
 
-  return ids;
+  return { created, linked, widened, widenedSkipped };
+}
+
+/**
+ * Build the link-table INSERTs + line-status UPDATEs that attach `lineIds` to
+ * a trip. Detection links set line status 'candidate' only for lines not
+ * already 'confirmed'/'excluded' (never clobber an operator decision). Chunked
+ * for D1's per-statement bind ceiling (20 lines × 4 = 80 binds for inserts;
+ * 2 + 20 = 22 for updates).
+ */
+function buildTripLineLinkStmts(
+  db: D1Database,
+  tripId: string,
+  lineIds: string[],
+  now: string,
+): D1PreparedStatement[] {
+  const stmts: D1PreparedStatement[] = [];
+  const CHUNK = 20;
+  for (let j = 0; j < lineIds.length; j += CHUNK) {
+    const chunkIds = lineIds.slice(j, j + CHUNK);
+    const linkPlaceholders = chunkIds.map(() => "(?, ?, ?, ?)").join(",");
+    const linkBinds = chunkIds.flatMap((lineId) => [newUuid(), tripId, lineId, now]);
+    stmts.push(
+      db
+        .prepare(
+          `INSERT OR IGNORE INTO business_trip_report_lines
+            (id, business_trip_report_id, amex_statement_line_id, created_at)
+           VALUES ${linkPlaceholders}`,
+        )
+        .bind(...linkBinds),
+    );
+    const idPlaceholders = chunkIds.map(() => "?").join(",");
+    stmts.push(
+      db
+        .prepare(
+          `UPDATE amex_statement_lines
+           SET business_trip_id = ?, business_trip_status = 'candidate', updated_at = ?
+           WHERE id IN (${idPlaceholders})
+             AND business_trip_status NOT IN ('confirmed','excluded')`,
+        )
+        .bind(tripId, now, ...chunkIds),
+    );
+  }
+  return stmts;
+}
+
+/** Run a list of prepared statements in chunked batches (D1 caps ~30/batch). */
+async function batchWrite(
+  db: D1Database,
+  stmts: D1PreparedStatement[],
+): Promise<void> {
+  const CHUNK = 30;
+  for (let i = 0; i < stmts.length; i += CHUNK) {
+    const slice = stmts.slice(i, i + CHUNK);
+    if (slice.length > 0) await db.batch(slice);
+  }
 }
 
 export async function listBusinessTripReports(
@@ -1726,6 +1804,463 @@ export async function listAmexLinesForBusinessTripReports(
     }
   }
   return out;
+}
+
+// ─── Business trip CRUD + membership (ADR 0010) ──────────────────────────────
+
+export interface BusinessTripWithCounts extends BusinessTripReport {
+  line_count: number;
+  receipt_count: number;
+}
+
+/** All trips with member counts (lines + receipts) via correlated subqueries. */
+export async function listBusinessTripsWithCounts(): Promise<BusinessTripWithCounts[]> {
+  const db = getReceiptsDb();
+  const result = await db
+    .prepare(
+      `SELECT t.*,
+          (SELECT COUNT(*) FROM business_trip_report_lines l
+             WHERE l.business_trip_report_id = t.id) AS line_count,
+          (SELECT COUNT(*) FROM business_trip_report_receipts r
+             WHERE r.business_trip_report_id = t.id) AS receipt_count
+       FROM business_trip_reports t
+       ORDER BY t.start_date DESC, t.created_at DESC`,
+    )
+    .all<BusinessTripWithCounts>();
+  return result.results ?? [];
+}
+
+export interface CreateBusinessTripInput {
+  tripName?: string | null;
+  startDate: string;
+  endDate: string;
+  purpose?: string | null;
+  primaryLocation?: string | null;
+  cardholderName?: string | null;
+}
+
+/**
+ * Operator-created trip (POST /api/receipts/trips). Born `status='confirmed'`
+ * (explicit intent) — detection-created trips stay 'candidate'. cardholder_name
+ * is NOT NULL in the schema (0005); an absent cardholder defaults to
+ * 'OPERATOR' (the import path always supplies a cardholder).
+ */
+export async function createBusinessTrip(
+  input: CreateBusinessTripInput,
+  actor: string,
+): Promise<string> {
+  const db = getReceiptsDb();
+  const id = newUuid();
+  const now = nowIso();
+  const cardholder = input.cardholderName?.trim() || "OPERATOR";
+  await db
+    .prepare(
+      `INSERT INTO business_trip_reports
+        (id, trip_name, cardholder_name, start_date, end_date, primary_location,
+         status, purpose, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'confirmed', ?, ?, ?)`,
+    )
+    .bind(
+      id,
+      input.tripName?.trim() || null,
+      cardholder,
+      input.startDate,
+      input.endDate,
+      input.primaryLocation?.trim() || null,
+      input.purpose?.trim() || null,
+      now,
+      now,
+    )
+    .run();
+
+  await createAuditEntry(db, {
+    actor,
+    action: "business_trip.created",
+    objectType: "business_trip",
+    objectId: id,
+    newValueJson: stringifyJson({ ...input, cardholderName: cardholder, status: "confirmed" }),
+  });
+
+  return id;
+}
+
+export interface BusinessTripMemberLine {
+  id: string;
+  transaction_date: string;
+  merchant: string;
+  amount_minor: number;
+  statement_month: string;
+  business_trip_status: string;
+}
+
+export interface BusinessTripMemberReceipt {
+  id: string;
+  transaction_date: string | null;
+  merchant: string | null;
+  amount_minor: number | null;
+  status: string;
+  payment_path: string;
+}
+
+export interface BusinessTripDetail {
+  trip: BusinessTripReport | null;
+  lines: BusinessTripMemberLine[];
+  receipts: BusinessTripMemberReceipt[];
+}
+
+export async function getBusinessTripWithMembers(
+  id: string,
+): Promise<BusinessTripDetail> {
+  const db = getReceiptsDb();
+  const trip = await db
+    .prepare(`SELECT * FROM business_trip_reports WHERE id = ?`)
+    .bind(id)
+    .first<BusinessTripReport>();
+
+  const lines = await db
+    .prepare(
+      `SELECT asl.id, asl.transaction_date, asl.merchant, asl.amount_minor,
+              asl.statement_month, asl.business_trip_status
+       FROM business_trip_report_lines btl
+       JOIN amex_statement_lines asl ON asl.id = btl.amex_statement_line_id
+       WHERE btl.business_trip_report_id = ?
+       ORDER BY asl.transaction_date ASC`,
+    )
+    .bind(id)
+    .all<BusinessTripMemberLine>();
+
+  const receipts = await db
+    .prepare(
+      `SELECT r.id, r.transaction_date, r.merchant, r.amount_minor, r.status, r.payment_path
+       FROM business_trip_report_receipts btr
+       JOIN receipt_records r ON r.id = btr.receipt_id
+       WHERE btr.business_trip_report_id = ?
+       ORDER BY r.transaction_date ASC`,
+    )
+    .bind(id)
+    .all<BusinessTripMemberReceipt>();
+
+  return {
+    trip,
+    lines: lines.results ?? [],
+    receipts: receipts.results ?? [],
+  };
+}
+
+export interface UpdateBusinessTripInput {
+  tripName?: string | null;
+  startDate?: string;
+  endDate?: string;
+  purpose?: string | null;
+  primaryLocation?: string | null;
+  status?: BusinessTripStatus;
+}
+
+/**
+ * Edit trip fields and/or transition status (ADR 0010 D4). Status transitions
+ * are validated here (defense-in-depth; the route validates first for a clean
+ * 409). A confirm/reject transition syncs member lines via the pure
+ * computeTripStatusLineUpdates helper. 'exported' is rejected (409 at route).
+ */
+export async function updateBusinessTrip(
+  id: string,
+  input: UpdateBusinessTripInput,
+  actor: string,
+): Promise<BusinessTripStatus> {
+  const db = getReceiptsDb();
+  const now = nowIso();
+  const before = await db
+    .prepare(`SELECT * FROM business_trip_reports WHERE id = ?`)
+    .bind(id)
+    .first<BusinessTripReport>();
+  if (!before) throw new Error(`Business trip ${id} not found.`);
+
+  const sets: string[] = [];
+  const binds: unknown[] = [];
+  if ("tripName" in input) { sets.push("trip_name = ?"); binds.push(input.tripName?.trim() || null); }
+  if ("purpose" in input) { sets.push("purpose = ?"); binds.push(input.purpose?.trim() || null); }
+  if ("primaryLocation" in input) { sets.push("primary_location = ?"); binds.push(input.primaryLocation?.trim() || null); }
+  if (input.startDate !== undefined) { sets.push("start_date = ?"); binds.push(input.startDate); }
+  if (input.endDate !== undefined) { sets.push("end_date = ?"); binds.push(input.endDate); }
+
+  let newStatus: BusinessTripStatus = before.status;
+  if (input.status !== undefined && input.status !== before.status) {
+    const v = validateTripTransition(before.status, input.status);
+    if (!v.ok) throw new Error(v.error ?? "Invalid trip transition.");
+    newStatus = input.status;
+    sets.push("status = ?");
+    binds.push(newStatus);
+  }
+
+  if (sets.length > 0) {
+    sets.push("updated_at = ?");
+    binds.push(now, id);
+    await db
+      .prepare(`UPDATE business_trip_reports SET ${sets.join(", ")} WHERE id = ?`)
+      .bind(...binds)
+      .run();
+
+    const action =
+      newStatus !== before.status && newStatus === "confirmed"
+        ? "business_trip.confirmed"
+        : newStatus !== before.status && newStatus === "rejected"
+          ? "business_trip.rejected"
+          : "business_trip.updated";
+    await createAuditEntry(db, {
+      actor,
+      action,
+      objectType: "business_trip",
+      objectId: id,
+      oldValueJson: stringifyJson({ status: before.status }),
+      newValueJson: stringifyJson(input),
+    });
+  }
+
+  // Status sync (ADR D4): apply member-line updates on a real transition.
+  if (
+    newStatus !== before.status &&
+    (newStatus === "confirmed" || newStatus === "rejected")
+  ) {
+    const memberLineIds = await getMemberLineIds(db, id);
+    const updates = computeTripStatusLineUpdates(
+      id,
+      memberLineIds,
+      newStatus as TripTransition,
+    );
+    await applyLineStatusUpdates(db, updates, now);
+  }
+
+  return newStatus;
+}
+
+async function getMemberLineIds(db: D1Database, tripId: string): Promise<string[]> {
+  const result = await db
+    .prepare(
+      `SELECT amex_statement_line_id AS id
+       FROM business_trip_report_lines
+       WHERE business_trip_report_id = ?`,
+    )
+    .bind(tripId)
+    .all<{ id: string }>();
+  return (result.results ?? []).map((r) => r.id);
+}
+
+async function applyLineStatusUpdates(
+  db: D1Database,
+  updates: Array<{
+    lineId: string;
+    businessTripId: string | null;
+    businessTripStatus: string;
+  }>,
+  now: string,
+): Promise<void> {
+  // Two bulk UPDATEs split by target status: confirmed keeps business_trip_id
+  // (already = tripId from attach); rejected clears it. Chunked for D1's bind
+  // ceiling.
+  const confirmedIds = updates
+    .filter((u) => u.businessTripStatus === "confirmed")
+    .map((u) => u.lineId);
+  const excludedIds = updates
+    .filter((u) => u.businessTripStatus === "excluded")
+    .map((u) => u.lineId);
+  const stmts: D1PreparedStatement[] = [];
+  for (let i = 0; i < confirmedIds.length; i += D1_ID_CHUNK_SIZE) {
+    const chunk = confirmedIds.slice(i, i + D1_ID_CHUNK_SIZE);
+    const ph = chunk.map(() => "?").join(",");
+    stmts.push(
+      db
+        .prepare(
+          `UPDATE amex_statement_lines SET business_trip_status = 'confirmed', updated_at = ?
+           WHERE id IN (${ph})`,
+        )
+        .bind(now, ...chunk),
+    );
+  }
+  for (let i = 0; i < excludedIds.length; i += D1_ID_CHUNK_SIZE) {
+    const chunk = excludedIds.slice(i, i + D1_ID_CHUNK_SIZE);
+    const ph = chunk.map(() => "?").join(",");
+    stmts.push(
+      db
+        .prepare(
+          `UPDATE amex_statement_lines
+           SET business_trip_id = NULL, business_trip_status = 'excluded', updated_at = ?
+           WHERE id IN (${ph})`,
+        )
+        .bind(now, ...chunk),
+    );
+  }
+  await batchWrite(db, stmts);
+}
+
+export interface TripMemberIds {
+  lineIds?: string[];
+  receiptIds?: string[];
+}
+
+/**
+ * Lines in `lineIds` currently claimed by a DIFFERENT trip — the attach route
+ * refuses these with a 409 (operator detaches at the owning trip first; no
+ * silent moves). Returns [] when all are free or already on this trip.
+ */
+export async function findCrossTripLineConflicts(
+  tripId: string,
+  lineIds: string[],
+): Promise<Array<{ lineId: string; businessTripId: string }>> {
+  if (lineIds.length === 0) return [];
+  const db = getReceiptsDb();
+  const conflicts: Array<{ lineId: string; businessTripId: string }> = [];
+  for (let i = 0; i < lineIds.length; i += D1_ID_CHUNK_SIZE) {
+    const chunk = lineIds.slice(i, i + D1_ID_CHUNK_SIZE);
+    const ph = chunk.map(() => "?").join(",");
+    const result = await db
+      .prepare(
+        `SELECT id, business_trip_id
+         FROM amex_statement_lines
+         WHERE id IN (${ph}) AND business_trip_id IS NOT NULL AND business_trip_id != ?`,
+      )
+      .bind(...chunk, tripId)
+      .all<{ id: string; business_trip_id: string }>();
+    for (const row of result.results ?? []) {
+      conflicts.push({ lineId: row.id, businessTripId: row.business_trip_id });
+    }
+  }
+  return conflicts;
+}
+
+/**
+ * Attach lines + receipts to a trip. Lines get business_trip_id + status
+ * ('confirmed' if the trip is confirmed, else 'candidate') and a link-table
+ * row. Receipts get a link-table row ONLY — receipt rows are never written
+ * (ADR D2; sealed receipts are legal members by construction). Cross-trip line
+ * conflicts must be checked by the caller (findCrossTripLineConflicts) first.
+ */
+export async function attachTripMembers(
+  tripId: string,
+  members: TripMemberIds,
+  actor: string,
+): Promise<{ lines: number; receipts: number }> {
+  const db = getReceiptsDb();
+  const now = nowIso();
+  const lineIds = (members.lineIds ?? []).filter(Boolean);
+  const receiptIds = (members.receiptIds ?? []).filter(Boolean);
+
+  const trip = await db
+    .prepare(`SELECT status FROM business_trip_reports WHERE id = ?`)
+    .bind(tripId)
+    .first<{ status: BusinessTripStatus }>();
+  if (!trip) throw new Error(`Business trip ${tripId} not found.`);
+  const lineStatus = trip.status === "confirmed" ? "confirmed" : "candidate";
+
+  const stmts: D1PreparedStatement[] = [];
+  for (let i = 0; i < lineIds.length; i += 20) {
+    const chunk = lineIds.slice(i, i + 20);
+    const linkPh = chunk.map(() => "(?, ?, ?, ?)").join(",");
+    const linkBinds = chunk.flatMap((lid) => [newUuid(), tripId, lid, now]);
+    stmts.push(
+      db
+        .prepare(
+          `INSERT OR IGNORE INTO business_trip_report_lines
+            (id, business_trip_report_id, amex_statement_line_id, created_at)
+           VALUES ${linkPh}`,
+        )
+        .bind(...linkBinds),
+    );
+    const idPh = chunk.map(() => "?").join(",");
+    stmts.push(
+      db
+        .prepare(
+          `UPDATE amex_statement_lines
+           SET business_trip_id = ?, business_trip_status = ?, updated_at = ?
+           WHERE id IN (${idPh})`,
+        )
+        .bind(tripId, lineStatus, now, ...chunk),
+    );
+  }
+  for (let i = 0; i < receiptIds.length; i += 20) {
+    const chunk = receiptIds.slice(i, i + 20);
+    const ph = chunk.map(() => "(?, ?, ?, ?)").join(",");
+    const binds = chunk.flatMap((rid) => [newUuid(), tripId, rid, now]);
+    stmts.push(
+      db
+        .prepare(
+          `INSERT OR IGNORE INTO business_trip_report_receipts
+            (id, business_trip_report_id, receipt_id, created_at)
+           VALUES ${ph}`,
+        )
+        .bind(...binds),
+    );
+  }
+  await batchWrite(db, stmts);
+
+  await createAuditEntry(db, {
+    actor,
+    action: "business_trip.members_changed",
+    objectType: "business_trip",
+    objectId: tripId,
+    newValueJson: stringifyJson({ attach: { lineIds, receiptIds } }),
+  });
+  return { lines: lineIds.length, receipts: receiptIds.length };
+}
+
+/**
+ * Detach lines + receipts from a trip. Lines: business_trip_id = NULL, status
+ * 'excluded', link row deleted (only for lines claimed by this trip). Receipts:
+ * link row deleted. (Receipt rows are never written.)
+ */
+export async function detachTripMembers(
+  tripId: string,
+  members: TripMemberIds,
+  actor: string,
+): Promise<{ lines: number; receipts: number }> {
+  const db = getReceiptsDb();
+  const now = nowIso();
+  const lineIds = (members.lineIds ?? []).filter(Boolean);
+  const receiptIds = (members.receiptIds ?? []).filter(Boolean);
+
+  const stmts: D1PreparedStatement[] = [];
+  for (let i = 0; i < lineIds.length; i += D1_ID_CHUNK_SIZE) {
+    const chunk = lineIds.slice(i, i + D1_ID_CHUNK_SIZE);
+    const ph = chunk.map(() => "?").join(",");
+    stmts.push(
+      db
+        .prepare(
+          `UPDATE amex_statement_lines
+           SET business_trip_id = NULL, business_trip_status = 'excluded', updated_at = ?
+           WHERE id IN (${ph}) AND business_trip_id = ?`,
+        )
+        .bind(now, ...chunk, tripId),
+    );
+    stmts.push(
+      db
+        .prepare(
+          `DELETE FROM business_trip_report_lines
+           WHERE business_trip_report_id = ? AND amex_statement_line_id IN (${ph})`,
+        )
+        .bind(tripId, ...chunk),
+    );
+  }
+  for (let i = 0; i < receiptIds.length; i += D1_ID_CHUNK_SIZE) {
+    const chunk = receiptIds.slice(i, i + D1_ID_CHUNK_SIZE);
+    const ph = chunk.map(() => "?").join(",");
+    stmts.push(
+      db
+        .prepare(
+          `DELETE FROM business_trip_report_receipts
+           WHERE business_trip_report_id = ? AND receipt_id IN (${ph})`,
+        )
+        .bind(tripId, ...chunk),
+    );
+  }
+  await batchWrite(db, stmts);
+
+  await createAuditEntry(db, {
+    actor,
+    action: "business_trip.members_changed",
+    objectType: "business_trip",
+    objectId: tripId,
+    newValueJson: stringifyJson({ detach: { lineIds, receiptIds } }),
+  });
+  return { lines: lineIds.length, receipts: receiptIds.length };
 }
 
 // ─── Expense categories ───────────────────────────────────────────────────────

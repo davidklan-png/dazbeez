@@ -177,8 +177,10 @@ function decodeAmexBuffer(buffer: ArrayBuffer): { text: string; encoding: string
   }
 }
 
-// Known outside-Tokyo location signals
-const OUTSIDE_TOKYO_SIGNALS = [
+// Known outside-homebase region signals (ADR 0010 D3: renamed from
+// OUTSIDE_TOKYO_SIGNALS; contents unchanged). A merchant carrying one of these
+// AND no homebase signal is a trip ANCHOR.
+const REGION_SIGNALS = [
   "神奈川", "横浜", "大阪", "京都", "福岡", "札幌", "名古屋", "仙台", "広島",
   "埼玉", "千葉", "兵庫", "神戸", "奈良", "滋賀", "岡山", "北海道", "静岡",
   "愛知", "栃木", "群馬", "茨城", "宮城", "新潟", "富山", "金沢", "石川",
@@ -186,22 +188,35 @@ const OUTSIDE_TOKYO_SIGNALS = [
   "Sendai", "Fukuoka", "KANAGAWA", "OSAKA", "KYOTO", "HIROSHIMA",
 ];
 
-// Tokyo signals — presence means NOT outside Tokyo
-const TOKYO_SIGNALS = [
+// Default homebase signals — verbatim the former hardcoded TOKYO_SIGNALS list
+// (ADR 0010 D3). Presence in a merchant means the charge is at homebase (NOT a
+// trip anchor). Exported so ComplianceSettings can default to it and detection
+// tests can reproduce today's behavior; the operator can override it in
+// Settings → Compliance (stored under key `homebase_signals`).
+export const DEFAULT_HOMEBASE_SIGNALS = [
   "東京都", "東京", "新宿", "渋谷", "中野", "東中野", "港区", "東京オペラシティ",
   "Tokyo", "TOKYO",
 ];
 
-export function isOutsideTokyo(merchantName: string): boolean {
-  // If it contains a Tokyo signal, it's in Tokyo
-  for (const sig of TOKYO_SIGNALS) {
-    if (merchantName.includes(sig)) return false;
-  }
-  // If it contains an outside-Tokyo signal, it's outside Tokyo
-  for (const sig of OUTSIDE_TOKYO_SIGNALS) {
-    if (merchantName.includes(sig)) return true;
-  }
-  return false;
+/** Does `merchant` carry a homebase signal (i.e. is it an at-homebase charge)? */
+export function hasHomebaseSignal(
+  merchant: string,
+  homebaseSignals: string[],
+): boolean {
+  return homebaseSignals.some((sig) => merchant.includes(sig));
+}
+
+/**
+ * Is `merchant` outside the homebase (a trip anchor)? True only when it carries
+ * a region signal AND no homebase signal. ADR 0010 D3 renamed this from
+ * isOutsideTokyo; `homebaseSignals` replaces the hardcoded TOKYO_SIGNALS list.
+ */
+export function isOutsideHomebase(
+  merchant: string,
+  homebaseSignals: string[],
+): boolean {
+  if (hasHomebaseSignal(merchant, homebaseSignals)) return false;
+  return REGION_SIGNALS.some((sig) => merchant.includes(sig));
 }
 
 export function parseAmexNetanswer(
@@ -416,61 +431,105 @@ export function netanswerLinesToImportInputs(
   }));
 }
 
-// ─── Business trip candidate detection ────────────────────────────────────
+// ─── Business trip candidate detection (ADR 0010 D3) ───────────────────────
 
 import type { BusinessTripCandidate } from "@/lib/receipts/types";
+import { isBusinessTripEligible } from "@/lib/receipts/categories";
 
 interface TripableAmexLine {
   id: string;
   cardholderName: string | null;
   transactionDate: string;
   merchant: string;
+  /**
+   * Resolved expense category code for the category-boost rule (ADR 0010 D3).
+   * Optional so legacy callers/fixtures without a category still work — an
+   * absent/null category is simply never boost-eligible (today's behavior).
+   */
+  expenseCategoryCode?: string | null;
 }
 
+/**
+ * Detect business-trip candidate clusters from a set of AMEX lines.
+ *
+ * ANCHORS: lines with a location signal outside homebase (as before).
+ * BOOST: lines whose expense category is trip-eligible AND whose merchant
+ * carries no homebase signal (e.g. Ekinet / airline / hotel-chain charges
+ * that bill without a region string) join a cluster when within `windowDays`
+ * of a member line. A cluster ships as a candidate only if it contains ≥1
+ * anchor AND ≥2 lines total — boost lines never form a cluster alone.
+ *
+ * `homebaseSignals` replaces the former hardcoded TOKYO_SIGNALS list; default
+ * `DEFAULT_HOMEBASE_SIGNALS` reproduces today's behavior exactly on lines with
+ * no category code (the boost set is empty, so only anchors cluster, as today).
+ */
 export function detectBusinessTripCandidates(
   lines: TripableAmexLine[],
+  homebaseSignals: string[] = DEFAULT_HOMEBASE_SIGNALS,
   windowDays = 7,
 ): BusinessTripCandidate[] {
-  // Only consider lines that are outside Tokyo
-  const outsideLines = lines.filter(
-    (l) => l.cardholderName && isOutsideTokyo(l.merchant),
-  );
-
-  if (outsideLines.length < 2) return [];
-
-  // Group by cardholder
-  const byCardholder = new Map<string, typeof outsideLines>();
-  for (const line of outsideLines) {
-    const ch = line.cardholderName!;
-    if (!byCardholder.has(ch)) byCardholder.set(ch, []);
-    byCardholder.get(ch)!.push(line);
+  // Partition into anchors and boost-eligible lines (both require a cardholder).
+  type L = (typeof lines)[number];
+  const anchors: L[] = [];
+  const boosts: L[] = [];
+  for (const line of lines) {
+    if (!line.cardholderName) continue;
+    if (isOutsideHomebase(line.merchant, homebaseSignals)) {
+      anchors.push(line);
+    } else if (
+      isBusinessTripEligible(line.expenseCategoryCode) &&
+      !hasHomebaseSignal(line.merchant, homebaseSignals)
+    ) {
+      boosts.push(line);
+    }
   }
+
+  // Need at least one anchor anywhere to form any candidate.
+  if (anchors.length === 0) return [];
+
+  // Group anchors + boost lines by cardholder.
+  const byCardholder = new Map<string, L[]>();
+  const push = (ch: string, line: L) => {
+    const arr = byCardholder.get(ch);
+    if (arr) arr.push(line);
+    else byCardholder.set(ch, [line]);
+  };
+  for (const line of anchors) push(line.cardholderName!, line);
+  for (const line of boosts) push(line.cardholderName!, line);
 
   const candidates: BusinessTripCandidate[] = [];
 
   for (const [cardholder, chLines] of byCardholder) {
-    // Sort by date
+    // A cardholder with only boost lines (no anchor) can't form a candidate.
+    if (!chLines.some((l) => isOutsideHomebase(l.merchant, homebaseSignals))) {
+      continue;
+    }
     const sorted = [...chLines].sort((a, b) =>
       a.transactionDate.localeCompare(b.transactionDate),
     );
 
-    // Cluster: group lines where adjacent dates are within windowDays
+    // Cluster: group lines where adjacent dates are within windowDays.
     let cluster: typeof sorted = [sorted[0]!];
+    const flush = () => {
+      // ≥2 lines AND ≥1 anchor (boost-never-alone).
+      const hasAnchor = cluster.some((l) =>
+        isOutsideHomebase(l.merchant, homebaseSignals),
+      );
+      if (cluster.length >= 2 && hasAnchor) {
+        candidates.push(buildCandidate(cardholder, cluster));
+      }
+    };
     for (let i = 1; i < sorted.length; i++) {
       const prev = cluster[cluster.length - 1]!;
       const dayDiff = dateDiffDays(prev.transactionDate, sorted[i]!.transactionDate);
       if (dayDiff <= windowDays) {
         cluster.push(sorted[i]!);
       } else {
-        if (cluster.length >= 2) {
-          candidates.push(buildCandidate(cardholder, cluster));
-        }
+        flush();
         cluster = [sorted[i]!];
       }
     }
-    if (cluster.length >= 2) {
-      candidates.push(buildCandidate(cardholder, cluster));
-    }
+    flush();
   }
 
   return candidates;
@@ -486,8 +545,12 @@ function buildCandidate(
   cluster: Array<{ id: string; transactionDate: string; merchant: string }>,
 ): BusinessTripCandidate {
   const dates = cluster.map((l) => l.transactionDate).sort();
-  // Extract location signal from first outside-Tokyo merchant
-  const locationSignal = extractLocationSignal(cluster[0]!.merchant);
+  // Extract a location signal from the first anchor merchant in the cluster
+  // (the cluster is guaranteed ≥1 anchor by the caller).
+  const anchorMerchant =
+    cluster.find((l) => REGION_SIGNALS.some((sig) => l.merchant.includes(sig)))?.merchant ??
+    cluster[0]!.merchant;
+  const locationSignal = extractLocationSignal(anchorMerchant);
   return {
     cardholderName,
     startDate: dates[0]!,
@@ -498,7 +561,7 @@ function buildCandidate(
 }
 
 function extractLocationSignal(merchant: string): string {
-  for (const sig of OUTSIDE_TOKYO_SIGNALS) {
+  for (const sig of REGION_SIGNALS) {
     if (merchant.includes(sig)) return sig;
   }
   return merchant.slice(0, 20);

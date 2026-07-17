@@ -17,7 +17,9 @@ type Props = {
   effectiveRecipient: EffectiveRecipient;
 };
 
-const LABELS: Record<keyof ComplianceSettings, string> = {
+// homebase_signals (ADR 0010 D3) is an array setting whose UI is Phase B, so it
+// is intentionally absent from this scalar-label map until then.
+const LABELS: Record<Exclude<keyof ComplianceSettings, "homebase_signals">, string> = {
   business_name: "Business name (事業者名)",
   taxpayer_type: "Taxpayer type",
   retention_years: "Retention years",
