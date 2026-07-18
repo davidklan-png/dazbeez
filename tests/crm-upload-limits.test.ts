@@ -42,9 +42,15 @@ test("getImageSizeValidationError rejects oversized uploads and accepts smaller 
 // ─── Business-card MIME policy ─────────────────────────────────────────────
 
 test("ALLOWED_BUSINESS_CARD_*: image-only, no pdf/html", () => {
-  assert.ok(!ALLOWED_BUSINESS_CARD_MIME_TYPES.includes("application/pdf"));
-  assert.ok(!ALLOWED_BUSINESS_CARD_EXTENSIONS.includes(".pdf"));
-  assert.ok(!ALLOWED_BUSINESS_CARD_EXTENSIONS.includes(".html"));
+  assert.ok(
+    !(ALLOWED_BUSINESS_CARD_MIME_TYPES as readonly string[]).includes(
+      "application/pdf",
+    ),
+  );
+  assert.ok(!(ALLOWED_BUSINESS_CARD_EXTENSIONS as readonly string[]).includes(".pdf"));
+  assert.ok(
+    !(ALLOWED_BUSINESS_CARD_EXTENSIONS as readonly string[]).includes(".html"),
+  );
 });
 
 test("getBusinessCardFileTypeError: accepted image types pass", () => {
