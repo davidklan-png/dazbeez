@@ -334,6 +334,12 @@ export function assembleProofsZip(
   noticeInput: TransitionNoticeInput,
   summaryCsv: string,
   attendeesCsv: string,
+  /** Reconciliation CSVs (review #2) — byte-identical copies of the standalone
+   *  artifacts, embedded at ZIP root as AMEX{month}_Reconciliation.csv etc. so
+   *  the ZIP alone is the complete accountant package (same doctrine as
+   *  集計.csv / 参加者一覧.csv). Absent entries are skipped (e.g. no DIGITAL
+   *  rows this month). */
+  reconciliationCsvs?: { amex?: string | null; cash?: string | null; digital?: string | null },
 ): Uint8Array {
   const root = ROOT_PREFIX(month);
   const files: Record<string, Uint8Array> = {};
@@ -402,6 +408,15 @@ export function assembleProofsZip(
   files[`${root}集計.csv`] = encoder.encode(summaryCsv);
   files[`${root}参加者一覧.csv`] = encoder.encode(attendeesCsv);
   files[`${root}お知らせ.txt`] = encoder.encode(buildTransitionNotice(noticeInput));
+  if (reconciliationCsvs?.amex) {
+    files[`${root}AMEX${month}_Reconciliation.csv`] = encoder.encode(reconciliationCsvs.amex);
+  }
+  if (reconciliationCsvs?.cash) {
+    files[`${root}CASH${month}_Reconciliation.csv`] = encoder.encode(reconciliationCsvs.cash);
+  }
+  if (reconciliationCsvs?.digital) {
+    files[`${root}DIGITAL${month}_Reconciliation.csv`] = encoder.encode(reconciliationCsvs.digital);
+  }
 
   return zipSync(files, { level: 0 });
 }

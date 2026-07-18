@@ -306,30 +306,6 @@ export async function POST(request: Request) {
       });
     }
 
-    // Transition notice (shared builder — also used by the finalize email, so
-    // the notice text cannot drift between the ZIP and the notification).
-    const proofsNoticeInput = deriveTransitionNoticeInput(
-      month,
-      bundle.rows,
-      bundle.receipts,
-      { rowCount: bundle.rows.length, receiptCount: proofsEntries.length },
-      { exportRevision, supersedesExportId, correctionReason },
-    );
-
-    const proofsKey = buildProofsKey(month, exportId);
-    const proofsZipBytes = assembleProofsZip(
-      month,
-      proofsEntries,
-      proofsNoticeInput,
-      summaryShipped,
-      attendeesShipped,
-    );
-    const proofsSha256 = await computeSha256Hex(proofsZipBytes);
-    await getReceiptsArchiveBucket().put(proofsKey, proofsZipBytes, {
-      httpMetadata: { contentType: "application/zip" },
-      customMetadata: retentionMetadata(),
-    });
-
     // ── Reconciliation CSVs (review #2) ───────────────────────────────────
     // AMEX: the ORIGINAL statement CSV (sealed artifact, SHA in manifest),
     // decoded and passed through line-for-line with 科目＆No./会議-出席者ID/
@@ -438,6 +414,39 @@ export async function POST(request: Request) {
         },
       );
     }
+
+    // ── Proofs ZIP assembly ───────────────────────────────────────────────
+    // Assembled AFTER the reconciliation CSVs so their shipped bytes can be
+    // embedded at ZIP root (AMEX{month}_Reconciliation.csv etc.) — the ZIP
+    // alone is the complete accountant package. Transition notice via the
+    // shared builder (also used by the finalize email, so the notice text
+    // cannot drift between the ZIP and the notification).
+    const proofsNoticeInput = deriveTransitionNoticeInput(
+      month,
+      bundle.rows,
+      bundle.receipts,
+      { rowCount: bundle.rows.length, receiptCount: proofsEntries.length },
+      { exportRevision, supersedesExportId, correctionReason },
+    );
+
+    const proofsKey = buildProofsKey(month, exportId);
+    const proofsZipBytes = assembleProofsZip(
+      month,
+      proofsEntries,
+      proofsNoticeInput,
+      summaryShipped,
+      attendeesShipped,
+      {
+        amex: amexReconShipped,
+        cash: cashReconShipped,
+        digital: digitalReconShipped,
+      },
+    );
+    const proofsSha256 = await computeSha256Hex(proofsZipBytes);
+    await getReceiptsArchiveBucket().put(proofsKey, proofsZipBytes, {
+      httpMetadata: { contentType: "application/zip" },
+      customMetadata: retentionMetadata(),
+    });
 
     // Gather all file-manifest entries for receipts included in this export
     // plus the AMEX statement artifact. This builds the per-file SHA-256

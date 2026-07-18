@@ -483,6 +483,27 @@ export const EXPORT_DOWNLOAD_FILES = [
 
 export type ExportDownloadFile = (typeof EXPORT_DOWNLOAD_FILES)[number];
 
+/**
+ * Download-link definitions shared by EVERY download surface (export page
+ * draft + finalized sections, finalize card). Single source of truth — the
+ * review-#2 rollout missed the export page because it had its own copy of
+ * this list; never duplicate it again.
+ */
+export const BUNDLE_DOWNLOAD_LINK_DEFS: ReadonlyArray<{
+  file: ExportDownloadFile;
+  label: string;
+}> = [
+  { file: "amex", label: "AMEX照合CSV" },
+  { file: "cash", label: "現金照合CSV" },
+  { file: "digital", label: "デジタル照合CSV" },
+  { file: "receipts", label: "Receipts CSV" },
+  { file: "manifest", label: "Manifest" },
+  { file: "summary", label: "Summary" },
+  { file: "attendees", label: "参加者一覧" },
+  { file: "readme", label: "README" },
+  { file: "proofs", label: "領収書ZIP" },
+];
+
 export function isExportDownloadFile(
   value: string,
 ): value is ExportDownloadFile {
