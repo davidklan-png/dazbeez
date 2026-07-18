@@ -33,7 +33,7 @@ import {
   ACCOUNTANT_DISCLAIMER_JA,
 } from "@/lib/receipts/settings";
 import { buildExportBundle } from "@/lib/receipts/month-closing";
-import { buildMonthlyExportCsv } from "@/lib/receipts/export";
+import { buildMonthlyExportCsv, BUNDLE_DOWNLOAD_LINK_DEFS } from "@/lib/receipts/export";
 import { deriveStatementWindow } from "@/lib/receipts/statement-window";
 import { CreateRevisionButton } from "@/components/receipts/export/create-revision-button";
 
@@ -42,14 +42,9 @@ export const dynamic = "force-dynamic";
 // The four artifacts finalize seals in RECEIPTS_ARCHIVE_BUCKET, served by
 // GET /api/receipts/export/[month]/download (Content-Disposition: attachment,
 // so plain anchors download without any client-side code).
-const BUNDLE_DOWNLOAD_LINKS = [
-  { file: "receipts", label: "Receipts CSV" },
-  { file: "manifest", label: "Manifest" },
-  { file: "summary", label: "Summary" },
-  { file: "readme", label: "README" },
-  { file: "proofs", label: "領収書ZIP" },
-  { file: "attendees", label: "参加者一覧" },
-] as const;
+// Shared definition (lib/receipts/export.ts) — the review-#2 rollout missed
+// this page because it had a local copy of the list. Do not re-inline.
+const BUNDLE_DOWNLOAD_LINKS = BUNDLE_DOWNLOAD_LINK_DEFS;
 
 export default async function ExportPage({
   searchParams,

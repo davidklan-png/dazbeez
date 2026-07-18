@@ -343,3 +343,32 @@ test("assembleProofsZip: 目次 No column matches entry nos (CSV⇄目次 contin
     );
   }
 });
+
+test("assembleProofsZip: reconciliation CSVs embedded at root when provided (review #2)", () => {
+  const zip = assembleProofsZip(
+    "2026-06",
+    [fakeEntry({ no: 1 })],
+    baseNotice,
+    SUMMARY_CSV,
+    ATTENDEES_CSV,
+    { amex: "﻿amex-bytes", cash: "﻿cash-bytes", digital: null },
+  );
+  const files = unzipSync(zip);
+  const keys = Object.keys(files);
+  const amexKey = keys.find((k) => k.endsWith("AMEX2026-06_Reconciliation.csv"));
+  const cashKey = keys.find((k) => k.endsWith("CASH2026-06_Reconciliation.csv"));
+  assert.ok(amexKey, "AMEX reconciliation embedded");
+  assert.ok(cashKey, "CASH reconciliation embedded");
+  // Byte-identity with the standalone artifact (same doctrine as 集計.csv).
+  assert.equal(
+    new TextDecoder("utf-8", { ignoreBOM: true }).decode(files[amexKey!]),
+    "﻿amex-bytes",
+  );
+  // Absent path → no entry.
+  assert.ok(
+    !keys.some((k) => k.includes("DIGITAL2026-06_Reconciliation")),
+    "no DIGITAL entry when null",
+  );
+  // Root placement (directly under the 領収書等証憓_<month>/ prefix).
+  assert.equal(amexKey!.split("/").length, 2, "embedded at ZIP root");
+});

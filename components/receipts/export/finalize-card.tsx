@@ -5,22 +5,15 @@ import { useState, type ReactNode } from "react";
 import { Btn } from "@/components/ui/btn";
 import { Card } from "@/components/ui/card";
 import { LockIcon } from "@/components/ui/icons";
+import { BUNDLE_DOWNLOAD_LINK_DEFS } from "@/lib/receipts/export";
 
 // The artifacts sealed in RECEIPTS_ARCHIVE_BUCKET, served by
 // GET /api/receipts/export/[month]/download (Content-Disposition: attachment).
 // AMEX/CASH/DIGITAL reconciliation files (review #2) 404 for revisions sealed
 // before they shipped, and CASH/DIGITAL 404 when the month has no such rows —
 // the link stays visible (matching summary/attendees behavior for old seals).
-const BUNDLE_DOWNLOAD_LINKS = [
-  { file: "amex", label: "AMEX照合CSV" },
-  { file: "cash", label: "現金照合CSV" },
-  { file: "digital", label: "デジタル照合CSV" },
-  { file: "receipts", label: "Receipts CSV" },
-  { file: "manifest", label: "Manifest" },
-  { file: "summary", label: "Summary" },
-  { file: "readme", label: "README" },
-  { file: "proofs", label: "領収書ZIP" },
-] as const;
+// Shared definition (lib/receipts/export.ts) — do not re-inline a local copy.
+const BUNDLE_DOWNLOAD_LINKS = BUNDLE_DOWNLOAD_LINK_DEFS;
 
 /**
  * Finalize action + panel. Extracted from export-screen.tsx so it can render at
