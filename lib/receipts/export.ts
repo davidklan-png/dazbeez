@@ -17,7 +17,7 @@ import {
  *   accountant opens this CSV in Excel on Windows; without the guard a
  *   merchant named `=cmd|'/c calc'!A1` would run a formula on open.
  */
-function csvEscape(value: string | null | undefined): string {
+export function csvEscape(value: string | null | undefined): string {
   if (value === null || value === undefined) return "";
   let s = String(value);
   // Formula-injection guard. Single-quote prefix is invisible in Excel when
@@ -31,7 +31,7 @@ function csvEscape(value: string | null | undefined): string {
   return s;
 }
 
-function csvQuoteAlways(value: string): string {
+export function csvQuoteAlways(value: string): string {
   return `"${value.replace(/"/g, '""')}"`;
 }
 
@@ -41,7 +41,7 @@ function formatAmount(amountMinor: number | null, currency: string): string {
   return (amountMinor / 100).toFixed(2);
 }
 
-const CSV_HEADERS = [
+export const EXPORT_CSV_HEADERS = [
   "No",
   "RowType",
   "TransactionDate",
@@ -120,60 +120,76 @@ export function buildMonthlyExportCsv(
   attendeeDirectory: ReceiptAttendeeDirectoryEntry[],
   amexAttendees: Record<string, string[]>,
 ): string {
-  const lines: string[] = [CSV_HEADERS.join(",")];
+  const lines: string[] = [EXPORT_CSV_HEADERS.join(",")];
 
   rows.forEach((row, index) => {
     const attendees = resolveRowAttendees(row, attendeeMap, amexAttendees);
-    // AttendeeIds: directory id per position ("?" when unresolved) so the two
-    // columns stay aligned. Unresolved names are expected in DRAFTS (the
-    // operator sees gaps); the finalize gate blocks them before sealing.
-    const { entries } = resolveAttendeeNames(attendees, attendeeDirectory);
-    const attendeeIds = entries
-      .map((e) => (e ? String(e.id) : "?"))
-      .join("; ");
-    const line = [
-      // No: 1-based row sequence. The join key between this CSV and the proofs
-      // ZIP filenames (No03_研究開発費_OpenAI_¥108341.pdf) — the accountant
-      // matches a statement line to its proof via this number.
-      csvEscape(String(index + 1)),
-      csvEscape(row.rowType),
-      csvEscape(row.transactionDate),
-      csvEscape(row.merchant),
-      csvEscape(formatAmount(row.amountMinor, row.currency)),
-      csvEscape(row.currency),
-      csvEscape(row.paymentPath),
-      csvEscape(row.expenseType),
-      csvEscape(row.expenseCategoryCode),
-      csvEscape(row.expenseCategoryJa),
-      csvEscape(row.expenseCategoryEn),
-      csvEscape(row.businessPurpose),
-      csvQuoteAlways(attendees.join("; ")),
-      csvQuoteAlways(attendeeIds),
-      csvEscape(row.lineId),
-      // StatementMonth column is intentionally empty here; line.statement_month
-      // matches the bundle's month so it's redundant on line rows and
-      // meaningless on receipt rows.
-      "",
-      csvEscape(row.matchStatus),
-      csvEscape(row.receiptStatus),
-      csvEscape(row.missingReceiptReason),
-      csvEscape(row.cardholderName),
-      csvEscape(row.businessTripStatus),
-      csvEscape(row.receiptId),
-      csvEscape(row.status),
-      csvEscape(row.originalR2Key),
-      // Compliance columns
-      csvEscape(row.invoiceRegistrationNumber),
-      csvEscape(row.qualifiedInvoiceStatus),
-      csvEscape(row.taxRate),
-      csvEscape(formatAmount(row.taxAmountMinor, row.currency)),
-      csvEscape(row.sourceType),
-      csvEscape(row.counterpartyName),
-    ].join(",");
-    lines.push(line);
+    lines.push(
+      serializeExportRowCells(row, index + 1, attendees, attendeeDirectory).join(","),
+    );
   });
 
   return lines.join("\n");
+}
+
+/**
+ * Serialize one export row to its cell array (EXPORT_CSV_HEADERS order).
+ * Single serialization authority shared by the receipts CSV and the
+ * CASH/DIGITAL reconciliation files (lib/receipts/reconciliation-files.ts) —
+ * extracted so the split files cannot drift from the machine-layer CSV.
+ */
+export function serializeExportRowCells(
+  row: ExportRow,
+  no: number,
+  attendees: string[],
+  attendeeDirectory: ReceiptAttendeeDirectoryEntry[],
+): string[] {
+  // AttendeeIds: directory id per position ("?" when unresolved) so the two
+  // columns stay aligned. Unresolved names are expected in DRAFTS (the
+  // operator sees gaps); the finalize gate blocks them before sealing.
+  const { entries } = resolveAttendeeNames(attendees, attendeeDirectory);
+  const attendeeIds = entries
+    .map((e) => (e ? String(e.id) : "?"))
+    .join("; ");
+  return [
+    // No: 1-based row sequence. The join key between this CSV and the proofs
+    // ZIP filenames — the accountant matches a statement line to its proof
+    // via this number (see 目次.csv, which maps No → evidence filename).
+    csvEscape(String(no)),
+    csvEscape(row.rowType),
+    csvEscape(row.transactionDate),
+    csvEscape(row.merchant),
+    csvEscape(formatAmount(row.amountMinor, row.currency)),
+    csvEscape(row.currency),
+    csvEscape(row.paymentPath),
+    csvEscape(row.expenseType),
+    csvEscape(row.expenseCategoryCode),
+    csvEscape(row.expenseCategoryJa),
+    csvEscape(row.expenseCategoryEn),
+    csvEscape(row.businessPurpose),
+    csvQuoteAlways(attendees.join("; ")),
+    csvQuoteAlways(attendeeIds),
+    csvEscape(row.lineId),
+    // StatementMonth column is intentionally empty here; line.statement_month
+    // matches the bundle's month so it's redundant on line rows and
+    // meaningless on receipt rows.
+    "",
+    csvEscape(row.matchStatus),
+    csvEscape(row.receiptStatus),
+    csvEscape(row.missingReceiptReason),
+    csvEscape(row.cardholderName),
+    csvEscape(row.businessTripStatus),
+    csvEscape(row.receiptId),
+    csvEscape(row.status),
+    csvEscape(row.originalR2Key),
+    // Compliance columns
+    csvEscape(row.invoiceRegistrationNumber),
+    csvEscape(row.qualifiedInvoiceStatus),
+    csvEscape(row.taxRate),
+    csvEscape(formatAmount(row.taxAmountMinor, row.currency)),
+    csvEscape(row.sourceType),
+    csvEscape(row.counterpartyName),
+  ];
 }
 
 /**
@@ -317,6 +333,22 @@ export function buildProofsKey(month: string, exportId: string): string {
   return `exports/${month}/${exportId}-proofs.zip`;
 }
 
+// ─── Reconciliation-file keys (monthly closing review #2) ────────────────────
+// Derived keys like summary/attendees — no column on receipt_exports. Old
+// sealed revisions predate these artifacts and simply 404 from R2.
+
+export function buildAmexReconciliationKey(month: string, exportId: string): string {
+  return `exports/${month}/${exportId}-amex-reconciliation.csv`;
+}
+
+export function buildCashReconciliationKey(month: string, exportId: string): string {
+  return `exports/${month}/${exportId}-cash-reconciliation.csv`;
+}
+
+export function buildDigitalReconciliationKey(month: string, exportId: string): string {
+  return `exports/${month}/${exportId}-digital-reconciliation.csv`;
+}
+
 export function buildManifestCsv(
   exportId: string,
   month: string,
@@ -333,6 +365,11 @@ export function buildManifestCsv(
     files?: ReceiptFile[];
     amexArtifact?: { r2Key: string; sha256Hash: string; originalFilename: string } | null;
     proofsArtifact?: { r2Key: string; sha256Hash: string; originalFilename: string } | null;
+    /** Reconciliation files (review #2): key+SHA per payment path, null when
+     *  the path has no rows this month (file not emitted). */
+    amexReconciliation?: { r2Key: string; sha256Hash: string } | null;
+    cashReconciliation?: { r2Key: string; sha256Hash: string } | null;
+    digitalReconciliation?: { r2Key: string; sha256Hash: string } | null;
     exportRevision?: number;
     supersedesExportId?: string | null;
     correctionReason?: string | null;
@@ -375,6 +412,24 @@ export function buildManifestCsv(
       `ProofsArtifactKey,${csvEscape(options.proofsArtifact.r2Key)}`,
       `ProofsArtifactSha256,${csvEscape(options.proofsArtifact.sha256Hash)}`,
       `ProofsArtifactFilename,${csvEscape(options.proofsArtifact.originalFilename)}`,
+    );
+  }
+  if (options?.amexReconciliation) {
+    lines.push(
+      `AmexReconciliationKey,${csvEscape(options.amexReconciliation.r2Key)}`,
+      `AmexReconciliationSha256,${csvEscape(options.amexReconciliation.sha256Hash)}`,
+    );
+  }
+  if (options?.cashReconciliation) {
+    lines.push(
+      `CashReconciliationKey,${csvEscape(options.cashReconciliation.r2Key)}`,
+      `CashReconciliationSha256,${csvEscape(options.cashReconciliation.sha256Hash)}`,
+    );
+  }
+  if (options?.digitalReconciliation) {
+    lines.push(
+      `DigitalReconciliationKey,${csvEscape(options.digitalReconciliation.r2Key)}`,
+      `DigitalReconciliationSha256,${csvEscape(options.digitalReconciliation.sha256Hash)}`,
     );
   }
 
@@ -421,6 +476,9 @@ export const EXPORT_DOWNLOAD_FILES = [
   "readme",
   "proofs",
   "attendees",
+  "amex",
+  "cash",
+  "digital",
 ] as const;
 
 export type ExportDownloadFile = (typeof EXPORT_DOWNLOAD_FILES)[number];
@@ -483,6 +541,28 @@ export function resolveExportDownload(
         r2Key: exportRecord.proofs_r2_key ?? null,
         contentType: "application/zip",
         filename: `export-${month}-proofs.zip`,
+      };
+    // Reconciliation files (review #2). Derived keys like summary/attendees.
+    // Download filenames follow the operator-specified convention
+    // AMEX{yyyy-mm}_Reconciliation.csv (not the export-… pattern) because
+    // these are the accountant's primary documents.
+    case "amex":
+      return {
+        r2Key: buildAmexReconciliationKey(month, exportRecord.id),
+        contentType: csv,
+        filename: `AMEX${month}_Reconciliation.csv`,
+      };
+    case "cash":
+      return {
+        r2Key: buildCashReconciliationKey(month, exportRecord.id),
+        contentType: csv,
+        filename: `CASH${month}_Reconciliation.csv`,
+      };
+    case "digital":
+      return {
+        r2Key: buildDigitalReconciliationKey(month, exportRecord.id),
+        contentType: csv,
+        filename: `DIGITAL${month}_Reconciliation.csv`,
       };
   }
 }
@@ -615,6 +695,9 @@ export function buildExportReadme(opts: {
   summarySha256?: string | null;
   attendeesSha256?: string | null;
   proofsSha256?: string | null;
+  amexReconciliationSha256?: string | null;
+  cashReconciliationSha256?: string | null;
+  digitalReconciliationSha256?: string | null;
 }): string {
   const revisionLine =
     opts.exportRevision > 1
@@ -631,6 +714,9 @@ export function buildExportReadme(opts: {
     `Summary SHA-256: ${opts.summarySha256 ?? "(none)"}`,
     `Attendees CSV SHA-256: ${opts.attendeesSha256 ?? "(none)"}`,
     `Proofs ZIP SHA-256: ${opts.proofsSha256 ?? "(none)"}`,
+    `AMEX reconciliation SHA-256: ${opts.amexReconciliationSha256 ?? "(none)"}`,
+    `CASH reconciliation SHA-256: ${opts.cashReconciliationSha256 ?? "(none)"}`,
+    `DIGITAL reconciliation SHA-256: ${opts.digitalReconciliationSha256 ?? "(none)"}`,
     "",
     "── Accountant review ──────────────────────────────────────────",
     ACCOUNTANT_DISCLAIMER_EN,
@@ -644,8 +730,13 @@ export function buildExportReadme(opts: {
     "per-PaymentPath totals for a quick reconciliation check.",
     "The attendees CSV (<exportId>-attendees.csv) maps the AttendeeIds",
     "column to each attendee's name, company, and title.",
+    "The AMEX reconciliation CSV reproduces the original card statement",
+    "line-for-line with 科目＆No., 会議-出席者ID, 人数, and 領収書ファイル名",
+    "appended to each charge row. CASH/DIGITAL receipts ship in their own",
+    "reconciliation CSVs with the same evidence columns appended.",
     "The proofs ZIP (<exportId>-proofs.zip) bundles one proof per receipt,",
-    "named No<NN>_<勘定科目>_<店舗>_¥<金額> — the No matches the receipts",
-    "CSV's first column. See 目次.csv inside the ZIP for the full index.",
+    "named <勘定科目><MonYYYY><①…><店舗><¥金額> — the 科目＆No. matches the",
+    "reconciliation CSVs' 科目＆No. column. See 目次.csv inside the ZIP for",
+    "the full index (including the receipts CSV's No join column).",
   ].join("\n");
 }

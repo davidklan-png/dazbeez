@@ -114,6 +114,7 @@ test("buildProofsMokuziCsv: human TOC columns — no machine fields", () => {
   const csv = buildProofsMokuziCsv([
     {
       no: 3,
+      kamokuNo: "研究開発費Mar2026②",
       filename: "No03_研究開発費_OpenAI_¥108,341.pdf",
       transactionDate: "2026-03-04",
       merchant: "OpenAI",
@@ -124,6 +125,7 @@ test("buildProofsMokuziCsv: human TOC columns — no machine fields", () => {
     },
     {
       no: 7,
+      kamokuNo: "接待交際費Mar2026⑷",
       filename: "No07_接待交際費_屋形舟_¥69,000.jpg",
       transactionDate: "2026-03-10",
       merchant: "屋形舟",
@@ -137,7 +139,7 @@ test("buildProofsMokuziCsv: human TOC columns — no machine fields", () => {
   assert.ok(csv.includes("\r\n"), "目次 must use CRLF for Windows Excel");
   // Exact header — the accountant's table of contents only.
   assert.ok(
-    csv.includes("No,ファイル名,取引日,店舗,金額,勘定科目,出席者"),
+    csv.includes("科目＆No.,No,ファイル名,取引日,店舗,金額,勘定科目,出席者"),
     "目次 header is the human TOC",
   );
   // Machine fields removed (they live in the manifest).
@@ -153,6 +155,7 @@ test("buildProofsMokuziCsv: human TOC columns — no machine fields", () => {
 test("buildProofsMokuziCsv: 出席者 populated for 会議費/接待交際費, empty otherwise", () => {
   const row = (categoryJa: string, attendees: string) => ({
     no: 1,
+    kamokuNo: "",
     filename: "f.jpg",
     transactionDate: "2026-06-01",
     merchant: "M",
@@ -331,10 +334,11 @@ test("assembleProofsZip: 目次 No column matches entry nos (CSV⇄目次 contin
   const files = unzipSync(zip);
   const mokuziKey = Object.keys(files).find((k) => k.endsWith("目次.csv"))!;
   const mokuzi = new TextDecoder().decode(files[mokuziKey]);
-  // The entry nos (3, 7, 33) must each appear as the leading No column.
+  // The entry nos (3, 7, 33) must each appear in the No column — the SECOND
+  // column since review #2 added 科目＆No. as the leading join key.
   for (const no of [3, 7, 33]) {
     assert.ok(
-      new RegExp(`^${no},`, "m").test(mokuzi.replace(/﻿/, "")),
+      new RegExp(`^[^,]*,${no},`, "m").test(mokuzi.replace(/﻿/, "")),
       `目次 must list No=${no}`,
     );
   }

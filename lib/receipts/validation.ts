@@ -121,7 +121,7 @@ export interface NetanswerParseResult {
   rowCount: number;
 }
 
-function decodeAmexBuffer(buffer: ArrayBuffer): { text: string; encoding: string } {
+export function decodeAmexBuffer(buffer: ArrayBuffer): { text: string; encoding: string } {
   const bytes = new Uint8Array(buffer);
 
   // Detect CP932/Shift-JIS by scanning for high-byte patterns that are

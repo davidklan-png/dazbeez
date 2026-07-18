@@ -147,6 +147,7 @@ export async function buildExportBundle(month: string): Promise<ExportBundle> {
     rows.push({
       rowType: "amex_line",
       lineId: line.id,
+      rawCsvLineNumber: line.raw_csv_line_number ?? null,
       matchStatus: line.match_status,
       receiptStatus: line.receipt_status,
       missingReceiptReason: line.receipt_missing_reason,
@@ -185,6 +186,7 @@ export async function buildExportBundle(month: string): Promise<ExportBundle> {
     rows.push({
       rowType: "receipt",
       lineId: null,
+      rawCsvLineNumber: null,
       matchStatus: null,
       receiptStatus: null,
       missingReceiptReason: null,
