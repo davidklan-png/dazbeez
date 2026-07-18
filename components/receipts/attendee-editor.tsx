@@ -14,6 +14,10 @@ interface AttendeeEditorProps {
    * of the session (and the inline Company/Title inputs disappear).
    */
   onRegister?: (entry: ReceiptAttendeeDirectoryEntry) => void;
+  /** When true (receipt sealed by a finalized export/reconciliation), every
+   *  mutating control is disabled so the operator can read attendee values
+   *  without being able to change them. */
+  disabled?: boolean;
 }
 
 export function AttendeeEditor({
@@ -21,6 +25,7 @@ export function AttendeeEditor({
   onChange,
   directory = [],
   onRegister,
+  disabled = false,
 }: AttendeeEditorProps) {
   const listId = useId();
   // Per-row company/title drafts for attendee names that don't resolve against
@@ -103,13 +108,15 @@ export function AttendeeEditor({
                 value={name}
                 onChange={(e) => update(i, e.target.value)}
                 placeholder="Attendee name"
+                disabled={disabled}
                 list={directory.length > 0 ? listId : undefined}
-                className="flex-1 rounded-xl border border-gray-300 px-3 py-2 text-sm focus:border-amber-500 focus:outline-none focus:ring-1 focus:ring-amber-500"
+                className="flex-1 rounded-xl border border-gray-300 px-3 py-2 text-sm focus:border-amber-500 focus:outline-none focus:ring-1 focus:ring-amber-500 disabled:bg-gray-50 disabled:text-gray-500"
               />
               <button
                 type="button"
                 onClick={() => remove(i)}
-                className="rounded-xl border border-gray-200 px-3 py-2 text-xs text-gray-500 hover:bg-gray-50"
+                disabled={disabled}
+                className="rounded-xl border border-gray-200 px-3 py-2 text-xs text-gray-500 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 Remove
               </button>
@@ -130,19 +137,22 @@ export function AttendeeEditor({
                     value={drafts[i]?.company ?? ""}
                     onChange={(e) => setDraft(i, "company", e.target.value)}
                     placeholder="Company"
-                    className="flex-1 rounded-lg border border-gray-300 px-2.5 py-1.5 text-xs focus:border-amber-500 focus:outline-none"
+                    disabled={disabled}
+                    className="flex-1 rounded-lg border border-gray-300 px-2.5 py-1.5 text-xs focus:border-amber-500 focus:outline-none disabled:bg-gray-50"
                   />
                   <input
                     type="text"
                     value={drafts[i]?.title ?? ""}
                     onChange={(e) => setDraft(i, "title", e.target.value)}
                     placeholder="Title"
-                    className="flex-1 rounded-lg border border-gray-300 px-2.5 py-1.5 text-xs focus:border-amber-500 focus:outline-none"
+                    disabled={disabled}
+                    className="flex-1 rounded-lg border border-gray-300 px-2.5 py-1.5 text-xs focus:border-amber-500 focus:outline-none disabled:bg-gray-50"
                   />
                   <button
                     type="button"
                     onClick={() => register(i, trimmed)}
                     disabled={
+                      disabled ||
                       registering === i ||
                       !drafts[i]?.company.trim() ||
                       !drafts[i]?.title.trim()
@@ -174,7 +184,8 @@ export function AttendeeEditor({
       <button
         type="button"
         onClick={add}
-        className="rounded-xl border border-dashed border-amber-300 px-3 py-2 text-xs font-medium text-amber-700 hover:bg-amber-50"
+        disabled={disabled}
+        className="rounded-xl border border-dashed border-amber-300 px-3 py-2 text-xs font-medium text-amber-700 hover:bg-amber-50 disabled:cursor-not-allowed disabled:opacity-50"
       >
         + Add attendee
       </button>

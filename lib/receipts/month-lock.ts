@@ -200,3 +200,15 @@ export function transactionMonthOf(
   const m = /^(\d{4}-\d{2})/.exec(transactionDate);
   return m ? m[1]! : null;
 }
+
+/**
+ * The YYYY-MM of "now" in the operator's timezone (JST, UTC+9). Used as the
+ * review queue's default month scope. JST-aware so a capture late on the 1st
+ * (or early-UTC on the 1st = still the 1st in Tokyo) isn't off-by-one against
+ * a UTC `toISOString()` slice.
+ */
+export function currentCalendarMonth(): string {
+  const now = new Date();
+  const jst = new Date(now.getTime() + 9 * 60 * 60 * 1000);
+  return jst.toISOString().slice(0, 7);
+}
