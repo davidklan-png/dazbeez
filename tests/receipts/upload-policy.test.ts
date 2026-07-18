@@ -197,8 +197,8 @@ test("partitionBatch: input over the limit splits accepted prefix + remainder", 
 });
 
 test("ALLOWED_RECEIPT_EXTENSIONS: no eml/html entries", () => {
-  assert.ok(!ALLOWED_RECEIPT_EXTENSIONS.includes(".eml"));
-  assert.ok(!ALLOWED_RECEIPT_EXTENSIONS.includes(".html"));
+  assert.ok(!(ALLOWED_RECEIPT_EXTENSIONS as readonly string[]).includes(".eml"));
+  assert.ok(!(ALLOWED_RECEIPT_EXTENSIONS as readonly string[]).includes(".html"));
 });
 
 test("formatFileSize: renders the byte counts used in copy", () => {
