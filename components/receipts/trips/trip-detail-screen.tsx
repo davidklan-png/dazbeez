@@ -7,7 +7,7 @@ import { Btn } from "@/components/ui/btn";
 import { Pill } from "@/components/ui/pill";
 import { Card } from "@/components/ui/card";
 import { Field, TextInput } from "@/components/ui/field";
-import { formatDate, formatAmountMinor } from "@/lib/receipts/format";
+import { formatDate, formatAmountMinor, formatPaymentPath } from "@/lib/receipts/format";
 import {
   tripStatusTone,
   candidateDisableReason,
@@ -34,6 +34,7 @@ interface MemberRow {
   month: string | null;
   status: string | null;
   sealed: boolean;
+  paymentPath: string | null;
 }
 
 export function TripDetailScreen({ trip, lines, receipts }: TripDetailScreenProps) {
@@ -73,6 +74,7 @@ export function TripDetailScreen({ trip, lines, receipts }: TripDetailScreenProp
       month: l.statement_month,
       status: l.business_trip_status,
       sealed: false,
+      paymentPath: null,
     })),
     ...receipts.map((r) => ({
       kind: "receipt" as const,
@@ -83,6 +85,7 @@ export function TripDetailScreen({ trip, lines, receipts }: TripDetailScreenProp
       month: r.transaction_date ? r.transaction_date.slice(0, 7) : null,
       status: r.status,
       sealed: r.status === "exported" || r.status === "archived",
+      paymentPath: r.payment_path,
     })),
   ].sort((a, b) => (a.date ?? "").localeCompare(b.date ?? ""));
 
@@ -227,6 +230,70 @@ export function TripDetailScreen({ trip, lines, receipts }: TripDetailScreenProp
   const status = trip.status;
   const exported_ = status === "exported";
 
+  // Charge-centric picker: card charges (AMEX lines) vs cash/digital receipts.
+  // The candidates endpoint already dedupes (a receipt matched to a line is
+  // folded into that line row), so each expense appears once.
+  const chargeLines = candidates.filter((c) => c.kind === "line");
+  const cashReceipts = candidates.filter((c) => c.kind === "receipt");
+
+  function renderCandidateRow(row: CandidateRow) {
+    const reason = candidateDisableReason(row, trip.id);
+    const disabled = reason !== null;
+    const checked = selected.has(row.id);
+    return (
+      <label
+        key={`${row.kind}-${row.id}`}
+        className={[
+          "flex items-center gap-2 rounded-lg border px-3 py-2",
+          disabled
+            ? "cursor-not-allowed border-gray-100 bg-gray-50 opacity-70"
+            : "cursor-pointer border-gray-100 hover:bg-gray-50",
+        ].join(" ")}
+      >
+        <input
+          type="checkbox"
+          className="h-4 w-4 accent-amber-500"
+          disabled={disabled || exported_}
+          checked={checked}
+          onChange={() => toggleSelected(row.id)}
+        />
+        <Pill tone={row.kind === "line" ? "outline" : "purple"} size="sm">
+          {row.kind === "line"
+            ? "Card charge"
+            : formatPaymentPath(row.paymentPath)}
+        </Pill>
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-[13px] text-gray-900">
+            {row.merchant ?? "(unnamed)"}
+          </div>
+          <div className="text-[11px] text-gray-500">
+            {formatDate(row.transactionDate)}
+            {row.month ? ` · ${row.month}` : ""}
+            {row.kind === "line"
+              ? row.matchedReceiptId
+                ? " · receipt ✓"
+                : " · no receipt"
+              : ""}
+          </div>
+        </div>
+        {disabled && row.ownedByTripId && (
+          <Link
+            href={`/receipts/trips/${row.ownedByTripId}`}
+            className="shrink-0 text-[11px] font-medium text-amber-700 hover:underline"
+            onClick={(e) => e.stopPropagation()}
+          >
+            owned by another trip →
+          </Link>
+        )}
+        <span className="shrink-0 text-[12px] tabular-nums text-gray-700">
+          {row.amountMinor != null
+            ? formatAmountMinor(row.amountMinor, row.currency)
+            : "—"}
+        </span>
+      </label>
+    );
+  }
+
   return (
     <div className="mx-auto max-w-5xl px-6 py-8">
       <div className="mb-4">
@@ -356,7 +423,9 @@ export function TripDetailScreen({ trip, lines, receipts }: TripDetailScreenProp
                   className="flex items-center gap-2 rounded-lg border border-gray-100 px-3 py-2"
                 >
                   <Pill tone={row.kind === "line" ? "outline" : "purple"} size="sm">
-                    {row.kind === "line" ? "AMEX" : "receipt"}
+                    {row.kind === "line"
+                      ? "Card charge"
+                      : formatPaymentPath(row.paymentPath)}
                   </Pill>
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-[13px] text-gray-900">
@@ -429,60 +498,27 @@ export function TripDetailScreen({ trip, lines, receipts }: TripDetailScreenProp
               No charges in range. Toggle “Show all” or adjust the search.
             </p>
           ) : (
-            <div className="max-h-80 space-y-1.5 overflow-y-auto">
-              {candidates.map((row) => {
-                const reason = candidateDisableReason(row, trip.id);
-                const disabled = reason !== null;
-                const checked = selected.has(row.id);
-                return (
-                  <label
-                    key={`${row.kind}-${row.id}`}
-                    className={[
-                      "flex cursor-pointer items-center gap-2 rounded-lg border px-3 py-2",
-                      disabled
-                        ? "cursor-not-allowed border-gray-100 bg-gray-50 opacity-70"
-                        : "border-gray-100 hover:bg-gray-50",
-                    ].join(" ")}
-                  >
-                    <input
-                      type="checkbox"
-                      className="h-4 w-4 accent-amber-500"
-                      disabled={disabled || exported_}
-                      checked={checked}
-                      onChange={() => toggleSelected(row.id)}
-                    />
-                    <Pill
-                      tone={row.kind === "line" ? "outline" : "purple"}
-                      size="sm"
-                    >
-                      {row.kind === "line" ? "AMEX" : "receipt"}
-                    </Pill>
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate text-[13px] text-gray-900">
-                        {row.merchant ?? "(unnamed)"}
-                      </div>
-                      <div className="text-[11px] text-gray-500">
-                        {formatDate(row.transactionDate)}
-                        {row.month ? ` · ${row.month}` : ""}
-                      </div>
-                    </div>
-                    {disabled && row.ownedByTripId && (
-                      <Link
-                        href={`/receipts/trips/${row.ownedByTripId}`}
-                        className="shrink-0 text-[11px] font-medium text-amber-700 hover:underline"
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        owned by another trip →
-                      </Link>
-                    )}
-                    <span className="shrink-0 text-[12px] tabular-nums text-gray-700">
-                      {row.amountMinor != null
-                        ? formatAmountMinor(row.amountMinor, row.currency)
-                        : "—"}
-                    </span>
-                  </label>
-                );
-              })}
+            <div className="max-h-80 space-y-3 overflow-y-auto">
+              {chargeLines.length > 0 && (
+                <div>
+                  <div className="mb-1 text-[11px] font-semibold uppercase tracking-[0.04em] text-gray-500">
+                    Card charges ({chargeLines.length})
+                  </div>
+                  <div className="space-y-1.5">
+                    {chargeLines.map(renderCandidateRow)}
+                  </div>
+                </div>
+              )}
+              {cashReceipts.length > 0 && (
+                <div>
+                  <div className="mb-1 text-[11px] font-semibold uppercase tracking-[0.04em] text-gray-500">
+                    Cash & digital receipts ({cashReceipts.length})
+                  </div>
+                  <div className="space-y-1.5">
+                    {cashReceipts.map(renderCandidateRow)}
+                  </div>
+                </div>
+              )}
             </div>
           )}
           {attachError && (

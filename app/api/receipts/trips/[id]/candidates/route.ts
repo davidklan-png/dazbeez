@@ -4,7 +4,7 @@ import {
   getBusinessTripWithMembers,
   listTripAttachCandidates,
 } from "@/lib/receipts/db";
-import { candidateWindow, filterAttachCandidates } from "@/lib/receipts/business-trips";
+import { candidateWindow, filterAttachCandidates, dedupeChargeCandidates } from "@/lib/receipts/business-trips";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -44,14 +44,18 @@ export async function GET(request: Request, { params }: RouteContext) {
     const memberLineIds = new Set(detail.lines.map((l) => l.id));
     const memberReceiptIds = new Set(detail.receipts.map((r) => r.id));
 
-    // db narrows by window + q (SQL); the pure filter excludes current members.
+    // db narrows by window + q (SQL); pure helpers exclude current members and
+    // dedupe (a receipt matched to a line is the same charge — fold it into the
+    // line row, never a separate candidate).
     const rows = await listTripAttachCandidates({ window, q });
-    const candidates = filterAttachCandidates(rows, {
-      memberLineIds,
-      memberReceiptIds,
-      window,
-      q,
-    });
+    const candidates = dedupeChargeCandidates(
+      filterAttachCandidates(rows, {
+        memberLineIds,
+        memberReceiptIds,
+        window,
+        q,
+      }),
+    );
 
     return NextResponse.json(
       { candidates, window, tripId: id },

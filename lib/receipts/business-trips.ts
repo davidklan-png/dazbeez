@@ -206,6 +206,11 @@ export interface CandidateRow {
   /** Lines only: the trip currently owning this line (business_trip_id), if any.
    *  A different-trip owner is INCLUDED but flagged so the UI can show why attach 409s. */
   ownedByTripId: string | null;
+  /** Lines only: the matched receipt id, if any. Lets the UI show "receipt ✓" on a
+   *  card-charge row instead of listing that receipt as a separate candidate. */
+  matchedReceiptId: string | null;
+  /** Receipts only: payment_path (CASH/DIGITAL). Null for lines. */
+  paymentPath: string | null;
 }
 
 /**
@@ -238,6 +243,25 @@ export function filterAttachCandidates(
     }
     return true;
   });
+}
+
+/**
+ * Charge-centric dedup (ADR 0010 D2). A receipt matched to an AMEX line is the
+ * SAME expense as that line — drop it as a standalone candidate so the same
+ * charge never appears as two selectable rows. The line row carries
+ * `matchedReceiptId` so the UI can show "receipt ✓". Only receipts with no
+ * matching line (cash/digital, or genuinely unmatched) survive as receipt
+ * candidates. Pure so it can be unit-tested alongside the picker.
+ */
+export function dedupeChargeCandidates(rows: CandidateRow[]): CandidateRow[] {
+  const matchedReceiptIds = new Set(
+    rows
+      .filter((r) => r.kind === "line" && r.matchedReceiptId)
+      .map((r) => r.matchedReceiptId),
+  );
+  return rows.filter(
+    (r) => !(r.kind === "receipt" && matchedReceiptIds.has(r.id)),
+  );
 }
 
 /**

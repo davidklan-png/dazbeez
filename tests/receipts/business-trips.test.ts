@@ -16,6 +16,7 @@ import {
   candidateWindow,
   isInCandidateWindow,
   filterAttachCandidates,
+  dedupeChargeCandidates,
   candidateDisableReason,
   filterTripsByTab,
   tripStatusTone,
@@ -230,6 +231,8 @@ function cand(over: Partial<CandidateRow> & { kind: "line" | "receipt"; id: stri
     month: "2026-06",
     status: "confirmed",
     ownedByTripId: null,
+    matchedReceiptId: null,
+    paymentPath: null,
     ...over,
   };
 }
@@ -286,6 +289,36 @@ test("filterAttachCandidates: q filters merchant (case-insensitive)", () => {
     q: "ekinet",
   });
   assert.deepEqual(out.map((r) => r.id), ["a"]);
+});
+
+// ─── dedupeChargeCandidates: fold a matched receipt into its line ────────────
+
+test("dedupeChargeCandidates: a receipt matched to a line is dropped (same expense, one row)", () => {
+  const rows = [
+    cand({ kind: "line", id: "line-1", merchant: "Ekinet", matchedReceiptId: "rec-1" }),
+    cand({ kind: "receipt", id: "rec-1", merchant: "Ekinet" }), // duplicate of line-1
+    cand({ kind: "receipt", id: "rec-2", merchant: "駅弁", paymentPath: "CASH" }), // standalone cash
+  ];
+  const out = dedupeChargeCandidates(rows);
+  assert.deepEqual(
+    out.map((r) => r.id).sort(),
+    ["line-1", "rec-2"],
+  );
+  // the surviving line row still carries the matched-receipt hint
+  assert.equal(out.find((r) => r.id === "line-1")?.matchedReceiptId, "rec-1");
+});
+
+test("dedupeChargeCandidates: receipts with no matching line survive", () => {
+  const rows = [
+    cand({ kind: "line", id: "line-1", matchedReceiptId: "rec-1" }),
+    cand({ kind: "receipt", id: "rec-2", paymentPath: "DIGITAL" }),
+    cand({ kind: "receipt", id: "rec-3", paymentPath: "CASH" }),
+  ];
+  const out = dedupeChargeCandidates(rows);
+  assert.deepEqual(
+    out.map((r) => r.id).sort(),
+    ["line-1", "rec-2", "rec-3"],
+  );
 });
 
 // ─── candidateDisableReason (ownedByTripId flag) ─────────────────────────────

@@ -2308,7 +2308,7 @@ export async function listTripAttachCandidates(
   const lines = await db
     .prepare(
       `SELECT id, transaction_date, merchant, amount_minor, currency,
-              statement_month, match_status, business_trip_id
+              statement_month, match_status, business_trip_id, matched_receipt_id
        FROM amex_statement_lines
        WHERE ${datePred} ${hasQ ? "AND merchant LIKE ?" : ""}
        ORDER BY transaction_date ASC`,
@@ -2323,6 +2323,7 @@ export async function listTripAttachCandidates(
       statement_month: string;
       match_status: string | null;
       business_trip_id: string | null;
+      matched_receipt_id: string | null;
     }>();
   for (const l of lines.results ?? []) {
     rows.push({
@@ -2335,13 +2336,15 @@ export async function listTripAttachCandidates(
       month: l.statement_month,
       status: l.match_status,
       ownedByTripId: l.business_trip_id,
+      matchedReceiptId: l.matched_receipt_id,
+      paymentPath: null,
     });
   }
 
   const recs = await db
     .prepare(
       `SELECT id, transaction_date, merchant, amount_minor, currency,
-              export_statement_month, status
+              export_statement_month, status, payment_path
        FROM receipt_records
        WHERE deleted_at IS NULL
          AND ${datePred} ${hasQ ? "AND merchant LIKE ?" : ""}
@@ -2356,6 +2359,7 @@ export async function listTripAttachCandidates(
       currency: string;
       export_statement_month: string | null;
       status: string;
+      payment_path: string;
     }>();
   for (const r of recs.results ?? []) {
     rows.push({
@@ -2370,6 +2374,8 @@ export async function listTripAttachCandidates(
         (r.transaction_date ? r.transaction_date.slice(0, 7) : null),
       status: r.status,
       ownedByTripId: null,
+      matchedReceiptId: null,
+      paymentPath: r.payment_path,
     });
   }
 
