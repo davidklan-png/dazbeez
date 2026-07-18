@@ -6,20 +6,20 @@ import { useEffect, useMemo, useRef } from "react";
 import { Kbd } from "@/components/ui/kbd";
 import { ReceiptThumb } from "@/components/receipts/ui/receipt-thumb";
 import { useKeyboardShortcuts } from "@/lib/receipts/keyboard";
-import type { QueueItem } from "@/lib/receipts/queue-items";
+import { useQueueControls } from "@/components/receipts/review/queue-controls";
 
 export function QueueRail({
-  items,
-  activeId,
   totalUnreviewed,
   totalCaptured,
 }: {
-  items: QueueItem[];
-  activeId: string | null;
   totalUnreviewed: number;
   totalCaptured: number;
 }) {
   const router = useRouter();
+  // Items/activeId/queryParams come from the QueueControls provider so j/k and
+  // the row order follow the client sort + search, and links stay within the
+  // chosen month/filter view (queryParams appended to every navigation).
+  const { visible: items, activeId, queryParams } = useQueueControls();
   const activeIndex = useMemo(
     () => items.findIndex((i) => i.id === activeId),
     [items, activeId],
@@ -42,7 +42,7 @@ export function QueueRail({
     const fallback = delta > 0 ? 0 : items.length - 1;
     const idx = activeIndex < 0 ? fallback : activeIndex;
     const next = items[(idx + delta + items.length) % items.length];
-    if (next) router.push(`/receipts/review/${next.id}`);
+    if (next) router.push(`/receipts/review/${next.id}${queryParams}`);
   }
 
   const doneSoFar = Math.max(0, totalCaptured - totalUnreviewed);
@@ -69,7 +69,7 @@ export function QueueRail({
           items.map((item) => (
             <Link
               key={item.id}
-              href={`/receipts/review/${item.id}`}
+              href={`/receipts/review/${item.id}${queryParams}`}
               ref={item.id === activeId ? activeRef : null}
               aria-current={item.id === activeId ? "page" : undefined}
               className={[
@@ -121,6 +121,18 @@ export function QueueRail({
                     }
                   >
                     extraction failed
+                  </span>
+                )}
+                {item.locked && (
+                  <span
+                    className="mt-1 inline-block rounded bg-gray-200 px-1.5 py-px text-[10px] font-semibold text-gray-600"
+                    title={
+                      item.lockKind === "reconciliation"
+                        ? "Sealed — the AMEX reconciliation for this month is finalized. Reopen it to edit."
+                        : "Sealed — the export for this month is finalized. Open a revision to edit."
+                    }
+                  >
+                    sealed
                   </span>
                 )}
               </div>

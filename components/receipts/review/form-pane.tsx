@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Btn } from "@/components/ui/btn";
@@ -10,8 +11,13 @@ import { ArrowRightIcon } from "@/components/ui/icons";
 import { FormGroup } from "@/components/receipts/ui/form-group";
 import { PaymentPathSeg } from "@/components/receipts/ui/payment-path-seg";
 import { AttendeeEditor } from "@/components/receipts/attendee-editor";
+import {
+  useQueueControls,
+  useQueuePosition,
+} from "@/components/receipts/review/queue-controls";
 import { useKeyboardShortcuts } from "@/lib/receipts/keyboard";
 import { isPendingProcessing } from "@/lib/receipts/extraction-state";
+import type { ReceiptLockInfo } from "@/lib/receipts/receipt-locks";
 import type { ReceiptAttendeeDirectoryEntry } from "@/lib/receipts/attendee-directory";
 import {
   EXPENSE_CATEGORIES,
@@ -60,11 +66,33 @@ export interface FormPaneProps {
   overrideTargetMonths: string[];
   /** The receipt's natural cycle month (label only). */
   naturalStatementMonth: string | null;
+  /** Split-lock surface (receipt-locks.ts). When locked, the form renders a
+   *  banner and disables every mutating control so the operator never types
+   *  into a sealed receipt and discovers the 409 at save. Defaults to unlocked
+   *  so callers that don't pass it behave as before. */
+  lock?: ReceiptLockInfo;
 }
 
 export function FormPane(props: FormPaneProps) {
   const router = useRouter();
   const { receipt } = props;
+
+  // Split-lock: when sealed by a finalized export or reconciliation the entire
+  // form is read-only (banner + every mutating control disabled, autosave and
+  // the `s` shortcut suppressed). The server 409 path stays the backstop.
+  const isLocked = props.lock?.locked ?? false;
+  const lockKind = props.lock?.kind ?? null;
+  const lockMonth = props.lock?.month ?? null;
+
+  // Position in the client-sorted + searched queue (hybrid model: month/lock
+  // chosen server-side, sort/search client-side). Falls back to the
+  // server-computed values when the receipt is filtered out of `visible`
+  // (e.g. the active receipt doesn't match the current text search).
+  const { queryParams } = useQueueControls();
+  const queuePos = useQueuePosition(receipt.id);
+  const queueIndex = queuePos.index >= 0 ? queuePos.index : props.queueIndex;
+  const queueTotal = queuePos.index >= 0 ? queuePos.total : props.queueTotal;
+  const nextReceiptId = queuePos.index >= 0 ? queuePos.nextId : props.nextReceiptId;
 
   // OCR runs on the Mac processor, not here. While the receipt is still pending
   // there is no stored OCR text, so the reprocess button (which only re-parses
@@ -299,6 +327,10 @@ export function FormPane(props: FormPaneProps) {
       initialRenderRef.current = false;
       return;
     }
+    // Sealed receipt: never fire the autosave debounce. The fields are disabled
+    // so they can't change, but this guards against programmatic state changes
+    // and is the explicit "suppress entirely" the lock requires.
+    if (isLocked) return;
     triggerSave(false);
   }, [
     paymentPath,
@@ -310,6 +342,7 @@ export function FormPane(props: FormPaneProps) {
     currency,
     businessPurpose,
     attendees,
+    isLocked,
     triggerSave,
   ]);
 
@@ -357,10 +390,10 @@ export function FormPane(props: FormPaneProps) {
         };
         setApiWarnings(okJson.warnings ?? []);
         setSave({ kind: "saved", at: Date.now() });
-        if (props.nextReceiptId) {
-          router.push(`/receipts/review/${props.nextReceiptId}`);
+        if (nextReceiptId) {
+          router.push(`/receipts/review/${nextReceiptId}${queryParams}`);
         } else {
-          router.push("/receipts/review");
+          router.push(`/receipts/review${queryParams}`);
         }
       } catch {
         setSave({ kind: "error", message: "Network error" });
@@ -377,20 +410,24 @@ export function FormPane(props: FormPaneProps) {
     currency,
     businessPurpose,
     attendees,
-    props.nextReceiptId,
+    nextReceiptId,
+    queryParams,
     router,
   ]);
 
   useKeyboardShortcuts({
     s: (e) => {
+      if (isLocked) return; // sealed — `s` does nothing, no PATCH fires
       e.preventDefault();
       onMarkReviewed();
     },
     c: (e) => {
+      if (isLocked) return;
       e.preventDefault();
       categoryRef.current?.focus();
     },
     a: (e) => {
+      if (isLocked) return;
       e.preventDefault();
       const input = attendeeAddRef.current?.querySelector("input");
       if (input instanceof HTMLInputElement) input.focus();
@@ -453,10 +490,40 @@ export function FormPane(props: FormPaneProps) {
           <span>{transactionLabel}</span>
           <span>·</span>
           <span>
-            {props.queueIndex} of {props.queueTotal}
+            {queueIndex} of {queueTotal}
           </span>
         </div>
       </header>
+
+      {isLocked && (
+        <div className="mx-6 mt-3 flex items-start gap-2 rounded-lg border border-gray-300 bg-gray-100 px-3 py-2 text-xs text-gray-700">
+          <span className="mt-px font-semibold text-gray-700">Sealed.</span>
+          <span>
+            {lockKind === "reconciliation" ? (
+              <>
+                The {lockMonth} AMEX reconciliation is finalized. Reopen it to
+                edit.{" "}
+                <Link
+                  href="/receipts/reconcile"
+                  className="font-semibold text-gray-900 underline"
+                >
+                  Go to reconcile →
+                </Link>
+              </>
+            ) : (
+              <>
+                The {lockMonth} export is finalized. Open a revision to edit.{" "}
+                <Link
+                  href="/receipts/export"
+                  className="font-semibold text-gray-900 underline"
+                >
+                  Go to export →
+                </Link>
+              </>
+            )}
+          </span>
+        </div>
+      )}
 
       {apiWarnings.length > 0 && (
         <div
@@ -496,6 +563,7 @@ export function FormPane(props: FormPaneProps) {
               <TextInput
                 value={merchant}
                 onChange={(e) => setMerchant(e.target.value)}
+                disabled={isLocked}
               />
             </Field>
             <Field label="Date">
@@ -504,6 +572,7 @@ export function FormPane(props: FormPaneProps) {
                 value={transactionDate}
                 max={new Date().toISOString().slice(0, 10)}
                 onChange={(e) => setTransactionDate(e.target.value)}
+                disabled={isLocked}
                 mono
               />
             </Field>
@@ -514,6 +583,7 @@ export function FormPane(props: FormPaneProps) {
                 prefix={currency === "JPY" ? "¥" : currency}
                 suffix={currency}
                 onChange={(e) => setAmountDisplay(e.target.value)}
+                disabled={isLocked}
                 mono
               />
             </Field>
@@ -523,6 +593,7 @@ export function FormPane(props: FormPaneProps) {
                 onChange={(e) =>
                   setExpenseType(e.target.value as ExpenseType)
                 }
+                disabled={isLocked}
                 options={EXPENSE_TYPES.map((e) => ({
                   value: e.value,
                   label: e.label,
@@ -535,7 +606,7 @@ export function FormPane(props: FormPaneProps) {
               kind="ghost"
               size="sm"
               onClick={handleExtract}
-              disabled={extractionBusy || pendingProcessing}
+              disabled={isLocked || extractionBusy || pendingProcessing}
             >
               {pendingProcessing
                 ? "Waiting for processor…"
@@ -570,7 +641,11 @@ export function FormPane(props: FormPaneProps) {
           done={Boolean(expenseCategoryCode) && paymentPath !== "UNKNOWN"}
         >
           <Field label="Payment path">
-            <PaymentPathSeg value={paymentPath} onChange={setPaymentPath} />
+            <PaymentPathSeg
+              value={paymentPath}
+              onChange={setPaymentPath}
+              disabled={isLocked}
+            />
           </Field>
           <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
             <Field label="Category" hint="14-item JP catalog">
@@ -578,7 +653,8 @@ export function FormPane(props: FormPaneProps) {
                 ref={categoryRef}
                 value={expenseCategoryCode}
                 onChange={(e) => setExpenseCategoryCode(e.target.value)}
-                className="h-[38px] w-full rounded-lg border border-gray-200 bg-white px-3 text-sm text-gray-900 focus:border-amber-500 focus:outline-none"
+                disabled={isLocked}
+                className="h-[38px] w-full rounded-lg border border-gray-200 bg-white px-3 text-sm text-gray-900 focus:border-amber-500 focus:outline-none disabled:bg-gray-50 disabled:text-gray-500"
               >
                 <option value="">— Select category —</option>
                 {EXPENSE_CATEGORIES.map((c) => (
@@ -622,6 +698,7 @@ export function FormPane(props: FormPaneProps) {
             <TextInput
               value={businessPurpose}
               onChange={(e) => setBusinessPurpose(e.target.value)}
+              disabled={isLocked}
               placeholder="e.g. Client dinner — Acme product review"
             />
           </Field>
@@ -635,6 +712,7 @@ export function FormPane(props: FormPaneProps) {
                 attendees={attendees}
                 onChange={setAttendees}
                 directory={directory}
+                disabled={isLocked}
                 onRegister={(entry) =>
                   setDirectory((prev) =>
                     prev.some((e) => e.id === entry.id) ? prev : [...prev, entry],
@@ -661,8 +739,8 @@ export function FormPane(props: FormPaneProps) {
               <select
                 value={receipt.export_statement_month ?? ""}
                 onChange={(e) => handleOverride(e.target.value)}
-                disabled={overrideBusy}
-                className="h-[36px] rounded-lg border border-gray-200 bg-white px-3 text-sm text-gray-900 focus:border-amber-500 focus:outline-none"
+                disabled={isLocked || overrideBusy}
+                className="h-[36px] rounded-lg border border-gray-200 bg-white px-3 text-sm text-gray-900 focus:border-amber-500 focus:outline-none disabled:bg-gray-50 disabled:text-gray-500"
               >
                 <option value="">
                   {receipt.export_statement_month ?? "— unassigned —"}
@@ -685,6 +763,7 @@ export function FormPane(props: FormPaneProps) {
             kind="primary"
             size="md"
             onClick={onMarkReviewed}
+            disabled={isLocked}
             rightIcon={<ArrowRightIcon size={14} className="text-white" />}
           >
             Mark reviewed → next
@@ -692,19 +771,19 @@ export function FormPane(props: FormPaneProps) {
           <span className="text-[11px] text-gray-400">
             <Kbd>s</Kbd>
           </span>
-          {props.nextReceiptId && (
+          {nextReceiptId && (
             <Btn
               kind="ghost"
               size="md"
               onClick={() =>
-                router.push(`/receipts/review/${props.nextReceiptId}`)
+                router.push(`/receipts/review/${nextReceiptId}${queryParams}`)
               }
             >
               Skip
             </Btn>
           )}
           <span className="flex-1" />
-          <Btn kind="danger" size="sm" onClick={handleDelete}>
+          <Btn kind="danger" size="sm" onClick={handleDelete} disabled={isLocked}>
             Delete
           </Btn>
         </div>

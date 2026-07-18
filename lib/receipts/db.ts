@@ -359,6 +359,10 @@ async function rejectIfReceiptInFinalizedReconciliation(
 export interface ListReceiptsFilter {
   status?: string;
   month?: string;
+  /** OR `transaction_date IS NULL` into the month condition so undated
+   *  receipts (usually pending extraction — the ones most needing review)
+   *  never disappear under a selected month. Ignored when `month` is unset. */
+  includeUndated?: boolean;
   paymentPath?: string;
   sourceType?: string;
   qualifiedInvoiceStatus?: string;
@@ -386,7 +390,14 @@ export async function listReceiptRecords(
     binds.push(filter.paymentPath);
   }
   if (filter?.month) {
-    conditions.push("transaction_date LIKE ?");
+    // includeUndated ORs `transaction_date IS NULL` in so pending-extraction
+    // (undated) receipts stay visible under a selected month — they are the
+    // rows most needing review and must never vanish when a month is picked.
+    conditions.push(
+      filter.includeUndated
+        ? "(transaction_date LIKE ? OR transaction_date IS NULL)"
+        : "transaction_date LIKE ?",
+    );
     binds.push(`${filter.month}%`);
   }
   if (filter?.sourceType) {
@@ -479,6 +490,26 @@ export {
   listPendingProcessingReceipts,
   reconcileExtractionState,
 } from "@/lib/receipts/extraction-queue-db";
+
+/**
+ * Distinct YYYY-MM transaction months present in the live data, newest first.
+ * Feeds the review-queue month picker so the operator can switch to any month
+ * that has receipts (not just the months within the current 200-row window).
+ * Excludes NULL transaction_dates — those are the undated rows surfaced via
+ * includeUndated, not a month of their own.
+ */
+export async function listDistinctTransactionMonths(): Promise<string[]> {
+  const db = getReceiptsDb();
+  const res = await db
+    .prepare(
+      `SELECT DISTINCT substr(transaction_date, 1, 7) AS m
+       FROM receipt_records
+       WHERE deleted_at IS NULL AND transaction_date IS NOT NULL
+       ORDER BY m DESC`,
+    )
+    .all<{ m: string }>();
+  return (res.results ?? []).map((r) => r.m);
+}
 
 export async function listReceiptRecordsByIds(
   ids: string[],

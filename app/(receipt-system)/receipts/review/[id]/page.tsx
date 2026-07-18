@@ -3,16 +3,24 @@ import {
   getAmexMatchFlagsByReceiptIds,
   getReceiptRecord,
   listAttendees,
+  listDistinctTransactionMonths,
   listReceiptRecords,
 } from "@/lib/receipts/db";
 import { RECEIPT_VIEW_LIMIT } from "@/lib/receipts/list-policy";
 import { assertReceiptsPageAccess } from "@/lib/receipts/auth-request";
 import { ReviewLayout } from "@/components/receipts/review/review-layout";
-import { QueueRail } from "@/components/receipts/review/queue-rail";
 import { buildQueueItems } from "@/lib/receipts/queue-items";
 import { ImagePane } from "@/components/receipts/review/image-pane";
 import { FormPane } from "@/components/receipts/review/form-pane";
 import { listOpenExportMonths, naturalMonthForDate } from "@/lib/receipts/membership";
+import { getReceiptLocks, UNLOCKED_RECEIPT } from "@/lib/receipts/receipt-locks";
+import {
+  buildReviewQueryParams,
+  effectiveReviewMonth,
+  ensureCurrentMonth,
+  filterReviewQueue,
+  resolveReviewMonthScope,
+} from "@/lib/receipts/review-queue-filter";
 import {
   InlineServerError,
   isNextInternalError,
@@ -25,16 +33,19 @@ import {
 import { getComplianceSettings } from "@/lib/receipts/settings";
 import { getExtractionHealth } from "@/lib/receipts/extraction-state";
 import { getReceiptsDb } from "@/lib/cloudflare-runtime";
+import type { ReceiptRecord } from "@/lib/receipts/types";
 
 export const dynamic = "force-dynamic";
 
 export default async function ReviewReceiptPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ id: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   try {
-    return await renderReceiptPage(params);
+    return await renderReceiptPage(params, searchParams);
   } catch (err) {
     if (isNextInternalError(err)) throw err;
     const { id } = await params.catch(() => ({ id: "?" }));
@@ -45,14 +56,30 @@ export default async function ReviewReceiptPage({
   }
 }
 
-async function renderReceiptPage(params: Promise<{ id: string }>) {
+async function renderReceiptPage(
+  params: Promise<{ id: string }>,
+  searchParams: Promise<Record<string, string | string[] | undefined>>,
+) {
   await assertReceiptsPageAccess();
 
   const { id } = await params;
+  const sp = await searchParams;
+  const filter = String(sp.filter ?? "");
+  const statusFilter = typeof sp.status === "string" ? sp.status : undefined;
+  const paymentPathFilter =
+    typeof sp.payment_path === "string" ? sp.payment_path : undefined;
+  const rawMonth = typeof sp.month === "string" ? sp.month : undefined;
+  const monthParam = rawMonth ?? "";
+  const { month: monthScope, includeUndated } = resolveReviewMonthScope(rawMonth);
+
   const [receipt, attendees, all] = await Promise.all([
     getReceiptRecord(id),
     listAttendees(id),
-    listReceiptRecords({ limit: RECEIPT_VIEW_LIMIT }),
+    listReceiptRecords({
+      limit: RECEIPT_VIEW_LIMIT,
+      month: monthScope,
+      includeUndated,
+    }),
   ]);
   if (!receipt) notFound();
 
@@ -89,8 +116,21 @@ async function renderReceiptPage(params: Promise<{ id: string }>) {
     );
   }
 
+  // Locks are computed over the union of the active receipt and the queue set,
+  // so the active receipt's lock is always known even when it lands outside
+  // the selected month (e.g. a deep link) — the form must never render
+  // editable for a receipt the server would refuse to mutate.
+  const locks = await getReceiptLocks(dedupeReceipts([receipt, ...all]));
+  const activeLock = locks.get(receipt.id) ?? UNLOCKED_RECEIPT;
+
+  const queue = filterReviewQueue(all, filter, {
+    statusFilter,
+    paymentPathFilter,
+    locks,
+  });
+
   const amexFlags = await getAmexMatchFlagsByReceiptIds(
-    all.map((r) => r.id).concat(all.some((r) => r.id === id) ? [] : [id]),
+    queue.map((r) => r.id).concat(queue.some((r) => r.id === id) ? [] : [id]),
   );
   const reReviewIds = new Set(
     [...amexFlags.entries()]
@@ -99,32 +139,38 @@ async function renderReceiptPage(params: Promise<{ id: string }>) {
   );
   const activeFlags = amexFlags.get(id);
 
-  const queueItems = buildQueueItems(all, reReviewIds);
+  const queueItems = buildQueueItems(queue, reReviewIds, Date.now(), locks);
   const activeIndex = queueItems.findIndex((q) => q.id === id);
   const nextReceiptId = queueItems[activeIndex + 1]?.id ?? null;
   const prevReceiptId = queueItems[activeIndex - 1]?.id ?? null;
 
   const needsAttention = all.filter(
-    (r) => r.status === "needs_review" || r.status === "captured",
+    (r) =>
+      !locks.get(r.id)?.locked &&
+      (r.status === "needs_review" || r.status === "captured"),
   ).length;
-
+  const lockedCount = all.filter((r) => locks.get(r.id)?.locked).length;
   const ocrHealth = getExtractionHealth(all);
+
+  const queryParams = buildReviewQueryParams(sp, monthParam);
+  const availableMonths = await listDistinctTransactionMonths();
+  const effectiveMonth = effectiveReviewMonth(monthParam, monthScope);
 
   const shortId = `R-${receipt.id.slice(0, 8)}`;
 
   return (
     <ReviewLayout
+      queueItems={queueItems}
+      activeId={id}
+      queryParams={queryParams}
       needsAttention={needsAttention}
-      capturedThisMonth={all.length}
+      workingSetCount={all.length}
+      lockedCount={lockedCount}
+      effectiveMonth={effectiveMonth}
+      availableMonths={ensureCurrentMonth(availableMonths, effectiveMonth)}
+      monthParam={monthParam}
+      activeFilter={filter}
       ocrHealth={ocrHealth}
-      queueRail={
-        <QueueRail
-          items={queueItems}
-          activeId={id}
-          totalUnreviewed={needsAttention}
-          totalCaptured={all.length}
-        />
-      }
       imagePane={
         <ImagePane
           receiptId={receipt.id}
@@ -149,9 +195,24 @@ async function renderReceiptPage(params: Promise<{ id: string }>) {
             reReviewNeeded={activeFlags?.reReviewNeeded ?? false}
             overrideTargetMonths={overrideTargetMonths}
             naturalStatementMonth={naturalStatementMonth}
+            lock={activeLock}
           />
         </div>
       }
     />
   );
+}
+
+/** De-duplicate so the active receipt (which may already be in the queue) is
+ *  not computed twice by getReceiptLocks. */
+function dedupeReceipts(receipts: ReceiptRecord[]): ReceiptRecord[] {
+  const seen = new Set<string>();
+  const out: ReceiptRecord[] = [];
+  for (const r of receipts) {
+    if (!seen.has(r.id)) {
+      seen.add(r.id);
+      out.push(r);
+    }
+  }
+  return out;
 }

@@ -3,6 +3,7 @@ import {
   getCategoryByCode,
 } from "@/lib/receipts/categories";
 import { isPendingProcessing } from "@/lib/receipts/extraction-state";
+import type { ReceiptLockInfo, ReceiptLockKind } from "@/lib/receipts/receipt-locks";
 import type { ReceiptRecord } from "@/lib/receipts/types";
 
 /** Audit B6 / Task 4: per-receipt "stuck?" threshold for the review queue.
@@ -30,18 +31,32 @@ export type QueueItem = {
    *  pill's title attribute. */
   extractionFailed: boolean;
   failureReason: string | null;
+  /** Split-lock surface (receipt-locks.ts). A locked receipt is hidden from
+   *  the default queue and shown read-only when opened. The rail renders a
+   *  gray "sealed" badge when `locked` is set (data-driven, not filter-driven
+   *  — only visible under the locked filter in practice). */
+  locked: boolean;
+  lockKind: ReceiptLockKind | null;
+  /** Sortable keys derived from the raw row so Date/Amount sort and "Needs
+   *  first" ordering are correct regardless of the formatted label. Date is
+   *  epoch-ms (transaction_date, falling back to captured_at); amount is the
+   *  raw minor units (-1 when unknown so it sorts low, not as zero). */
+  sortDateMs: number;
+  sortAmountMinor: number;
 };
 
 export function buildQueueItems(
   receipts: ReceiptRecord[],
   reReviewIds: ReadonlySet<string> = new Set(),
   now: number = Date.now(),
+  locks: ReadonlyMap<string, ReceiptLockInfo> = new Map(),
 ): QueueItem[] {
   return receipts.map((r) => {
     const code = r.expense_category_code ?? "";
     const cat = getCategoryByCode(code);
     const captured = r.captured_at ?? "";
     const failure = readFailureInfo(r);
+    const lock = locks.get(r.id);
     return {
       id: r.id,
       merchant: r.merchant?.trim() || "Unnamed receipt",
@@ -53,8 +68,23 @@ export function buildQueueItems(
       stuck: isStuckPending(r, now),
       extractionFailed: failure.failed,
       failureReason: failure.reason,
+      locked: lock?.locked ?? false,
+      lockKind: lock?.kind ?? null,
+      sortDateMs: sortDateMsFor(r),
+      sortAmountMinor: r.amount_minor ?? -1,
     };
   });
+}
+
+/** Epoch-ms for the receipt's effective date (transaction_date, falling back
+ *  to captured_at — the same fallback dateLabel uses). 0 when unparseable so
+ *  undated/legacy rows sort to an end rather than NaN-scattering. */
+function sortDateMsFor(r: ReceiptRecord): number {
+  const captured = r.captured_at ?? "";
+  const raw = r.transaction_date || captured.slice(0, 10);
+  if (!raw) return 0;
+  const t = Date.parse(raw.length === 10 ? `${raw}T00:00:00Z` : raw);
+  return Number.isNaN(t) ? 0 : t;
 }
 
 /** Parse extraction_json for the failed marker written by
