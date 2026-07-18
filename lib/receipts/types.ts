@@ -735,6 +735,11 @@ export interface ExportRow {
   rowType: "amex_line" | "receipt";
   // AMEX-line identity (null on receipt rows)
   lineId: string | null;
+  /** Original statement CSV row number (amex_statement_lines.raw_csv_line_number).
+   *  The join key for the AMEX reconciliation passthrough file; null/absent on
+   *  receipt rows and on lines imported before raw_csv_line_number existed.
+   *  Optional so existing fixtures/preview constructors stay valid. */
+  rawCsvLineNumber?: number | null;
   matchStatus: AmexMatchStatus | null;
   /** AmexReceiptStatus on line rows; null on receipt rows. */
   receiptStatus: AmexReceiptStatus | null;

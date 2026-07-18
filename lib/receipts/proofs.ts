@@ -69,6 +69,9 @@ export function buildProofFilename(p: ProofFilenameParts): string {
 
 export interface ProofMokuziRow {
   no: number;
+  /** 科目＆No. label (`会議費Jun2026③`) — the join key to the reconciliation
+   *  CSVs. Empty string for legacy No-named entries. */
+  kamokuNo: string;
   filename: string;
   transactionDate: string | null;
   merchant: string;
@@ -102,6 +105,7 @@ function csvQuote(value: string | null | undefined): string {
  *  machine layer. */
 export function buildProofsMokuziCsv(rows: ProofMokuziRow[]): string {
   const header = [
+    "科目＆No.",
     "No",
     "ファイル名",
     "取引日",
@@ -115,6 +119,7 @@ export function buildProofsMokuziCsv(rows: ProofMokuziRow[]): string {
     .sort((a, b) => a.no - b.no)
     .map((r) =>
       [
+        csvQuote(r.kamokuNo),
         String(r.no),
         csvQuote(r.filename),
         csvQuote(r.transactionDate),
@@ -293,6 +298,14 @@ export interface ProofZipEntry {
   /** 出席者 for the 目次 (会議費/接待交際費 only); blank otherwise. */
   attendees: string;
   paymentPath: ProofPaymentPath;
+  /** 科目＆No. label (`会議費Jun2026③`) — the join key shown in 目次 and the
+   *  reconciliation CSVs. */
+  kamokuNo?: string;
+  /** Pre-assigned evidence filename (reconciliation-files.ts
+   *  buildEvidenceAssignments). When present it names the ZIP entry —
+   *  collisions still get a -2/-3 suffix before the extension. When absent
+   *  the legacy No{NN}_ naming applies. */
+  filename?: string;
 }
 
 const ROOT_PREFIX = (month: string) => `領収書等証憓_${month}/`;
@@ -332,34 +345,49 @@ export function assembleProofsZip(
 
   for (const entry of entries) {
     const folder = folderFor(entry.paymentPath);
-    const base = buildProofFilename({
-      no: entry.no,
-      categoryJa: entry.categoryJa,
-      merchant: entry.merchant,
-      amountMinor: entry.amountMinor,
-      currency: entry.currency,
-      ext: entry.ext,
-    });
-    let filename = base;
-    let fileIndex = 1;
+    let filename: string;
     const seen = seenPerFolder.get(folder) ?? new Set<string>();
-    while (seen.has(filename)) {
-      fileIndex += 1;
-      filename = buildProofFilename({
+    if (entry.filename) {
+      // Pre-assigned evidence name (科目＆No convention). Collisions cannot
+      // happen for distinct receipts (per-category sequence is unique), but a
+      // defensive -2/-3 suffix keeps the ZIP writable if inputs ever repeat.
+      filename = entry.filename;
+      let fileIndex = 1;
+      while (seen.has(filename)) {
+        fileIndex += 1;
+        const dot = entry.filename.lastIndexOf(".");
+        filename = `${entry.filename.slice(0, dot)}-${fileIndex}${entry.filename.slice(dot)}`;
+      }
+    } else {
+      const base = buildProofFilename({
         no: entry.no,
         categoryJa: entry.categoryJa,
         merchant: entry.merchant,
         amountMinor: entry.amountMinor,
         currency: entry.currency,
         ext: entry.ext,
-        fileIndex,
       });
+      filename = base;
+      let fileIndex = 1;
+      while (seen.has(filename)) {
+        fileIndex += 1;
+        filename = buildProofFilename({
+          no: entry.no,
+          categoryJa: entry.categoryJa,
+          merchant: entry.merchant,
+          amountMinor: entry.amountMinor,
+          currency: entry.currency,
+          ext: entry.ext,
+          fileIndex,
+        });
+      }
     }
     seen.add(filename);
     seenPerFolder.set(folder, seen);
     files[`${root}${folder}${filename}`] = entry.bytes;
     mokuziRows.push({
       no: entry.no,
+      kamokuNo: entry.kamokuNo ?? "",
       filename,
       transactionDate: entry.transactionDate,
       merchant: entry.merchant,
