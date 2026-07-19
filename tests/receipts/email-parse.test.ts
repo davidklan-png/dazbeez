@@ -12,6 +12,8 @@ import {
   extractAuthVerdicts,
   pickRawHeadersSubset,
   staleCutoffIso,
+  capBody,
+  extractLinks,
 } from "@/lib/receipts/email-parse";
 
 // ─── withinMessageSizeCeiling ───────────────────────────────────────────────
@@ -156,4 +158,104 @@ test("staleCutoffIso: crosses month/year boundaries correctly", () => {
   const now = Date.UTC(2026, 2, 1); // March 1
   const cutoff = staleCutoffIso(now, 30);
   assert.equal(cutoff, "2026-01-30T00:00:00.000Z");
+});
+
+// ─── capBody ────────────────────────────────────────────────────────────────
+
+test("capBody: null passes through, not truncated", () => {
+  assert.deepEqual(capBody(null, 100), { value: null, truncated: false });
+});
+
+test("capBody: under ceiling → unchanged, not truncated", () => {
+  assert.deepEqual(capBody("hello", 100), { value: "hello", truncated: false });
+  assert.deepEqual(capBody("hello", 5), { value: "hello", truncated: false });
+});
+
+test("capBody: over ceiling → truncated true, value byte-bounded", () => {
+  const { value, truncated } = capBody("hello world", 5);
+  assert.equal(truncated, true);
+  assert.equal(value, "hello");
+});
+
+test("capBody: byte cap splits a multibyte sequence into a replacement char, not a throw", () => {
+  // "あ" is 3 UTF-8 bytes. Cap at 4 bytes: the first "あ" (3 bytes) survives
+  // intact; the 4th byte is the leading byte of the second "あ", an incomplete
+  // sequence the non-fatal decoder turns into U+FFFD. So the stored string is
+  // the intact char + one replacement char — never a throw. (The stored value
+  // can re-encode to maxBytes + ~2 at the boundary: a 1-byte partial becomes a
+  // 3-byte replacement char. Immaterial for the cap's purpose.)
+  const { value, truncated } = capBody("ああ", 4);
+  assert.equal(truncated, true);
+  assert.equal(typeof value, "string");
+  assert.equal(value?.length, 2, "intact char + one replacement char");
+  assert.equal(value?.[0], "あ", "first complete char preserved");
+  assert.equal(
+    value?.codePointAt(1),
+    0xfffd,
+    "the partial byte becomes U+FFFD, not a throw",
+  );
+});
+
+test("capBody: exactly at ceiling → not truncated", () => {
+  assert.deepEqual(capBody("hello", 5), { value: "hello", truncated: false });
+});
+
+// ─── extractLinks ───────────────────────────────────────────────────────────
+
+test("extractLinks: single confirmation-style URL in text", () => {
+  const text =
+    "Confirm your forwarding address by visiting https://example.com/confirm?code=123 within 48h.";
+  assert.deepEqual(extractLinks(text, null), ["https://example.com/confirm?code=123"]);
+});
+
+test("extractLinks: multiple links preserve first-seen order + dedupe", () => {
+  const text =
+    "See https://a.com/x and https://b.com/y then https://a.com/x again and https://c.com/z";
+  assert.deepEqual(extractLinks(text, null), [
+    "https://a.com/x",
+    "https://b.com/y",
+    "https://c.com/z",
+  ]);
+});
+
+test("extractLinks: URL inside href=\"…\" in html is captured (no tag-stripping)", () => {
+  // Tag-stripping would DELETE this URL (the <...> match spans the whole tag);
+  // scanning raw html with the regex catches it. This is the regression guard.
+  const html = `<p>Please <a href="https://accounts.google.com/confirm?c=ABC">confirm</a>.</p>`;
+  assert.deepEqual(extractLinks(null, html), [
+    "https://accounts.google.com/confirm?c=ABC",
+  ]);
+});
+
+test("extractLinks: text + html merged; bare URL in html text node also caught", () => {
+  const text = "Receipt at https://shop.example.com/r/9\n";
+  const html = `<b>https://shop.example.com/r/9</b> <a href="https://help.example.com">help</a>`;
+  assert.deepEqual(extractLinks(text, html), [
+    "https://shop.example.com/r/9",
+    "https://help.example.com",
+  ]);
+});
+
+test("extractLinks: trailing punctuation is trimmed", () => {
+  const text = "Visit https://example.com. Then https://other.com/path), done.";
+  assert.deepEqual(extractLinks(text, null), ["https://example.com", "https://other.com/path"]);
+});
+
+test("extractLinks: no URLs → empty array (no throw)", () => {
+  assert.deepEqual(extractLinks("Just prose, no links here.", null), []);
+  assert.deepEqual(extractLinks(null, null), []);
+  assert.deepEqual(extractLinks("", ""), []);
+});
+
+test("extractLinks: caps at maxLinks (default 20), still deduped", () => {
+  const text = Array.from({ length: 30 }, (_, i) => `https://x.com/${i}`).join(" ");
+  const links = extractLinks(text, null);
+  assert.equal(links.length, 20);
+  assert.equal(new Set(links).size, 20, "no dupes within the capped set");
+  assert.equal(links[0], "https://x.com/0");
+});
+
+test("extractLinks: explicit maxLinks override", () => {
+  const text = "https://a.com https://b.com https://c.com https://d.com";
+  assert.equal(extractLinks(text, null, 2).length, 2);
 });

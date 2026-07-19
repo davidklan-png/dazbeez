@@ -1,8 +1,11 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useState, useTransition, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import type { EmailReceiptIntake } from "@/lib/receipts/types";
+import { extractLinks } from "@/lib/receipts/email-parse";
+
+const BODY_PREVIEW_CHARS = 200;
 
 /**
  * One triage row in /receipts/inbox. Promote creates a real receipt (the row
@@ -10,6 +13,11 @@ import type { EmailReceiptIntake } from "@/lib/receipts/types";
  * reason. Promote is disabled when the row has no promotable attachment
  * (mirrors the server assertPromotable check) and the reject_reason is shown
  * inline so the operator sees WHY it can't be promoted.
+ *
+ * ADR 0011 Phase A: the parsed email body (body_text always; body_html behind a
+ * sandboxed-iframe toggle) and extracted links are surfaced here. Links are
+ * always visible when present — finding a verification link (e.g. the Gmail
+ * forwarding confirmation) fast is the actual point of capturing the body.
  */
 export function InboxRow({ intake }: { intake: EmailReceiptIntake }) {
   const router = useRouter();
@@ -17,8 +25,30 @@ export function InboxRow({ intake }: { intake: EmailReceiptIntake }) {
   const [error, setError] = useState<string | null>(null);
   const [rejectOpen, setRejectOpen] = useState(false);
   const [reason, setReason] = useState("");
+  const [bodyOpen, setBodyOpen] = useState(false);
+  const [htmlSrcDoc, setHtmlSrcDoc] = useState<string | null>(null);
+  const [htmlLoading, setHtmlLoading] = useState(false);
 
   const promotable = intake.status === "pending_triage" && !!intake.attachment_r2_key;
+
+  // extractLinks is dependency-free (email-parse.ts has no bindings), safe to
+  // call in this client component. Memoized so a re-render doesn't re-scan up
+  // to 512 KiB of body_html.
+  const links = useMemo(
+    () => extractLinks(intake.body_text, intake.body_html),
+    [intake.body_text, intake.body_html],
+  );
+
+  const hasBody = !!(intake.body_text || intake.body_html);
+  const bodyText = intake.body_text ?? "";
+  const bodyPreview =
+    bodyText.length > BODY_PREVIEW_CHARS
+      ? `${bodyText.slice(0, BODY_PREVIEW_CHARS)}…`
+      : bodyText;
+  // Only show the expand toggle when there's more than the preview, or an HTML
+  // part to render — otherwise the preview already shows everything.
+  const showBodyToggle =
+    hasBody && (!!intake.body_html || bodyText.length > BODY_PREVIEW_CHARS);
 
   function refresh() {
     startTransition(() => {
@@ -70,6 +100,29 @@ export function InboxRow({ intake }: { intake: EmailReceiptIntake }) {
     }
   }
 
+  // Sanitize + reveal the HTML body. DOMPurify is dynamically imported so the
+  // DOM lib stays out of the SSR/edge bundle; sanitize runs only in the browser
+  // when the operator explicitly opts in. Defense in depth on top of the
+  // sandbox="" iframe, which already blocks scripts/same-origin/popups/nav.
+  async function handleViewHtml() {
+    setError(null);
+    if (htmlSrcDoc !== null) {
+      setHtmlSrcDoc(null); // toggle off
+      return;
+    }
+    if (!intake.body_html) return;
+    setHtmlLoading(true);
+    try {
+      const DOMPurify = (await import("dompurify")).default;
+      const clean = DOMPurify.sanitize(intake.body_html);
+      setHtmlSrcDoc(clean);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to render HTML body.");
+    } finally {
+      setHtmlLoading(false);
+    }
+  }
+
   return (
     <li className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -109,6 +162,83 @@ export function InboxRow({ intake }: { intake: EmailReceiptIntake }) {
         )}
       </div>
 
+      {/* Body preview (collapsed). Body-only receipts are now visible at a glance. */}
+      {bodyPreview && !bodyOpen && (
+        <p className="mt-2 whitespace-pre-wrap break-words text-xs text-gray-500">
+          {bodyPreview}
+        </p>
+      )}
+
+      {/* Extracted links — always visible when present. This is the Gmail
+          verification fast path: the operator sees the link without expanding. */}
+      {links.length > 0 && (
+        <div className="mt-2">
+          <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">
+            Links in this email
+          </p>
+          <ul className="mt-0.5 space-y-0.5">
+            {links.map((url) => (
+              <li key={url} className="truncate">
+                <a
+                  href={url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-xs font-medium text-amber-600 hover:text-amber-700 hover:underline"
+                >
+                  {url}
+                </a>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {intake.body_truncated === 1 && (
+        <p className="mt-1 text-[11px] text-amber-700">
+          Body truncated at capture (very large message) — the links above may
+          be incomplete.
+        </p>
+      )}
+
+      {/* Expanded body: full text + opt-in sandboxed HTML. */}
+      {bodyOpen && (
+        <div className="mt-3 rounded-lg border border-gray-200 bg-gray-50 p-3">
+          {bodyText ? (
+            <pre className="whitespace-pre-wrap break-words font-sans text-xs text-gray-800">
+              {bodyText}
+            </pre>
+          ) : (
+            <p className="text-xs text-gray-400">No text body.</p>
+          )}
+
+          {intake.body_html && (
+            <div className="mt-3">
+              <button
+                type="button"
+                onClick={handleViewHtml}
+                disabled={htmlLoading || isPending}
+                className="rounded-lg border border-gray-300 px-2.5 py-1 text-[11px] font-medium text-gray-600 hover:bg-gray-100 disabled:opacity-50"
+              >
+                {htmlSrcDoc !== null
+                  ? "Hide formatted HTML"
+                  : htmlLoading
+                    ? "Rendering…"
+                    : "View as HTML (sandboxed)"}
+              </button>
+              {htmlSrcDoc !== null && (
+                <iframe
+                  title="Email HTML body"
+                  srcDoc={htmlSrcDoc}
+                  sandbox=""
+                  referrerPolicy="no-referrer"
+                  className="mt-2 h-96 w-full rounded-md border border-gray-300 bg-white"
+                />
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
       {error && (
         <p className="mt-2 text-xs font-medium text-red-600">{error}</p>
       )}
@@ -134,6 +264,19 @@ export function InboxRow({ intake }: { intake: EmailReceiptIntake }) {
         >
           {rejectOpen ? "Cancel" : "Reject"}
         </button>
+        {showBodyToggle && (
+          <button
+            type="button"
+            onClick={() => {
+              setBodyOpen((v) => !v);
+              if (bodyOpen) setHtmlSrcDoc(null);
+            }}
+            disabled={isPending}
+            className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-100 disabled:opacity-50"
+          >
+            {bodyOpen ? "Hide body" : "Show full body"}
+          </button>
+        )}
       </div>
 
       {rejectOpen && (

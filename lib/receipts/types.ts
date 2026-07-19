@@ -319,6 +319,12 @@ export interface EmailReceiptIntake {
   reject_reason: string | null;
   promoted_receipt_id: string | null;
   raw_headers_json: string | null;
+  // ADR 0011 Phase A body capture. Both nullable (older rows / no body part).
+  // body_truncated is 1 if EITHER body was cut at the capture cap. Intake-side
+  // metadata only — does not flow into receipt_records on promote.
+  body_text: string | null;
+  body_html: string | null;
+  body_truncated: number;
   created_at: string;
 }
 

@@ -16,6 +16,8 @@ import {
   recordIntake,
   INTAKE_MAX_MESSAGE_BYTES,
   INTAKE_STALE_DAYS,
+  INTAKE_BODY_TEXT_MAX_BYTES,
+  INTAKE_BODY_HTML_MAX_BYTES,
 } from "../../../lib/receipts/email-intake";
 import {
   withinMessageSizeCeiling,
@@ -23,6 +25,7 @@ import {
   extractAuthVerdicts,
   pickRawHeadersSubset,
   staleCutoffIso,
+  capBody,
 } from "../../../lib/receipts/email-parse";
 
 interface Env {
@@ -143,6 +146,13 @@ async function processMessage(
       })),
     );
 
+    // ADR 0011 Phase A: capture the parsed text/html body, byte-capped. The
+    // flag is set if EITHER part was cut, so /receipts/inbox can surface
+    // "body truncated at capture" rather than look silently incomplete.
+    const textCap = capBody(parsed.text ?? null, INTAKE_BODY_TEXT_MAX_BYTES);
+    const htmlCap = capBody(parsed.html ?? null, INTAKE_BODY_HTML_MAX_BYTES);
+    const bodyTruncated = textCap.truncated || htmlCap.truncated;
+
     const ids = await recordIntake(env.RECEIPTS_DB, env.RECEIPTS_BUCKET, {
       receivedAt,
       fromAddress,
@@ -151,6 +161,9 @@ async function processMessage(
       spfPass: spf,
       dkimPass: dkim,
       rawHeadersJson,
+      bodyText: textCap.value,
+      bodyHtml: htmlCap.value,
+      bodyTruncated,
       attachments,
     });
 

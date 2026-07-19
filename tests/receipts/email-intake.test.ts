@@ -123,6 +123,9 @@ function rowFromInsertBinds(args: unknown[]): EmailReceiptIntake {
     raw_headers_json: (args[14] as string | null) ?? null,
     created_at: String(args[15]),
     to_address: (args[16] as string | null) ?? null,
+    body_text: (args[17] as string | null) ?? null,
+    body_html: (args[18] as string | null) ?? null,
+    body_truncated: Number(args[19] ?? 0),
   };
 }
 
@@ -197,6 +200,9 @@ function intakeRow(over: Partial<EmailReceiptIntake> = {}): EmailReceiptIntake {
     reject_reason: null,
     promoted_receipt_id: null,
     raw_headers_json: null,
+    body_text: null,
+    body_html: null,
+    body_truncated: 0,
     created_at: "2026-07-19T00:00:00.000Z",
     ...over,
   };
@@ -210,6 +216,9 @@ const baseInput = {
   spfPass: true,
   dkimPass: false,
   rawHeadersJson: null,
+  bodyText: null,
+  bodyHtml: null,
+  bodyTruncated: false,
 };
 
 // ─── classifyAttachment ─────────────────────────────────────────────────────
@@ -355,6 +364,54 @@ test("recordIntake: null to_address is accepted (defensive — message.to absent
   const db = createFakeDb();
   await recordIntake(asD1(db), asR2(createFakeBucket()), { ...baseInput, toAddress: null, attachments: [] });
   assert.equal(db.rows[0].to_address, null);
+});
+
+test("recordIntake: body_text/body_html/body_truncated round-trip through all three branches", async () => {
+  const valid = new TextEncoder().encode("%PDF-1.4").buffer;
+  const big = new Uint8Array(MAX_RECEIPT_FILE_BYTES + 1);
+  type Att = { filename: string; contentType: string; sizeBytes: number; data: ArrayBuffer };
+  const input = (attachments: Att[]) => ({
+    ...baseInput,
+    bodyText: "Receipt body text https://example.com/r/1",
+    bodyHtml: "<p>Receipt body text <a href='https://example.com/r/1'>link</a></p>",
+    bodyTruncated: true,
+    attachments,
+  });
+
+  // zero-attachment branch
+  let db = createFakeDb();
+  await recordIntake(asD1(db), asR2(createFakeBucket()), input([]));
+  assert.equal(db.rows[0].body_text, "Receipt body text https://example.com/r/1", "zero-attachment body_text");
+  assert.equal(db.rows[0].body_html, input([]).bodyHtml, "zero-attachment body_html");
+  assert.equal(db.rows[0].body_truncated, 1, "zero-attachment body_truncated flag");
+
+  // valid-attachment branch
+  db = createFakeDb();
+  await recordIntake(asD1(db), asR2(createFakeBucket()), input([
+    { filename: "a.pdf", contentType: "application/pdf", sizeBytes: valid.byteLength, data: valid },
+  ]));
+  assert.equal(db.rows[0].body_text, "Receipt body text https://example.com/r/1", "valid-attachment body_text");
+  assert.equal(db.rows[0].body_truncated, 1, "valid-attachment body_truncated flag");
+
+  // invalid-attachment branch
+  db = createFakeDb();
+  await recordIntake(asD1(db), asR2(createFakeBucket()), input([
+    { filename: "big.pdf", contentType: "application/pdf", sizeBytes: big.byteLength, data: big.buffer },
+  ]));
+  assert.equal(db.rows[0].body_text, "Receipt body text https://example.com/r/1", "invalid-attachment body_text");
+  assert.equal(db.rows[0].body_truncated, 1, "invalid-attachment body_truncated flag");
+});
+
+test("recordIntake: bodyTruncated=false persists as 0 (the common, untruncated case)", async () => {
+  const db = createFakeDb();
+  await recordIntake(asD1(db), asR2(createFakeBucket()), {
+    ...baseInput,
+    bodyText: "small body",
+    bodyHtml: null,
+    bodyTruncated: false,
+    attachments: [],
+  });
+  assert.equal(db.rows[0].body_truncated, 0);
 });
 
 test("recordIntake: multiple attachments → one row per attachment (fan-out)", async () => {

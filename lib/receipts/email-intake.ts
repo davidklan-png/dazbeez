@@ -45,6 +45,15 @@ import type {
 // here as the single source of the constant.
 export const INTAKE_MAX_MESSAGE_BYTES = 10 * 1024 * 1024; // 10 MiB
 
+// ADR 0011 Phase A body-capture caps. Pragmatic guards against a pathological
+// inline-image-laden HTML body bloating D1 rows and the triage UI payload —
+// NOT a documented platform hard limit (none was found; if a tighter real
+// ceiling surfaces, use it and tell the architect). Applied byte-accurately in
+// the Worker via capBody() before recordIntake, so stored bodies are already
+// bounded and body_truncated records whether EITHER was cut.
+export const INTAKE_BODY_TEXT_MAX_BYTES = 256 * 1024; // 256 KiB
+export const INTAKE_BODY_HTML_MAX_BYTES = 512 * 1024; // 512 KiB
+
 // Pending rows older than this are stale and cleaned up by the scheduled job
 // (ADR 0011 §6 / open question: 30-day window).
 export const INTAKE_STALE_DAYS = 30;
@@ -141,6 +150,11 @@ export interface RecordIntakeInput {
   spfPass: boolean;
   dkimPass: boolean;
   rawHeadersJson: string | null;
+  // ADR 0011 Phase A: parsed body (already byte-capped by the Worker via
+  // capBody). bodyTruncated is true if EITHER part was cut at its cap.
+  bodyText: string | null;
+  bodyHtml: string | null;
+  bodyTruncated: boolean;
   attachments: ParsedEmailAttachment[];
 }
 
@@ -186,6 +200,9 @@ export async function recordIntake(
       reject_reason: "no attachment",
       promoted_receipt_id: null,
       raw_headers_json: input.rawHeadersJson,
+      body_text: input.bodyText,
+      body_html: input.bodyHtml,
+      body_truncated: input.bodyTruncated ? 1 : 0,
     });
   } else {
     for (const att of input.attachments) {
@@ -216,6 +233,9 @@ export async function recordIntake(
           reject_reason: null,
           promoted_receipt_id: null,
           raw_headers_json: input.rawHeadersJson,
+          body_text: input.bodyText,
+          body_html: input.bodyHtml,
+          body_truncated: input.bodyTruncated ? 1 : 0,
         });
       } else {
         // Invalid → still recorded, NULL r2_key, reason visible, stays
@@ -237,6 +257,9 @@ export async function recordIntake(
           reject_reason: verdict.rejectReason,
           promoted_receipt_id: null,
           raw_headers_json: input.rawHeadersJson,
+          body_text: input.bodyText,
+          body_html: input.bodyHtml,
+          body_truncated: input.bodyTruncated ? 1 : 0,
         });
       }
     }
@@ -249,8 +272,9 @@ export async function recordIntake(
           (id, received_at, from_address, subject, spf_pass, dkim_pass,
            attachment_r2_key, attachment_sha256, attachment_content_type,
            attachment_size_bytes, attachment_filename, status, reject_reason,
-           promoted_receipt_id, raw_headers_json, created_at, to_address)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           promoted_receipt_id, raw_headers_json, created_at, to_address,
+           body_text, body_html, body_truncated)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         row.id,
@@ -270,6 +294,9 @@ export async function recordIntake(
         row.raw_headers_json,
         now,
         row.to_address,
+        row.body_text,
+        row.body_html,
+        row.body_truncated,
       )
       .run();
     createdIds.push(row.id);

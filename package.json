@@ -22,6 +22,7 @@
     "@reactflow/controls": "^11.2.14",
     "@reactflow/core": "^11.11.4",
     "@reactflow/minimap": "^11.7.14",
+    "dompurify": "^3.4.12",
     "fflate": "^0.8.3",
     "framer-motion": "^12.38.0",
     "next": "^16.2.3",
