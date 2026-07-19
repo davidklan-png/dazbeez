@@ -2,6 +2,16 @@ import { getReceiptsBucket, getReceiptsArchiveBucket } from "@/lib/cloudflare-ru
 import { newUuid } from "@/lib/receipts/db-utils";
 import { retentionMetadata } from "@/lib/receipts/retention";
 
+/**
+ * Collapse a user-supplied filename into a safe R2 path segment: strip to
+ * `[A-Za-z0-9._-]`, cap at 100 chars. Shared by the receipts key builder
+ * and the email-intake key builder (ADR 0011) so the two cannot drift on
+ * sanitization rules.
+ */
+export function sanitizeFilenameForR2(filename: string): string {
+  return filename.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 100);
+}
+
 export function generateR2Key(
   receiptId: string,
   filename: string,
@@ -9,7 +19,7 @@ export function generateR2Key(
 ): string {
   const date = capturedAt.slice(0, 10); // YYYY-MM-DD
   const [year, month] = date.split("-") as [string, string];
-  const safe = filename.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 100);
+  const safe = sanitizeFilenameForR2(filename);
   return `receipts/${year}/${month}/${receiptId}/${newUuid()}-${safe}`;
 }
 
