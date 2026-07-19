@@ -1,0 +1,28 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "dazbeez-receipts-email-intake",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-08-01",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  // ADR 0011: bindings copied verbatim from the main wrangler.jsonc — same D1
+  // database and R2 bucket the receipts app uses, so intake rows and attachment
+  // objects land where /receipts/inbox and promoteIntake expect them.
+  "d1_databases": [
+    {
+      "binding": "RECEIPTS_DB",
+      "database_name": "dazbeez-receipts",
+      "database_id": "8dffd78f-b9aa-490d-822d-4f413e52aeba"
+    }
+  ],
+  "r2_buckets": [
+    { "binding": "RECEIPTS_BUCKET", "bucket_name": "dazbeez-receipts" }
+  ],
+  // Daily cleanup at 03:00 UTC. Not user-facing; 03:00 UTC (~12:00 JST) avoids
+  // the receipts module's statement-finalization window and is quiet hours for
+  // inbound mail. See ADR 0011 §6.
+  "triggers": {
+    "crons": ["0 3 * * *"]
+  }
+}

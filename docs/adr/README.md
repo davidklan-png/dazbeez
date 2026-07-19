@@ -19,6 +19,7 @@ other, and the superseded ADR is preserved verbatim as decision history.
 | [0006](0006-statement-window-membership-for-non-amex-receipts.md) | Statement-window membership for non-AMEX receipts | **Superseded in part** | 2026-07-13 | Superseded by [0008](0008-calendar-month-membership-for-non-amex-receipts.md) (in part); kept as history |
 | [0008](0008-calendar-month-membership-for-non-amex-receipts.md) | Calendar-month membership for non-AMEX receipts | Accepted | 2026-07-14 | Supersedes [0006](0006-statement-window-membership-for-non-amex-receipts.md) (in part) |
 | [0009](0009-sealed-month-amendment-policy.md) | Sealed-month amendment policy | Proposed (design of record, not yet implemented) | 2026-07-14 | — |
+| [0011](0011-email-receipt-intake.md) | Email receipt intake (receipts@dazbeez.com via Cloudflare Email Routing, triage table before promotion, standalone worker) | Accepted | 2026-07-19 | — |
 
 ### Numbering
 

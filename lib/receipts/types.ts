@@ -157,7 +157,12 @@ export type AuditAction =
   | "business_trip.updated"
   | "business_trip.confirmed"
   | "business_trip.rejected"
-  | "business_trip.members_changed";
+  | "business_trip.members_changed"
+  // Email receipt intake (ADR 0011). promote/reject are human actions on
+  // email_receipt_intake rows; newValueJson carries the SPF/DKIM verdicts so
+  // "who let this unauthenticated sender in" stays answerable in the trail.
+  | "email_intake.promoted"
+  | "email_intake.rejected";
 
 // ─── Compliance: source / preservation / qualified-invoice ────────────────
 
@@ -284,6 +289,37 @@ export interface ReceiptRecord {
   extraction_processor?: string | null;
   created_at: string;
   updated_at: string;
+}
+
+/**
+ * ADR 0011: an inbound email receipt awaiting human triage. Lives in
+ * `email_receipt_intake`, NOT `receipt_records` — nothing here is a tax
+ * record until a human promotes it (which calls createReceiptRecord). The
+ * attachment_* fields are all nullable: a body-only email, or one whose
+ * attachment failed validation, is still recorded (so it's visible in the
+ * inbox) but has nothing to promote. No retention_until / legal_hold on this
+ * shape by design (see migration 0024).
+ */
+export type EmailIntakeStatus = "pending_triage" | "promoted" | "rejected";
+
+export interface EmailReceiptIntake {
+  id: string;
+  received_at: string;
+  from_address: string;
+  to_address: string | null;
+  subject: string | null;
+  spf_pass: number;
+  dkim_pass: number;
+  attachment_r2_key: string | null;
+  attachment_sha256: string | null;
+  attachment_content_type: string | null;
+  attachment_size_bytes: number | null;
+  attachment_filename: string | null;
+  status: EmailIntakeStatus;
+  reject_reason: string | null;
+  promoted_receipt_id: string | null;
+  raw_headers_json: string | null;
+  created_at: string;
 }
 
 export interface ReceiptAttendee {

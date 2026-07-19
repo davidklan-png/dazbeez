@@ -8,6 +8,7 @@ import { ToasterProvider } from "@/components/ui/toaster";
 const NAV = [
   { href: "/receipts", label: "Dashboard" },
   { href: "/receipts/capture", label: "Capture" },
+  { href: "/receipts/inbox", label: "Inbox" },
   { href: "/receipts/review", label: "Review" },
   { href: "/receipts/amex", label: "AMEX" },
   { href: "/receipts/reconcile", label: "Reconcile" },

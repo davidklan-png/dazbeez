@@ -1,0 +1,30 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "types": ["@cloudflare/workers-types"],
+    "lib": ["ES2022", "WebWorker"],
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["../../*"]
+    }
+  },
+  "include": [
+    "src/**/*.ts",
+    "../../lib/receipts/email-intake.ts",
+    "../../lib/receipts/email-parse.ts",
+    "../../lib/receipts/storage.ts",
+    "../../lib/receipts/upload-policy.ts",
+    "../../lib/receipts/db-utils.ts",
+    "../../lib/receipts/types.ts",
+    "../../lib/receipts/categories.ts",
+    "../../lib/receipts/retention.ts"
+  ]
+}
