@@ -854,6 +854,11 @@ function LineRow({
               re-review
             </Pill>
           ) : null}
+          {line.memo_currency_parse_status === "unparsed" ? (
+            <Pill tone="amber" size="sm">
+              currency unparsed
+            </Pill>
+          ) : null}
           {!confirmed && !noReceipt && band === "none" && (
             <Pill tone="red" size="sm" dot>
               no match
@@ -994,6 +999,11 @@ function DetailPane({
                   ? "No receipt expected"
                   : color.label}
           </Pill>
+          {line.memo_currency_parse_status === "unparsed" ? (
+            <Pill tone="amber" size="sm" dot>
+              Currency unparsed — review memo
+            </Pill>
+          ) : null}
           <span className="text-[13px] text-gray-500">
             {match?.matchReasons.join(", ") ||
               matchExplanation(
@@ -1014,7 +1024,16 @@ function DetailPane({
             <KV k="Posted" v={`${line.posting_date ?? line.transaction_date}`} />
             <KV
               k="Amount"
-              v={formatJpy(line.amount_minor, line.currency)}
+              v={
+                line.memo_currency_parse_status === "parsed" &&
+                line.foreign_currency &&
+                line.foreign_amount_minor != null
+                  ? `${formatJpy(line.amount_minor, line.currency)} · ${formatJpy(
+                      line.foreign_amount_minor,
+                      line.foreign_currency,
+                    )}`
+                  : formatJpy(line.amount_minor, line.currency)
+              }
               mono
             />
             <KV k="Card" v={line.cardholder_name ?? "AMEX"} />

@@ -353,6 +353,19 @@ export interface AmexStatementLine {
   payment_type: string | null;
   prepayment_flag: string | null;
   memo: string | null;
+  // Foreign-currency detail parsed from memo (migration 0026). For an
+  // overseas-billed charge the statement reports only the JPY-converted total
+  // in amount_minor; these hold the original foreign amount / FX rate parsed
+  // off the memo so reconciliation can match a USD (etc.) receipt against
+  // foreign_amount_minor instead of the JPY total. memo_currency_parse_status:
+  // NULL/undefined = no 現地通貨額 marker (ordinary JPY line), 'parsed' =
+  // extracted, 'unparsed' = marker present but extraction failed or the
+  // FX-rate cross-check failed (amber pill in reconcile UI). Optional +
+  // nullable: rows predating 0026 (or backfill) have them NULL.
+  foreign_amount_minor?: number | null;
+  foreign_currency?: string | null;
+  foreign_exchange_rate?: number | null;
+  memo_currency_parse_status?: "parsed" | "unparsed" | null;
   raw_csv_line_number: number | null;
   source_file_sha256: string | null;
   imported_at: string | null;
@@ -664,6 +677,12 @@ export interface ImportAmexLineInput {
   paymentType?: string;
   prepaymentFlag?: string;
   memo?: string;
+  // Foreign-currency detail parsed from memo (migration 0026). See
+  // AmexStatementLine for semantics. Undefined on rows with no foreign data.
+  foreignAmountMinor?: number | null;
+  foreignCurrency?: string | null;
+  foreignExchangeRate?: number | null;
+  memoCurrencyParseStatus?: "parsed" | "unparsed" | null;
   rawCsvLineNumber?: number;
   sourceFileSha256?: string;
   // Set on rows the parser identifies as real charges with no receipt

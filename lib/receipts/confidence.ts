@@ -56,6 +56,27 @@ export function matchExplanation(
     }
     return `Consolidated receipt — ${confirmedSiblings.length} lines sum to ${sum}, receipt total is ${receipt.amount_minor}. Link the remaining charges before sign-off.`;
   }
+  // Foreign-currency match (migration 0026): a JPY statement line carrying a
+  // parsed foreign amount matched a USD (etc.) receipt on the FOREIGN amount,
+  // not the JPY total. Compare foreign_amount_minor to the receipt amount and
+  // explain it as a foreign link — otherwise a valid match reads as "Amount
+  // differs" because the JPY total ≠ the receipt's cents.
+  const foreignMatch =
+    line.memo_currency_parse_status === "parsed" &&
+    line.foreign_currency != null &&
+    line.foreign_amount_minor != null &&
+    line.foreign_currency.toUpperCase() === receipt.currency.toUpperCase();
+  if (foreignMatch) {
+    if (line.foreign_amount_minor !== (receipt.amount_minor ?? 0))
+      return "Foreign-currency amount differs — verify before confirming.";
+    if (
+      line.transaction_date &&
+      receipt.transaction_date &&
+      line.transaction_date !== receipt.transaction_date
+    )
+      return "Dates differ slightly — common for late captures.";
+    return "Linked match (foreign currency).";
+  }
   if (line.amount_minor !== (receipt.amount_minor ?? 0))
     return "Amount differs — verify before confirming.";
   if (

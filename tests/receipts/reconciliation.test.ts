@@ -418,13 +418,123 @@ test("multiple receipts — best match is selected", () => {
   assert.equal(matches[0]!.receiptId, "r-1", "exact amount match should win");
 });
 
-test("currency mismatch (USD receipt vs JPY line) is not matched", () => {
-  // ¥500 line and $5.00 receipt both have amount_minor = 500 but represent
-  // very different values; the matcher must reject this.
+test("currency mismatch (USD receipt vs JPY line, NO foreign data) is not matched", () => {
+  // Case (a): a JPY line with no parsed foreign-currency data still does NOT
+  // match a USD receipt. ¥500 line and $5.00 receipt both have amount_minor =
+  // 500 but represent very different values; today's protective behavior,
+  // unchanged by the two-path change.
   const lines = [makeAmexLine({ amount_minor: 500, currency: "JPY" })];
   const receipts = [makeReceipt({ amount_minor: 500, currency: "USD" })];
   const matches = matchAmexToReceipts(lines, receipts);
   assert.equal(matches.length, 0, "currency must match before amount comparison");
+});
+
+test("foreign-currency path: JPY line with parsed USD data matches a same-amount USD receipt", () => {
+  // Case (b): the line's JPY total (¥1918) is not comparable to a USD receipt;
+  // matching uses the parsed foreign amount (11.51 USD = 1151 minor) against
+  // the receipt's USD amount_minor, with a distinguishing reason string.
+  const lines = [
+    makeAmexLine({
+      id: "cf-line",
+      merchant: "CLOUDFLARE",
+      amount_minor: 1918,
+      currency: "JPY",
+      transaction_date: "2026-06-11",
+      memo: "現地通貨額:11.51 USD",
+      memo_currency_parse_status: "parsed",
+      foreign_currency: "USD",
+      foreign_amount_minor: 1151,
+    }),
+  ];
+  const receipts = [
+    makeReceipt({
+      id: "r-cf",
+      merchant: "CLOUDFLARE",
+      amount_minor: 1151,
+      currency: "USD",
+      transaction_date: "2026-06-11",
+    }),
+  ];
+  const matches = matchAmexToReceipts(lines, receipts);
+  assert.equal(matches.length, 1);
+  assert.equal(matches[0]!.receiptId, "r-cf");
+  // Must NOT reuse the bare JPY "exact amount" reason — a reviewer needs to see
+  // WHY a JPY-denominated line matched a USD receipt.
+  assert.ok(
+    matches[0]!.matchReasons.some((r) => /foreign currency/.test(r)),
+    `expected a foreign-currency reason, got ${JSON.stringify(matches[0]!.matchReasons)}`,
+  );
+});
+
+test("foreign-currency path: JPY line parsed as EUR does not match a USD receipt", () => {
+  // Case (c): foreign data in a currency OTHER than the receipt's still does
+  // not match.
+  const lines = [
+    makeAmexLine({
+      amount_minor: 1918,
+      currency: "JPY",
+      transaction_date: "2026-06-11",
+      memo_currency_parse_status: "parsed",
+      foreign_currency: "EUR",
+      foreign_amount_minor: 1151,
+    }),
+  ];
+  const receipts = [
+    makeReceipt({ amount_minor: 1151, currency: "USD", transaction_date: "2026-06-11" }),
+  ];
+  assert.equal(matchAmexToReceipts(lines, receipts).length, 0);
+});
+
+test("foreign-currency path: unparsed status is not match-eligible", () => {
+  // An "unparsed" line is flagged for operator review and must never auto-match
+  // via the foreign path, even though its foreign_* fields are populated.
+  const lines = [
+    makeAmexLine({
+      amount_minor: 1918,
+      currency: "JPY",
+      transaction_date: "2026-06-11",
+      memo_currency_parse_status: "unparsed",
+      foreign_currency: "USD",
+      foreign_amount_minor: 1151,
+    }),
+  ];
+  const receipts = [
+    makeReceipt({ amount_minor: 1151, currency: "USD", transaction_date: "2026-06-11" }),
+  ];
+  assert.equal(matchAmexToReceipts(lines, receipts).length, 0);
+});
+
+test("foreign-currency path: a JPY↔JPY match is unaffected when the line also carries foreign data", () => {
+  // Protects the highest-traffic domestic path: the same-currency branch wins
+  // for a JPY receipt even though the line has parsed (unrelated) USD data.
+  const lines = [
+    makeAmexLine({
+      id: "jp-line",
+      merchant: "コンビニ",
+      amount_minor: 1000,
+      currency: "JPY",
+      transaction_date: "2026-06-11",
+      memo_currency_parse_status: "parsed",
+      foreign_currency: "USD",
+      foreign_amount_minor: 9999,
+    }),
+  ];
+  const receipts = [
+    makeReceipt({
+      id: "r-jp",
+      merchant: "コンビニ",
+      amount_minor: 1000,
+      currency: "JPY",
+      transaction_date: "2026-06-11",
+    }),
+  ];
+  const matches = matchAmexToReceipts(lines, receipts);
+  assert.equal(matches.length, 1);
+  assert.equal(matches[0]!.receiptId, "r-jp");
+  assert.ok(
+    !matches[0]!.matchReasons.some((r) => /foreign currency/.test(r)),
+    `JPY match must not carry a foreign-currency reason, got ${JSON.stringify(matches[0]!.matchReasons)}`,
+  );
 });
 
 test("currency match is case-insensitive", () => {
