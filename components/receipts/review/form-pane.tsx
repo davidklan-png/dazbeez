@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Btn } from "@/components/ui/btn";
 import { Pill } from "@/components/ui/pill";
-import { Field, SelectInput, TextInput } from "@/components/ui/field";
+import { Field, TextInput } from "@/components/ui/field";
 import { Kbd } from "@/components/ui/kbd";
 import { ArrowRightIcon } from "@/components/ui/icons";
 import { FormGroup } from "@/components/receipts/ui/form-group";
@@ -26,7 +26,6 @@ import {
   formatCategoryLabel,
 } from "@/lib/receipts/categories";
 import type {
-  ExpenseType,
   PaymentPath,
   ReceiptAttendee,
   ReceiptRecord,
@@ -34,22 +33,6 @@ import type {
 } from "@/lib/receipts/types";
 import { SaveBadge, type SaveState } from "./save-badge";
 import { useExtraction } from "./use-extraction";
-
-const EXPENSE_TYPES: Array<{ value: ExpenseType; label: string }> = [
-  { value: "UNKNOWN", label: "Unknown" },
-  { value: "transportation", label: "Transportation" },
-  { value: "travel", label: "Travel" },
-  { value: "business_trip", label: "Business trip" },
-  { value: "meeting-no-alcohol", label: "Meeting (no alcohol)" },
-  { value: "entertainment-alcohol", label: "Entertainment (alcohol)" },
-  { value: "office_supplies", label: "Office supplies" },
-  { value: "telecom", label: "Telecom / Communications" },
-  { value: "software", label: "Software" },
-  { value: "books", label: "Books / research" },
-  { value: "research", label: "Research" },
-  { value: "insurance", label: "Insurance" },
-  { value: "misc", label: "Miscellaneous" },
-];
 
 const SAVE_DEBOUNCE_MS = 450;
 
@@ -118,7 +101,6 @@ export function FormPane(props: FormPaneProps) {
 
   // ─── form state ─────────────────────────────────────────────────────
   const [paymentPath, setPaymentPath] = useState<PaymentPath>(receipt.payment_path);
-  const [expenseType, setExpenseType] = useState<ExpenseType>(receipt.expense_type);
   const [expenseCategoryCode, setExpenseCategoryCode] = useState(
     receipt.expense_category_code ?? "",
   );
@@ -191,10 +173,6 @@ export function FormPane(props: FormPaneProps) {
       setAmountDisplay(formatAmountInput(ex.amountMinor, ex.currency ?? currency));
       filled++;
     }
-    if (ex.expenseType && ex.expenseType !== "UNKNOWN" && expenseType === "UNKNOWN") {
-      setExpenseType(ex.expenseType);
-      filled++;
-    }
     if (ex.businessPurpose && !businessPurpose) {
       setBusinessPurpose(ex.businessPurpose);
       filled++;
@@ -238,7 +216,6 @@ export function FormPane(props: FormPaneProps) {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               paymentPath,
-              expenseType,
               expenseCategoryCode: expenseCategoryCode || null,
               transactionDate: transactionDate || null,
               merchant: merchant.trim() || null,
@@ -279,7 +256,6 @@ export function FormPane(props: FormPaneProps) {
       receipt.id,
       receipt.status,
       paymentPath,
-      expenseType,
       expenseCategoryCode,
       transactionDate,
       merchant,
@@ -334,7 +310,6 @@ export function FormPane(props: FormPaneProps) {
     triggerSave(false);
   }, [
     paymentPath,
-    expenseType,
     expenseCategoryCode,
     transactionDate,
     merchant,
@@ -367,7 +342,6 @@ export function FormPane(props: FormPaneProps) {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             paymentPath,
-            expenseType,
             expenseCategoryCode: expenseCategoryCode || null,
             transactionDate: transactionDate || null,
             merchant: merchant.trim() || null,
@@ -402,7 +376,6 @@ export function FormPane(props: FormPaneProps) {
   }, [
     receipt.id,
     paymentPath,
-    expenseType,
     expenseCategoryCode,
     transactionDate,
     merchant,
@@ -585,19 +558,6 @@ export function FormPane(props: FormPaneProps) {
                 onChange={(e) => setAmountDisplay(e.target.value)}
                 disabled={isLocked}
                 mono
-              />
-            </Field>
-            <Field label="Expense type">
-              <SelectInput
-                value={expenseType}
-                onChange={(e) =>
-                  setExpenseType(e.target.value as ExpenseType)
-                }
-                disabled={isLocked}
-                options={EXPENSE_TYPES.map((e) => ({
-                  value: e.value,
-                  label: e.label,
-                }))}
               />
             </Field>
           </div>
