@@ -163,12 +163,31 @@ export function matchAmexToReceipts(
       if (receipt.payment_path !== "AMEX") continue;
 
       // Amount comparison only makes sense when both sides are denominated in
-      // the same currency. amount_minor for JPY is yen units and for USD/EUR
-      // is cents — comparing across currencies silently matches e.g. ¥500
-      // (line.amount_minor 500) to $5.00 (receipt.amount_minor 500).
+      // the same currency. AMEX statement lines are JPY (amount_minor is yen);
+      // an overseas-billed charge also carries the original foreign amount in
+      // memo-derived foreign_amount_minor/foreign_currency (migration 0026) —
+      // that's the only figure comparable to a USD/EUR (cents) receipt's
+      // amount_minor. Same-currency path is today's behavior, unchanged for the
+      // common JPY↔JPY case; the foreign path compares the line's parsed foreign
+      // amount to the receipt amount. It is only eligible on a cleanly "parsed"
+      // line — an "unparsed" line is flagged for operator review and never
+      // auto-matched, and a "none" line has no foreign data at all (so ordinary
+      // domestic-JPY matching is byte-for-byte unchanged).
+      let amexMinor: number;
+      let foreignPath = false;
       if (
-        line.currency.toUpperCase() !== receipt.currency.toUpperCase()
+        line.currency.toUpperCase() === receipt.currency.toUpperCase()
       ) {
+        amexMinor = line.amount_minor;
+      } else if (
+        line.memo_currency_parse_status === "parsed" &&
+        line.foreign_currency != null &&
+        line.foreign_amount_minor != null &&
+        line.foreign_currency.toUpperCase() === receipt.currency.toUpperCase()
+      ) {
+        amexMinor = line.foreign_amount_minor;
+        foreignPath = true;
+      } else {
         continue;
       }
 
@@ -176,12 +195,11 @@ export function matchAmexToReceipts(
       let score = 0;
       let dateDelta = Infinity;
 
-      const amexMinor = line.amount_minor;
       const receiptMinor = receipt.amount_minor;
 
       if (receiptMinor !== null && amexMinor === receiptMinor) {
         score += 0.5;
-        reasons.push("exact amount");
+        reasons.push(foreignPath ? "exact amount (foreign currency)" : "exact amount");
       } else if (
         receiptMinor !== null &&
         // Use abs() on the reference value so the threshold works for refunds
@@ -190,7 +208,9 @@ export function matchAmexToReceipts(
         Math.abs(amexMinor - receiptMinor) < Math.abs(amexMinor) * 0.01
       ) {
         score += 0.2;
-        reasons.push("approximate amount");
+        reasons.push(
+          foreignPath ? "approximate amount (foreign currency)" : "approximate amount",
+        );
       } else {
         continue; // Amount mismatch too large — not a candidate
       }
@@ -314,6 +334,13 @@ export function matchAmexToReceipts(
         !assignedLines.has(line.id) &&
         line.match_status !== "confirmed" &&
         line.match_status !== "no_receipt" &&
+        // Consolidation stays JPY-only this pass (migration 0026 follow-up).
+        // line.currency is always JPY here, so a USD (etc.) receipt is naturally
+        // excluded from consolidated groups — its single foreign line is matched
+        // via the 1:1 foreign path above. Threading foreign_amount_minor through
+        // the exact-sum logic is deferred (architect-approved; the real
+        // foreign-billed charges today are single-line subscriptions, not
+        // consolidation candidates). See AGENTS backlog / worker report.
         line.currency.toUpperCase() === receipt.currency.toUpperCase() &&
         !!line.merchant &&
         (descriptionContains(line.merchant, receipt.merchant!) ||

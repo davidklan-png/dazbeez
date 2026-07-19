@@ -1,4 +1,10 @@
 import type { ImportAmexLineInput } from "@/lib/receipts/types";
+import {
+  parseForeignCurrencyMemo,
+  parseExchangeRateMemo,
+  foreignAmountCrossCheckOk,
+  type ForeignCurrencyParseStatus,
+} from "@/lib/receipts/foreign-currency";
 
 // Receipt file validation, accepted types, and size limits now live in the
 // client-safe upload-policy module (shared with capture components so the UI
@@ -96,6 +102,19 @@ export interface NetanswerParsedLine {
   amountCents: number;
   currency: string;
   memo: string | null;
+  // Foreign-currency detail parsed from memo (migration 0026). For an
+  // overseas-billed charge, amountCents/currency are the JPY-converted total
+  // reported on the statement; these hold the original foreign amount parsed
+  // off the 現地通貨額 memo so reconciliation can match a USD (etc.) receipt
+  // against it. memoCurrencyParseStatus: null = no 現地通貨額 marker (ordinary
+  // JPY line), "parsed" = extracted, "unparsed" = marker present but extraction
+  // failed OR the FX-rate cross-check failed (rate attached from the trailing
+  // continuation row below). foreignAmountMinor inherits the line's own sign
+  // (negative for refunds); foreignExchangeRate is informational only.
+  foreignAmountMinor: number | null;
+  foreignCurrency: string | null;
+  foreignExchangeRate: number | null;
+  memoCurrencyParseStatus: ForeignCurrencyParseStatus | null;
   rawFields: string[];
   // True when this row had no 利用日 (usage date) in the CSV — e.g. an annual
   // card fee, late fee, or interest adjustment. These are real charges that
@@ -349,6 +368,37 @@ export function parseAmexNetanswer(
       // charge (現地通貨額 is already captured in the preceding dated row's
       // memo, e.g. line 20 above). Label it as benign so the UI doesn't
       // raise it as a warning.
+      //
+      // Foreign-charge continuation-row correlation (migration 0026): this
+      // trailing row also carries the FX rate actually used
+      // (円換算レート:M/D <rate>), which would otherwise vanish into
+      // skippedLines unread. When the immediately preceding pushed line
+      // parsed a 現地通貨額 foreign amount, rescue the rate off this row's
+      // memo, attach it to that line, and run the rate × foreign-amount
+      // cross-check — a mismatch downgrades the line to "unparsed" so a bad
+      // parse can't silently drive a foreign-currency match. The row is still
+      // skipped either way (it has no monetary value of its own).
+      if (isUndatedChargeLine) {
+        const prev = lines[lines.length - 1];
+        if (prev && prev.memoCurrencyParseStatus === "parsed" && memo) {
+          const rate = parseExchangeRateMemo(memo);
+          if (rate != null) {
+            prev.foreignExchangeRate = rate;
+            if (
+              prev.foreignAmountMinor != null &&
+              prev.foreignCurrency &&
+              !foreignAmountCrossCheckOk({
+                foreignAmountMinor: prev.foreignAmountMinor,
+                foreignCurrency: prev.foreignCurrency,
+                jpyAmountMinorAbs: Math.abs(prev.amountCents),
+                exchangeRate: rate,
+              })
+            ) {
+              prev.memoCurrencyParseStatus = "unparsed";
+            }
+          }
+        }
+      }
       skippedLines.push({
         lineNumber: i + 1,
         reason: isUndatedChargeLine
@@ -376,6 +426,23 @@ export function parseAmexNetanswer(
     const effectiveDate =
       txDate ?? metadata.paymentDueDate ?? `${_statementMonth}-01`;
 
+    // Foreign-currency parse (migration 0026). 現地通貨額 memo → original
+    // foreign amount. The memo is a magnitude only, so inherit the line's own
+    // sign (a refund line's foreign amount is negative too). foreignExchangeRate
+    // starts null here and is attached from the trailing continuation row above
+    // when one follows; the cross-check there may downgrade status to "unparsed".
+    const foreign = parseForeignCurrencyMemo(memo);
+    let foreignAmountMinor: number | null = null;
+    let foreignCurrency: string | null = null;
+    let memoCurrencyParseStatus: ForeignCurrencyParseStatus | null = null;
+    if (foreign.status === "parsed") {
+      foreignAmountMinor = isNegative ? -foreign.amountMinor : foreign.amountMinor;
+      foreignCurrency = foreign.currency;
+      memoCurrencyParseStatus = "parsed";
+    } else if (foreign.status === "unparsed") {
+      memoCurrencyParseStatus = "unparsed";
+    }
+
     lines.push({
       lineNumber: i + 1,
       cardholderName: currentCardholder,
@@ -387,6 +454,10 @@ export function parseAmexNetanswer(
       amountCents,
       currency: "JPY",
       memo: memo || null,
+      foreignAmountMinor,
+      foreignCurrency,
+      foreignExchangeRate: null,
+      memoCurrencyParseStatus,
       noReceiptRequired: isUndatedChargeLine,
       noReceiptReason: isUndatedChargeLine
         ? `No 利用日 (usage date) on statement for "${merchantName}" — fixed/recurring charge, no receipt applicable.`
@@ -447,6 +518,10 @@ export function netanswerLinesToImportInputs(
     paymentType: l.paymentType ?? undefined,
     prepaymentFlag: l.prepaymentFlag ?? undefined,
     memo: l.memo ?? undefined,
+    foreignAmountMinor: l.foreignAmountMinor ?? undefined,
+    foreignCurrency: l.foreignCurrency ?? undefined,
+    foreignExchangeRate: l.foreignExchangeRate ?? undefined,
+    memoCurrencyParseStatus: l.memoCurrencyParseStatus ?? undefined,
     rawCsvLineNumber: l.lineNumber,
     sourceFileSha256: sha256,
     receiptStatus: l.noReceiptRequired ? "no_receipt_required" : undefined,

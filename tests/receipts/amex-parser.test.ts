@@ -586,3 +586,158 @@ test("parseAmexNetanswer: handles comma thousands separators in metadata total",
   assert.equal(result.metadata.statementTotalCents, 10000);
   assert.equal(result.validationErrors.length, 0);
 });
+
+// ─── Foreign-currency detail (migration 0026) ───────────────────────────────
+// Real 2026-06/07 SAISON shape: a dated overseas charge row whose memo carries
+// 現地通貨額:<amt> <CCY>, immediately followed by a no-date/no-amount
+// continuation row whose memo carries 円換算レート:M/D <rate>. The continuation
+// row is still skipped (no monetary value) but its rate is correlated back onto
+// the charge line and cross-checked.
+
+test("parseAmexNetanswer: foreign charge + continuation rate row → parsed foreign fields on the charge line", () => {
+  // 11.51 USD × 166.6377 = 1918.06 → ¥1918 (cross-check passes)
+  const csv = [
+    "カード名称,TestCard",
+    "お支払日,2026/07/10",
+    "今回ご請求額,001918",
+    "",
+    "利用日,ご利用店名及び商品名,本人・家族区分,支払区分名称,締前入金区分,利用金額,備考",
+    ",ご利用者名:テスト 様,,,,,",
+    "2026/06/11,CLOUDFLARE,1,1回,,1918,現地通貨額:11.51 USD",
+    ",(SAN FRANCISCO),1,1回,,,円換算レート:6/11 166.6377",
+  ].join("\n");
+  const result = parseAmexNetanswer(toBuffer(csv), "2026-07");
+  assert.equal(result.lines.length, 1);
+  assert.equal(result.parsedTotalCents, 1918);
+  assert.equal(result.validationErrors.length, 0);
+
+  const line = result.lines[0]!;
+  assert.equal(line.merchantName, "CLOUDFLARE");
+  assert.equal(line.memoCurrencyParseStatus, "parsed");
+  assert.equal(line.foreignAmountMinor, 1151);
+  assert.equal(line.foreignCurrency, "USD");
+  assert.equal(line.foreignExchangeRate, 166.6377);
+
+  // The continuation row is still skipped (no monetary value of its own), benign.
+  assert.equal(result.skippedLines.length, 1);
+  assert.equal(result.skippedLines[0]!.benign, true);
+});
+
+test("parseAmexNetanswer: ANTHROPIC 66.00 USD real example also parses", () => {
+  // 66.00 × 168.1516 = 11098.0 → ¥11098
+  const csv = [
+    "カード名称,TestCard",
+    "お支払日,2026/07/10",
+    "今回ご請求額,011098",
+    "",
+    "利用日,ご利用店名及び商品名,本人・家族区分,支払区分名称,締前入金区分,利用金額,備考",
+    ",ご利用者名:テスト 様,,,,,",
+    "2026/06/23,ANTHROPIC,1,1回,,11098,現地通貨額:66.00 USD",
+    ",(SAN FRANCISCO),1,1回,,,円換算レート:6/23 168.1516",
+  ].join("\n");
+  const result = parseAmexNetanswer(toBuffer(csv), "2026-07");
+  const line = result.lines[0]!;
+  assert.equal(line.memoCurrencyParseStatus, "parsed");
+  assert.equal(line.foreignAmountMinor, 6600);
+  assert.equal(line.foreignCurrency, "USD");
+  assert.equal(line.foreignExchangeRate, 168.1516);
+});
+
+test("netanswerLinesToImportInputs: passes foreign-currency fields through", () => {
+  const csv = [
+    "カード名称,TestCard",
+    "お支払日,2026/07/10",
+    "今回ご請求額,001918",
+    "",
+    "利用日,ご利用店名及び商品名,本人・家族区分,支払区分名称,締前入金区分,利用金額,備考",
+    ",ご利用者名:テスト 様,,,,,",
+    "2026/06/11,CLOUDFLARE,1,1回,,1918,現地通貨額:11.51 USD",
+    ",(SAN FRANCISCO),1,1回,,,円換算レート:6/11 166.6377",
+  ].join("\n");
+  const { lines } = parseAmexNetanswer(toBuffer(csv), "2026-07");
+  const inputs = netanswerLinesToImportInputs(lines, "2026-07", "artifact-1", "sha256abc");
+  assert.equal(inputs[0]!.foreignAmountMinor, 1151);
+  assert.equal(inputs[0]!.foreignCurrency, "USD");
+  assert.equal(inputs[0]!.foreignExchangeRate, 166.6377);
+  assert.equal(inputs[0]!.memoCurrencyParseStatus, "parsed");
+});
+
+test("parseAmexNetanswer: rate cross-check failure downgrades to unparsed", () => {
+  // JPY total says 5000 but 11.51 × 166.6377 = 1918 — the parse grabbed the
+  // wrong row/code, so matching on it would be worse than not matching.
+  const csv = [
+    "カード名称,TestCard",
+    "お支払日,2026/07/10",
+    "今回ご請求額,005000",
+    "",
+    "利用日,ご利用店名及び商品名,本人・家族区分,支払区分名称,締前入金区分,利用金額,備考",
+    ",ご利用者名:テスト 様,,,,,",
+    "2026/06/11,CLOUDFLARE,1,1回,,5000,現地通貨額:11.51 USD",
+    ",(SAN FRANCISCO),1,1回,,,円換算レート:6/11 166.6377",
+  ].join("\n");
+  const result = parseAmexNetanswer(toBuffer(csv), "2026-07");
+  const line = result.lines[0]!;
+  assert.equal(line.memoCurrencyParseStatus, "unparsed");
+  // Values retained for operator review (status is the source of truth for
+  // match eligibility; reconciliation gates on status === "parsed").
+  assert.equal(line.foreignAmountMinor, 1151);
+  assert.equal(line.foreignExchangeRate, 166.6377);
+});
+
+test("parseAmexNetanswer: continuation row without a rate memo leaves status parsed (rate is bonus)", () => {
+  // Charge parses cleanly; the trailing annotation row has no 円換算レート
+  // memo. The rate is a bonus cross-check, not a requirement, so the line stays
+  // parsed with a null rate (matches the existing benign-skip test shape).
+  const csv = [
+    "カード名称,TestCard",
+    "お支払日,2026/07/10",
+    "今回ご請求額,001918",
+    "",
+    "利用日,ご利用店名及び商品名,本人・家族区分,支払区分名称,締前入金区分,利用金額,備考",
+    ",ご利用者名:テスト 様,,,,,",
+    "2026/06/11,CLOUDFLARE,1,1回,,1918,現地通貨額:11.51 USD",
+    ",CLOUDFLARE,1,1回,,,",
+  ].join("\n");
+  const result = parseAmexNetanswer(toBuffer(csv), "2026-07");
+  const line = result.lines[0]!;
+  assert.equal(line.memoCurrencyParseStatus, "parsed");
+  assert.equal(line.foreignAmountMinor, 1151);
+  assert.equal(line.foreignExchangeRate, null);
+});
+
+test("parseAmexNetanswer: foreign refund inherits the line's negative sign", () => {
+  // 今回ご請求額 omitted so the total-mismatch check is skipped (its parser
+  // strips the sign, which would otherwise conflict with a negative net).
+  const csv = [
+    "カード名称,TestCard",
+    "利用日,ご利用店名及び商品名,本人・家族区分,支払区分名称,締前入金区分,利用金額,備考",
+    ",ご利用者名:テスト 様,,,,,",
+    "2026/06/11,CLOUDFLARE REFUND,1,1回,,-1918,現地通貨額:11.51 USD",
+    ",(SAN FRANCISCO),1,1回,,,円換算レート:6/11 166.6377",
+  ].join("\n");
+  const result = parseAmexNetanswer(toBuffer(csv), "2026-07");
+  const line = result.lines[0]!;
+  assert.equal(line.amountCents, -1918);
+  assert.equal(line.memoCurrencyParseStatus, "parsed");
+  // Sign inherited from amountCents: the memo magnitude 11.51 becomes -1151.
+  assert.equal(line.foreignAmountMinor, -1151);
+  assert.equal(line.foreignCurrency, "USD");
+});
+
+test("parseAmexNetanswer: ordinary JPY line (no foreign marker) has null foreign fields", () => {
+  const csv = [
+    "カード名称,TestCard",
+    "お支払日,2026/05/07",
+    "今回ご請求額,001000",
+    "",
+    "利用日,ご利用店名及び商品名,本人・家族区分,支払区分名称,締前入金区分,利用金額,備考",
+    ",ご利用者名:テスト 様,,,,,",
+    "2026/05/01,コンビニ,1,1回,,1000,",
+  ].join("\n");
+  const result = parseAmexNetanswer(toBuffer(csv), "2026-05");
+  const line = result.lines[0]!;
+  assert.equal(line.memoCurrencyParseStatus, null);
+  assert.equal(line.foreignAmountMinor, null);
+  assert.equal(line.foreignCurrency, null);
+  assert.equal(line.foreignExchangeRate, null);
+});
