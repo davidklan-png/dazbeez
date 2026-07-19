@@ -406,17 +406,18 @@ test("buildMonthlyExportCsv: AttendeeIds sits right after Attendees; resolved id
   const csv = buildMonthlyExportCsv([row], attendeeMap, DIR, {});
   const dataLine = csv.split("\n")[1]!;
   const cols = dataLine.split(",");
-  // Header layout: …(11) BusinessPurpose, (12) Attendees, (13) AttendeeIds, (14) LineId…
-  assert.equal(cols[12], '"Alice Nakamura; Bob Smith; Nobody Here"', "Attendees column");
-  assert.equal(cols[13], '"5; 3; ?"', "AttendeeIds: resolved ids '; '-joined, ? for unresolved");
+  // Header layout (ExpenseType column removed): …(10) BusinessPurpose, (11)
+  // Attendees, (12) AttendeeIds, (13) LineId…
+  assert.equal(cols[11], '"Alice Nakamura; Bob Smith; Nobody Here"', "Attendees column");
+  assert.equal(cols[12], '"5; 3; ?"', "AttendeeIds: resolved ids '; '-joined, ? for unresolved");
 });
 
 test("buildMonthlyExportCsv: empty attendees row → empty Attendees + empty AttendeeIds", () => {
   const row = makeReceiptRow({ receiptId: "r-1" });
   const csv = buildMonthlyExportCsv([row], new Map(), DIR, {});
   const cols = csv.split("\n")[1]!.split(",");
-  assert.equal(cols[12], '""', "empty Attendees column is quoted-empty");
-  assert.equal(cols[13], '""', "empty AttendeeIds column is quoted-empty");
+  assert.equal(cols[11], '""', "empty Attendees column is quoted-empty");
+  assert.equal(cols[12], '""', "empty AttendeeIds column is quoted-empty");
 });
 
 test("buildMonthlyExportCsv: amex_line with no receipt attendees falls back to line attendees", () => {

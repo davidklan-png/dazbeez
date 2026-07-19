@@ -109,10 +109,14 @@ export async function createReceiptRecord(
       input.taxAmountMinor ?? null,
       input.businessPurpose ?? null,
       input.alcoholPresent ? 1 : 0,
-      expenseType === "meeting-no-alcohol" ||
-      expenseType === "entertainment-alcohol"
-        ? 1
-        : 0,
+      // expense_type is deprecated (Expense Type field removed from the
+      // review form; category — expense_category_code — is now the single
+      // classification input). It's always "UNKNOWN" at insert time
+      // regardless (extraction never invents category, per ADR — see
+      // extraction.ts), so this branch never fired live. attendees_required
+      // is derived from category client-side (categoryRequiresAttendees in
+      // form-pane.tsx) rather than stored per-insert.
+      0,
       status,
       extractionState,
       input.originalR2Key,

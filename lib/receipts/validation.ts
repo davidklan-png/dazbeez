@@ -110,6 +110,13 @@ export interface NetanswerParsedLine {
 export interface SkippedLineInfo {
   lineNumber: number;
   reason: string;
+  // True when the skip is known to carry no monetary value and requires no
+  // operator action — e.g. the trailing no-date/no-amount annotation row
+  // Netアンサー emits after an overseas-currency charge (the JPY amount and
+  // 現地通貨額 detail are already captured on the preceding dated row's own
+  // line/memo). False (default) means this may be a real parsing problem
+  // the operator should look at.
+  benign: boolean;
 }
 
 export interface NetanswerParseResult {
@@ -301,7 +308,7 @@ export function parseAmexNetanswer(
 
     const merchantName = col1;
     if (!merchantName) {
-      skippedLines.push({ lineNumber: i + 1, reason: "missing merchant" });
+      skippedLines.push({ lineNumber: i + 1, reason: "missing merchant", benign: false });
       continue;
     }
 
@@ -333,13 +340,29 @@ export function parseAmexNetanswer(
     const isNegative = /[-−△▲]/.test(amountRaw);
     const digits = amountRaw.replace(/[^0-9]/g, "");
     if (!digits) {
-      skippedLines.push({ lineNumber: i + 1, reason: "missing amount" });
+      // A row with a real 利用日 date but no amount is a genuine parsing
+      // problem worth an operator's attention. A row with NO date and no
+      // amount can never be a legitimate charge under this CSV format (real
+      // undated charges — annual fees, etc. — always carry an amount, see
+      // isUndatedChargeLine above); in practice this is the trailing
+      // no-value annotation row Netアンサー emits after an overseas-currency
+      // charge (現地通貨額 is already captured in the preceding dated row's
+      // memo, e.g. line 20 above). Label it as benign so the UI doesn't
+      // raise it as a warning.
+      skippedLines.push({
+        lineNumber: i + 1,
+        reason: isUndatedChargeLine
+          ? "no date, no amount — informational row, no monetary value (commonly the overseas-currency annotation line trailing a foreign-billed charge; see the memo on the transaction row above)"
+          : "missing amount",
+        benign: isUndatedChargeLine,
+      });
       continue;
     }
     const magnitude = parseInt(digits, 10);
     if (isNaN(magnitude)) {
       skippedLines.push({
         lineNumber: i + 1,
+        benign: false,
         reason: `unparseable amount: ${amountRaw.slice(0, 30)}`,
       });
       continue;

@@ -145,13 +145,19 @@ starts. Design consequences:
 
 ## Receipts Backlog (architect-tracked, not urgent)
 
-1. **Deprecate `expense_type` in favor of `expense_category_code`.**
-   Half-finished migration (see LEGACY_CATEGORY_MAP in lib/receipts/
-   categories.ts). Plan: remove Expense Type from the review form; switch
-   insert-time `attendees_required` from hardcoded legacy values to
-   `requiresAttendees(categoryCode)`; decide export CSV column handling
-   with David (accountant-facing format). Keep the DB column for history.
-   Interim operator convention: David sets both fields consistently.
+1. **Deprecate `expense_type` in favor of `expense_category_code`.** DONE
+   (c865c36, 2026-07-19, sandbox session — cf:dev smoke still needed on
+   the Mac). Expense Type field removed from the review form (form-pane.tsx);
+   Category is the single classification input. Attendee-requirement gate
+   was already Category-driven (categoryRequiresAttendees), so no
+   functional regression there. Dead expense_type-based attendees_required
+   check at insert removed (db.ts) — it never fired live since expense_type
+   is always "UNKNOWN" at insert. David decided: drop ExpenseType from the
+   accountant-facing export CSV now (export.ts) rather than leave it
+   permanently blank — flag to David to give the accountant a heads-up on
+   the column-layout change before the next delivery. expense_type DB
+   column + type kept untouched for historical rows, no migration. 577
+   receipts tests pass, tsc clean.
 2. **`listReceiptSummaries` refactor** — month-scoped, column-projected
    queries (no `extraction_json`) for review queue / reconcile / capture /
    export list views; replaces global `LIMIT 200/1000`. Bundle with #1
