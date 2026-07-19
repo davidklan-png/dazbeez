@@ -26,8 +26,6 @@ import {
   csvEscape,
   csvQuoteAlways,
   resolveRowAttendees,
-  serializeExportRowCells,
-  EXPORT_CSV_HEADERS,
 } from "@/lib/receipts/export";
 import { sanitizeZipNameSegment, formatYenAmount } from "@/lib/receipts/proofs";
 
@@ -257,13 +255,26 @@ export function attendeeIdCells(
 
 // ─── CASH / DIGITAL reconciliation CSVs ─────────────────────────────────────
 
-export const PAYMENT_PATH_APPEND_HEADERS = ["科目＆No.", "領収書ファイル名"] as const;
+/** Lean accountant-facing columns (draft-round feedback 2026-07-18: the full
+ *  receipts-CSV column set is "too many columns" — the machine layer already
+ *  ships those). Mirrors the AMEX file's appended block so both 照合CSVs read
+ *  the same way; attendees carried as IDs + count, resolvable via
+ *  参加者一覧.csv. */
+export const PAYMENT_PATH_CSV_HEADERS = [
+  "No",
+  "利用日",
+  "店舗名",
+  "金額",
+  "科目＆No.",
+  "会議-出席者ID",
+  "人数",
+  "領収書ファイル名",
+] as const;
 
 /**
- * CASH/DIGITAL reconciliation CSV — the existing receipts-CSV row format
- * (same columns, No restarts at 1 within the file) plus 科目＆No. and
- * 領収書ファイル名 appended, filtered to one payment path. Attendees/AttendeeIds
- * columns are already part of the existing format.
+ * CASH/DIGITAL reconciliation CSV — lean rows (No restarts at 1 within the
+ * file), one file per payment path. 会議-出席者ID keeps the "; " separator
+ * (Excel date-coerces space-separated ids).
  */
 export function buildPaymentPathReconciliationCsv(
   rows: ExportRow[],
@@ -272,22 +283,31 @@ export function buildPaymentPathReconciliationCsv(
   amexAttendees: Record<string, string[]>,
   assignments: Map<string, EvidenceAssignment>,
 ): string {
-  const header = [...EXPORT_CSV_HEADERS, ...PAYMENT_PATH_APPEND_HEADERS].join(",");
-  const lines: string[] = [header];
+  const lines: string[] = [PAYMENT_PATH_CSV_HEADERS.join(",")];
   rows.forEach((row, index) => {
     const attendees = resolveRowAttendees(row, attendeeMap, amexAttendees);
-    const cells = serializeExportRowCells(
-      row,
-      index + 1,
-      attendees,
-      attendeeDirectory,
-    );
+    const { ids, count } = attendeeIdCells(attendees, attendeeDirectory);
     const assignment = row.receiptId ? assignments.get(row.receiptId) : undefined;
-    cells.push(
-      csvEscape(assignment?.label ?? ""),
-      csvEscape(assignment?.filename ?? missingReceiptCell(row.missingReceiptReason)),
+    lines.push(
+      [
+        csvEscape(String(index + 1)),
+        csvEscape(row.transactionDate),
+        csvEscape(row.merchant),
+        csvEscape(
+          row.amountMinor === null
+            ? ""
+            : row.currency === "JPY"
+              ? String(row.amountMinor)
+              : (row.amountMinor / 100).toFixed(2),
+        ),
+        csvEscape(assignment?.label ?? row.expenseCategoryJa ?? ""),
+        csvQuoteAlways(ids),
+        csvEscape(count),
+        csvEscape(
+          assignment?.filename ?? missingReceiptCell(row.missingReceiptReason),
+        ),
+      ].join(","),
     );
-    lines.push(cells.join(","));
   });
   return lines.join("\n");
 }

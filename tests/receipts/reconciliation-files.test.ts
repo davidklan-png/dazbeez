@@ -9,11 +9,10 @@ import {
   attendeeIdCells,
   missingReceiptCell,
   AMEX_RECONCILIATION_APPEND_HEADERS,
-  PAYMENT_PATH_APPEND_HEADERS,
+  PAYMENT_PATH_CSV_HEADERS,
   type EvidenceUnit,
   type AmexLineAppend,
 } from "@/lib/receipts/reconciliation-files";
-import { EXPORT_CSV_HEADERS } from "@/lib/receipts/export";
 import type { ExportRow } from "@/lib/receipts/types";
 import type { ReceiptAttendeeDirectoryEntry } from "@/lib/receipts/attendee-directory";
 
@@ -233,7 +232,7 @@ const receiptRow = (over: Partial<ExportRow>): ExportRow => ({
   ...over,
 } as ExportRow);
 
-test("buildPaymentPathReconciliationCsv: existing header + 科目＆No./領収書ファイル名", () => {
+test("buildPaymentPathReconciliationCsv: lean header + attendees + evidence (draft-round feedback)", () => {
   const assignments = buildEvidenceAssignments("2026-06", [
     unit({ receiptId: "r-cash-1", categoryJa: "消耗品費", merchant: "セブン-イレブン", amountMinor: 1200 }),
   ]);
@@ -245,11 +244,9 @@ test("buildPaymentPathReconciliationCsv: existing header + 科目＆No./領収�
     assignments,
   );
   const lines = csv.split("\n");
-  assert.equal(
-    lines[0],
-    [...EXPORT_CSV_HEADERS, ...PAYMENT_PATH_APPEND_HEADERS].join(","),
-  );
-  assert.ok(lines[1]!.startsWith("1,receipt,2026-06-10,"), "No restarts at 1 per file");
+  assert.equal(lines[0], PAYMENT_PATH_CSV_HEADERS.join(","));
+  assert.equal(lines[0], "No,利用日,店舗名,金額,科目＆No.,会議-出席者ID,人数,領収書ファイル名");
+  assert.ok(lines[1]!.startsWith("1,2026-06-10,セブン-イレブン,1200,"), "No restarts at 1; lean columns");
   assert.ok(lines[1]!.includes("消耗品費Jun2026①"), "科目＆No appended");
   assert.ok(
     lines[1]!.includes("消耗品費Jun2026①セブン-イレブン¥1,200.jpg") ||

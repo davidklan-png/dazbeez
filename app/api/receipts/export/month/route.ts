@@ -301,7 +301,6 @@ export async function POST(request: Request) {
           : row.paymentPath === "CASH"
             ? "CASH"
             : "AMEX") as ProofPaymentPath,
-        kamokuNo: assignment?.label,
         filename: assignment?.filename,
       });
     }

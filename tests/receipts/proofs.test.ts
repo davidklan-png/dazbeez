@@ -4,7 +4,6 @@ import { unzipSync } from "fflate";
 import {
   assembleProofsZip,
   buildProofFilename,
-  buildProofsMokuziCsv,
   buildTransitionNotice,
   formatYenAmount,
   sanitizeZipNameSegment,
@@ -108,75 +107,6 @@ test("buildProofFilename: No zero-pads to 2, 3 digits naturally", () => {
   assert.ok(f(120).startsWith("No120_"));
 });
 
-// ─── buildProofsMokuziCsv (目次) ────────────────────────────────────────────
-
-test("buildProofsMokuziCsv: human TOC columns — no machine fields", () => {
-  const csv = buildProofsMokuziCsv([
-    {
-      no: 3,
-      kamokuNo: "研究開発費Mar2026②",
-      filename: "No03_研究開発費_OpenAI_¥108,341.pdf",
-      transactionDate: "2026-03-04",
-      merchant: "OpenAI",
-      amountMinor: 108341,
-      currency: "JPY",
-      categoryJa: "研究開発費",
-      attendees: "",
-    },
-    {
-      no: 7,
-      kamokuNo: "接待交際費Mar2026⑷",
-      filename: "No07_接待交際費_屋形舟_¥69,000.jpg",
-      transactionDate: "2026-03-10",
-      merchant: "屋形舟",
-      amountMinor: 69000,
-      currency: "JPY",
-      categoryJa: "接待交際費",
-      attendees: "山田太郎; 鈴木花子",
-    },
-  ]);
-  assert.ok(csv.startsWith("﻿"), "目次 must be BOM-prefixed for Excel");
-  assert.ok(csv.includes("\r\n"), "目次 must use CRLF for Windows Excel");
-  // Exact header — the accountant's table of contents only.
-  assert.ok(
-    csv.includes("科目＆No.,No,ファイル名,取引日,店舗,金額,勘定科目,出席者"),
-    "目次 header is the human TOC",
-  );
-  // Machine fields removed (they live in the manifest).
-  assert.ok(!csv.includes("statement_line_id"), "no statement_line_id column");
-  assert.ok(!csv.includes("receipt_id"), "no receipt_id column");
-  assert.ok(!csv.includes("出典"), "no 出典 column");
-  // 出席者 populated for 接待交際費.
-  assert.ok(csv.includes("山田太郎; 鈴木花子"), "attendees listed for 接待交際費");
-  // Quoted filename field (contains a comma in the amount).
-  assert.ok(csv.includes('"No03_研究開発費_OpenAI_¥108,341.pdf"'));
-});
-
-test("buildProofsMokuziCsv: 出席者 populated for 会議費/接待交際費, empty otherwise", () => {
-  const row = (categoryJa: string, attendees: string) => ({
-    no: 1,
-    kamokuNo: "",
-    filename: "f.jpg",
-    transactionDate: "2026-06-01",
-    merchant: "M",
-    amountMinor: 1000,
-    currency: "JPY",
-    categoryJa,
-    attendees,
-  });
-  assert.ok(
-    buildProofsMokuziCsv([row("会議費", "Alice; Bob")]).includes(",会議費,Alice; Bob"),
-    "会議費 attendees populated",
-  );
-  assert.ok(
-    buildProofsMokuziCsv([row("接待交際費", "Carol")]).includes(",接待交際費,Carol"),
-    "接待交際費 attendees populated",
-  );
-  // Non-meeting/entertainment category → empty 出席者 (trailing empty field).
-  const other = buildProofsMokuziCsv([row("旅費交通費", "")]);
-  assert.match(other, /旅費交通費,\r\n/, "non-meeting category has empty 出席者");
-});
-
 // ─── buildTransitionNotice (お知らせ) ───────────────────────────────────────
 
 const baseNotice: TransitionNoticeInput = {
@@ -191,7 +121,10 @@ const baseNotice: TransitionNoticeInput = {
 test("buildTransitionNotice: static + dynamic sections, honest about gaps", () => {
   const txt = buildTransitionNotice(baseNotice);
   assert.ok(txt.includes("2026年6月"), "month label");
-  assert.ok(txt.includes("NoXX"), "explains the No join key");
+  assert.ok(txt.includes("科目＆No."), "explains the 科目＆No join key");
+  assert.ok(txt.includes("Reconciliation.csv"), "explains the AMEX passthrough file");
+  assert.ok(!txt.includes("NoXX"), "retired NoXX naming no longer described");
+  assert.ok(txt.includes("参加者一覧.csv"), "attendee IDs resolve via 参加者一覧");
   assert.ok(txt.includes("出席者"), "attendees now a CSV column");
   assert.ok(txt.includes("SHA-256"), "integrity hashing mentioned");
   assert.ok(txt.includes("再圧縮"), "honest about recompression");
@@ -203,13 +136,20 @@ test("buildTransitionNotice: static + dynamic sections, honest about gaps", () =
 test("buildTransitionNotice: missing-receipt reasons + IC advisories surface", () => {
   const txt = buildTransitionNotice({
     ...baseNotice,
-    missingReceiptLines: [{ lineId: "amex-line-9", reason: "紛失" }],
-    icAdvisories: [{ no: 33, merchant: "セブン-イレブン", amountMinor: 10000 }],
+    missingReceiptLines: [
+      { transactionDate: "2026-04-30", merchant: "ソフトバンクM", amountMinor: 14975, reason: "紛失" },
+    ],
+    icAdvisories: [
+      { no: 33, transactionDate: "2026-06-02", merchant: "セブン-イレブン", amountMinor: 10000 },
+    ],
   });
   assert.ok(txt.includes("領収書なしの明細"), "missing-receipt section header");
   assert.ok(txt.includes("紛失"), "recorded reason");
+  assert.ok(txt.includes("2026-04-30 ソフトバンクM ¥14,975"), "line identified by date/merchant/amount");
+  assert.ok(!/[0-9a-f]{8}-[0-9a-f]{4}/.test(txt), "no UUIDs surfaced to the accountant");
   assert.ok(txt.includes("ICカードチャージ"), "IC advisory section");
-  assert.ok(txt.includes("No33"), "IC advisory No");
+  assert.ok(txt.includes("2026-06-02 セブン-イレブン ¥10,000"), "IC advisory identified by date, not No");
+  assert.ok(!txt.includes("No33"), "internal No not surfaced");
 });
 
 test("buildTransitionNotice: revision context only when revision > 1", () => {
@@ -255,7 +195,7 @@ const SUMMARY_CSV =
 const ATTENDEES_CSV =
   "﻿AttendeeId,Name,Company,Title\r\n5,Alice Nakamura,Acme,Director\r\n";
 
-test("assembleProofsZip: UTF-8 names round-trip + 目次/集計/参加者一覧/お知らせ present", () => {
+test("assembleProofsZip: UTF-8 names round-trip + 集計/参加者一覧/お知らせ present, 目次 retired", () => {
   const entries = [
     fakeEntry({ no: 3, ext: "pdf", paymentPath: "AMEX" }),
     fakeEntry({
@@ -279,9 +219,9 @@ test("assembleProofsZip: UTF-8 names round-trip + 目次/集計/参加者一覧/
   const names = Object.keys(files);
 
   // Root + two folders with Japanese names.
-  assert.ok(names.some((n) => n.startsWith("領収書等証憓_2026-06/")), "Japanese root folder");
+  assert.ok(names.some((n) => n.startsWith("領収書等証憑_2026-06/")), "Japanese root folder");
   assert.ok(names.some((n) => n.includes("AMEX明細分/")), "AMEX folder");
-  assert.ok(names.some((n) => n.includes("追加経費_現金デジタル分/")), "cash/digital folder");
+  assert.ok(names.some((n) => n.includes("現金分/")), "cash folder (per payment path)");
   // The two proof files, with their No-prefixed Japanese names intact.
   assert.ok(
     names.some((n) => n.includes("No03_研究開発費_OpenAI_¥108,341.pdf")),
@@ -292,7 +232,7 @@ test("assembleProofsZip: UTF-8 names round-trip + 目次/集計/参加者一覧/
     "cash proof filename (whitespace-stripped merchant) round-trips",
   );
   // Index + summary + attendees + notice.
-  assert.ok(names.some((n) => n.endsWith("目次.csv")), "目次.csv present");
+  assert.ok(!names.some((n) => n.endsWith("目次.csv")), "目次.csv retired (照合CSVs are the index)");
   assert.ok(names.some((n) => n.endsWith("集計.csv")), "集計.csv present");
   assert.ok(names.some((n) => n.endsWith("参加者一覧.csv")), "参加者一覧.csv present");
   assert.ok(names.some((n) => n.endsWith("お知らせ.txt")), "お知らせ.txt present");
@@ -316,32 +256,6 @@ test("assembleProofsZip: UTF-8 names round-trip + 目次/集計/参加者一覧/
     sankashaBytes.every((b, i) => b === expectedSankasha[i]),
     "参加者一覧.csv bytes identical to the standalone attendees artifact",
   );
-});
-
-test("assembleProofsZip: 目次 No column matches entry nos (CSV⇄目次 continuity)", () => {
-  const entries = [
-    fakeEntry({ no: 3 }),
-    fakeEntry({ no: 7, merchant: "屋形舟", amountMinor: 69000 }),
-    fakeEntry({ no: 33, merchant: "セブン", amountMinor: 10000 }),
-  ];
-  const zip = assembleProofsZip(
-    "2026-06",
-    entries,
-    { ...baseNotice, receiptCount: 3 },
-    SUMMARY_CSV,
-    ATTENDEES_CSV,
-  );
-  const files = unzipSync(zip);
-  const mokuziKey = Object.keys(files).find((k) => k.endsWith("目次.csv"))!;
-  const mokuzi = new TextDecoder().decode(files[mokuziKey]);
-  // The entry nos (3, 7, 33) must each appear in the No column — the SECOND
-  // column since review #2 added 科目＆No. as the leading join key.
-  for (const no of [3, 7, 33]) {
-    assert.ok(
-      new RegExp(`^[^,]*,${no},`, "m").test(mokuzi.replace(/﻿/, "")),
-      `目次 must list No=${no}`,
-    );
-  }
 });
 
 test("assembleProofsZip: reconciliation CSVs embedded at root when provided (review #2)", () => {
@@ -369,6 +283,6 @@ test("assembleProofsZip: reconciliation CSVs embedded at root when provided (rev
     !keys.some((k) => k.includes("DIGITAL2026-06_Reconciliation")),
     "no DIGITAL entry when null",
   );
-  // Root placement (directly under the 領収書等証憓_<month>/ prefix).
+  // Root placement (directly under the 領収書等証憑_<month>/ prefix).
   assert.equal(amexKey!.split("/").length, 2, "embedded at ZIP root");
 });
