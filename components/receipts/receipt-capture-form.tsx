@@ -99,6 +99,12 @@ export function ReceiptCaptureForm({
     () => EMPTY_QUEUE,
   );
   const [sessionUploads, setSessionUploads] = useState<SessionUpload[]>(persisted);
+  // Live "Preselect AMEX/CASH" chip state. Lifted up from CaptureMobile so
+  // onPickFile's upload() reads the value the operator actually toggled, not
+  // the one-time initialPayment prop (seeded once from the ?payment= URL).
+  // Before this, paymentChip lived in CaptureMobile and only drove the chip's
+  // own highlight — it never reached the upload call, so the chip was cosmetic.
+  const [paymentChip, setPaymentChip] = useState<PaymentChip>(initialPayment);
   // Desktop FIFO concurrency pool (limit DESKTOP_MAX_CONCURRENT_UPLOADS) and
   // the mobile single-flight gate. Both held in refs so they survive re-renders
   // without restarting in-flight work.
@@ -123,7 +129,7 @@ export function ReceiptCaptureForm({
         // phase. The normal capture -> upload -> re-arm flow is unchanged.
         if (!mobileSingleFlightRef.current.start()) return;
         try {
-          await upload(file, initialPayment, source);
+          await upload(file, paymentChip, source);
         } finally {
           mobileSingleFlightRef.current.finish();
         }
@@ -147,7 +153,7 @@ export function ReceiptCaptureForm({
 
       const slot = await desktopPoolRef.current.acquire();
       try {
-        const result = await upload(file, initialPayment, source);
+        const result = await upload(file, paymentChip, source);
         setSessionUploads((prev) =>
           prev.map((u) =>
             u.id === id
@@ -161,13 +167,14 @@ export function ReceiptCaptureForm({
         slot.release();
       }
     },
-    [isMobile, upload, initialPayment],
+    [isMobile, upload, paymentChip],
   );
 
   if (isMobile) {
     return (
       <CaptureMobile
-        initialPayment={initialPayment}
+        paymentChip={paymentChip}
+        setPaymentChip={setPaymentChip}
         rapidMode={rapidMode}
         todayCount={todayCount}
         phase={phase}
