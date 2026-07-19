@@ -49,10 +49,16 @@ const MERCHANT_ALIAS_GROUPS: RegExp[][] = [
   [/えきねっと|エキネット|EKI-?NET/i, /東日本旅客鉄道|JR\s*東日本|JR\s*EAST/i],
 ];
 
-// Consolidated-group suggestions never reach the "obvious" (auto-confirm)
-// band — 0.92 in lib/receipts/confidence.ts. A wrong grouping is the
-// costliest reconciliation mistake, so a human confirms each group line.
-const CONSOLIDATED_CONFIDENCE_CAP = 0.9;
+// Matches that must NEVER reach the "obvious" (auto-confirm) band — 0.92 in
+// lib/receipts/confidence.ts — so the bulk-confirm-obvious action can never
+// action one without an individual human look. Two categories share this cap
+// today (single source of truth — do NOT let them drift):
+//   (a) consolidated multi-line matches — a wrong grouping is the costliest
+//       reconciliation mistake;
+//   (b) tentative matches against a receipt whose payment_path is still
+//       UNKNOWN — confirming one reclassifies the receipt as AMEX, which must
+//       never happen silently via a bulk action.
+const MANUAL_REVIEW_CONFIDENCE_CAP = 0.9;
 
 function merchantAliasMatch(a: string, b: string): boolean {
   return MERCHANT_ALIAS_GROUPS.some(
@@ -160,7 +166,19 @@ export function matchAmexToReceipts(
     let best: { match: ReconciliationMatch; dateDelta: number } | null = null;
 
     for (const receipt of eligibleReceipts) {
-      if (receipt.payment_path !== "AMEX") continue;
+      // Admit declared-AMEX receipts (today's behavior) AND receipts whose
+      // payment_path is still UNKNOWN — an unclassified receipt with obvious
+      // merchant/amount/date signals should surface as a *tentative* candidate
+      // (capped below the "obvious" band) rather than stay invisible until the
+      // operator manually classifies it. CASH/DIGITAL receipts are explicit
+      // human classifications and stay excluded.
+      if (
+        receipt.payment_path !== "AMEX" &&
+        receipt.payment_path !== "UNKNOWN"
+      ) {
+        continue;
+      }
+      const tentativePaymentPath = receipt.payment_path === "UNKNOWN";
 
       // Amount comparison only makes sense when both sides are denominated in
       // the same currency. AMEX statement lines are JPY (amount_minor is yen);
@@ -192,6 +210,13 @@ export function matchAmexToReceipts(
       }
 
       const reasons: string[] = [];
+      // Compose: a tentative-payment match may also be a foreign-currency
+      // match (e.g. an unclassified USD Cloudflare receipt vs a parsed-foreign
+      // JPY line). Push the tentative reason first so both reasons read
+      // together rather than one overwriting the other.
+      if (tentativePaymentPath) {
+        reasons.push("payment path not yet set — confirming will classify as AMEX");
+      }
       let score = 0;
       let dateDelta = Infinity;
 
@@ -249,7 +274,15 @@ export function matchAmexToReceipts(
           match: {
             amexLineId: line.id,
             receiptId: receipt.id,
-            confidenceScore: Math.min(score, dateCap),
+            // Tentative UNKNOWN-payment matches are additionally capped below
+            // the "obvious" band so bulk-confirm-obvious can never silently
+            // reclassify one as AMEX — a human must confirm each individually.
+            confidenceScore: Math.min(
+              score,
+              tentativePaymentPath
+                ? Math.min(dateCap, MANUAL_REVIEW_CONFIDENCE_CAP)
+                : dateCap,
+            ),
             matchReasons: reasons,
           },
           dateDelta,
@@ -366,7 +399,7 @@ export function matchAmexToReceipts(
       const dateDelta = daysBetween(line.transaction_date!, receipt.transaction_date);
       const score = Math.min(
         0.5 + Math.max(0, 0.35 - 0.05 * dateDelta) + 0.15,
-        CONSOLIDATED_CONFIDENCE_CAP,
+        MANUAL_REVIEW_CONFIDENCE_CAP,
       );
       assignedLines.add(line.id);
       resolved.push({

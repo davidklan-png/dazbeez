@@ -56,6 +56,14 @@ export function matchExplanation(
     }
     return `Consolidated receipt — ${confirmedSiblings.length} lines sum to ${sum}, receipt total is ${receipt.amount_minor}. Link the remaining charges before sign-off.`;
   }
+  // Tentative UNKNOWN-payment match: the receipt hasn't been classified yet.
+  // Confirming will classify it as AMEX as part of the same action — surface
+  // that side effect so the operator isn't surprised. Composes with the
+  // foreign-currency note below when both apply.
+  const tentative = receipt.payment_path === "UNKNOWN";
+  const tentativeNote = tentative
+    ? "Payment path not set — confirming will classify this receipt as AMEX. "
+    : "";
   // Foreign-currency match (migration 0026): a JPY statement line carrying a
   // parsed foreign amount matched a USD (etc.) receipt on the FOREIGN amount,
   // not the JPY total. Compare foreign_amount_minor to the receipt amount and
@@ -68,22 +76,22 @@ export function matchExplanation(
     line.foreign_currency.toUpperCase() === receipt.currency.toUpperCase();
   if (foreignMatch) {
     if (line.foreign_amount_minor !== (receipt.amount_minor ?? 0))
-      return "Foreign-currency amount differs — verify before confirming.";
+      return `${tentativeNote}Foreign-currency amount differs — verify before confirming.`;
     if (
       line.transaction_date &&
       receipt.transaction_date &&
       line.transaction_date !== receipt.transaction_date
     )
-      return "Dates differ slightly — common for late captures.";
-    return "Linked match (foreign currency).";
+      return `${tentativeNote}Dates differ slightly — common for late captures.`;
+    return `${tentativeNote}Linked match (foreign currency).`;
   }
   if (line.amount_minor !== (receipt.amount_minor ?? 0))
-    return "Amount differs — verify before confirming.";
+    return `${tentativeNote}Amount differs — verify before confirming.`;
   if (
     line.transaction_date &&
     receipt.transaction_date &&
     line.transaction_date !== receipt.transaction_date
   )
-    return "Dates differ slightly — common for late captures.";
-  return "Linked match.";
+    return `${tentativeNote}Dates differ slightly — common for late captures.`;
+  return `${tentativeNote}Linked match.`;
 }

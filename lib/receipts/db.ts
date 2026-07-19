@@ -1175,23 +1175,38 @@ export async function updateAmexReconciliation(
     newMerchant: string | null;
     filledDate: string | null;
   } | null = null;
+  // Hoisted to function scope so the amex.reconciled audit below can record it
+  // even when no merchant/date adoption happened.
+  let classifyAsAmex = false;
 
   if (receiptId && matchStatus === "confirmed") {
-    // Read the receipt's current merchant/transaction_date to decide whether
-    // the AMEX override is a no-op (and to populate the audit trail).
+    // Read the receipt's current merchant/transaction_date/payment_path to
+    // decide whether the AMEX override is a no-op (and to populate the audit
+    // trail). payment_path drives the tentative-match → AMEX classification.
     const receiptRow = await db
       .prepare(
-        `SELECT merchant, transaction_date FROM receipt_records WHERE id = ? LIMIT 1`,
+        `SELECT merchant, transaction_date, payment_path FROM receipt_records WHERE id = ? LIMIT 1`,
       )
       .bind(receiptId)
-      .first<{ merchant: string | null; transaction_date: string | null }>();
+      .first<{ merchant: string | null; transaction_date: string | null; payment_path: string }>();
 
     const receiptMerchant = receiptRow?.merchant ?? null;
     const receiptDate = receiptRow?.transaction_date ?? null;
+    const receiptPaymentPath = receiptRow?.payment_path ?? null;
 
     const merchantChanged = shouldOverwriteMerchant(amexMerchant, receiptMerchant);
 
     const dateFill = !receiptDate && !!amexTransactionDate;
+
+    // Confirming a tentative UNKNOWN-payment match classifies the receipt as
+    // AMEX in the SAME batch as the match confirmation — a receipt must never
+    // be observable as matched + still UNKNOWN, even transiently. Gated
+    // strictly on UNKNOWN; an already-declared AMEX/CASH/DIGITAL receipt is
+    // never touched here. 'AMEX' is a fixed classification, inlined as a
+    // literal (not a bind param). Appended to BOTH UPDATE branches below so the
+    // flip lands regardless of which branch runs.
+    classifyAsAmex = receiptPaymentPath === "UNKNOWN";
+    const paymentPathFragment = classifyAsAmex ? ", payment_path = 'AMEX'" : "";
 
     if (merchantChanged || dateFill) {
       receiptAdoptAudit = {
@@ -1206,7 +1221,7 @@ export async function updateAmexReconciliation(
              SET merchant = ?,
                  transaction_date = COALESCE(transaction_date, ?),
                  status = 'reconciled',
-                 updated_at = ?
+                 updated_at = ?${paymentPathFragment}
              WHERE id = ?`,
           )
           .bind(
@@ -1221,7 +1236,7 @@ export async function updateAmexReconciliation(
       statements.push(
         db
           .prepare(
-            `UPDATE receipt_records SET status = 'reconciled', updated_at = ? WHERE id = ?`,
+            `UPDATE receipt_records SET status = 'reconciled', updated_at = ?${paymentPathFragment} WHERE id = ?`,
           )
           .bind(now, receiptId),
       );
@@ -1271,7 +1286,16 @@ export async function updateAmexReconciliation(
       matchStatus: previousStatus,
       receiptStatus: previousReceiptStatus,
     }),
-    newValueJson: stringifyJson({ receiptId, matchStatus, receiptStatus: newReceiptStatus }),
+    newValueJson: stringifyJson({
+      receiptId,
+      matchStatus,
+      receiptStatus: newReceiptStatus,
+      // Traceable record that this confirm also classified an UNKNOWN receipt
+      // as AMEX (audit-everything convention — never an invisible side effect).
+      ...(classifyAsAmex
+        ? { classifiedPaymentPath: { from: "UNKNOWN", to: "AMEX" } }
+        : {}),
+    }),
   });
 
   // Second audit entry when AMEX values were adopted onto the receipt.

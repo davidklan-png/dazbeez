@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { matchAmexToReceipts, normalizeDescription } from "@/lib/receipts/reconciliation";
+import { bandForLine } from "@/lib/receipts/confidence";
 import type { AmexStatementLine, ReceiptRecord } from "@/lib/receipts/types";
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
@@ -534,6 +535,99 @@ test("foreign-currency path: a JPY↔JPY match is unaffected when the line also 
   assert.ok(
     !matches[0]!.matchReasons.some((r) => /foreign currency/.test(r)),
     `JPY match must not carry a foreign-currency reason, got ${JSON.stringify(matches[0]!.matchReasons)}`,
+  );
+});
+
+// ─── Tentative UNKNOWN-payment matches (payment path not yet set) ─────────────
+// An unclassified receipt (payment_path UNKNOWN) with obvious signals should
+// surface as a candidate, capped below the "obvious" band so the bulk-confirm
+// action can never silently reclassify it as AMEX. CASH/DIGITAL stay excluded.
+
+test("tentative UNKNOWN-payment match: surfaces as candidate, capped below obvious, reason present", () => {
+  // Default line+receipt have matching merchant/amount/date (raw signals clear
+  // 0.92). Override only payment_path → UNKNOWN.
+  const lines = [makeAmexLine({})];
+  const receipts = [makeReceipt({ payment_path: "UNKNOWN" })];
+  const matches = matchAmexToReceipts(lines, receipts);
+  assert.equal(matches.length, 1);
+  assert.ok(
+    matches[0]!.confidenceScore < 0.92,
+    `capped below 0.92, got ${matches[0]!.confidenceScore}`,
+  );
+  assert.ok(
+    matches[0]!.matchReasons.some((r) => /payment path not yet set/.test(r)),
+    `expected tentative reason, got ${JSON.stringify(matches[0]!.matchReasons)}`,
+  );
+  // The cap is UNKNOWN-specific: the same receipt declared AMEX clears obvious.
+  const amexMatches = matchAmexToReceipts(lines, [makeReceipt({ payment_path: "AMEX" })]);
+  assert.ok(
+    amexMatches[0]!.confidenceScore >= 0.92,
+    `declared-AMEX should clear obvious, got ${amexMatches[0]!.confidenceScore}`,
+  );
+});
+
+test("§3 regression: UNKNOWN-payment perfect match is NOT 'obvious' (bulk-confirm must never touch it)", () => {
+  // Raw signals (exact amount + 0-day window + merchant match) would alone
+  // reach the 0.92 "obvious" band — the gate bulkConfirmObvious auto-confirms.
+  // The tentative cap must keep it out of that band. This is the load-bearing
+  // safety gate of the whole feature; a failure here is a blocker.
+  const lines = [makeAmexLine({})];
+  const receipts = [makeReceipt({ payment_path: "UNKNOWN" })];
+  const matches = matchAmexToReceipts(lines, receipts);
+  const band = bandForLine(lines[0]!, matches[0]);
+  assert.notEqual(
+    band,
+    "obvious",
+    `capped tentative match must not reach the obvious (bulk-confirm) band, got ${band}`,
+  );
+});
+
+test("tentative match scope: CASH receipt is NOT reconsidered as an AMEX candidate", () => {
+  const lines = [makeAmexLine({})];
+  const receipts = [makeReceipt({ payment_path: "CASH" })];
+  assert.equal(matchAmexToReceipts(lines, receipts).length, 0);
+});
+
+test("tentative match scope: DIGITAL receipt is NOT reconsidered as an AMEX candidate", () => {
+  const lines = [makeAmexLine({})];
+  const receipts = [makeReceipt({ payment_path: "DIGITAL" })];
+  assert.equal(matchAmexToReceipts(lines, receipts).length, 0);
+});
+
+test("tentative + foreign: UNKNOWN USD receipt matches parsed-foreign JPY line, capped, composed reasons", () => {
+  const lines = [
+    makeAmexLine({
+      id: "cf-line",
+      merchant: "CLOUDFLARE",
+      amount_minor: 1918,
+      currency: "JPY",
+      transaction_date: "2026-06-11",
+      memo_currency_parse_status: "parsed",
+      foreign_currency: "USD",
+      foreign_amount_minor: 1151,
+    }),
+  ];
+  const receipts = [
+    makeReceipt({
+      id: "r-cf",
+      merchant: "CLOUDFLARE",
+      amount_minor: 1151,
+      currency: "USD",
+      transaction_date: "2026-06-11",
+      payment_path: "UNKNOWN",
+    }),
+  ];
+  const matches = matchAmexToReceipts(lines, receipts);
+  assert.equal(matches.length, 1);
+  assert.ok(matches[0]!.confidenceScore < 0.92);
+  const reasons = matches[0]!.matchReasons;
+  assert.ok(
+    reasons.some((r) => /payment path not yet set/.test(r)),
+    `tentative reason missing: ${JSON.stringify(reasons)}`,
+  );
+  assert.ok(
+    reasons.some((r) => /foreign currency/.test(r)),
+    `foreign-currency reason missing: ${JSON.stringify(reasons)}`,
   );
 });
 
