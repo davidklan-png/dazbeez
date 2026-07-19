@@ -781,6 +781,12 @@ function LineRow({
   );
   const confirmed = line.match_status === "confirmed";
   const noReceipt = line.match_status === "no_receipt";
+  // Tentative UNKNOWN-payment match: a suggested receipt whose payment_path is
+  // still UNKNOWN. Confirming it classifies the receipt as AMEX (db.ts), so flag
+  // it distinctly — never silently reclassify.
+  const tentativeMatch =
+    !!match &&
+    (receiptId ? receiptMap.get(receiptId)?.payment_path : undefined) === "UNKNOWN";
 
   return (
     <button
@@ -857,6 +863,11 @@ function LineRow({
           {line.memo_currency_parse_status === "unparsed" ? (
             <Pill tone="amber" size="sm">
               currency unparsed
+            </Pill>
+          ) : null}
+          {tentativeMatch ? (
+            <Pill tone="blue" size="sm">
+              confirms as AMEX
             </Pill>
           ) : null}
           {!confirmed && !noReceipt && band === "none" && (
@@ -984,6 +995,9 @@ function DetailPane({
     line.match_status === "no_receipt" ||
     line.receipt_status === "no_receipt_required" ||
     line.receipt_status === "receipt_not_available";
+  // Tentative UNKNOWN-payment match: confirming classifies the receipt as AMEX.
+  const tentativeMatch =
+    !!match && receipt?.payment_path === "UNKNOWN";
 
   return (
     <div className="h-full overflow-auto bg-gray-50 p-6">
@@ -1002,6 +1016,11 @@ function DetailPane({
           {line.memo_currency_parse_status === "unparsed" ? (
             <Pill tone="amber" size="sm" dot>
               Currency unparsed — review memo
+            </Pill>
+          ) : null}
+          {tentativeMatch ? (
+            <Pill tone="blue" size="sm" dot>
+              Payment path not set — confirms as AMEX
             </Pill>
           ) : null}
           <span className="text-[13px] text-gray-500">
