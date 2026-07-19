@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useRef, useState, type ChangeEvent } from "react";
+import { useRef, type ChangeEvent } from "react";
 import { Btn } from "@/components/ui/btn";
 import { Pill } from "@/components/ui/pill";
 import { CameraIcon, CheckIcon, PlusIcon } from "@/components/ui/icons";
@@ -11,7 +11,11 @@ import type { PaymentPath } from "@/lib/receipts/types";
 import type { CapturePhase } from "./use-receipt-upload";
 
 export interface CaptureMobileProps {
-  initialPayment: PaymentPath | null;
+  // paymentChip/setPaymentChip are owned by ReceiptCaptureForm (lifted state)
+  // so the toggled value actually reaches the upload call. See
+  // receipt-capture-form.tsx.
+  paymentChip: PaymentPath | null;
+  setPaymentChip: (p: PaymentPath | null) => void;
   rapidMode: boolean;
   todayCount: number | null;
   phase: CapturePhase;
@@ -22,7 +26,6 @@ export interface CaptureMobileProps {
 
 export function CaptureMobile(props: CaptureMobileProps) {
   const fileRef = useRef<HTMLInputElement>(null);
-  const [paymentChip, setPaymentChip] = useState<PaymentPath | null>(props.initialPayment);
 
   function pickFile() {
     fileRef.current?.click();
@@ -58,8 +61,8 @@ export function CaptureMobile(props: CaptureMobileProps) {
       ) : (
         <CaptureIdleMobile
           todayCount={props.todayCount}
-          paymentChip={paymentChip}
-          setPaymentChip={setPaymentChip}
+          paymentChip={props.paymentChip}
+          setPaymentChip={props.setPaymentChip}
           onTapCapture={pickFile}
           error={props.phase.kind === "error" ? props.phase.message : null}
         />
