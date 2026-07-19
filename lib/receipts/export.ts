@@ -154,7 +154,8 @@ export function serializeExportRowCells(
   return [
     // No: 1-based row sequence. The join key between this CSV and the proofs
     // ZIP filenames — the accountant matches a statement line to its proof
-    // via this number (see 目次.csv, which maps No → evidence filename).
+    // via this number (kept for the machine layer; the 照合CSVs'
+    // 領収書ファイル名 column is the accountant-facing evidence index).
     csvEscape(String(no)),
     csvEscape(row.rowType),
     csvEscape(row.transactionDate),
@@ -757,7 +758,8 @@ export function buildExportReadme(opts: {
     "reconciliation CSVs with the same evidence columns appended.",
     "The proofs ZIP (<exportId>-proofs.zip) bundles one proof per receipt,",
     "named <勘定科目><MonYYYY><①…><店舗><¥金額> — the 科目＆No. matches the",
-    "reconciliation CSVs' 科目＆No. column. See 目次.csv inside the ZIP for",
-    "the full index (including the receipts CSV's No join column).",
+    "reconciliation CSVs' 科目＆No. column; their 領収書ファイル名 column is",
+    "the evidence index. Proofs are foldered per payment path (AMEX明細分/",
+    "現金分/デジタル分).",
   ].join("\n");
 }

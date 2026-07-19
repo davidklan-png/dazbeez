@@ -7,14 +7,15 @@
 // CSV — see buildMonthlyExportCsv). The route does the R2 fetches and passes the
 // bytes here; these helpers are unit-testable without R2/D1.
 //
-// Folder contract (matches the manual delivery the accountant already receives):
+// Folder contract (review #2 + draft-round feedback 2026-07-18):
 //   領収書等証憑_<month>/
-//     AMEX明細分/            ← receipts matched to AMEX statement lines
-//       No03_研究開発費_OpenAI_¥108,341.pdf
-//     追加経費_現金デジタル分/ ← CASH/DIGITAL receipts (calendar-month membership)
-//       No33_旅費交通費_セブン-イレブン東中野末広橋店_¥10,000.jpg
-//     目次.csv               ← index
-//     お知らせ.txt           ← transition notice (what changed vs manual delivery)
+//     AMEX明細分/  ← receipts matched to AMEX statement lines
+//       会議費Jun2026③小田原みなと食堂¥6,490.jpg   (科目＆No naming)
+//     現金分/      ← CASH receipts (calendar-month membership)
+//     デジタル分/  ← DIGITAL receipts
+//     AMEX/CASH/DIGITAL{month}_Reconciliation.csv ← byte-copies of the 照合CSVs
+//     集計.csv / 参加者一覧.csv / お知らせ.txt
+//   (目次.csv retired — the 照合CSVs' 領収書ファイル名 column is the index.)
 
 import { zipSync } from "fflate";
 import { computeSha256Hex } from "@/lib/receipts/storage";
@@ -33,7 +34,7 @@ export function sanitizeZipNameSegment(s: string, maxLen = 30): string {
   return capped.length > 0 ? capped : "unknown";
 }
 
-/** ¥-prefixed comma-grouped yen amount for filenames / 目次. JPY only (proofs
+/** ¥-prefixed comma-grouped yen amount for filenames. JPY only (proofs
  *  are yen receipts); non-JPY falls back to the raw minor value. */
 export function formatYenAmount(amountMinor: number, currency: string): string {
   if (currency !== "JPY") return String(amountMinor);
@@ -65,84 +66,30 @@ export function buildProofFilename(p: ProofFilenameParts): string {
   return `No${no}_${cat}_${merchant}_${amount}${suffix}.${p.ext}`;
 }
 
-// ─── 目次.csv (index) ────────────────────────────────────────────────────────
-
-export interface ProofMokuziRow {
-  no: number;
-  /** 科目＆No. label (`会議費Jun2026③`) — the join key to the reconciliation
-   *  CSVs. Empty string for legacy No-named entries. */
-  kamokuNo: string;
-  filename: string;
-  transactionDate: string | null;
-  merchant: string;
-  amountMinor: number;
-  currency: string;
-  categoryJa: string;
-  /** 出席者: "; "-joined attendees for 会議費/接待交際費 entries (caller-resolved
-   *  from the same attendeeMap the receipts CSV uses); blank for other rows. */
-  attendees: string;
-}
-
-function csvQuote(value: string | null | undefined): string {
-  if (value === null || value === undefined) return "";
-  const s = String(value);
-  if (s.includes(",") || s.includes('"') || s.includes("\n") || s.includes("\r")) {
-    return `"${s.replace(/"/g, '""')}"`;
-  }
-  return s;
-}
-
-/** 目次.csv — the accountant's human table of contents (one row per proof),
- *  Excel-safe (BOM + CRLF + quoted comma fields). Columns:
- *    No, ファイル名, 取引日, 店舗, 金額, 勘定科目, 出席者
- *  `No` is the join key to the receipts CSV. 出席者 lists attendees for 会議費 /
- *  接待交際費 entries (caller-resolved from the receipts CSV's attendee source),
- *  blank for other categories.
- *
- *  Machine fields (statement_line_id, receipt_id, sha256, source) are
- *  intentionally NOT here — they have no value to a human reader and already
- *  live in the manifest (per-file SHAs, IDs). 目次 = human layer, manifest =
- *  machine layer. */
-export function buildProofsMokuziCsv(rows: ProofMokuziRow[]): string {
-  const header = [
-    "科目＆No.",
-    "No",
-    "ファイル名",
-    "取引日",
-    "店舗",
-    "金額",
-    "勘定科目",
-    "出席者",
-  ].join(",");
-  const body = rows
-    .slice()
-    .sort((a, b) => a.no - b.no)
-    .map((r) =>
-      [
-        csvQuote(r.kamokuNo),
-        String(r.no),
-        csvQuote(r.filename),
-        csvQuote(r.transactionDate),
-        csvQuote(r.merchant),
-        csvQuote(formatYenAmount(r.amountMinor, r.currency)),
-        csvQuote(r.categoryJa),
-        csvQuote(r.attendees),
-      ].join(","),
-    );
-  // BOM (Excel on Windows detects UTF-8 → Japanese renders) + CRLF.
-  return `\uFEFF${[header, ...body].join("\r\n")}\r\n`;
-}
-
 // ─── お知らせ.txt (transition notice) ────────────────────────────────────────
 
 export interface TransitionNoticeInput {
   monthLabel: string; // e.g. "2026年6月"
   rowCount: number; // receipts CSV rows (AMEX lines + cash/digital)
   receiptCount: number; // distinct receipts with a proof in the zip
-  /** AMEX statement lines shipped with no receipt, with the recorded reason. */
-  missingReceiptLines: { lineId: string; reason: string }[];
-  /** IC-card top-up advisories (non-blocking) among the proofs, if any. */
-  icAdvisories: { no: number; merchant: string; amountMinor: number }[];
+  /** AMEX statement lines shipped with no receipt, with the recorded reason.
+   *  date/merchant/amount identify the line for the accountant — internal
+   *  lineId UUIDs are NOT surfaced (draft-round feedback). */
+  missingReceiptLines: {
+    transactionDate: string | null;
+    merchant: string;
+    amountMinor: number;
+    reason: string;
+  }[];
+  /** IC-card top-up advisories (non-blocking) among the proofs, if any.
+   *  Identified by date/merchant/amount (目次 retired, so No means nothing
+   *  to the accountant anymore). */
+  icAdvisories: {
+    no: number;
+    transactionDate: string | null;
+    merchant: string;
+    amountMinor: number;
+  }[];
   exportRevision: number;
   supersedesExportId?: string | null;
   correctionReason?: string | null;
@@ -158,10 +105,13 @@ export function buildTransitionNotice(input: TransitionNoticeInput): string {
   lines.push("");
   lines.push("【お知りいただきたい変更点（従来の手作業納品との違い）】");
   lines.push(
-    "・各証憑のファイル名先頭にある NoXX は、明細CSVの No 列と対応しています（従来の①②等の丸数字に代わる整理番号です）。",
+    "・カード明細の照合表（AMEX＜年月＞_Reconciliation.csv）は、カード会社の明細CSVをそのまま再現し、右側に「科目＆No.」「会議-出席者ID」「人数」「領収書ファイル名」の列を追記したものです。現金・デジタル決済分は CASH／DIGITAL の照合CSVに分けて同封しています。",
   );
   lines.push(
-    "・接待・会議の出席者は別紙PDFではなく、明細CSVの 出席者 列に記載しています。",
+    "・各証憑のファイル名は「科目＆No.」（例：会議費Jun2026③）で始まり、従来の手作業納品と同じ丸数字方式です。照合CSVの「科目＆No.」「領収書ファイル名」列と対応しています。",
+  );
+  lines.push(
+    "・接待・会議の出席者は別紙PDFではなく、照合CSVの出席者ID列に記載しています。IDと氏名・会社・役職の対応は 参加者一覧.csv をご参照ください。",
   );
   lines.push(
     "・紙の領収書は一つにまとめたPDFではなく、1件ずつの画像ファイルとして同封しています。",
@@ -183,7 +133,10 @@ export function buildTransitionNotice(input: TransitionNoticeInput): string {
     lines.push("");
     lines.push("【領収書なしの明細（記録された理由）】");
     for (const m of input.missingReceiptLines) {
-      lines.push(`・No/明細 ${m.lineId}: ${m.reason || "（理由記録なし）"}`);
+      const date = m.transactionDate ?? "日付不明";
+      lines.push(
+        `・${date} ${m.merchant} ¥${m.amountMinor.toLocaleString("ja-JP")}: ${m.reason || "（理由記録なし）"}`,
+      );
     }
   }
   if (input.icAdvisories.length > 0) {
@@ -193,14 +146,14 @@ export function buildTransitionNotice(input: TransitionNoticeInput): string {
     );
     for (const ic of input.icAdvisories) {
       lines.push(
-        `・No${String(ic.no).padStart(2, "0")} ${ic.merchant} ¥${ic.amountMinor.toLocaleString("ja-JP")} — 交通系ICカードのチャージの可能性があります。業務利用の確定・精算方法は会計判断をお願いします。`,
+        `・${ic.transactionDate ?? "日付不明"} ${ic.merchant} ¥${ic.amountMinor.toLocaleString("ja-JP")} — 交通系ICカードのチャージの可能性があります。業務利用の確定・精算方法は会計判断をお願いします。`,
       );
     }
   }
   if (input.exportRevision > 1) {
     lines.push("");
     lines.push("【改訂情報】");
-    lines.push(`・改訹: ${input.exportRevision}（差替元: ${input.supersedesExportId ?? "不明"}）`);
+    lines.push(`・改訂: ${input.exportRevision}（差替元: ${input.supersedesExportId ?? "不明"}）`);
     lines.push(`・改訂理由: ${input.correctionReason ?? "（記録なし）"}`);
   }
   lines.push("");
@@ -255,7 +208,12 @@ export function deriveTransitionNoticeInput(
 ): TransitionNoticeInput {
   const missingReceiptLines = rows
     .filter((r) => r.rowType === "amex_line" && r.missingReceiptReason)
-    .map((r) => ({ lineId: r.lineId ?? "?", reason: r.missingReceiptReason ?? "" }));
+    .map((r) => ({
+      transactionDate: r.transactionDate,
+      merchant: r.merchant ?? "店舗不明",
+      amountMinor: r.amountMinor ?? 0,
+      reason: r.missingReceiptReason ?? "",
+    }));
   const icAdvisories: TransitionNoticeInput["icAdvisories"] = [];
   const icSeen = new Set<string>();
   const receiptById = new Map(receipts.map((r) => [r.id, r]));
@@ -266,6 +224,7 @@ export function deriveTransitionNoticeInput(
       icSeen.add(row.receiptId);
       icAdvisories.push({
         no: i + 1,
+        transactionDate: row.transactionDate,
         merchant: row.merchant ?? "",
         amountMinor: row.amountMinor ?? 0,
       });
@@ -298,9 +257,6 @@ export interface ProofZipEntry {
   /** 出席者 for the 目次 (会議費/接待交際費 only); blank otherwise. */
   attendees: string;
   paymentPath: ProofPaymentPath;
-  /** 科目＆No. label (`会議費Jun2026③`) — the join key shown in 目次 and the
-   *  reconciliation CSVs. */
-  kamokuNo?: string;
   /** Pre-assigned evidence filename (reconciliation-files.ts
    *  buildEvidenceAssignments). When present it names the ZIP entry —
    *  collisions still get a -2/-3 suffix before the extension. When absent
@@ -308,12 +264,17 @@ export interface ProofZipEntry {
   filename?: string;
 }
 
-const ROOT_PREFIX = (month: string) => `領収書等証憓_${month}/`;
+const ROOT_PREFIX = (month: string) => `領収書等証憑_${month}/`;
 const AMEX_FOLDER = "AMEX明細分/";
-const CASH_FOLDER = "追加経費_現金デジタル分/";
+// Draft-round feedback 2026-07-18: one folder per payment path, mirroring the
+// per-path 照合CSVs (the shared 追加経費_現金デジタル分 folder made the CASH
+// receipts hard to find).
+const CASH_FOLDER = "現金分/";
+const DIGITAL_FOLDER = "デジタル分/";
 
 function folderFor(paymentPath: ProofPaymentPath): string {
-  return paymentPath === "AMEX" ? AMEX_FOLDER : CASH_FOLDER;
+  if (paymentPath === "AMEX") return AMEX_FOLDER;
+  return paymentPath === "DIGITAL" ? DIGITAL_FOLDER : CASH_FOLDER;
 }
 
 /** Build the sealed proofs ZIP. fflate uses a single compression level; we use
@@ -343,7 +304,6 @@ export function assembleProofsZip(
 ): Uint8Array {
   const root = ROOT_PREFIX(month);
   const files: Record<string, Uint8Array> = {};
-  const mokuziRows: ProofMokuziRow[] = [];
   // Per-folder dedupe so a (rare) filename collision gets a -2/-3 suffix.
   const seenPerFolder = new Map<string, Set<string>>();
 
@@ -391,20 +351,10 @@ export function assembleProofsZip(
     seen.add(filename);
     seenPerFolder.set(folder, seen);
     files[`${root}${folder}${filename}`] = entry.bytes;
-    mokuziRows.push({
-      no: entry.no,
-      kamokuNo: entry.kamokuNo ?? "",
-      filename,
-      transactionDate: entry.transactionDate,
-      merchant: entry.merchant,
-      amountMinor: entry.amountMinor,
-      currency: entry.currency,
-      categoryJa: entry.categoryJa,
-      attendees: entry.attendees,
-    });
   }
 
-  files[`${root}目次.csv`] = encoder.encode(buildProofsMokuziCsv(mokuziRows));
+  // 目次.csv retired (draft-round feedback 2026-07-18): the AMEX/CASH/DIGITAL
+  // 照合CSVs' 領収書ファイル名 column IS the index now.
   files[`${root}集計.csv`] = encoder.encode(summaryCsv);
   files[`${root}参加者一覧.csv`] = encoder.encode(attendeesCsv);
   files[`${root}お知らせ.txt`] = encoder.encode(buildTransitionNotice(noticeInput));
