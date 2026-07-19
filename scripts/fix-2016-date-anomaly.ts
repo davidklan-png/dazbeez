@@ -3,7 +3,7 @@
 // read as 2016-MM-DD by Google Vision OCR but are 2026 receipts (captured
 // 2026-05; the printed weekday (月)=Monday matches the 2026 date, not 2016;
 // AMEX charges being reconciled in 2026). Operator-directed (decision rule in
-// WORKER-PROMPT-deploy-review-ux-and-2016-fix.md §A1): correct the YEAR ONLY.
+// prompts/WORKER-PROMPT-deploy-review-ux-and-2016-fix.md §A1): correct the YEAR ONLY.
 //
 // WHERE THIS RUNS: the Mac, with live Cloudflare bindings — it shells out to
 // `wrangler d1 execute RECEIPTS_DB --remote`. Dry-run by default; --write to

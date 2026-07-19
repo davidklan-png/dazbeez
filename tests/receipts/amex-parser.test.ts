@@ -380,9 +380,10 @@ test("parseAmexNetanswer: tracks skipped date-rows with missing merchant", () =>
   assert.equal(result.lines.length, 1);
   assert.equal(result.skippedLines.length, 1);
   assert.match(result.skippedLines[0]!.reason, /missing merchant/);
+  assert.equal(result.skippedLines[0]!.benign, false);
 });
 
-test("parseAmexNetanswer: tracks skipped date-rows with missing amount", () => {
+test("parseAmexNetanswer: tracks skipped date-rows with missing amount (not benign — has a real date)", () => {
   const csv = [
     "カード名称,TestCard",
     "お支払日,2026/05/07",
@@ -397,6 +398,33 @@ test("parseAmexNetanswer: tracks skipped date-rows with missing amount", () => {
   assert.equal(result.lines.length, 1);
   assert.equal(result.skippedLines.length, 1);
   assert.match(result.skippedLines[0]!.reason, /missing amount/);
+  assert.equal(result.skippedLines[0]!.benign, false);
+});
+
+test("parseAmexNetanswer: undated + amountless row (overseas-currency annotation line) is skipped as benign", () => {
+  // Real-world shape: an overseas-billed charge (e.g. CLOUDFLARE) carries its
+  // 現地通貨額 detail in the memo of its own dated row; Netアンサー then
+  // emits a trailing row with no 利用日 and no 利用金額 for that same
+  // charge. It has zero monetary value — the statement total already
+  // reconciles without it — so it should be flagged benign, not as an error
+  // needing operator review.
+  const csv = [
+    "カード名称,TestCard",
+    "お支払日,2026/05/07",
+    "今回ご請求額,001918",
+    "",
+    "利用日,ご利用店名及び商品名,本人・家族区分,支払区分名称,締前入金区分,利用金額,備考",
+    ",ご利用者名:テスト 様,,,,,",
+    "2026/05/01,CLOUDFLARE,1,1回,,1918,現地通貨額:11.51 USD",
+    ",CLOUDFLARE,1,1回,,,",
+  ].join("\n");
+  const result = parseAmexNetanswer(toBuffer(csv), "2026-05");
+  assert.equal(result.lines.length, 1);
+  assert.equal(result.parsedTotalCents, 1918);
+  assert.equal(result.validationErrors.length, 0);
+  assert.equal(result.skippedLines.length, 1);
+  assert.equal(result.skippedLines[0]!.benign, true);
+  assert.match(result.skippedLines[0]!.reason, /no date, no amount/);
 });
 
 test("parseAmexNetanswer: skippedLines is empty array for clean CSVs", () => {
