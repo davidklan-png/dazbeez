@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { CONTACT_MESSAGE_MAX_LENGTH } from "@/lib/contact-prefill";
 import { serviceList, type ServiceSlug } from "@/lib/services";
 
 type FieldErrors = Partial<Record<"firstName" | "lastName" | "email" | "phoneNumber" | "message" | "service", string>>;
@@ -14,6 +15,7 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 type Props = {
   defaultService?: string;
+  defaultMessage?: string;
   headline?: string;
   eyebrow?: string;
   source?: string;
@@ -21,6 +23,7 @@ type Props = {
 
 export function ContactForm({
   defaultService = "",
+  defaultMessage = "",
   headline = "Tell us what you\u2019re trying to build.",
   eyebrow = "Contact",
   source,
@@ -31,7 +34,7 @@ export function ContactForm({
   const [company, setCompany] = useState("");
   const [phoneNumber, setPhoneNumber] = useState("");
   const [service, setService] = useState<string>(defaultService);
-  const [message, setMessage] = useState("");
+  const [message, setMessage] = useState(defaultMessage);
   const [website, setWebsite] = useState("");
 
   const [errors, setErrors] = useState<FieldErrors>({});
@@ -62,7 +65,7 @@ export function ContactForm({
     setCompany("");
     setPhoneNumber("");
     setService(defaultService);
-    setMessage("");
+    setMessage(defaultMessage);
     setWebsite("");
     setErrors({});
     setServerError("");
@@ -267,7 +270,7 @@ export function ContactForm({
             aria-required="true"
             aria-invalid={errors.message ? true : undefined}
             aria-describedby={errors.message ? "message-error" : undefined}
-            maxLength={4000}
+            maxLength={CONTACT_MESSAGE_MAX_LENGTH}
           />
           <div className="mt-1 flex items-start justify-between gap-3">
             {errors.message ? (
@@ -277,7 +280,7 @@ export function ContactForm({
             ) : (
               <span />
             )}
-            <p className="text-xs text-gray-400">{message.length} / 4000</p>
+            <p className="text-xs text-gray-400">{message.length} / {CONTACT_MESSAGE_MAX_LENGTH}</p>
           </div>
         </div>
 

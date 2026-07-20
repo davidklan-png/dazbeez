@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { ContactForm } from "@/components/contact-form";
+import { normalizeMessagePrefill } from "@/lib/contact-prefill";
 import { isServiceSlug, services } from "@/lib/services";
 
 export const metadata: Metadata = {
@@ -9,13 +10,14 @@ export const metadata: Metadata = {
   alternates: { canonical: "/contact" },
 };
 
-type SearchParams = Promise<{ service?: string | string[] }>;
+type SearchParams = Promise<{ service?: string | string[]; message?: string | string[] }>;
 
 export default async function ContactPage({ searchParams }: { searchParams: SearchParams }) {
   const sp = await searchParams;
   const raw = typeof sp.service === "string" ? sp.service : Array.isArray(sp.service) ? sp.service[0] : undefined;
   const preselected = isServiceSlug(raw) ? raw : "";
   const preselectedTitle = preselected ? services[preselected].title : "";
+  const defaultMessage = normalizeMessagePrefill(sp.message);
 
   return (
     <div className="py-16">
@@ -36,7 +38,9 @@ export default async function ContactPage({ searchParams }: { searchParams: Sear
         </div>
 
         <ContactForm
+          key={defaultMessage}
           defaultService={preselected}
+          defaultMessage={defaultMessage}
           eyebrow={preselectedTitle ? preselectedTitle : "Contact"}
           headline={
             preselectedTitle
