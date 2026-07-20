@@ -211,6 +211,46 @@ test("loadReconciliationLockedReceiptIds: empty id list → empty map, no query"
   assert.equal(prepared, false, "must short-circuit and not run a query for empty input");
 });
 
+// ─── ADR 0012: drafted months are excluded from the recon-locked set ─────────
+
+test("loadReconciliationLockedReceiptIds: query excludes months that have an open export draft", async () => {
+  // A drafted month must NOT appear in the locked set — otherwise the queue
+  // over-reports a 409 the server would no longer throw. The canned-fake style
+  // can't execute the NOT EXISTS, so assert the exclusion clause is in the
+  // emitted SQL (live behavior is covered by the server carve-out tests).
+  let capturedSql = "";
+  const recording: ReceiptLockD1 = {
+    prepare(sql: string) {
+      capturedSql = sql;
+      return {
+        bind(..._args: unknown[]) {
+          return {
+            async all<T = unknown>(): Promise<{ results?: T[] }> {
+              return { results: [] };
+            },
+          };
+        },
+      };
+    },
+  };
+  await loadReconciliationLockedReceiptIds(recording, ["a"]);
+  assert.match(capturedSql, /NOT EXISTS/i);
+  assert.match(capturedSql, /receipt_exports/i);
+  assert.match(capturedSql, /status = 'draft'/i);
+});
+
+test("computeReceiptLocks: AMEX receipt whose finalized-recon month has a draft → UNLOCKED (carve-out)", () => {
+  // End-to-end effect: a drafted month is excluded from the recon-locked map by
+  // loadReconciliationLockedReceiptIds, so the receipt the operator wants to
+  // correct surfaces unlocked (empty map here models the exclusion).
+  const locks = computeReceiptLocks(
+    [receipt({ id: "amex", payment_path: "AMEX", transaction_date: "2026-06-15" })],
+    new Set(),
+    new Map(),
+  );
+  assert.equal(locks.get("amex")?.locked, false);
+});
+
 // Static guard: keep the PaymentPath literals honest against the lock model.
 test("computeReceiptLocks: covers all four payment paths", () => {
   const paths: PaymentPath[] = ["AMEX", "CASH", "DIGITAL", "UNKNOWN"];

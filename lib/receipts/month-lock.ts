@@ -75,6 +75,16 @@ export function buildMonthLock(input: {
 // attempt would re-hit the finalized row and re-throw. The predicate
 // below treats "has draft revision" as a release of the lock; finalizing
 // the revision closes the lock again (draft goes away, finalized stays).
+//
+// ADR 0012 (2026-07-20) unifies this draft carve-out as the single "month
+// open for correction" signal across ALL three edit gates: this export lock
+// (#1), the reconciliation lock (#2, for receipt edits only —
+// rejectIfReceiptInFinalizedReconciliation in db.ts), and the per-receipt
+// status gate (#3 — an `exported` receipt becomes editable/deletable while a
+// draft is open, via isMonthLockedForEdits in the PATCH/DELETE paths). The
+// line-level reconciliation seal (rejectIfFinalized on amex_statement_lines
+// writes) deliberately stays strict. See receipt-locks.ts header +
+// docs/adr/0012-unified-draft-carveout-month-locks.md.
 
 /**
  * Typed error thrown when an insert/update would land a CASH/DIGITAL
