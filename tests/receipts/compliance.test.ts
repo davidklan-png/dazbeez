@@ -228,6 +228,42 @@ test("compliance: electronic receipt with PDF original does not warn", () => {
   );
 });
 
+// ADR 0011 Phase B: an email_body receipt's TRUE original is the raw body
+// (text/html or text/plain), NOT the Mac-rendered image derivative. The
+// screenshot-proxy check only fires for image/* originals, so a text/* original
+// keeps the electronic-preservation check quiet — this is the load-bearing
+// reason the raw body is filed as is_original and the render as is_original=false.
+test("compliance: email_body receipt with text/html body original does not warn", () => {
+  const checks = computeReceiptChecks({
+    receipt: baseReceipt({ source_type: "email_body" }),
+    attendees: [],
+    files: [originalFile({ content_type: "text/html" })],
+    settings: SETTINGS,
+  });
+  assert.equal(
+    checks.find(
+      (c) => c.checkType === "electronic_transaction_missing_original",
+    ),
+    undefined,
+    "email_body with a text/html original must not trip the screenshot-proxy check",
+  );
+});
+
+test("compliance: email_body receipt with text/plain body original does not warn", () => {
+  const checks = computeReceiptChecks({
+    receipt: baseReceipt({ source_type: "email_body" }),
+    attendees: [],
+    files: [originalFile({ content_type: "text/plain" })],
+    settings: SETTINGS,
+  });
+  assert.equal(
+    checks.find(
+      (c) => c.checkType === "electronic_transaction_missing_original",
+    ),
+    undefined,
+  );
+});
+
 test("compliance: missing original file is a blocker", () => {
   const checks = computeReceiptChecks({
     receipt: baseReceipt(),

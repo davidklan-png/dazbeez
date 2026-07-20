@@ -11,3 +11,10 @@ pymupdf>=1.24
 # derivative generation at ingest (resize/q75/EXIF strip). Was transitive via
 # mlx-vlm; made explicit since the consumer now depends on it directly.
 pillow>=10.0
+# ADR 0011 Phase B: render email_body receipts' raw HTML/text body to a PDF the
+# MLX pipeline can OCR. WeasyPrint has NO JavaScript engine and is run with a
+# no-network url_fetcher (the SSRF boundary) — see render_email_body.py +
+# test_render_email_body.py's canary. Needs pango/cairo/gdk-pixbuf on the Mac:
+# `brew install pango gdk-pixbuf`. Lazy-imported so --help / sanitizer tests
+# work without it.
+weasyprint>=60

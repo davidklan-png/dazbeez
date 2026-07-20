@@ -25,7 +25,9 @@ import {
   generateR2Key,
   uploadOriginal,
   sanitizeFilenameForR2,
+  computeSha256Hex,
 } from "@/lib/receipts/storage";
+import { createReceiptFile } from "@/lib/receipts/files";
 import {
   ALLOWED_RECEIPT_MIME_TYPES,
   ALLOWED_RECEIPT_EXTENSIONS,
@@ -44,6 +46,15 @@ import type {
 // parses anything. Enforced by the email() handler before recordIntake; kept
 // here as the single source of the constant.
 export const INTAKE_MAX_MESSAGE_BYTES = 10 * 1024 * 1024; // 10 MiB
+
+// ADR 0011 Phase A body-capture caps. Pragmatic guards against a pathological
+// inline-image-laden HTML body bloating D1 rows and the triage UI payload —
+// NOT a documented platform hard limit (none was found; if a tighter real
+// ceiling surfaces, use it and tell the architect). Applied byte-accurately in
+// the Worker via capBody() before recordIntake, so stored bodies are already
+// bounded and body_truncated records whether EITHER was cut.
+export const INTAKE_BODY_TEXT_MAX_BYTES = 256 * 1024; // 256 KiB
+export const INTAKE_BODY_HTML_MAX_BYTES = 512 * 1024; // 512 KiB
 
 // Pending rows older than this are stale and cleaned up by the scheduled job
 // (ADR 0011 §6 / open question: 30-day window).
@@ -141,6 +152,11 @@ export interface RecordIntakeInput {
   spfPass: boolean;
   dkimPass: boolean;
   rawHeadersJson: string | null;
+  // ADR 0011 Phase A: parsed body (already byte-capped by the Worker via
+  // capBody). bodyTruncated is true if EITHER part was cut at its cap.
+  bodyText: string | null;
+  bodyHtml: string | null;
+  bodyTruncated: boolean;
   attachments: ParsedEmailAttachment[];
 }
 
@@ -186,6 +202,9 @@ export async function recordIntake(
       reject_reason: "no attachment",
       promoted_receipt_id: null,
       raw_headers_json: input.rawHeadersJson,
+      body_text: input.bodyText,
+      body_html: input.bodyHtml,
+      body_truncated: input.bodyTruncated ? 1 : 0,
     });
   } else {
     for (const att of input.attachments) {
@@ -216,6 +235,9 @@ export async function recordIntake(
           reject_reason: null,
           promoted_receipt_id: null,
           raw_headers_json: input.rawHeadersJson,
+          body_text: input.bodyText,
+          body_html: input.bodyHtml,
+          body_truncated: input.bodyTruncated ? 1 : 0,
         });
       } else {
         // Invalid → still recorded, NULL r2_key, reason visible, stays
@@ -237,6 +259,9 @@ export async function recordIntake(
           reject_reason: verdict.rejectReason,
           promoted_receipt_id: null,
           raw_headers_json: input.rawHeadersJson,
+          body_text: input.bodyText,
+          body_html: input.bodyHtml,
+          body_truncated: input.bodyTruncated ? 1 : 0,
         });
       }
     }
@@ -249,8 +274,9 @@ export async function recordIntake(
           (id, received_at, from_address, subject, spf_pass, dkim_pass,
            attachment_r2_key, attachment_sha256, attachment_content_type,
            attachment_size_bytes, attachment_filename, status, reject_reason,
-           promoted_receipt_id, raw_headers_json, created_at, to_address)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           promoted_receipt_id, raw_headers_json, created_at, to_address,
+           body_text, body_html, body_truncated)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         row.id,
@@ -270,6 +296,9 @@ export async function recordIntake(
         row.raw_headers_json,
         now,
         row.to_address,
+        row.body_text,
+        row.body_html,
+        row.body_truncated,
       )
       .run();
     createdIds.push(row.id);
@@ -338,8 +367,10 @@ export function buildPromoteReceiptInput(intake: EmailReceiptIntake): CreateRece
 /**
  * Refuse promotion for rows that have nothing to promote or are no longer
  * pending. Throws a plain Error whose message is safe to surface as 409 body.
- * Mirrored as a disabled state in the inbox UI (Promote disabled when
- * attachment_r2_key is NULL) — this is the server authority.
+ * ADR 0011 Phase B: a body-only row (no attachment, but a captured text/html
+ * body) is ALSO promotable — the body becomes the receipt's true original and
+ * enters the render pipeline. Mirrored as the enabled Promote button in the
+ * inbox UI; this is the server authority.
  */
 export function assertPromotable(intake: EmailReceiptIntake): void {
   if (intake.status !== "pending_triage") {
@@ -347,11 +378,144 @@ export function assertPromotable(intake: EmailReceiptIntake): void {
       `Intake ${intake.id} is already ${intake.status} (only pending_triage may be promoted).`,
     );
   }
-  if (!intake.attachment_r2_key) {
+  const hasAttachment = !!intake.attachment_r2_key;
+  const hasBody = !!(intake.body_text || intake.body_html);
+  if (!hasAttachment && !hasBody) {
     throw new Error(
-      `Intake ${intake.id} has no promotable attachment${intake.reject_reason ? ` (${intake.reject_reason})` : ""}.`,
+      `Intake ${intake.id} has nothing promotable (no valid attachment and no captured body).`,
     );
   }
+}
+
+/** True for a Phase B body-only intake (no attachment, but a text/html body). */
+export function isBodyOnlyIntake(intake: EmailReceiptIntake): boolean {
+  return !intake.attachment_r2_key && (!!intake.body_text || !!intake.body_html);
+}
+
+/**
+ * Promote a BODY-ONLY intake row into a real receipt (ADR 0011 Phase B). The
+ * shared core for both the manual Promote button and the auto-promote path.
+ *
+ * The raw body (prefer html else text) becomes the receipt's TRUE original:
+ * written to R2, referenced by receipt_records.original_r2_key AND an
+ * is_original receipt_files row whose content_type is text/* (never image/*),
+ * so compliance's electronic_transaction_missing_original screenshot-proxy
+ * check stays quiet (compliance.ts only fires it for image/* originals). The
+ * Mac-rendered derivative is a SEPARATE is_original=false receipt_files row
+ * deposited later by /render, and original_r2_key is never repointed at it.
+ *
+ * The receipt is created at sourceType 'email_body'; createReceiptRecord seeds
+ * needs_render=1 from the source type, so it is NOT enqueued for MLX extraction
+ * yet — it waits for the Mac render. No second insert path: this calls the same
+ * createReceiptRecord every other capture path uses.
+ */
+async function promoteBodyIntake(
+  intake: EmailReceiptIntake,
+  actor: string,
+): Promise<string> {
+  const db = getReceiptsDb();
+  const bucket = getReceiptsBucket();
+
+  const useHtml = !!intake.body_html;
+  const bodyStr = (useHtml ? intake.body_html : intake.body_text) ?? "";
+  if (!bodyStr) {
+    throw new Error(`Intake ${intake.id} has no body to promote.`);
+  }
+  const contentType = useHtml ? "text/html" : "text/plain";
+  const filename = useHtml ? "email-body.html" : "email-body.txt";
+
+  const encoded = new TextEncoder().encode(bodyStr);
+  const bodyBytes = encoded.buffer.slice(0, encoded.byteLength) as ArrayBuffer;
+  const sha256 = await computeSha256Hex(bodyBytes);
+
+  // Staging key: write the body so createReceiptRecord has a real original_r2_key
+  // to insert (the column is NOT NULL). After we know the receipt id, copy to the
+  // standard receipts/{id}/... key, patch original_r2_key, create the is_original
+  // receipt_files row, and delete the staging object — same move-semantics as the
+  // attachment promote path below.
+  const now = nowIso();
+  const stagingKey = `receipts-render-staging/${intake.id}/${newUuid()}-${sanitizeFilenameForR2(filename)}`;
+  await bucket.put(stagingKey, bodyBytes, {
+    httpMetadata: { contentType },
+  });
+
+  const receiptId = await createReceiptRecord(
+    {
+      capturedBy: intake.from_address,
+      source: "email",
+      sourceType: "email_body",
+      status: "captured",
+      originalR2Key: stagingKey,
+      originalSha256: sha256,
+      originalContentType: contentType,
+      originalSizeBytes: bodyBytes.byteLength,
+      originalFilename: filename,
+    },
+    actor,
+  );
+
+  // Copy to the standard key + patch original_r2_key + create the is_original
+  // receipt_files row.
+  const standardKey = generateR2Key(receiptId, filename, now);
+  await uploadOriginal(standardKey, bodyBytes, contentType);
+  await db
+    .prepare(
+      `UPDATE receipt_records SET original_r2_key = ?, updated_at = ? WHERE id = ?`,
+    )
+    .bind(standardKey, now, receiptId)
+    .run();
+  await createReceiptFile(db, {
+    objectType: "receipt",
+    objectId: receiptId,
+    role: "original",
+    r2Bucket: "receipts",
+    r2Key: standardKey,
+    originalFilename: filename,
+    contentType,
+    fileSizeBytes: bodyBytes.byteLength,
+    sha256Hash: sha256,
+    uploadedBy: actor,
+    isOriginal: true,
+  });
+
+  // Flip the intake row (idempotent guard on status). attachment_r2_key is
+  // already NULL for a body-only row.
+  await db
+    .prepare(
+      `UPDATE email_receipt_intake
+         SET status = 'promoted', promoted_receipt_id = ?
+       WHERE id = ? AND status = 'pending_triage'`,
+    )
+    .bind(receiptId, intake.id)
+    .run();
+
+  // Delete the now-moved staging object (best-effort).
+  try {
+    await bucket.delete(stagingKey);
+  } catch (err) {
+    console.error("[promoteBodyIntake] failed to delete staging R2 object", {
+      key: stagingKey,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  await createAuditEntry(db, {
+    actor,
+    action: "email_intake.promoted",
+    objectType: "email_intake",
+    objectId: intake.id,
+    newValueJson: stringifyJson({
+      receiptId,
+      from_address: intake.from_address,
+      subject: intake.subject,
+      spf_pass: intake.spf_pass,
+      dkim_pass: intake.dkim_pass,
+      sourceType: "email_body",
+      via: actor.includes("auto") ? "auto" : "manual",
+    }),
+  });
+
+  return receiptId;
 }
 
 /**
@@ -389,6 +553,13 @@ export async function promoteIntake(
   const intake = await getIntake(db, id);
   if (!intake) throw new Error(`Intake ${id} not found.`);
   assertPromotable(intake);
+
+  // ADR 0011 Phase B: body-only intakes take the render-pipeline path (raw
+  // body → receipt original → Mac render → MLX extraction). Attachment intakes
+  // use the existing copy-to-standard-key path below.
+  if (isBodyOnlyIntake(intake)) {
+    return promoteBodyIntake(intake, actor);
+  }
 
   // Read the intake object so we can copy it to the standard key.
   const originalIntakeKey = intake.attachment_r2_key as string;

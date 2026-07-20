@@ -89,6 +89,36 @@ export async function putProofCopy(
   });
 }
 
+// ─── Rendered derivatives (ADR 0011 Phase B) ────────────────────────────────
+// The Mac-rendered PDF/PNG of an email_body receipt's raw HTML/text body — the
+// MLX-consumable form of a receipt whose original is text, not an image. Stored
+// in the LIVE receipts bucket at a STABLE per-receipt key; /file serves it in
+// preference to the raw-body original once it exists.
+
+export function renderedR2Key(receiptId: string, ext: "pdf" | "png"): string {
+  return `receipts/${receiptId}/rendered.${ext}`;
+}
+
+/**
+ * Overwrite-capable put for the Mac-rendered derivative. Like putProofCopy:
+ * regenerable, so re-render overwrites in place. The caller deletes any prior
+ * `processed` receipt_files row first so the r2_key UNIQUE constraint holds
+ * after the fresh insert. NOTE: the rendered derivative is NOT the compliance
+ * original — the raw body (text/*, is_original=true) is. This object is filed
+ * as a separate is_original=false `processed` row.
+ */
+export async function putRenderedDerivative(
+  key: string,
+  data: ArrayBuffer,
+  contentType: string,
+): Promise<void> {
+  const bucket = getReceiptsBucket();
+  await bucket.put(key, data, {
+    httpMetadata: { contentType },
+    customMetadata: retentionMetadata(),
+  });
+}
+
 export async function archiveBundle(
   key: string,
   data: ArrayBuffer,

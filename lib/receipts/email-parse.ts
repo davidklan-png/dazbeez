@@ -135,3 +135,102 @@ export function pickRawHeadersSubset(
 export function staleCutoffIso(nowMs: number, days: number): string {
   return new Date(nowMs - days * 24 * 60 * 60 * 1000).toISOString();
 }
+
+// ─── Body capture: cap + link extraction (ADR 0011 Phase A) ──────────────────
+
+/**
+ * Cap a parsed body part to a UTF-8 byte ceiling. Returns the (possibly
+ * truncated) string and whether it was cut; null passes through unchanged.
+ *
+ * Byte-accurate: encode to UTF-8, slice to maxBytes, decode with a non-fatal
+ * decoder so a multibyte sequence split at the boundary becomes a replacement
+ * char rather than throwing. Called from the Worker BEFORE recordIntake so the
+ * stored body is already bounded and recordIntake stays a thin writer.
+ *
+ * TextEncoder/TextDecoder are platform globals (Node + Workers), so this stays
+ * dependency-free per this file's header contract (no `@/`, no bindings).
+ */
+export function capBody(
+  body: string | null,
+  maxBytes: number,
+): { value: string | null; truncated: boolean } {
+  if (body === null) return { value: null, truncated: false };
+  const encoded = new TextEncoder().encode(body);
+  if (encoded.byteLength <= maxBytes) return { value: body, truncated: false };
+  const sliced = encoded.subarray(0, maxBytes);
+  const value = new TextDecoder("utf-8", { fatal: false }).decode(sliced);
+  return { value, truncated: true };
+}
+
+/**
+ * Extract deduped http(s) URLs from the text and html bodies, preserving
+ * first-seen order, capped at `maxLinks` (default 20 — a body stuffed with
+ * tracking-pixel URLs shouldn't produce a wall of links). Used to surface
+ * verification links (e.g. the Gmail forwarding confirmation) as a clickable
+ * list in /receipts/inbox.
+ *
+ * Scans text and html TOGETHER: bare URLs in text, `href="…"` URLs in html,
+ * and bare URLs in html text nodes are all caught by the same regex (it stops
+ * at whitespace, angle brackets, and quotes). This is simpler and more complete
+ * than tag-stripping, which would drop URLs living inside attributes (the
+ * `<[^>]*>` match spans the entire opening tag, href URL included). Pure; no
+ * network, no DOM.
+ */
+export function extractLinks(
+  text: string | null,
+  html: string | null,
+  maxLinks = 20,
+): string[] {
+  const combined = `${text ?? ""}\n${html ?? ""}`;
+  const seen = new Set<string>();
+  const out: string[] = [];
+  const re = /https?:\/\/[^\s<>"']+/g;
+  let m: RegExpExecArray | null;
+  while (out.length < maxLinks && (m = re.exec(combined)) !== null) {
+    const url = m[0].replace(/[.,;:!)?]+$/, ""); // trim trailing punctuation
+    if (!seen.has(url)) {
+      seen.add(url);
+      out.push(url);
+    }
+  }
+  return out;
+}
+
+// ─── Auto-promote gating (ADR 0011 Phase B) ─────────────────────────────────
+
+/**
+ * Parse a comma-separated TRUSTED_INTAKE_SENDERS value (Worker/consumer env or
+ * secret) into a normalized lowercased list. Tolerant of whitespace/empties.
+ * Pure so the gating decision is unit-testable without bindings.
+ */
+export function parseTrustedIntakeSenders(
+  raw: string | null | undefined,
+): string[] {
+  if (!raw) return [];
+  return raw
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter((s) => s.length > 0);
+}
+
+/**
+ * Whether a body-only intake should be auto-promoted into a real receipt with
+ * NO operator click. The compensating control for receipts@ being a public,
+ * unauthenticated address: only an allowlisted sender with passing SPF AND
+ * DKIM gets auto-promoted; everyone else stays pending_triage (visible per
+ * Phase A, manual Promote). Pure — the call site passes the verdicts and the
+ * parsed allowlist.
+ */
+export function isAutoPromoteEligible(args: {
+  fromAddress: string;
+  spfPass: boolean;
+  dkimPass: boolean;
+  /** true if the email has at least one VALID receipt attachment. */
+  hasValidAttachment: boolean;
+  trustedSenders: readonly string[];
+}): boolean {
+  // Attachments use the normal manual triage path regardless of sender.
+  if (args.hasValidAttachment) return false;
+  if (!args.spfPass || !args.dkimPass) return false;
+  return args.trustedSenders.includes(args.fromAddress.toLowerCase());
+}

@@ -52,6 +52,24 @@ test("buildPendingProcessingQuery: SQL retains deleted-row filter, ordering, LIM
   assert.match(sql, /LIMIT \?/);
 });
 
+// ADR 0011 Phase B: render-needed receipts (needs_render=1) must NOT appear as
+// pending extraction — they're awaiting a Mac render before they're
+// extractable, and must not block month-close for a window they haven't been
+// matched into. The filter is a literal in the SQL, so bindings are unchanged.
+test("buildPendingProcessingQuery: excludes needs_render receipts (Phase B render gate)", () => {
+  const { sql } = buildPendingProcessingQuery();
+  assert.match(sql, /needs_render = 0/);
+});
+
+test("buildPendingProcessingQuery: needs_render filter is a literal, not a placeholder; bindings unchanged", () => {
+  const { sql, bindings } = buildPendingProcessingQuery(50);
+  assert.ok(
+    !/needs_render = \?/.test(sql),
+    "needs_render is a literal 0 in the SQL, not a bind placeholder",
+  );
+  assert.deepEqual([...bindings], [...STATES, 50]);
+});
+
 // ─── reconcile update ───────────────────────────────────────────────────────
 
 test("buildReconcileExtractionStateQuery: bindings order for terminal 'processed'", () => {

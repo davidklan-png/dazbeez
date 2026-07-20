@@ -100,6 +100,25 @@ export async function deleteProofCopyForReceipt(
 }
 
 /**
+ * Delete any existing `processed` row for a receipt (ADR 0011 Phase B render-
+ * derivative upsert preamble). The rendered derivative lives at a STABLE r2_key
+ * (`receipts/<id>/rendered.<ext>`) and r2_key is UNIQUE, so a re-render must
+ * clear the prior row before the fresh INSERT. Mirrors deleteProofCopyForReceipt.
+ */
+export async function deleteProcessedForReceipt(
+  db: D1Database,
+  receiptId: string,
+): Promise<void> {
+  await db
+    .prepare(
+      `DELETE FROM receipt_files
+       WHERE object_type = 'receipt' AND object_id = ? AND role = 'processed'`,
+    )
+    .bind(receiptId)
+    .run();
+}
+
+/**
  * Count receipt_files rows per receipt id (any role). Used by the proofs gate
  * (validateMonthReadyForExportCore) to flag a shipped receipt with ZERO file
  * rows — no original, no proof_copy → no proof to include → block finalize.
