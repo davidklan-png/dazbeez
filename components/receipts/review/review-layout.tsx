@@ -13,7 +13,10 @@ import {
 } from "@/components/receipts/review/queue-controls";
 import type { QueueItem } from "@/lib/receipts/queue-items";
 import {
+  buildReviewControlQuery,
+  closingToggleMonth,
   isConcreteMonth,
+  normalizeReviewFilter,
   type ReviewScope,
 } from "@/lib/receipts/review-queue-filter";
 
@@ -135,30 +138,32 @@ function SubHeader({
   scope: ReviewScope;
 }) {
   const router = useRouter();
-  const concrete = isConcreteMonth(monthParam);
-
-  function pushQuery(next: { month?: string; scope?: ReviewScope; filter?: string | null }) {
-    const params = new URLSearchParams();
-    const month = next.month ?? monthParam;
-    if (month) params.set("month", month);
-    const filter = next.filter !== undefined ? next.filter : activeFilter || null;
-    if (filter) params.set("filter", filter);
-    const nextScope = next.scope ?? scope;
-    // Closing scope is only meaningful for a concrete month; selecting 'all'
-    // drops it (resolveReviewScope enforces the same server-side).
-    if (nextScope === "closing" && isConcreteMonth(month)) params.set("scope", "closing");
-    const qs = params.toString();
-    router.push(qs ? `/receipts/review?${qs}` : "/receipts/review");
-  }
+  // The toggle acts on the explicit month when present, otherwise the effective
+  // (current calendar) month — so Closing scope is reachable from the default
+  // current-month URL, not only after picking a month. Disabled for All months
+  // or a genuinely invalid effective month.
+  const toggleMonth = closingToggleMonth(monthParam, effectiveMonth);
+  const concrete = isConcreteMonth(toggleMonth);
+  const normalizedFilter = normalizeReviewFilter(activeFilter);
 
   function onMonthChange(value: string) {
     // Preserve the workflow filter across month changes. Closing scope is
     // preserved too, except when switching to 'all' (no closing scope there).
-    pushQuery({ month: value, scope: value === "all" ? "calendar" : scope });
+    const nextScope: ReviewScope = value === "all" ? "calendar" : scope;
+    router.push(
+      `/receipts/review${buildReviewControlQuery({ month: value, filter: activeFilter || null, scope: nextScope })}`,
+    );
   }
 
   function onToggleScope() {
-    pushQuery({ scope: scope === "closing" ? "calendar" : "closing" });
+    const nextScope: ReviewScope = scope === "closing" ? "calendar" : "closing";
+    // Always carry the (possibly just-materialized) concrete month so enabling
+    // from an implicit/default month navigates with an explicit month; disabling
+    // preserves the concrete month. buildReviewControlQuery drops scope=closing
+    // for a non-concrete month (All months).
+    router.push(
+      `/receipts/review${buildReviewControlQuery({ month: toggleMonth, filter: activeFilter || null, scope: nextScope })}`,
+    );
   }
 
   return (
@@ -203,7 +208,7 @@ function SubHeader({
           aria-label="Review queue filters"
         >
           {FILTER_TABS.map((f) => {
-            const isActive = activeFilter === f.key;
+            const isActive = normalizedFilter === f.key;
             return (
               <Link
                 key={f.key || "all"}
@@ -226,10 +231,10 @@ function SubHeader({
           <Link
             href={reviewHref("locked", monthParam, scope)}
             role="tab"
-            aria-selected={activeFilter === "locked"}
+            aria-selected={normalizedFilter === "locked"}
             className={[
               "flex shrink-0 items-center gap-1 rounded-[7px] border px-2.5 py-1 text-xs",
-              activeFilter === "locked"
+              normalizedFilter === "locked"
                 ? "border-gray-500 bg-gray-100 font-semibold text-gray-700"
                 : "border-gray-200 bg-white font-medium text-gray-500 hover:text-gray-700",
             ].join(" ")}
@@ -299,12 +304,7 @@ function reviewHref(
   monthParam: string,
   scope: ReviewScope,
 ): string {
-  const params = new URLSearchParams();
-  if (filter) params.set("filter", filter);
-  if (monthParam) params.set("month", monthParam);
-  if (scope === "closing" && isConcreteMonth(monthParam)) params.set("scope", "closing");
-  const qs = params.toString();
-  return qs ? `/receipts/review?${qs}` : "/receipts/review";
+  return `/receipts/review${buildReviewControlQuery({ month: monthParam, filter, scope })}`;
 }
 
 /** Friendly month label for the picker. */

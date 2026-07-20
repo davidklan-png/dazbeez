@@ -54,6 +54,59 @@ export function isConcreteMonth(monthParam: string): boolean {
   return /^\d{4}-\d{2}$/.test(monthParam);
 }
 
+/** The month a closing-scope toggle acts on: the explicit month param when one
+ *  is present, otherwise the effective (current calendar) month. This lets the
+ *  toggle work from the default current-month URL — where `monthParam === ""`
+ *  but the selector is showing a concrete `effectiveMonth` — instead of being
+ *  disabled until the operator picks a month they're already on (which never
+ *  fires the picker's onChange). Returns 'all' when the effective month is All
+ *  months. Pure. */
+export function closingToggleMonth(
+  monthParam: string,
+  effectiveMonth: string,
+): string {
+  return isConcreteMonth(monthParam) ? monthParam : effectiveMonth;
+}
+
+/** Filter keys that have their own tab. Any other value (legacy `attendees` /
+ *  `purpose` / `reviewed`, or an unknown key) renders as All, matching
+ *  filterReviewQueue's fallback. */
+const RECOGNIZED_REVIEW_FILTERS: ReadonlySet<string> = new Set([
+  "needs",
+  "amex",
+  "non-amex",
+  "locked",
+]);
+
+/** Normalize a filter key for the visible active tab: recognized keys pass
+ *  through; legacy/unknown keys map to "" so the All tab renders selected
+ *  (filterReviewQueue already falls back to All for them). Pure. */
+export function normalizeReviewFilter(
+  filter: string | null | undefined,
+): string {
+  return filter && RECOGNIZED_REVIEW_FILTERS.has(filter) ? filter : "";
+}
+
+/** Build a `/receipts/review?…` query string from explicit control state. The
+ *  single URL builder used by the SubHeader's month picker, closing-scope
+ *  toggle, and filter tabs — pure so the toggle's "enable from implicit month"
+ *  behavior is unit-testable without a DOM. `scope=closing` is emitted only for
+ *  a concrete month (All months / default-with-no-effective-month drops it). */
+export function buildReviewControlQuery(args: {
+  month: string;
+  filter: string | null;
+  scope: ReviewScope;
+}): string {
+  const sp = new URLSearchParams();
+  if (args.month) sp.set("month", args.month);
+  if (args.filter) sp.set("filter", args.filter);
+  if (args.scope === "closing" && isConcreteMonth(args.month)) {
+    sp.set("scope", "closing");
+  }
+  const qs = sp.toString();
+  return qs ? `?${qs}` : "";
+}
+
 /** Apply the lock split + status/payment_path deep-links + workflow filter to a
  *  working set. Locked receipts are hidden unless `filter` is 'locked'. The lock
  *  map is { locked: boolean }-shaped so this stays decoupled from the full

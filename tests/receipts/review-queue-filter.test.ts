@@ -1,12 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  buildReviewControlQuery,
   buildReviewQueryParams,
+  closingToggleMonth,
   effectiveReviewMonth,
   ensureCurrentMonth,
   filterReviewQueue,
   isConcreteMonth,
   mergeMonthOptions,
+  normalizeReviewFilter,
   parseReviewScope,
   resolveReviewMonthScope,
   resolveReviewScope,
@@ -245,3 +248,75 @@ test("mergeMonthOptions: 'all' effective month is not added as an option", () =>
   const out = mergeMonthOptions(["2026-06"], [], "all");
   assert.deepEqual(out, ["2026-06"]);
 });
+
+// ─── closing-scope toggle: implicit vs explicit month ───────────────────────
+
+test("closingToggleMonth: implicit month ('') resolves to the effective (current) month", () => {
+  assert.equal(closingToggleMonth("", "2026-07"), "2026-07");
+});
+
+test("closingToggleMonth: explicit month wins over the effective month", () => {
+  assert.equal(closingToggleMonth("2026-06", "2026-07"), "2026-06");
+});
+
+test("closingToggleMonth: All months stays 'all'", () => {
+  assert.equal(closingToggleMonth("all", "all"), "all");
+});
+
+test("closing scope: enabling from the default/implicit current month produces ?month=YYYY-MM&scope=closing", () => {
+  // monthParam '' but the selector shows effectiveMonth 2026-07 → the toggle
+  // must be enabled and navigate with an explicit month.
+  const month = closingToggleMonth("", "2026-07");
+  assert.equal(isConcreteMonth(month), true);
+  assert.equal(
+    buildReviewControlQuery({ month, filter: null, scope: "closing" }),
+    "?month=2026-07&scope=closing",
+  );
+});
+
+test("closing scope: explicit month is unchanged when enabling (filter preserved)", () => {
+  const month = closingToggleMonth("2026-06", "2026-07");
+  assert.equal(month, "2026-06");
+  assert.equal(
+    buildReviewControlQuery({ month, filter: "needs", scope: "closing" }),
+    "?month=2026-06&filter=needs&scope=closing",
+  );
+});
+
+test("closing scope: All months cannot enable closing scope (toggle disabled, scope dropped)", () => {
+  const month = closingToggleMonth("all", "all");
+  assert.equal(isConcreteMonth(month), false);
+  // buildReviewControlQuery never emits scope=closing for a non-concrete month.
+  assert.equal(
+    buildReviewControlQuery({ month: "all", filter: null, scope: "closing" }),
+    "?month=all",
+  );
+});
+
+test("closing scope: disabling preserves the concrete month and drops scope", () => {
+  // Once enabled, the URL carries the explicit month; disabling keeps it.
+  const month = closingToggleMonth("2026-06", "2026-07");
+  assert.equal(
+    buildReviewControlQuery({ month, filter: null, scope: "calendar" }),
+    "?month=2026-06",
+  );
+});
+
+// ─── normalizeReviewFilter (visible active tab) ─────────────────────────────
+
+test("normalizeReviewFilter: recognized keys pass through", () => {
+  assert.equal(normalizeReviewFilter("needs"), "needs");
+  assert.equal(normalizeReviewFilter("amex"), "amex");
+  assert.equal(normalizeReviewFilter("non-amex"), "non-amex");
+  assert.equal(normalizeReviewFilter("locked"), "locked");
+});
+
+test("normalizeReviewFilter: legacy + unknown keys normalize to All ('')", () => {
+  for (const key of ["attendees", "purpose", "reviewed", "nonsense"]) {
+    assert.equal(normalizeReviewFilter(key), "", `key=${key} should normalize to All`);
+  }
+  assert.equal(normalizeReviewFilter(""), "");
+  assert.equal(normalizeReviewFilter(null), "");
+  assert.equal(normalizeReviewFilter(undefined), "");
+});
+
