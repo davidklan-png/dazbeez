@@ -8,7 +8,7 @@ import {
 } from "@/lib/receipts/month-lock";
 import { shouldOverwriteMerchant } from "@/lib/receipts/reconciliation";
 import { retentionUntilIso } from "@/lib/receipts/retention";
-import { assignMembershipForReceipt } from "@/lib/receipts/membership";
+import { assignMembershipForReceipt, postPatchMembershipDate } from "@/lib/receipts/membership";
 import { deleteAmexArtifact } from "@/lib/receipts/storage";
 import { PENDING_EXTRACTION_STATES } from "@/lib/receipts/types";
 import type { ReceiptAttendeeDirectoryEntry } from "@/lib/receipts/attendee-directory";
@@ -324,22 +324,23 @@ export async function updateReceiptRecord(
     newValueJson: stringifyJson(input),
   });
 
-  // ADR 0008 (was ADR 0006 PR #2): if a date is being set on a CASH/DIGITAL
-  // receipt that has no membership yet, assign it now (sticky — only when
-  // currently NULL; an already-assigned receipt is never re-derived here,
-  // matching the freeze rule). A date CHANGE on an already-assigned receipt is
-  // ignored (sticky); the operator can override explicitly if the new date
-  // should land in a different month. (ADR 0006's drift detection is retired —
-  // calendar month has no AMEX-line dependency to drift.)
-  if (
-    "transactionDate" in input &&
-    input.transactionDate &&
-    (effectivePaymentPath === "CASH" || effectivePaymentPath === "DIGITAL") &&
-    !before.export_statement_month &&
-    !("exportStatementMonth" in input)
-  ) {
+  // ADR 0008: assign membership whenever a CASH/DIGITAL receipt with a date has
+  // NULL export_statement_month after a PATCH — regardless of which field the
+  // PATCH touched (see postPatchMembershipDate). This closes the UNKNOWN→CASH
+  // classification path: extraction sets the date while payment_path=UNKNOWN,
+  // then the operator classifies UNKNOWN→CASH in a PATCH that does NOT touch the
+  // date — the previous condition (required "transactionDate" in input) never
+  // fired for that flow. Sticky + override-safe (explicit override wins).
+  const membershipDate = postPatchMembershipDate({
+    effectivePaymentPath,
+    beforeExportStatementMonth: before.export_statement_month ?? null,
+    explicitOverrideInInput: "exportStatementMonth" in input,
+    effectiveTransactionDate:
+      ("transactionDate" in input ? input.transactionDate : before.transaction_date) ?? null,
+  });
+  if (membershipDate) {
     try {
-      await assignMembershipForReceipt(id, input.transactionDate, actor);
+      await assignMembershipForReceipt(id, membershipDate, actor);
     } catch (assignErr) {
       console.error("[updateReceiptRecord] membership assignment failed", assignErr);
     }
