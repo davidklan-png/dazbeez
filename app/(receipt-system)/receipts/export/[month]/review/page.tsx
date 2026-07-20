@@ -20,6 +20,8 @@ import {
 } from "@/lib/receipts/blockers";
 import { deriveStatementWindow } from "@/lib/receipts/statement-window";
 import { formatMonth } from "@/lib/receipts/format";
+import { listCategoryRules } from "@/lib/receipts/category-rules";
+import { getReceiptsDb } from "@/lib/cloudflare-runtime";
 import { ReviewScreen } from "@/components/receipts/export/review-screen";
 
 export const dynamic = "force-dynamic";
@@ -75,6 +77,14 @@ export default async function ReviewPage({ params }: { params: Params }) {
     ...computeIcCardTopUpWarnings(monthReceipts),
   ];
 
+  // Active category pattern rules → live suggestion affordance on unmatched,
+  // uncategorized AMEX lines (ADR: category-rules).
+  const categoryRules = (await listCategoryRules(getReceiptsDb())).map((r) => ({
+    matchType: r.match_type,
+    matchValue: r.match_value,
+    expenseCategoryCode: r.expense_category_code,
+  }));
+
   return (
     <ReviewScreen
       month={month}
@@ -89,6 +99,7 @@ export default async function ReviewPage({ params }: { params: Params }) {
       warnings={warnings}
       tripReports={tripReports}
       tripLines={tripLines}
+      categoryRules={categoryRules}
     />
   );
 }

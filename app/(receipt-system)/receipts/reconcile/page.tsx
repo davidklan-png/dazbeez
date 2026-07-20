@@ -16,6 +16,8 @@ import { ReconcileScreen } from "@/components/receipts/reconcile/reconcile-scree
 import { assertReceiptsPageAccess } from "@/lib/receipts/auth-request";
 import type { MonthOption } from "@/components/receipts/month-switcher";
 import { formatMonth } from "@/lib/receipts/format";
+import { listCategoryRules } from "@/lib/receipts/category-rules";
+import { getReceiptsDb } from "@/lib/cloudflare-runtime";
 
 export const dynamic = "force-dynamic";
 
@@ -97,6 +99,14 @@ export default async function ReconcilePage({
     attendeeReceiptIds,
   );
 
+  // Active category pattern rules → live suggestion on unmatched, uncategorized
+  // AMEX lines (ADR: category-rules).
+  const categoryRules = (await listCategoryRules(getReceiptsDb())).map((r) => ({
+    matchType: r.match_type,
+    matchValue: r.match_value,
+    expenseCategoryCode: r.expense_category_code,
+  }));
+
   return (
     <ReconcileScreen
       amexLines={amexLines}
@@ -111,6 +121,7 @@ export default async function ReconcilePage({
       window={window}
       receiptsInWindow={receiptsInWindow}
       attendeesByReceiptId={attendeesByReceiptId}
+      categoryRules={categoryRules}
     />
   );
 }

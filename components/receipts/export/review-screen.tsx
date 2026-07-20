@@ -22,6 +22,7 @@ import type {
   ReceiptRecord,
 } from "@/lib/receipts/types";
 import type { StatementWindow } from "@/lib/receipts/statement-window";
+import type { CategoryRule } from "@/lib/receipts/category-rules";
 
 export interface ReviewScreenProps {
   month: string;
@@ -37,6 +38,9 @@ export interface ReviewScreenProps {
   warnings: Blocker[];
   tripReports: BusinessTripReport[];
   tripLines: Map<string, AmexStatementLine[]>;
+  /** Active category pattern rules → live suggestion affordance on unmatched,
+   *  uncategorized AMEX lines (ADR: category-rules). */
+  categoryRules: CategoryRule[];
 }
 
 export function ReviewScreen(props: ReviewScreenProps) {
@@ -83,6 +87,7 @@ export function ReviewScreen(props: ReviewScreenProps) {
           receipts={props.receipts}
           finalized={finalized}
           reconciliationSealed={props.reconciliationSealed}
+          categoryRules={props.categoryRules}
         />
         <AdditionalChargesSection
           chargeRows={chargeRows}
@@ -90,6 +95,7 @@ export function ReviewScreen(props: ReviewScreenProps) {
           dupBadgeById={dupBadgeById}
           finalized={finalized}
           reconciliationSealed={props.reconciliationSealed}
+          categoryRules={props.categoryRules}
         />
         <BusinessTripsSection
           tripReports={props.tripReports}
@@ -315,11 +321,13 @@ function SideBySideSection({
   receipts,
   finalized,
   reconciliationSealed,
+  categoryRules,
 }: {
   amexRows: ExportRow[];
   receipts: ReceiptRecord[];
   finalized: boolean;
   reconciliationSealed: boolean;
+  categoryRules: CategoryRule[];
 }) {
   const receiptMap = new Map(receipts.map((r) => [r.id, r]));
   // Group by receiptId to render consolidated-receipt groups together.
@@ -364,6 +372,7 @@ function SideBySideSection({
                 receipt={receiptMap.get(rid)}
                 finalized={finalized}
                 reconciliationSealed={reconciliationSealed}
+                categoryRules={categoryRules}
               />
             ))}
             {singleMatched.map(([rid, g]) => (
@@ -373,6 +382,7 @@ function SideBySideSection({
                 receipt={receiptMap.get(rid)}
                 finalized={finalized}
                 reconciliationSealed={reconciliationSealed}
+                categoryRules={categoryRules}
               />
             ))}
             {standalone.map((row, i) => (
@@ -382,6 +392,7 @@ function SideBySideSection({
                 receipt={undefined}
                 finalized={finalized}
                 reconciliationSealed={reconciliationSealed}
+                categoryRules={categoryRules}
               />
             ))}
           </>
@@ -400,11 +411,13 @@ function SideBySideRow({
   receipt,
   finalized,
   reconciliationSealed,
+  categoryRules,
 }: {
   row: ExportRow;
   receipt: ReceiptRecord | undefined;
   finalized: boolean;
   reconciliationSealed: boolean;
+  categoryRules: CategoryRule[];
 }) {
   const amountDelta =
     receipt && receipt.amount_minor !== null && receipt.amount_minor !== row.amountMinor;
@@ -423,7 +436,7 @@ function SideBySideRow({
         </div>
         <div className="mt-1.5 max-w-[260px]">
           <InlineCategoryCell
-            {...buildCategoryCellProps(row, finalized, reconciliationSealed)}
+            {...buildCategoryCellProps(row, finalized, reconciliationSealed, categoryRules)}
           />
         </div>
       </div>
@@ -470,12 +483,14 @@ function ConsolidatedGroup({
   receipt,
   finalized,
   reconciliationSealed,
+  categoryRules,
 }: {
   receiptId: string;
   rows: ExportRow[];
   receipt: ReceiptRecord | undefined;
   finalized: boolean;
   reconciliationSealed: boolean;
+  categoryRules: CategoryRule[];
 }) {
   const lineSum = rows.reduce((s, r) => s + (r.amountMinor ?? 0), 0);
   const balanced = receipt && receipt.amount_minor !== null && receipt.amount_minor === lineSum;
@@ -498,6 +513,7 @@ function ConsolidatedGroup({
           receipt={i === 0 ? receipt : undefined}
           finalized={finalized}
           reconciliationSealed={reconciliationSealed}
+          categoryRules={categoryRules}
         />
       ))}
     </div>
@@ -512,12 +528,14 @@ function AdditionalChargesSection({
   dupBadgeById,
   finalized,
   reconciliationSealed,
+  categoryRules,
 }: {
   chargeRows: ExportRow[];
   monthLabel: string;
   dupBadgeById: Map<string, DuplicateBadge>;
   finalized: boolean;
   reconciliationSealed: boolean;
+  categoryRules: CategoryRule[];
 }) {
   // ADR 0008: a cash/digital receipt ships in the CALENDAR month of its
   // transaction_date — so this section's population is "receipts assigned to
@@ -567,7 +585,7 @@ function AdditionalChargesSection({
                   {formatAmountMinor(r.amountMinor ?? 0, r.currency)}
                 </span>
                 <InlineCategoryCell
-                  {...buildCategoryCellProps(r, finalized, reconciliationSealed)}
+                  {...buildCategoryCellProps(r, finalized, reconciliationSealed, categoryRules)}
                 />
                 <span>
                   <Pill tone="gray" size="sm">
