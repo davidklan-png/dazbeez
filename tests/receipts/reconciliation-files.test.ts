@@ -107,6 +107,7 @@ test("buildAmexReconciliationCsv: frame rows verbatim, header + charge rows appe
   const appends = new Map<number, AmexLineAppend>([
     [6, {
       kamokuNo: "会議費Jun2026①",
+      businessPurpose: "クライアント打ち合わせ",
       attendeeIds: "1; 2; 29",
       attendeeCount: "3",
       receiptFileCell: "会議費Jun2026①小田原みなと食堂¥6,490.jpg",
@@ -128,7 +129,7 @@ test("buildAmexReconciliationCsv: frame rows verbatim, header + charge rows appe
   // (¥6,490) so csvEscape wraps it.
   assert.equal(
     out[5],
-    '2026/04/17,小田原みなと食堂,,1回,,6490,,会議費Jun2026①,"1; 2; 29",3,"会議費Jun2026①小田原みなと食堂¥6,490.jpg"',
+    '2026/04/17,小田原みなと食堂,,1回,,6490,,会議費Jun2026①,クライアント打ち合わせ,"1; 2; 29",3,"会議費Jun2026①小田原みなと食堂¥6,490.jpg"',
   );
   // 小計/合計 rows verbatim.
   assert.equal(out[7], ",【小計】,,,,8195,");
@@ -139,6 +140,7 @@ test("buildAmexReconciliationCsv: comma-split amount rows normalize to 7 fields 
   const appends = new Map<number, AmexLineAppend>([
     [7, {
       kamokuNo: "旅費交通費Jun2026①",
+      businessPurpose: "",
       attendeeIds: "",
       attendeeCount: "",
       receiptFileCell: "旅費交通費Jun2026①ENEOS¥1,705.jpg",
@@ -150,7 +152,7 @@ test("buildAmexReconciliationCsv: comma-split amount rows normalize to 7 fields 
   const cells = out[6]!.split(",");
   assert.equal(cells[0], "2026/05/02");
   assert.equal(cells[5], "1705");
-  // 7 base + 4 appended = 11 cells (ids cell is quoted-empty).
+  // 7 base + 5 appended = 12 cells (ids cell is quoted-empty).
   assert.equal(out[6]!.includes("旅費交通費Jun2026①"), true);
 });
 
@@ -158,13 +160,14 @@ test("buildAmexReconciliationCsv: lines without appends and missing-receipt cell
   const appends = new Map<number, AmexLineAppend>([
     [6, {
       kamokuNo: "通信費",
+      businessPurpose: "",
       attendeeIds: "",
       attendeeCount: "",
       receiptFileCell: missingReceiptCell("Monthly expense"),
     }],
   ]);
   const out = buildAmexReconciliationCsv(STATEMENT, appends).split("\n");
-  assert.ok(out[5]!.endsWith("通信費,\"\",,領収書なし：Monthly expense"), out[5]);
+  assert.ok(out[5]!.endsWith("通信費,,\"\",,領収書なし：Monthly expense"), out[5]);
   // Charge row 7 got no append entry → passes through verbatim.
   assert.equal(out[6], "2026/05/02,ENEOS,,1回,,1,705,");
 });
@@ -245,7 +248,7 @@ test("buildPaymentPathReconciliationCsv: lean header + attendees + evidence (dra
   );
   const lines = csv.split("\n");
   assert.equal(lines[0], PAYMENT_PATH_CSV_HEADERS.join(","));
-  assert.equal(lines[0], "No,利用日,店舗名,金額,科目＆No.,会議-出席者ID,人数,領収書ファイル名");
+  assert.equal(lines[0], "No,利用日,店舗名,金額,科目＆No.,事業目的,会議-出席者ID,人数,領収書ファイル名");
   assert.ok(lines[1]!.startsWith("1,2026-06-10,セブン-イレブン,1200,"), "No restarts at 1; lean columns");
   assert.ok(lines[1]!.includes("消耗品費Jun2026①"), "科目＆No appended");
   assert.ok(
@@ -264,4 +267,44 @@ test("buildPaymentPathReconciliationCsv: receipt without assignment gets 領収�
     new Map(),
   );
   assert.ok(csv.split("\n")[1]!.endsWith(",領収書なし"), csv);
+});
+
+// ─── 事業目的 (BusinessPurpose) column ──────────────────────────────────────
+
+test("buildAmexReconciliationCsv: empty businessPurpose renders an empty cell, not 'null'/'undefined'", () => {
+  const appends = new Map<number, AmexLineAppend>([
+    [6, {
+      kamokuNo: "会議費Jun2026①",
+      businessPurpose: "",
+      attendeeIds: "1; 2",
+      attendeeCount: "2",
+      receiptFileCell: "evidence.jpg",
+    }],
+  ]);
+  const row = buildAmexReconciliationCsv(STATEMENT, appends).split("\n")[5]!;
+  assert.ok(!row.includes("null"), `must not render literal null: ${row}`);
+  assert.ok(!row.includes("undefined"), `must not render literal undefined: ${row}`);
+  // 科目＆No. immediately followed by an empty 事業目的 cell, then the quoted ids.
+  assert.ok(
+    row.includes("会議費Jun2026①,,"),
+    `expected empty 事業目的 cell after 科目＆No, got: ${row}`,
+  );
+});
+
+test("buildPaymentPathReconciliationCsv: null businessPurpose renders an empty cell, not 'null'/'undefined'", () => {
+  const csv = buildPaymentPathReconciliationCsv(
+    [receiptRow({ businessPurpose: null })],
+    new Map(),
+    DIRECTORY,
+    {},
+    new Map(),
+  );
+  const row = csv.split("\n")[1]!;
+  assert.ok(!row.includes("null"), `must not render literal null: ${row}`);
+  assert.ok(!row.includes("undefined"), `must not render literal undefined: ${row}`);
+  // 科目＆No. (消耗品費, no assignment) followed by an empty 事業目的 cell.
+  assert.ok(
+    row.includes("消耗品費,,"),
+    `expected empty 事業目的 cell after 科目＆No, got: ${row}`,
+  );
 });

@@ -351,6 +351,7 @@ export async function POST(request: Request) {
             row.expenseCategoryJa ??
             row.expenseCategoryCode ??
             "",
+          businessPurpose: row.businessPurpose ?? "",
           attendeeIds: ids,
           attendeeCount: count,
           receiptFileCell:

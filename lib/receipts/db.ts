@@ -3157,3 +3157,45 @@ export async function finalizeReconciliation(
     newValueJson: stringifyJson({ manifestR2Key, manifestSha256 }),
   });
 }
+
+// Reverse a finalized AMEX reconciliation back to 'draft' so receipts in the
+// statement month become editable again. Minimal beta-review reopen (operator
+// decision 2026-07-20) — not the full ADR 0009 audited-reopen machinery.
+// `createReconciliationDraft` already deletes any stale 'draft' row for the
+// month before inserting a fresh one, so the row this leaves behind is
+// harmlessly replaced whenever the operator re-runs the normal finalize flow.
+//
+// `db` is an optional testability seam (matches the email-intake /
+// crm-reply-monitor / month-lock pattern); production callers omit it and the
+// default binding resolves exactly as finalizeReconciliation does.
+export async function unfinalizeReconciliation(
+  statementMonth: string,
+  actor: string,
+  reason: string,
+  db: D1Database = getReceiptsDb(),
+): Promise<void> {
+  const row = await db
+    .prepare(
+      `SELECT id FROM amex_reconciliations WHERE statement_month = ? AND status = 'finalized' LIMIT 1`,
+    )
+    .bind(statementMonth)
+    .first<{ id: string }>();
+  if (!row) {
+    throw new Error(`No finalized reconciliation found for ${statementMonth}.`);
+  }
+  await db
+    .prepare(
+      `UPDATE amex_reconciliations
+       SET status = 'draft', finalized_by = NULL, finalized_at = NULL
+       WHERE id = ?`,
+    )
+    .bind(row.id)
+    .run();
+  await createAuditEntry(db, {
+    actor,
+    action: "amex.reconciliation_amended",
+    objectType: "amex_reconciliation",
+    objectId: row.id,
+    newValueJson: stringifyJson({ reason, statementMonth, unfinalized: true }),
+  });
+}

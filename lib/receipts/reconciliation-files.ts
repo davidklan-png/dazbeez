@@ -111,6 +111,7 @@ export function buildEvidenceAssignments(
 
 export const AMEX_RECONCILIATION_APPEND_HEADERS = [
   "科目＆No.",
+  "事業目的",
   "会議-出席者ID",
   "人数",
   "領収書ファイル名",
@@ -120,6 +121,9 @@ export const AMEX_RECONCILIATION_APPEND_HEADERS = [
 export interface AmexLineAppend {
   /** 科目＆No label for matched lines; bare 勘定科目 for no-receipt lines. */
   kamokuNo: string;
+  /** 事業目的 (business purpose), read next to the category label; blank when
+   *  the matched receipt has no business_purpose (csvEscape("") → ""). */
+  businessPurpose: string;
   /** "; "-joined directory ids ("1; 2; 29"). "; " (not spaces) is a HARD rule:
    *  Excel date-coerces space-separated ids ("2 3 4" → 2-Mar-2004). */
   attendeeIds: string;
@@ -211,6 +215,7 @@ export function buildAmexReconciliationCsv(
         [
           ...normalized.map((f) => csvEscape(f)),
           csvEscape(append.kamokuNo),
+          csvEscape(append.businessPurpose),
           csvQuoteAlways(append.attendeeIds),
           csvEscape(append.attendeeCount),
           csvEscape(append.receiptFileCell),
@@ -266,6 +271,7 @@ export const PAYMENT_PATH_CSV_HEADERS = [
   "店舗名",
   "金額",
   "科目＆No.",
+  "事業目的",
   "会議-出席者ID",
   "人数",
   "領収書ファイル名",
@@ -301,6 +307,7 @@ export function buildPaymentPathReconciliationCsv(
               : (row.amountMinor / 100).toFixed(2),
         ),
         csvEscape(assignment?.label ?? row.expenseCategoryJa ?? ""),
+        csvEscape(row.businessPurpose ?? ""),
         csvQuoteAlways(ids),
         csvEscape(count),
         csvEscape(
