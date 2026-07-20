@@ -65,6 +65,23 @@ export default async function ReceiptsSettingsPage() {
             <span className="text-sm text-amber-700">Manage →</span>
           </Link>
         </li>
+        <li>
+          <Link
+            href="/receipts/settings/category-rules"
+            className="flex items-center justify-between p-4 transition-colors hover:bg-amber-50"
+          >
+            <div>
+              <p className="text-sm font-semibold text-gray-900">
+                Category rules
+              </p>
+              <p className="mt-1 text-xs text-gray-500">
+                Turn repeated sender/merchant → category patterns into rules that
+                pre-fill suggestions (never auto-categorize).
+              </p>
+            </div>
+            <span className="text-sm text-amber-700">Manage →</span>
+          </Link>
+        </li>
       </ul>
     </div>
   );

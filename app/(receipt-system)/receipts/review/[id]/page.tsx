@@ -32,6 +32,7 @@ import {
 } from "@/lib/receipts/compliance";
 import { getComplianceSettings } from "@/lib/receipts/settings";
 import { getExtractionHealth } from "@/lib/receipts/extraction-state";
+import { listCategoryRules } from "@/lib/receipts/category-rules";
 import { getReceiptsDb } from "@/lib/cloudflare-runtime";
 import type { ReceiptRecord } from "@/lib/receipts/types";
 
@@ -156,6 +157,13 @@ async function renderReceiptPage(
   const availableMonths = await listDistinctTransactionMonths();
   const effectiveMonth = effectiveReviewMonth(monthParam, monthScope);
 
+  // Category pattern rules → form-pane suggestion affordance (ADR: category-rules).
+  const categoryRules = (await listCategoryRules(getReceiptsDb())).map((r) => ({
+    matchType: r.match_type,
+    matchValue: r.match_value,
+    expenseCategoryCode: r.expense_category_code,
+  }));
+
   const shortId = `R-${receipt.id.slice(0, 8)}`;
 
   return (
@@ -196,6 +204,7 @@ async function renderReceiptPage(
             overrideTargetMonths={overrideTargetMonths}
             naturalStatementMonth={naturalStatementMonth}
             lock={activeLock}
+            categoryRules={categoryRules}
           />
         </div>
       }

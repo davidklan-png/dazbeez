@@ -135,12 +135,27 @@ export function InlineCategoryCell(props: InlineCategoryCellProps) {
         )}
       </div>
 
-      {/* Uncategorized nudge — only when the operator can actually act. */}
-      {props.editable && !value && (
-        <Pill tone="amber" size="sm">
-          category needed
-        </Pill>
-      )}
+      {/* Uncategorized nudge — only when the operator can actually act. When a
+       *  category-rule suggestion exists, offer a one-click Accept that PATCHes
+       *  via the SAME handleChange path as a manual dropdown pick (never a
+       *  pre-selected dropdown — autosave/optimistic-commit risk). */}
+      {props.editable && !value ? (
+        props.suggestedCategoryCode ? (
+          <button
+            type="button"
+            onClick={() => handleChange(props.suggestedCategoryCode!)}
+            disabled={status === "saving"}
+            className="inline-flex items-center gap-1 rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-800 hover:bg-amber-100 disabled:opacity-50"
+          >
+            <span>Suggested: {formatCategoryLabel(props.suggestedCategoryCode!)}</span>
+            <span className="underline">Accept</span>
+          </button>
+        ) : (
+          <Pill tone="amber" size="sm">
+            category needed
+          </Pill>
+        )
+      ) : null}
 
       {/* Attendees-required inline warning. Non-blocking: the finalize gate is
        *  the enforcement point. Shown for any row whose current category

@@ -25,6 +25,7 @@ import {
   requiresAttendees as categoryRequiresAttendees,
   formatCategoryLabel,
 } from "@/lib/receipts/categories";
+import { findCategorySuggestion, type CategoryRule } from "@/lib/receipts/category-rules";
 import type {
   PaymentPath,
   ReceiptAttendee,
@@ -54,6 +55,11 @@ export interface FormPaneProps {
    *  into a sealed receipt and discovers the 409 at save. Defaults to unlocked
    *  so callers that don't pass it behave as before. */
   lock?: ReceiptLockInfo;
+  /** Active category pattern rules (ADR: category-rules). When the receipt has
+   *  no category, a matching rule surfaces a SUGGESTION affordance — never a
+   *  pre-selected dropdown. Optional: callers that don't pass it get no
+   *  suggestions (behaves as before). */
+  categoryRules?: CategoryRule[];
 }
 
 export function FormPane(props: FormPaneProps) {
@@ -182,6 +188,28 @@ export function FormPane(props: FormPaneProps) {
 
   const needsAttendees = categoryRequiresAttendees(expenseCategoryCode);
   const category = getCategoryByCode(expenseCategoryCode);
+
+  // Category pattern rule suggestion (ADR: category-rules). Only when no
+  // category is set yet, and only matching against the receipt's identity:
+  // email-source receipts match sender rules (captured_by = sender address);
+  // everything else matches merchant rules only (captured_by is the operator,
+  // not a sender, so it's excluded). NEVER a pre-selected dropdown — the
+  // Accept button below calls the same setExpenseCategoryCode the manual
+  // <select> uses, so the autosave PATCH is byte-identical to a human pick.
+  const categorySuggestion =
+    !expenseCategoryCode && (props.categoryRules?.length ?? 0) > 0
+      ? findCategorySuggestion(
+          {
+            merchant: props.receipt.merchant,
+            fromAddress:
+              props.receipt.source_type === "email_attachment" ||
+              props.receipt.source_type === "email_body"
+                ? props.receipt.captured_by
+                : null,
+          },
+          props.categoryRules ?? [],
+        )
+      : null;
 
   // ─── refs for keyboard focus ────────────────────────────────────────
   const categoryRef = useRef<HTMLSelectElement | null>(null);
@@ -628,6 +656,17 @@ export function FormPane(props: FormPaneProps) {
               <TextInput value="10% (standard)" readOnly />
             </Field>
           </div>
+          {!expenseCategoryCode && categorySuggestion && !isLocked ? (
+            <button
+              type="button"
+              onClick={() => setExpenseCategoryCode(categorySuggestion.categoryCode)}
+              className="mt-2 inline-flex items-center gap-1.5 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-[12px] text-amber-800 transition-colors hover:bg-amber-100"
+              title={`Matched ${categorySuggestion.rule.matchType} rule: ${categorySuggestion.rule.matchValue}`}
+            >
+              <span>Suggested: {formatCategoryLabel(categorySuggestion.categoryCode)}</span>
+              <span className="font-semibold underline">Accept</span>
+            </button>
+          ) : null}
           {category && (
             <div className="mt-2.5 flex items-start gap-2 rounded-lg bg-gray-50 px-3 py-2.5 text-[12px] text-gray-600">
               <span className="text-green-500">✓</span>

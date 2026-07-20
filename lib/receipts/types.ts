@@ -172,7 +172,13 @@ export type AuditAction =
   // Settings page (trusted_intake_senders table). This list IS the safety gate
   // for a zero-human-review auto-promotion path, so every add/remove is audited.
   | "trusted_sender.added"
-  | "trusted_sender.removed";
+  | "trusted_sender.removed"
+  // Category pattern rules: the operator accepted a proposed rule, removed an
+  // active one, or dismissed a proposal (so it won't re-surface). Rules never
+  // auto-set expense_category_code — these audit the rule lifecycle only.
+  | "category_rule.created"
+  | "category_rule.removed"
+  | "category_rule.dismissed";
 
 // ─── Compliance: source / preservation / qualified-invoice ────────────────
 

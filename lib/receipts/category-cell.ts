@@ -7,6 +7,7 @@
 // review-screen.tsx for the per-row call sites.
 
 import type { ExportRow } from "@/lib/receipts/types";
+import { findCategorySuggestion, type CategoryRule } from "@/lib/receipts/category-rules";
 
 export type CategoryRoute =
   | { kind: "receipt"; id: string }
@@ -32,6 +33,11 @@ export interface InlineCategoryCellProps {
   /** Whether the row's receipt has attendees recorded — drives the
    *  attendees-required inline warning (non-blocking; gate enforces). */
   hasAttendees: boolean;
+  /** Category pattern rule suggestion (ADR: category-rules). Non-null ONLY for
+   *  an unmatched, uncategorized line that matches an active rule — a VISIBLE
+   *  Accept affordance, never a pre-selected dropdown. The cell's Accept calls
+   *  the same PATCH path as a manual pick. */
+  suggestedCategoryCode: string | null;
 }
 
 /**
@@ -53,6 +59,7 @@ export function buildCategoryCellProps(
   row: ExportRow,
   finalized: boolean,
   reconciliationSealed: boolean,
+  rules: readonly CategoryRule[] = [],
 ): InlineCategoryCellProps {
   const hasReceipt = Boolean(row.receiptId);
   const sourceLabel: "from receipt" | "on line" = hasReceipt
@@ -77,6 +84,15 @@ export function buildCategoryCellProps(
     disabledReason = "Reconciliation is sealed for this month — unseal to edit.";
   }
 
+  // Category-rule suggestion: only for an UNMATCHED, UNCATEGORIZED line (a
+  // matched line's category comes from the receipt — categorized via receipt
+  // review, and a line PATCH would be shadowed by resolveLineCategory anyway).
+  // Live-computed (ADR category-rules §3); the cell renders a visible Accept.
+  const suggestion =
+    !hasReceipt && !row.expenseCategoryCode && rules.length > 0
+      ? findCategorySuggestion({ merchant: row.merchant ?? null, fromAddress: null }, rules)
+      : null;
+
   return {
     code: row.expenseCategoryCode,
     categoryJa: row.expenseCategoryJa,
@@ -86,6 +102,7 @@ export function buildCategoryCellProps(
     editable,
     disabledReason,
     hasAttendees: row.attendees.length > 0,
+    suggestedCategoryCode: suggestion?.categoryCode ?? null,
   };
 }
 

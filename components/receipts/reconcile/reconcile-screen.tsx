@@ -35,6 +35,7 @@ import {
 } from "@/lib/receipts/categories";
 import { normalizeDescription } from "@/lib/receipts/reconciliation";
 import { resolveLineCategory } from "@/lib/receipts/line-classification";
+import { findCategorySuggestion, type CategoryRule } from "@/lib/receipts/category-rules";
 import type {
   AmexBusinessTripStatus,
   AmexReceiptStatus,
@@ -64,6 +65,9 @@ export interface ReconcileScreenProps {
   window: StatementWindow | null;
   receiptsInWindow: ReceiptRecord[];
   attendeesByReceiptId: Map<string, string[]>;
+  /** Active category pattern rules → live suggestion on unmatched, uncategorized
+   *  AMEX lines (ADR: category-rules). */
+  categoryRules: CategoryRule[];
 }
 
 type Tab = "lines" | "orphans" | "trips";
@@ -525,6 +529,7 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
           onUnmatch={(line) => reconcile(line.id, null, "unmatched")}
           onUpdateCategory={updateCategory}
           onUpdateLineDetails={updateLineDetails}
+          categoryRules={props.categoryRules}
         />
       </div>
 
@@ -950,6 +955,7 @@ function DetailPane({
   onUnmatch,
   onUpdateCategory,
   onUpdateLineDetails,
+  categoryRules,
 }: {
   active: {
     line: AmexStatementLine;
@@ -966,6 +972,7 @@ function DetailPane({
   onNoReceipt: (line: AmexStatementLine) => void;
   onUnmatch: (line: AmexStatementLine) => void;
   onUpdateCategory: (lineId: string, code: string) => void;
+  categoryRules: CategoryRule[];
   onUpdateLineDetails: (
     lineId: string,
     body: {
@@ -986,6 +993,14 @@ function DetailPane({
   const { line, band, match } = active;
   const receiptId = line.matched_receipt_id ?? match?.receiptId ?? null;
   const receipt = receiptId ? receiptMap.get(receiptId) ?? null : null;
+  // Category-rule suggestion for an UNMATCHED, uncategorized line (a matched
+  // line's category comes from the receipt — line writes are shadowed by
+  // resolveLineCategory). Live-computed; Accept calls the same onUpdateCategory
+  // PATCH the SelectInput uses.
+  const categorySuggestion =
+    !receipt && !line.expense_category_code && categoryRules.length > 0
+      ? findCategorySuggestion({ merchant: line.merchant, fromAddress: null }, categoryRules)
+      : null;
   const receiptAttendeeNames = receiptId
     ? attendeesByReceiptId.get(receiptId) ?? []
     : [];
@@ -1244,6 +1259,18 @@ function DetailPane({
                   })),
                 ]}
               />
+              {categorySuggestion ? (
+                <button
+                  type="button"
+                  onClick={() => onUpdateCategory(line.id, categorySuggestion.categoryCode)}
+                  disabled={busy || locked}
+                  className="mt-1.5 inline-flex items-center gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-[11px] font-medium text-amber-800 hover:bg-amber-100 disabled:opacity-50"
+                  title={`Matched ${categorySuggestion.rule.matchType} rule: ${categorySuggestion.rule.matchValue}`}
+                >
+                  <span>Suggested: {formatCategoryLabel(categorySuggestion.categoryCode)}</span>
+                  <span className="underline">Accept</span>
+                </button>
+              ) : null}
             </Field>
           )}
           <Field label="Tax rate">
