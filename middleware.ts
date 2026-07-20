@@ -37,6 +37,14 @@ const isPublicRoute = createRouteMatcher([
   "/api/receipts/:id/extract",
   "/api/receipts/:id/extraction-failed",
   "/api/receipts/:id/proof",
+  // ADR 0011 Phase B (option b): the Mac consumer drives the body pipeline.
+  // render: consumer deposits the Mac-rendered body derivative. promote: the
+  // consumer auto-promotes allowlisted body-only intakes. Both do processor-key
+  // OR Clerk layered auth inside the handler (mirroring file/extract/proof), so
+  // they MUST be exempt from auth.protect() here — without this, Clerk
+  // 404-rewrites the consumer's processor-key POST before the handler runs.
+  "/api/receipts/:id/render",
+  "/api/receipts/inbox/:id/promote",
 ]);
 
 export default clerkMiddleware(async (auth, request) => {
