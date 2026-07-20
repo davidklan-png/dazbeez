@@ -6,6 +6,7 @@ import {
   type ReceiptLockD1,
 } from "@/lib/receipts/receipt-locks";
 import type { PaymentPath, ReceiptRecord } from "@/lib/receipts/types";
+import { D1_ID_CHUNK_SIZE } from "@/lib/receipts/db-utils";
 
 // computeReceiptLocks is pure: feed the two query results (sealed export months
 // + the receipt→statement-month map for finalized reconciliations) and assert
@@ -269,4 +270,34 @@ test("computeReceiptLocks: covers all four payment paths", () => {
   assert.equal(locks.get("CASH")?.kind, "export");
   assert.equal(locks.get("DIGITAL")?.kind, "export");
   assert.equal(locks.get("UNKNOWN")?.kind, "reconciliation"); // recon wins (checked first)
+});
+
+// ─── D1 bind-limit chunking (regression: all-months review crash) ───────────
+
+test("loadReconciliationLockedReceiptIds: chunks receipt ids to stay under D1's bind limit", async () => {
+  // The review queue passes 100+ ids for an all-months view; a single IN(?,…)
+  // exceeded D1's bound-param limit and crashed /receipts/review. The query must
+  // chunk over D1_ID_CHUNK_SIZE. Recording fake counts bind args per prepare.
+  const bindCounts: number[] = [];
+  const recording: ReceiptLockD1 = {
+    prepare() {
+      return {
+        bind(...args: unknown[]) {
+          bindCounts.push(args.length);
+          return {
+            async all<T = unknown>(): Promise<{ results?: T[] }> {
+              return { results: [] };
+            },
+          };
+        },
+      };
+    },
+  };
+  const ids = Array.from({ length: D1_ID_CHUNK_SIZE + 5 }, (_, i) => `r${i}`);
+  await loadReconciliationLockedReceiptIds(recording, ids);
+  assert.ok(bindCounts.length >= 2, `expected ≥2 chunked queries, got ${bindCounts.length}`);
+  assert.ok(
+    Math.max(...bindCounts) <= D1_ID_CHUNK_SIZE,
+    `largest chunk ${Math.max(...bindCounts)} exceeds D1_ID_CHUNK_SIZE (${D1_ID_CHUNK_SIZE})`,
+  );
 });
