@@ -195,3 +195,42 @@ export function extractLinks(
   }
   return out;
 }
+
+// ─── Auto-promote gating (ADR 0011 Phase B) ─────────────────────────────────
+
+/**
+ * Parse a comma-separated TRUSTED_INTAKE_SENDERS value (Worker/consumer env or
+ * secret) into a normalized lowercased list. Tolerant of whitespace/empties.
+ * Pure so the gating decision is unit-testable without bindings.
+ */
+export function parseTrustedIntakeSenders(
+  raw: string | null | undefined,
+): string[] {
+  if (!raw) return [];
+  return raw
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter((s) => s.length > 0);
+}
+
+/**
+ * Whether a body-only intake should be auto-promoted into a real receipt with
+ * NO operator click. The compensating control for receipts@ being a public,
+ * unauthenticated address: only an allowlisted sender with passing SPF AND
+ * DKIM gets auto-promoted; everyone else stays pending_triage (visible per
+ * Phase A, manual Promote). Pure — the call site passes the verdicts and the
+ * parsed allowlist.
+ */
+export function isAutoPromoteEligible(args: {
+  fromAddress: string;
+  spfPass: boolean;
+  dkimPass: boolean;
+  /** true if the email has at least one VALID receipt attachment. */
+  hasValidAttachment: boolean;
+  trustedSenders: readonly string[];
+}): boolean {
+  // Attachments use the normal manual triage path regardless of sender.
+  if (args.hasValidAttachment) return false;
+  if (!args.spfPass || !args.dkimPass) return false;
+  return args.trustedSenders.includes(args.fromAddress.toLowerCase());
+}

@@ -1,0 +1,23 @@
+-- 0028_receipt_render_pipeline.sql
+--
+-- Phase B of ADR 0011 email body auto-promotion. Two additive columns on
+-- receipt_records; no CHECK change, no table rebuild (SQLite cannot ALTER a
+-- CHECK in place, and a data-preserving rebuild of the central tax-records
+-- table is disproportionate here).
+--
+-- extraction_r2_key: the Mac-rendered derivative (PDF/PNG) of an email_body
+--   receipt's raw HTML/text body. NULL until the render completes. The /file
+--   endpoint serves `extraction_r2_key ?? original_r2_key`, so the MLX
+--   consumer and the review UI transparently get the rendered image once it
+--   exists, with no change to consumer fetch logic. `original_r2_key` ALWAYS
+--   stays pointed at the true original (the raw body) — never repointed at the
+--   derivative — preserving the system-wide compliance invariant.
+--
+-- needs_render: 1 for email_body receipts that must be rendered to PDF/image
+--   on the Mac BEFORE they are eligible for MLX extraction. Excluded from the
+--   "pending extraction" query (extraction-queue-db.ts) so a render-needed
+--   receipt does not block month-close and is not picked up by the extraction
+--   backfill. Cleared to 0 by the /render deposit endpoint, which then
+--   enqueues the receipt for extraction. Defaults 0 for every existing row.
+ALTER TABLE receipt_records ADD COLUMN extraction_r2_key TEXT;
+ALTER TABLE receipt_records ADD COLUMN needs_render INTEGER NOT NULL DEFAULT 0;

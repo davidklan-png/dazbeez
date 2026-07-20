@@ -34,9 +34,14 @@ export function buildPendingProcessingQuery(limit = RECEIPT_BULK_LIMIT): {
   sql: string;
   bindings: readonly unknown[];
 } {
+  // ADR 0011 Phase B: needs_render receipts are awaiting a Mac render BEFORE
+  // they are extractable — they are neither pending extraction nor a legit
+  // month-close blocker for a window they haven't been matched into. Exclude
+  // them. (Column is NOT NULL DEFAULT 0 from 0028, so old rows read as 0.)
   const sql = `SELECT * FROM receipt_records
      WHERE deleted_at IS NULL
        AND extraction_state IN (${PENDING_STATE_PLACEHOLDERS})
+       AND (needs_render = 0 OR needs_render IS NULL)
      ORDER BY captured_at DESC LIMIT ?`;
   return { sql, bindings: [...PENDING_EXTRACTION_STATES, limit] };
 }

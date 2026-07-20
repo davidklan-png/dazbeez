@@ -14,6 +14,8 @@ import {
   staleCutoffIso,
   capBody,
   extractLinks,
+  parseTrustedIntakeSenders,
+  isAutoPromoteEligible,
 } from "@/lib/receipts/email-parse";
 
 // ─── withinMessageSizeCeiling ───────────────────────────────────────────────
@@ -258,4 +260,87 @@ test("extractLinks: caps at maxLinks (default 20), still deduped", () => {
 test("extractLinks: explicit maxLinks override", () => {
   const text = "https://a.com https://b.com https://c.com https://d.com";
   assert.equal(extractLinks(text, null, 2).length, 2);
+});
+
+// ─── parseTrustedIntakeSenders ──────────────────────────────────────────────
+
+test("parseTrustedIntakeSenders: comma-separated, trimmed, lowercased, empties dropped", () => {
+  assert.deepEqual(
+    parseTrustedIntakeSenders("David@Gmail.com, foo@bar.com ,, bar@bar.com"),
+    ["david@gmail.com", "foo@bar.com", "bar@bar.com"],
+  );
+});
+
+test("parseTrustedIntakeSenders: null/undefined/blank → []", () => {
+  assert.deepEqual(parseTrustedIntakeSenders(null), []);
+  assert.deepEqual(parseTrustedIntakeSenders(undefined), []);
+  assert.deepEqual(parseTrustedIntakeSenders(""), []);
+  assert.deepEqual(parseTrustedIntakeSenders("   "), []);
+});
+
+// ─── isAutoPromoteEligible (ADR 0011 Phase B auto-promote gate) ─────────────
+// The compensating control for receipts@ being a public, unauthenticated
+// address: only an allowlisted sender with passing SPF AND DKIM and NO valid
+// attachment gets auto-promoted with no operator click.
+
+test("isAutoPromoteEligible: allowlisted + SPF+DKIM + body-only → true", () => {
+  assert.equal(
+    isAutoPromoteEligible({
+      fromAddress: "david@gmail.com",
+      spfPass: true,
+      dkimPass: true,
+      hasValidAttachment: false,
+      trustedSenders: ["david@gmail.com", "other@x.com"],
+    }),
+    true,
+  );
+});
+
+test("isAutoPromoteEligible: non-allowlisted sender → false even with SPF+DKIM", () => {
+  assert.equal(
+    isAutoPromoteEligible({
+      fromAddress: "stranger@evil.com",
+      spfPass: true,
+      dkimPass: true,
+      hasValidAttachment: false,
+      trustedSenders: ["david@gmail.com"],
+    }),
+    false,
+  );
+});
+
+test("isAutoPromoteEligible: SPF or DKIM fail → false even if allowlisted", () => {
+  const base = {
+    fromAddress: "david@gmail.com",
+    hasValidAttachment: false,
+    trustedSenders: ["david@gmail.com"],
+  } as const;
+  assert.equal(isAutoPromoteEligible({ ...base, spfPass: false, dkimPass: true }), false);
+  assert.equal(isAutoPromoteEligible({ ...base, spfPass: true, dkimPass: false }), false);
+});
+
+test("isAutoPromoteEligible: a valid attachment → false (attachments stay manual-triage)", () => {
+  assert.equal(
+    isAutoPromoteEligible({
+      fromAddress: "david@gmail.com",
+      spfPass: true,
+      dkimPass: true,
+      hasValidAttachment: true,
+      trustedSenders: ["david@gmail.com"],
+    }),
+    false,
+  );
+});
+
+test("isAutoPromoteEligible: from_address matched case-insensitively", () => {
+  assert.equal(
+    isAutoPromoteEligible({
+      fromAddress: "DAVID@Gmail.com",
+      spfPass: true,
+      dkimPass: true,
+      hasValidAttachment: false,
+      trustedSenders: ["david@gmail.com"],
+    }),
+    true,
+  );
 });

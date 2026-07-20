@@ -23,6 +23,7 @@ const ELECTRONIC_SOURCE_TYPES: ReadonlySet<SourceType> = new Set([
   "electronic_receipt",
   "digital_invoice",
   "email_attachment",
+  "email_body",
   "credit_card_statement",
   "amex_csv",
 ]);

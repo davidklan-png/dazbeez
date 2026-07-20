@@ -600,7 +600,12 @@ def pull_pending_rows(only_id: str | None = None) -> list[dict[str, Any]]:
         "original_r2_key, extraction_json, captured_at, merchant "
         "FROM receipt_records "
         "WHERE extraction_state IN ('captured','queued','processing') "
-        "AND deleted_at IS NULL"
+        "AND deleted_at IS NULL "
+        # ADR 0011 Phase B: needs_render receipts are awaiting a Mac render
+        # before they're extractable — exclude them so backfill/MLX never tries
+        # to OCR a raw HTML/text body. Mirrors the needs_render=0 filter in
+        # buildPendingProcessingQuery (lib/receipts/extraction-queue-db.ts).
+        "AND (needs_render = 0 OR needs_render IS NULL)"
         + where_id +
         " ORDER BY captured_at;"
     )
@@ -717,6 +722,196 @@ def process_backfill(dry_run: bool, only_id: str | None = None) -> None:
         print("Dry-run only. Re-run with --write to apply.")
 
 
+# ─── Email body auto-promote + render (ADR 0011 Phase B, option b) ───────────
+# The standalone email-intake Worker can't call createReceiptRecord (it's
+# isolated from cloudflare-runtime — see workers/receipts-email-intake/src/
+# cloudflare-env.d.ts), so the Mac consumer drives BOTH halves of the body
+# pipeline for allowlisted senders:
+#   1. auto-promote: a pending_triage body-only intake from a trusted sender
+#      (SPF+DKIM) → POST /inbox/{id}/promote. The Worker route runs the same
+#      createReceiptRecord every capture path uses (body-only branch), creating
+#      the receipt at source_type 'email_body' with needs_render=1 (NOT enqueued).
+#   2. render: a needs_render=1 receipt → fetch its raw body via /file, render
+#      to PDF (render_email_body.py: WeasyPrint, NO network, NO JS), POST
+#      /{id}/render, which deposits the derivative + clears needs_render +
+#      enqueues for normal MLX extraction.
+# Both are dry-run by default (--write applies), mirroring --backfill. They are
+# meant to run on a periodic timer (separate from this process's MLX loop) —
+# wrangler-per-call discovery is too heavy for the per-poll main loop. No MLX
+# model is loaded for either mode.
+
+def fetch_trusted_senders() -> list[str]:
+    """Read the auto-promote allowlist from D1. The Settings page
+    (trusted_intake_senders table) is authoritative — the TRUSTED_INTAKE_SENDERS
+    env var was removed. Uses the same _d1_query() path as
+    pull_pending_rows/pull_auto_promote_candidates (operator wrangler OAuth, a
+    separate auth path from the processor-key HTTP calls). Emails are stored
+    lowercase-normalized, so no case-folding here. Called once per launchd
+    invocation at the top of process_auto_promote (each run is short-lived; no
+    in-memory TTL needed)."""
+    rows = _d1_query("SELECT email FROM trusted_intake_senders;")
+    return [str(r["email"]) for r in rows if r.get("email")]
+
+
+def is_auto_promote_eligible(
+    from_address: str,
+    spf_pass: int | bool | None,
+    dkim_pass: int | bool | None,
+    has_attachment: bool,
+    trusted_senders: list[str],
+) -> bool:
+    """Mirror of lib/receipts/email-parse.ts isAutoPromoteEligible. Attachments
+    use the manual triage path regardless of sender; body-only + a trusted
+    sender + SPF and DKIM pass → eligible for auto-promotion. Pure: the caller
+    passes the allowlist fetched from D1 (fetch_trusted_senders)."""
+    if has_attachment:
+        return False
+    if not (spf_pass and dkim_pass):
+        return False
+    return (from_address or "").strip().lower() in trusted_senders
+
+
+def post_promote(intake_id: str) -> None:
+    """POST /api/receipts/inbox/{id}/promote (processor key). Creates the
+    receipt via the canonical createReceiptRecord path (body-only branch)."""
+    headers = {
+        "x-receipts-processor-key": PROCESSOR_KEY,
+        "Content-Type": "application/json",
+    }
+    if CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET:
+        headers["CF-Access-Client-Id"] = CF_ACCESS_CLIENT_ID
+        headers["CF-Access-Client-Secret"] = CF_ACCESS_CLIENT_SECRET
+    resp = requests.post(
+        f"{EXTRACT_BASE}/inbox/{intake_id}/promote",
+        headers=headers,
+        timeout=60,
+    )
+    resp.raise_for_status()
+
+
+def post_render(receipt_id: str, derivative: bytes, content_type: str) -> None:
+    """POST /api/receipts/{id}/render (processor key, raw bytes). Mirrors
+    post_proof. Deposits the rendered derivative + clears needs_render +
+    enqueues the receipt for MLX extraction."""
+    headers = {
+        "x-receipts-processor-key": PROCESSOR_KEY,
+        "Content-Type": content_type,
+    }
+    if CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET:
+        headers["CF-Access-Client-Id"] = CF_ACCESS_CLIENT_ID
+        headers["CF-Access-Client-Secret"] = CF_ACCESS_CLIENT_SECRET
+    resp = requests.post(
+        f"{EXTRACT_BASE}/{receipt_id}/render",
+        headers=headers,
+        data=derivative,
+        timeout=60,
+    )
+    resp.raise_for_status()
+
+
+def pull_auto_promote_candidates(
+    trusted_senders: list[str], only_id: str | None = None
+) -> list[dict[str, Any]]:
+    """pending_triage body-only intakes (no attachment) with a captured body,
+    that pass the auto-promote gate. Fetches the pending_triage body-only rows
+    and filters by the allowlist in Python (the list is small). The caller
+    supplies the allowlist (fetched fresh from D1 via fetch_trusted_senders)."""
+    where_id = f" AND id = {_sql_escape(only_id)}" if only_id else ""
+    rows = _d1_query(
+        "SELECT id, from_address, spf_pass, dkim_pass, "
+        "attachment_r2_key, body_text, body_html "
+        "FROM email_receipt_intake "
+        "WHERE status = 'pending_triage'"
+        + where_id + ";"
+    )
+    return [
+        r
+        for r in rows
+        if not r.get("attachment_r2_key")
+        and (r.get("body_text") or r.get("body_html"))
+        and is_auto_promote_eligible(
+            r.get("from_address", ""),
+            r.get("spf_pass"),
+            r.get("dkim_pass"),
+            bool(r.get("attachment_r2_key")),
+            trusted_senders,
+        )
+    ]
+
+
+def pull_render_pending(only_id: str | None = None) -> list[dict[str, Any]]:
+    """receipt_records awaiting a Mac render (needs_render=1)."""
+    where_id = f" AND id = {_sql_escape(only_id)}" if only_id else ""
+    return _d1_query(
+        "SELECT id, original_content_type "
+        "FROM receipt_records "
+        "WHERE needs_render = 1 AND deleted_at IS NULL"
+        + where_id + ";"
+    )
+
+
+def process_auto_promote(dry_run: bool, only_id: str | None = None) -> None:
+    """Promote allowlisted body-only intakes into receipts (POST /promote).
+    The allowlist is read fresh from D1 (the Settings page is authoritative) on
+    every invocation — no env var, no caching across runs."""
+    trusted_senders = fetch_trusted_senders()
+    if not trusted_senders:
+        print(
+            "No trusted senders configured (Settings page is empty) — "
+            "nothing to auto-promote."
+        )
+        return
+    rows = pull_auto_promote_candidates(trusted_senders, only_id)
+    if not rows:
+        print(
+            f"No auto-promote candidates "
+            f"({len(trusted_senders)} trusted sender(s) configured)."
+        )
+        return
+    print(f"{len(rows)} auto-promote candidate(s):")
+    for r in rows:
+        iid = r["id"]
+        label = f"{iid} from={r.get('from_address')}"
+        if dry_run:
+            print(f"  [dry-run] would promote {label}")
+            continue
+        try:
+            post_promote(iid)
+            print(f"  [ok] promoted {label}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"  [fail] {label}: {exc}", file=sys.stderr)
+
+
+def process_renders(dry_run: bool, only_id: str | None = None) -> None:
+    """Render needs_render receipts: fetch raw body via /file → PDF (no network,
+    no JS) → POST /render, which enqueues for normal MLX extraction."""
+    from render_email_body import render_body_to_pdf  # lazy: WeasyPrint is heavy
+
+    rows = pull_render_pending(only_id)
+    if not rows:
+        print("No receipts awaiting render.")
+        return
+    print(f"{len(rows)} receipt(s) awaiting render:")
+    for r in rows:
+        rid = r["id"]
+        content_type = r.get("original_content_type") or "text/plain"
+        if dry_run:
+            print(f"  [dry-run] would render {rid} ({content_type})")
+            continue
+        try:
+            body = fetch_original_bytes(rid)  # GET /file → raw body bytes
+            if not body:
+                print(f"  [skip] {rid}: empty body from /file", file=sys.stderr)
+                continue
+            pdf = render_body_to_pdf(
+                body.decode("utf-8", errors="replace"), content_type
+            )
+            post_render(rid, pdf, "application/pdf")
+            print(f"  [ok] rendered {rid}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"  [fail] {rid}: {exc}", file=sys.stderr)
+
+
 def process_once() -> int:
     messages = pull_batch()
     if not messages:
@@ -816,6 +1011,25 @@ def main() -> None:
                 sys.exit(2)
             only_id = sys.argv[i + 1]
         process_backfill(dry_run=dry_run, only_id=only_id)
+        return
+
+    # ADR 0011 Phase B (option b): the Mac consumer drives body-receipt auto-
+    # promotion + render. Dry-run by default; --write applies; --id <uuid>
+    # narrows. Both return before the MLX model load (neither needs MLX). Meant
+    # to run on a periodic timer separate from the queue loop.
+    if "--auto-promote" in sys.argv or "--render" in sys.argv:
+        dry_run = "--write" not in sys.argv
+        only_id = None
+        if "--id" in sys.argv:
+            i = sys.argv.index("--id")
+            if i + 1 >= len(sys.argv):
+                print("--id requires a UUID argument", file=sys.stderr)
+                sys.exit(2)
+            only_id = sys.argv[i + 1]
+        if "--auto-promote" in sys.argv:
+            process_auto_promote(dry_run=dry_run, only_id=only_id)
+        if "--render" in sys.argv:
+            process_renders(dry_run=dry_run, only_id=only_id)
         return
 
     # Pre-warm the model BEFORE pulling any messages. The model load (cold:

@@ -36,12 +36,12 @@ function isNotFound(error: unknown): boolean {
 }
 function isIntakeStateConflict(error: unknown): boolean {
   // assertPromotable / rejectIntake refuse with messages mentioning the
-  // intake's state (already promoted/rejected, no promotable attachment,
+  // intake's state (already promoted/rejected, nothing promotable,
   // missing R2 object). These are 409s, not 500s.
   return (
     error instanceof Error &&
     (/already (promoted|rejected|pending_triage)/i.test(error.message) ||
-      /no promotable attachment/i.test(error.message) ||
+      /nothing promotable|no promotable attachment|no body to promote/i.test(error.message) ||
       /only pending_triage may be/i.test(error.message) ||
       /is missing from r2/i.test(error.message))
   );

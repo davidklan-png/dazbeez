@@ -36,11 +36,19 @@ function safeFilename(name: string | null): string {
 function buildFileHeaders(
   receipt: { original_content_type: string; original_filename: string | null },
   object: { httpMetadata?: { contentType?: string }; size: number },
+  preferObjectContentType = false,
 ): Headers {
-  const contentType =
-    receipt.original_content_type ||
-    object.httpMetadata?.contentType ||
-    "application/octet-stream";
+  // When serving the rendered derivative (extraction_r2_key), the object's own
+  // content type (e.g. application/pdf) is authoritative — the receipt's
+  // original_content_type is the raw body (text/html), which is wrong for the
+  // served bytes. Otherwise the original_content_type wins as before.
+  const contentType = preferObjectContentType
+    ? object.httpMetadata?.contentType ||
+      receipt.original_content_type ||
+      "application/octet-stream"
+    : receipt.original_content_type ||
+      object.httpMetadata?.contentType ||
+      "application/octet-stream";
 
   const headers = new Headers({
     "Content-Type": contentType,
@@ -68,17 +76,25 @@ export async function GET(request: Request, { params }: RouteContext) {
       return Response.json({ error: "Receipt not found." }, { status: 404 });
     }
 
+    // ADR 0011 Phase B: serve the rendered derivative once it exists (the
+    // MLX-consumable PDF/PNG of an email_body receipt's raw body); otherwise
+    // the true original. The MLX consumer and the review image pane both hit
+    // this endpoint, so both transparently get the rendered bytes once /render
+    // has deposited them — zero change to consumer fetch logic.
+    const servingDerivative = !!receipt.extraction_r2_key;
+    const servedKey = receipt.extraction_r2_key ?? receipt.original_r2_key;
+
     // Get the R2ObjectBody directly — do not wrap body in an intermediate object.
     // Keeping the R2ObjectBody in scope here lets the Cloudflare runtime stream
     // the object directly to the response without buffering it into memory.
-    const object = await getReceiptsBucket().get(receipt.original_r2_key);
+    const object = await getReceiptsBucket().get(servedKey);
     if (!object?.body) {
       return Response.json({ error: "Receipt file not found in storage." }, { status: 404 });
     }
 
     return new Response(object.body, {
       status: 200,
-      headers: buildFileHeaders(receipt, object),
+      headers: buildFileHeaders(receipt, object, servingDerivative),
     });
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("Unauthorized")) {
@@ -101,14 +117,16 @@ export async function HEAD(request: Request, { params }: RouteContext) {
       return new Response(null, { status: 404 });
     }
 
-    const object = await getReceiptsBucket().head(receipt.original_r2_key);
+    const object = await getReceiptsBucket().head(
+      receipt.extraction_r2_key ?? receipt.original_r2_key,
+    );
     if (!object) {
       return new Response(null, { status: 404 });
     }
 
     return new Response(null, {
       status: 200,
-      headers: buildFileHeaders(receipt, object),
+      headers: buildFileHeaders(receipt, object, !!receipt.extraction_r2_key),
     });
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("Unauthorized")) {

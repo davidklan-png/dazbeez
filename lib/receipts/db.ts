@@ -91,8 +91,8 @@ export async function createReceiptRecord(
          original_r2_key, original_sha256, original_content_type, original_size_bytes,
          legacy, retention_until, legal_hold,
          source_type, preservation_status, qualified_invoice_status,
-         created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 1, ?, 'needs_review', 'not_checked', ?, ?)`,
+         created_at, updated_at, extraction_r2_key, needs_render)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 1, ?, 'needs_review', 'not_checked', ?, ?, ?, ?)`,
     )
     .bind(
       id,
@@ -127,6 +127,12 @@ export async function createReceiptRecord(
       sourceType,
       now,
       now,
+      null, // extraction_r2_key — NULL until the Mac render completes (/render).
+      // ADR 0011 Phase B: email_body receipts must be rendered to PDF/image on
+      // the Mac before MLX extraction. needs_render=1 keeps them out of the
+      // pending-extraction query (and thus off month-close / backfill) until
+      // /render clears it and enqueues. Every other source is render-ready now.
+      sourceType === "email_body" ? 1 : 0,
     )
     .run();
 

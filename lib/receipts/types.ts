@@ -144,6 +144,11 @@ export type AuditAction =
   | "receipt.export_statement_month_overridden"
   | "receipt.export_statement_month_rolled_forward"
   | "receipt.proof_uploaded"
+  // ADR 0011 Phase B: the Mac consumer deposited the rendered derivative of an
+  // email_body receipt's body (the MLX-consumable PDF/PNG). Filed as an
+  // is_original=false `processed` receipt_files row; extraction_r2_key set and
+  // the receipt enqueued for MLX extraction.
+  | "receipt.render_uploaded"
   // ADR 0008 one-time policy migration (window → calendar month). Replaces the
   // ADR 0006 _window_drift action — calendar membership has no AMEX-line
   // dependency, so drift detection is retired.
@@ -162,7 +167,12 @@ export type AuditAction =
   // email_receipt_intake rows; newValueJson carries the SPF/DKIM verdicts so
   // "who let this unauthenticated sender in" stays answerable in the trail.
   | "email_intake.promoted"
-  | "email_intake.rejected";
+  | "email_intake.rejected"
+  // ADR 0011 Phase B follow-up: the auto-promote allowlist is managed from a
+  // Settings page (trusted_intake_senders table). This list IS the safety gate
+  // for a zero-human-review auto-promotion path, so every add/remove is audited.
+  | "trusted_sender.added"
+  | "trusted_sender.removed";
 
 // ─── Compliance: source / preservation / qualified-invoice ────────────────
 
@@ -172,6 +182,7 @@ export type SourceType =
   | "digital_invoice"
   | "credit_card_statement"
   | "email_attachment"
+  | "email_body"
   | "manual_upload"
   | "amex_csv";
 
@@ -287,6 +298,13 @@ export interface ReceiptRecord {
   extraction_processed_at?: string | null;
   extraction_attempts?: number;
   extraction_processor?: string | null;
+  // Render pipeline (0028_receipt_render_pipeline.sql, ADR 0011 Phase B).
+  // extraction_r2_key: the Mac-rendered PDF/PNG of an email_body receipt's raw
+  // body; NULL until render completes. /file serves it in preference to
+  // original_r2_key. needs_render: 1 for email_body receipts awaiting Mac
+  // render before MLX extraction; excluded from the pending-extraction query.
+  extraction_r2_key?: string | null;
+  needs_render?: number;
   created_at: string;
   updated_at: string;
 }

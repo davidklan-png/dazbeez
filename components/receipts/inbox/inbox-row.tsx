@@ -29,7 +29,9 @@ export function InboxRow({ intake }: { intake: EmailReceiptIntake }) {
   const [htmlSrcDoc, setHtmlSrcDoc] = useState<string | null>(null);
   const [htmlLoading, setHtmlLoading] = useState(false);
 
-  const promotable = intake.status === "pending_triage" && !!intake.attachment_r2_key;
+  const promotable =
+    intake.status === "pending_triage" &&
+    (!!intake.attachment_r2_key || !!intake.body_text || !!intake.body_html);
 
   // extractLinks is dependency-free (email-parse.ts has no bindings), safe to
   // call in this client component. Memoized so a re-render doesn't re-scan up
@@ -154,6 +156,11 @@ export function InboxRow({ intake }: { intake: EmailReceiptIntake }) {
             {intake.attachment_content_type
               ? ` · ${intake.attachment_content_type}`
               : ""}
+          </p>
+        ) : intake.body_text || intake.body_html ? (
+          <p className="rounded-lg bg-sky-50 px-2.5 py-1.5 text-xs text-sky-800">
+            Body-only receipt (no attachment). Promoting stores the raw body and
+            queues it for Mac render → extraction.
           </p>
         ) : (
           <p className="rounded-lg bg-amber-50 px-2.5 py-1.5 text-xs text-amber-800">

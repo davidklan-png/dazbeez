@@ -19,6 +19,7 @@ import {
   rejectIntake,
   buildPromoteReceiptInput,
   assertPromotable,
+  isBodyOnlyIntake,
 } from "@/lib/receipts/email-intake";
 import { MAX_RECEIPT_FILE_BYTES } from "@/lib/receipts/upload-policy";
 import type { EmailReceiptIntake } from "@/lib/receipts/types";
@@ -528,8 +529,50 @@ test("buildPromoteReceiptInput: copies R2 metadata from the intake row", () => {
 
 // ─── assertPromotable (pure half of promote) ────────────────────────────────
 
-test("assertPromotable: refuses when attachment_r2_key is NULL", () => {
-  assert.throws(() => assertPromotable(intakeRow({ attachment_r2_key: null })), /no promotable attachment/i);
+test("assertPromotable: refuses when there is neither attachment nor body", () => {
+  assert.throws(
+    () =>
+      assertPromotable(
+        intakeRow({ attachment_r2_key: null, body_text: null, body_html: null }),
+      ),
+    /nothing promotable/i,
+  );
+});
+
+test("assertPromotable: body-only row (no attachment, has body) IS promotable (ADR 0011 Phase B)", () => {
+  assert.doesNotThrow(() =>
+    assertPromotable(
+      intakeRow({
+        attachment_r2_key: null,
+        body_text: "Receipt body text",
+        reject_reason: "no attachment",
+      }),
+    ),
+  );
+  assert.doesNotThrow(() =>
+    assertPromotable(
+      intakeRow({ attachment_r2_key: null, body_text: null, body_html: "<p>x</p>" }),
+    ),
+  );
+});
+
+test("isBodyOnlyIntake: true only when no attachment but a body is present", () => {
+  assert.equal(
+    isBodyOnlyIntake(intakeRow({ attachment_r2_key: null, body_text: "x" })),
+    true,
+  );
+  assert.equal(
+    isBodyOnlyIntake(intakeRow({ attachment_r2_key: null, body_html: "<p>x</p>" })),
+    true,
+  );
+  assert.equal(isBodyOnlyIntake(intakeRow()), false, "attachment row is not body-only");
+  assert.equal(
+    isBodyOnlyIntake(
+      intakeRow({ attachment_r2_key: null, body_text: null, body_html: null }),
+    ),
+    false,
+    "no attachment and no body is not body-only",
+  );
 });
 
 test("assertPromotable: refuses when status is not pending_triage", () => {
