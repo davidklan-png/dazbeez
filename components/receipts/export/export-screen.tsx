@@ -19,6 +19,7 @@ import {
   type ManifestSampleRow,
 } from "@/lib/receipts/manifest-preview";
 import type { StatementWindow } from "@/lib/receipts/statement-window";
+import { EXPENSE_CATEGORIES } from "@/lib/receipts/categories";
 
 export type { Blocker } from "@/lib/receipts/blockers";
 
@@ -894,7 +895,7 @@ const SCHEMA_COLS = [
   { k: "transaction_date", t: "date", ex: "2026-04-17", n: "JST, ISO 8601" },
   { k: "amount", t: "integer", ex: "8850", n: "minor units in `currency`" },
   { k: "currency", t: "string", ex: "JPY", n: "ISO 4217" },
-  { k: "category", t: "enum", ex: "接待交際費", n: "one of 14 JP catalog" },
+  { k: "category", t: "enum", ex: "接待交際費", n: `one of ${EXPENSE_CATEGORIES.length} JP catalog` },
   { k: "expense_type", t: "enum", ex: "meeting-no-alcohol", n: "expense classification" },
   { k: "payment_path", t: "enum", ex: "AMEX", n: "AMEX / CASH / DIGITAL / UNKNOWN" },
   { k: "amex_reference", t: "string", ex: "20260417-0214", n: "links to amex_statement_lines" },

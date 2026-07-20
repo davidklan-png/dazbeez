@@ -12,9 +12,29 @@ import {
 
 // ─── Category seed ───────────────────────────────────────────────────────────
 
-test("EXPENSE_CATEGORIES has exactly 15 entries", () => {
-  // 14 original + miscellaneous (雑費), added 2026-07 per operator request.
-  assert.equal(EXPENSE_CATEGORIES.length, 15);
+test("EXPENSE_CATEGORIES has exactly 16 entries", () => {
+  // 14 original + miscellaneous (雑費, 2026-07) + research_development (研究開発費, 2026-07-20).
+  assert.equal(EXPENSE_CATEGORIES.length, 16);
+});
+
+test("research_development (研究開発費) is canonical, ordered immediately before miscellaneous", () => {
+  const rd = getCategoryByCode("research_development");
+  assert.ok(rd, "research_development should exist");
+  assert.equal(rd!.jaName, "研究開発費");
+  assert.equal(rd!.enName, "Research & Development");
+  assert.equal(rd!.requiresAttendees, false);
+  assert.equal(rd!.defaultBusinessTripEligible, false);
+  assert.equal(rd!.displayOrder, 150);
+
+  // Immediately before miscellaneous, which moved to display_order 160.
+  const rdIdx = EXPENSE_CATEGORIES.findIndex((c) => c.code === "research_development");
+  const miscIdx = EXPENSE_CATEGORIES.findIndex((c) => c.code === "miscellaneous");
+  assert.ok(rdIdx >= 0 && miscIdx >= 0);
+  assert.equal(miscIdx, rdIdx + 1, "research_development must immediately precede miscellaneous");
+  assert.equal(getCategoryByCode("miscellaneous")!.displayOrder, 160);
+
+  assert.equal(isCanonicalCode("research_development"), true);
+  assert.equal(formatCategoryLabel("research_development"), "研究開発費 — Research & Development");
 });
 
 test("all canonical codes are unique", () => {
@@ -118,7 +138,7 @@ test("isBusinessTripEligible returns false for null/undefined", () => {
 
 // ─── isCanonicalCode ─────────────────────────────────────────────────────────
 
-test("isCanonicalCode accepts all 14 canonical codes", () => {
+test("isCanonicalCode accepts all 16 canonical codes", () => {
   for (const cat of EXPENSE_CATEGORIES) {
     assert.equal(isCanonicalCode(cat.code), true, `${cat.code} should be canonical`);
   }
@@ -151,6 +171,8 @@ test("mapLegacyCategory maps known legacy values", () => {
   assert.deepEqual(mapLegacyCategory("entertainment-alcohol"), { code: "entertainment", ambiguous: false });
   assert.deepEqual(mapLegacyCategory("transportation"), { code: "travel_transportation", ambiguous: false });
   assert.deepEqual(mapLegacyCategory("books"), { code: "newspapers_books", ambiguous: false });
+  // Legacy 'research' stays newspapers_books — only the canonical research_development code is R&D.
+  assert.deepEqual(mapLegacyCategory("research"), { code: "newspapers_books", ambiguous: false });
   assert.deepEqual(mapLegacyCategory("office_supplies"), { code: "supplies", ambiguous: false });
   assert.deepEqual(mapLegacyCategory("telecom"), { code: "communications", ambiguous: false });
 });

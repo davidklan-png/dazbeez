@@ -636,7 +636,7 @@ export function FormPane(props: FormPaneProps) {
             />
           </Field>
           <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
-            <Field label="Category" hint="14-item JP catalog">
+            <Field label="Category" hint={`${EXPENSE_CATEGORIES.length}-item JP catalog`}>
               <select
                 ref={categoryRef}
                 value={expenseCategoryCode}
