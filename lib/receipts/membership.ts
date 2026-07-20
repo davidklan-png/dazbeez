@@ -98,15 +98,23 @@ export async function listReceiptsByExportStatementMonth(
   return res.results ?? [];
 }
 
-// ─── Unassigned-receipt surface (unassignable only) ────────────────────────
+// ─── Unassigned-receipt surface (needs-attention residue) ──────────────────
 
 /**
- * CASH/DIGITAL receipts that can NEVER be assigned — no transaction_date. These
- * need operator action (set a date), will never auto-resolve, and are invisible
- * to every membership query. Style as needs-attention; deep-link to the
- * receipt's edit view. (ADR 0006's separate "awaiting statement" bucket is
- * retired by ADR 0008: a dated receipt is always immediately assignable to its
- * calendar month, so there is no awaiting state.)
+ * CASH/DIGITAL receipts with no export_statement_month assignment — the residue
+ * the export page surfaces as needs-attention, deep-linked to each receipt's
+ * review view. Two kinds land here:
+ *   - undated (transaction_date IS NULL): can NEVER be assigned until a date is
+ *     set; will never auto-resolve.
+ *   - dated-but-unassigned: assignment slipped past the capture/classification
+ *     hook (e.g. the UNKNOWN→CASH path before updateReceiptRecord's hook was
+ *     broadened to fire on the effective post-PATCH state). A dated receipt is
+ *     assignable to its calendar month — surfacing it keeps a future slip
+ *     visible on the screen where it matters instead of silently shrinking the
+ *     draft (error-surfacing doctrine, theme #12). The caller distinguishes the
+ *     two by `transaction_date` (null ⇒ undated).
+ * All are invisible to every membership query, which keys on
+ * export_statement_month.
  */
 export async function listUnassignableReceipts(): Promise<ReceiptRecord[]> {
   const db = getReceiptsDb();
@@ -116,8 +124,7 @@ export async function listUnassignableReceipts(): Promise<ReceiptRecord[]> {
        WHERE export_statement_month IS NULL
          AND payment_path IN ('CASH', 'DIGITAL')
          AND deleted_at IS NULL
-         AND transaction_date IS NULL
-       ORDER BY captured_at DESC`,
+       ORDER BY (transaction_date IS NULL) ASC, captured_at DESC`,
     )
     .all<ReceiptRecord>();
   return res.results ?? [];
@@ -198,4 +205,33 @@ export async function assignMembershipForReceipt(
     }),
   });
   return result;
+}
+
+/**
+ * Decide whether the updateReceiptRecord membership hook should assign
+ * export_statement_month after a PATCH, and with what date. Returns the date to
+ * assign with, or null to skip. Pure (unit-tested); updateReceiptRecord applies
+ * the side effect via {@link assignMembershipForReceipt}.
+ *
+ * Fires whenever the receipt is CASH/DIGITAL with a date and no existing
+ * assignment — UNLESS the PATCH carries an explicit exportStatementMonth
+ * override (explicit wins) or the receipt is already assigned (sticky). It does
+ * NOT require the PATCH to touch the date, so the UNKNOWN→CASH classification
+ * flow (date set while UNKNOWN, then classified CASH without re-touching the
+ * date) assigns instead of leaving membership NULL and silently falling out of
+ * the draft.
+ */
+export function postPatchMembershipDate(args: {
+  effectivePaymentPath: PaymentPath;
+  beforeExportStatementMonth: string | null;
+  explicitOverrideInInput: boolean;
+  effectiveTransactionDate: string | null;
+}): string | null {
+  if (args.effectivePaymentPath !== "CASH" && args.effectivePaymentPath !== "DIGITAL") {
+    return null;
+  }
+  if (args.beforeExportStatementMonth) return null; // sticky — already assigned
+  if (args.explicitOverrideInInput) return null; // explicit override wins
+  if (!args.effectiveTransactionDate) return null; // nothing to assign from
+  return args.effectiveTransactionDate;
 }

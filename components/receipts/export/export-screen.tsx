@@ -57,10 +57,10 @@ export interface ExportScreenProps {
   unassignableReceipts: ReceiptRecord[];
 }
 
-/** ADR 0008: receipts not yet in any export-month bundle — undated cash/digital
- * only. The ADR 0006 "awaiting statement" bucket is retired: under the calendar
- * rule every dated cash/digital receipt is immediately assignable to its
- * transaction_date's calendar month. */
+/** ADR 0008: cash/digital receipts not yet in any export-month bundle — both
+ * undated (unassignable until a date is set) and dated-but-unassigned (assignment
+ * slipped past the capture/classification hook). Deep-linked to the review view
+ * so the residue is visible on the screen where it gets fixed. */
 function UnassignedReceiptsSection({
   unassignable,
 }: {
@@ -71,18 +71,21 @@ function UnassignedReceiptsSection({
     <Card>
       <div className="flex items-baseline justify-between">
         <div className="text-[13px] font-semibold text-red-700">
-          Unassignable — missing transaction date
+          Unassigned — not in any export month
         </div>
         <Pill tone="red" size="sm">{unassignable.length}</Pill>
       </div>
       <p className="mt-1 text-[12px] text-gray-500">
-        These cash/digital receipts have no date and can never be assigned to an export month. Set a transaction date to assign them.
+        Cash/digital receipts with no statement-month assignment. Open each to set a transaction date (if missing) or assign it to an export month.
       </p>
       <ul className="mt-2 space-y-0.5 text-[12.5px]">
         {unassignable.map((r) => (
           <li key={r.id}>
             <Link href={`/receipts/review/${r.id}`} className="text-amber-700 hover:underline">
-              {r.merchant ?? `R-${r.id.slice(0, 8)}`} · captured {r.captured_at.slice(0, 10)}
+              {r.merchant ?? `R-${r.id.slice(0, 8)}`} ·{" "}
+              {r.transaction_date
+                ? `${r.transaction_date} — assign a month`
+                : `no date — captured ${r.captured_at.slice(0, 10)}`}
             </Link>
           </li>
         ))}
