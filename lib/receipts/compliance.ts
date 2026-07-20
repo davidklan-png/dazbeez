@@ -366,6 +366,43 @@ export async function summarizeOpenChecksForExport(
 }
 
 /**
+ * Receipt ids in `receiptIds` that have ANY open compliance check at severity
+ * `blocker` OR `warning`. Batched (chunked IN-lists), deduped, D1-only.
+ *
+ * Used by the review-queue closing-attention collector so "Needs review"
+ * includes every receipt carrying an open compliance issue — warnings included
+ * even when `export_block_on_warnings` is false (the attention set is broader
+ * than the finalize gate). Returns a Set for direct membership tests; callers
+ * that need a per-receipt breakdown should query the checks directly.
+ */
+export async function collectOpenComplianceCheckReceiptIds(
+  db: D1Database,
+  receiptIds: string[],
+): Promise<Set<string>> {
+  const ids = [...new Set(receiptIds.filter(Boolean))];
+  const out = new Set<string>();
+  if (ids.length === 0) return out;
+  const CHUNK = 50;
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    const chunk = ids.slice(i, i + CHUNK);
+    const placeholders = chunk.map(() => "?").join(",");
+    const result = await db
+      .prepare(
+        `SELECT DISTINCT object_id
+         FROM receipt_compliance_checks
+         WHERE object_type = 'receipt'
+           AND status = 'open'
+           AND severity IN ('blocker', 'warning')
+           AND object_id IN (${placeholders})`,
+      )
+      .bind(...chunk)
+      .all<{ object_id: string }>();
+    for (const row of result.results ?? []) out.add(row.object_id);
+  }
+  return out;
+}
+
+/**
  * High-level helper: load the receipt + attendees + files + settings, run
  * the engine, persist results, and return the computed checks.
  */

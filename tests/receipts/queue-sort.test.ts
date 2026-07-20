@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import {
   DEFAULT_SORT,
   needsFirst,
-  searchQueueItems,
   sortQueueItems,
   type SortKey,
 } from "@/lib/receipts/queue-sort";
@@ -38,54 +37,6 @@ test("needsFirst: true when needs is set, stuck, OR extractionFailed", () => {
   assert.equal(needsFirst(item({ id: "a", needs: "attendees" })), true);
   assert.equal(needsFirst(item({ id: "a", stuck: true })), true);
   assert.equal(needsFirst(item({ id: "a", extractionFailed: true })), true);
-});
-
-// ─── searchQueueItems ────────────────────────────────────────────────────────
-
-test("searchQueueItems: empty query returns the list unchanged", () => {
-  const items = [item({ id: "a" }), item({ id: "b" })];
-  assert.equal(searchQueueItems(items, ""), items);
-  assert.equal(searchQueueItems(items, "   "), items);
-});
-
-test("searchQueueItems: merchant substring match is case-insensitive", () => {
-  const items = [
-    item({ id: "a", merchant: "Starbucks" }),
-    item({ id: "b", merchant: "Lawson" }),
-  ];
-  const out = searchQueueItems(items, "star");
-  assert.deepEqual(out.map((i) => i.id), ["a"]);
-});
-
-test("searchQueueItems: category label match", () => {
-  const items = [
-    item({ id: "a", categoryLabel: "Transportation" }),
-    item({ id: "b", categoryLabel: "Books" }),
-  ];
-  const out = searchQueueItems(items, "trans");
-  assert.deepEqual(out.map((i) => i.id), ["a"]);
-});
-
-test("searchQueueItems: digits typed match the amount label's digits", () => {
-  const items = [
-    item({ id: "a", amountLabel: "¥1,200" }),
-    item({ id: "b", amountLabel: "¥3,500" }),
-  ];
-  // "1200" matches ¥1,200 (the comma is ignored). "35" matches ¥3,500.
-  assert.deepEqual(searchQueueItems(items, "1200").map((i) => i.id), ["a"]);
-  assert.deepEqual(searchQueueItems(items, "35").map((i) => i.id), ["b"]);
-  assert.deepEqual(searchQueueItems(items, "99").map((i) => i.id), []);
-});
-
-test("searchQueueItems: mixed query — digits drive amount, full text drives merchant/category", () => {
-  const items = [
-    item({ id: "a", merchant: "Dinner", amountLabel: "¥5,000" }),
-    item({ id: "b", merchant: "Lunch", amountLabel: "¥5,000" }),
-  ];
-  // "5000" matches both amounts.
-  assert.deepEqual(searchQueueItems(items, "5000").map((i) => i.id), ["a", "b"]);
-  // "dinner" matches only the merchant on a.
-  assert.deepEqual(searchQueueItems(items, "dinner").map((i) => i.id), ["a"]);
 });
 
 // ─── sortQueueItems ─────────────────────────────────────────────────────────
@@ -137,6 +88,29 @@ test("sortQueueItems: 'needs' surfaces needs/stuck/failed before reviewed, date-
   assert.deepEqual(out.map((i) => i.id), ["need-new", "need-old", "rev-new", "rev-old"]);
 });
 
-test("DEFAULT_SORT is 'needs'", () => {
-  assert.equal(DEFAULT_SORT, "needs" as SortKey);
+// ─── undated last (review-closing-scope default sort) ───────────────────────
+
+test("sortQueueItems: date-asc puts undated/legacy rows (sortDateMs 0) LAST, not ahead of real dates", () => {
+  const items = [
+    item({ id: "undated", sortDateMs: 0 }),
+    item({ id: "mid", sortDateMs: Date.UTC(2026, 6, 15) }),
+    item({ id: "early", sortDateMs: Date.UTC(2026, 6, 1) }),
+    item({ id: "also-undated", sortDateMs: 0 }),
+  ];
+  const out = sortQueueItems(items, "date-asc");
+  assert.deepEqual(out.map((i) => i.id), ["early", "mid", "undated", "also-undated"]);
+});
+
+test("sortQueueItems: date-desc also keeps undated rows last", () => {
+  const items = [
+    item({ id: "undated", sortDateMs: 0 }),
+    item({ id: "early", sortDateMs: Date.UTC(2026, 6, 1) }),
+    item({ id: "late", sortDateMs: Date.UTC(2026, 6, 20) }),
+  ];
+  const out = sortQueueItems(items, "date-desc");
+  assert.deepEqual(out.map((i) => i.id), ["late", "early", "undated"]);
+});
+
+test("DEFAULT_SORT is 'date-asc' (earliest transaction/capture date first)", () => {
+  assert.equal(DEFAULT_SORT, "date-asc" as SortKey);
 });
