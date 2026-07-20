@@ -25,6 +25,10 @@ import type {
   SourceType,
 } from "@/lib/receipts/types";
 import { VALID_SOURCE_TYPES } from "@/lib/receipts/upload-policy";
+import {
+  compactUndefinedReceiptUpdate,
+  parseExportStatementMonthOverride,
+} from "@/lib/receipts/receipt-update";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -267,52 +271,65 @@ export async function PATCH(request: Request, { params }: RouteContext) {
           { status: 400 },
         );
       }
-      const raw = body.exportStatementMonth;
-      if (raw === null || raw === "") {
-        exportStatementMonth = null;
-      } else if (typeof raw === "string" && /^\d{4}-\d{2}$/.test(raw)) {
-        const sealed = await loadSealedExportMonths();
-        if (sealed.has(raw)) {
-          return NextResponse.json(
-            {
-              error:
-                `${raw}'s export is finalized — cannot reassign a receipt into a sealed month. ` +
-                `Pick an open month, or use the export revision flow.`,
-            },
-            { status: 422 },
-          );
-        }
-        exportStatementMonth = raw;
-      } else {
+      const parsed = parseExportStatementMonthOverride(body.exportStatementMonth);
+      if (parsed.kind === "empty") {
+        // Stored membership is the sticky authority (ADR 0008); intentional
+        // unassignment is not supported. The UI only sends a concrete target
+        // month — null/empty here is rejected, not silently cleared.
         return NextResponse.json(
-          { error: "Invalid exportStatementMonth (expected YYYY-MM or null)." },
+          {
+            error:
+              "exportStatementMonth cannot be cleared — pick a concrete open month. " +
+              "Stored membership is the sticky authority.",
+          },
           { status: 400 },
         );
       }
+      if (parsed.kind === "invalid") {
+        return NextResponse.json(
+          { error: "Invalid exportStatementMonth (expected a concrete open YYYY-MM)." },
+          { status: 400 },
+        );
+      }
+      const sealed = await loadSealedExportMonths();
+      if (sealed.has(parsed.value)) {
+        return NextResponse.json(
+          {
+            error:
+              `${parsed.value}'s export is finalized — cannot reassign a receipt into a sealed month. ` +
+              `Pick an open month, or use the export revision flow.`,
+          },
+          { status: 422 },
+        );
+      }
+      exportStatementMonth = parsed.value;
     }
 
-    await updateReceiptRecord(
-      id,
-      {
-        paymentPath: body.paymentPath as PaymentPath | undefined,
-        expenseType: body.expenseType as ExpenseType | undefined,
-        transactionDate: body.transactionDate,
-        merchant,
-        amountMinor: body.amountMinor,
-        currency: body.currency?.toUpperCase(),
-        taxAmountMinor: body.taxAmountMinor,
-        businessPurpose,
-        expenseCategoryCode,
-        exportStatementMonth,
-        status: body.status as ReceiptStatus | undefined,
-        sourceType,
-        invoiceRegistrationNumber,
-        counterpartyName,
-        taxRate,
-        qualifiedInvoiceStatus,
-      },
-      actor,
-    );
+    // Compact away undefined-valued own properties before mutating, so an OMITTED
+    // optional field is genuinely absent (not present-as-undefined). Otherwise the
+    // `"field" in input` presence checks in updateReceiptRecord fire and bind the
+    // column to `undefined ?? null` → NULL, silently clearing sticky data (the
+    // 2026-07-20 membership-clearing root cause). The same compacted object drives
+    // the SQL mutation and the generic audit.
+    const receiptUpdate = compactUndefinedReceiptUpdate({
+      paymentPath: body.paymentPath as PaymentPath | undefined,
+      expenseType: body.expenseType as ExpenseType | undefined,
+      transactionDate: body.transactionDate,
+      merchant,
+      amountMinor: body.amountMinor,
+      currency: body.currency?.toUpperCase(),
+      taxAmountMinor: body.taxAmountMinor,
+      businessPurpose,
+      expenseCategoryCode,
+      exportStatementMonth,
+      status: body.status as ReceiptStatus | undefined,
+      sourceType,
+      invoiceRegistrationNumber,
+      counterpartyName,
+      taxRate,
+      qualifiedInvoiceStatus,
+    });
+    await updateReceiptRecord(id, receiptUpdate, actor);
 
     // ADR 0006 §D6: dedicated audit for the override (old → new month + actor),
     // separate from the generic receipt.updated entry updateReceiptRecord writes.
