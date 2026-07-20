@@ -38,6 +38,7 @@
 import { getReceiptsDb } from "@/lib/cloudflare-runtime";
 import { loadSealedExportMonths } from "@/lib/receipts/membership";
 import { transactionMonthOf } from "@/lib/receipts/month-lock";
+import { D1_ID_CHUNK_SIZE } from "@/lib/receipts/db-utils";
 import type { PaymentPath, ReceiptRecord } from "@/lib/receipts/types";
 
 export type ReceiptLockKind = "export" | "reconciliation";
@@ -129,25 +130,32 @@ export async function loadReconciliationLockedReceiptIds(
 ): Promise<Map<string, string>> {
   const out = new Map<string, string>();
   if (receiptIds.length === 0) return out;
-  const placeholders = receiptIds.map(() => "?").join(",");
-  const res = await db
-    .prepare(
-      `SELECT asl.matched_receipt_id AS rid, ar.statement_month AS m
-       FROM amex_statement_lines AS asl
-       JOIN amex_reconciliations AS ar
-         ON ar.statement_month = asl.statement_month
-        AND ar.status = 'finalized'
-       WHERE asl.matched_receipt_id IN (${placeholders})
-         AND NOT EXISTS (
-           SELECT 1 FROM receipt_exports re
-           WHERE re.export_month = ar.statement_month
-             AND re.status = 'draft'
-         )`,
-    )
-    .bind(...receiptIds)
-    .all<{ rid: string; m: string }>();
-  for (const row of res.results ?? []) {
-    if (!out.has(row.rid)) out.set(row.rid, row.m);
+  // Chunk over D1_ID_CHUNK_SIZE: the review queue passes every receipt id (100+
+  // for an all-months view), and D1 rejects more than 100 bound params per
+  // statement. First-writer-wins is preserved across chunks (a receipt matching
+  // several lines in the same finalized month yields the same month anyway).
+  for (let i = 0; i < receiptIds.length; i += D1_ID_CHUNK_SIZE) {
+    const chunk = receiptIds.slice(i, i + D1_ID_CHUNK_SIZE);
+    const placeholders = chunk.map(() => "?").join(",");
+    const res = await db
+      .prepare(
+        `SELECT asl.matched_receipt_id AS rid, ar.statement_month AS m
+         FROM amex_statement_lines AS asl
+         JOIN amex_reconciliations AS ar
+           ON ar.statement_month = asl.statement_month
+          AND ar.status = 'finalized'
+         WHERE asl.matched_receipt_id IN (${placeholders})
+           AND NOT EXISTS (
+             SELECT 1 FROM receipt_exports re
+             WHERE re.export_month = ar.statement_month
+               AND re.status = 'draft'
+           )`,
+      )
+      .bind(...chunk)
+      .all<{ rid: string; m: string }>();
+    for (const row of res.results ?? []) {
+      if (!out.has(row.rid)) out.set(row.rid, row.m);
+    }
   }
   return out;
 }

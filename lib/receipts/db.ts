@@ -671,23 +671,30 @@ export async function listAttendeeNamesByReceiptIds(
   const out = new Map<string, string[]>();
   if (receiptIds.length === 0) return out;
   const db = getReceiptsDb();
-  const placeholders = receiptIds.map(() => "?").join(", ");
-  const result = await db
-    .prepare(
-      `SELECT receipt_id, attendee_name
-       FROM receipt_attendees
-       WHERE receipt_id IN (${placeholders})
-       ORDER BY created_at ASC`,
-    )
-    .bind(...receiptIds)
-    .all<{ receipt_id: string; attendee_name: string }>();
-  for (const row of result.results ?? []) {
-    let arr = out.get(row.receipt_id);
-    if (!arr) {
-      arr = [];
-      out.set(row.receipt_id, arr);
+  // Chunk over D1_ID_CHUNK_SIZE: callers (review queue, reconcile, export) pass
+  // 100+ ids for an all-months view, and D1 rejects >100 bound params/statement.
+  // Each receipt's rows land in exactly one chunk (chunking is by receipt_id), so
+  // per-receipt created_at order is preserved within a chunk.
+  for (let i = 0; i < receiptIds.length; i += D1_ID_CHUNK_SIZE) {
+    const chunk = receiptIds.slice(i, i + D1_ID_CHUNK_SIZE);
+    const placeholders = chunk.map(() => "?").join(", ");
+    const result = await db
+      .prepare(
+        `SELECT receipt_id, attendee_name
+         FROM receipt_attendees
+         WHERE receipt_id IN (${placeholders})
+         ORDER BY created_at ASC`,
+      )
+      .bind(...chunk)
+      .all<{ receipt_id: string; attendee_name: string }>();
+    for (const row of result.results ?? []) {
+      let arr = out.get(row.receipt_id);
+      if (!arr) {
+        arr = [];
+        out.set(row.receipt_id, arr);
+      }
+      arr.push(row.attendee_name);
     }
-    arr.push(row.attendee_name);
   }
   return out;
 }
@@ -1037,23 +1044,28 @@ export async function getAmexMatchFlagsByReceiptIds(
   if (receiptIds.length === 0) return flags;
 
   const db = getReceiptsDb();
-  const placeholders = receiptIds.map(() => "?").join(",");
-  const result = await db
-    .prepare(
-      `SELECT matched_receipt_id, re_review_needed
-       FROM amex_statement_lines
-       WHERE matched_receipt_id IN (${placeholders})`,
-    )
-    .bind(...receiptIds)
-    .all<{ matched_receipt_id: string; re_review_needed: 0 | 1 }>();
+  // Chunk over D1_ID_CHUNK_SIZE: the review queue passes 100+ ids for an
+  // all-months view, and D1 rejects >100 bound params per statement.
+  for (let i = 0; i < receiptIds.length; i += D1_ID_CHUNK_SIZE) {
+    const chunk = receiptIds.slice(i, i + D1_ID_CHUNK_SIZE);
+    const placeholders = chunk.map(() => "?").join(",");
+    const result = await db
+      .prepare(
+        `SELECT matched_receipt_id, re_review_needed
+         FROM amex_statement_lines
+         WHERE matched_receipt_id IN (${placeholders})`,
+      )
+      .bind(...chunk)
+      .all<{ matched_receipt_id: string; re_review_needed: 0 | 1 }>();
 
-  for (const row of result.results ?? []) {
-    const existing = flags.get(row.matched_receipt_id);
-    flags.set(row.matched_receipt_id, {
-      hasMatch: true,
-      reReviewNeeded:
-        (existing?.reReviewNeeded ?? false) || row.re_review_needed === 1,
-    });
+    for (const row of result.results ?? []) {
+      const existing = flags.get(row.matched_receipt_id);
+      flags.set(row.matched_receipt_id, {
+        hasMatch: true,
+        reReviewNeeded:
+          (existing?.reReviewNeeded ?? false) || row.re_review_needed === 1,
+      });
+    }
   }
   return flags;
 }
