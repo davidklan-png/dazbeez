@@ -1060,6 +1060,73 @@ export async function listAmexLineAttendeeNamesByMonth(
   return attendeesByLine;
 }
 
+/**
+ * Every AMEX statement line matched to one of `receiptIds`, across ALL statement
+ * months (a receipt matched to lines in two months is the cross-month ambiguity
+ * case). Ordered by statement_month then transaction_date for stable display.
+ * Used by the review-queue closing-attention collector to run the full per-line
+ * sign-off rules + cross-month grouping over a working set's receipts in one
+ * batched query (no per-receipt round-trips).
+ */
+export async function listAmexLinesByMatchedReceiptIds(
+  receiptIds: string[],
+): Promise<AmexStatementLine[]> {
+  const ids = [...new Set(receiptIds.filter(Boolean))];
+  if (ids.length === 0) return [];
+  const db = getReceiptsDb();
+  const out: AmexStatementLine[] = [];
+  const CHUNK = D1_ID_CHUNK_SIZE;
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    const chunk = ids.slice(i, i + CHUNK);
+    const placeholders = chunk.map(() => "?").join(",");
+    const result = await db
+      .prepare(
+        `SELECT * FROM amex_statement_lines
+         WHERE matched_receipt_id IN (${placeholders})
+         ORDER BY statement_month ASC, transaction_date ASC`,
+      )
+      .bind(...chunk)
+      .all<AmexStatementLine>();
+    out.push(...(result.results ?? []));
+  }
+  return out;
+}
+
+/**
+ * Direct amex_line_attendees for a specific set of line ids, keyed by line id.
+ * The by-line variant of {@link listAmexLineAttendeeNamesByMonth}: the
+ * closing-attention collector loads only the lines matched to the working set
+ * (which may span months), so it needs attendees for exactly those lines rather
+ * than every line in a month.
+ */
+export async function listAmexLineAttendeeNamesByLineIds(
+  lineIds: string[],
+): Promise<Record<string, string[]>> {
+  const ids = [...new Set(lineIds.filter(Boolean))];
+  if (ids.length === 0) return {};
+  const db = getReceiptsDb();
+  const attendeesByLine: Record<string, string[]> = {};
+  const CHUNK = D1_ID_CHUNK_SIZE;
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    const chunk = ids.slice(i, i + CHUNK);
+    const placeholders = chunk.map(() => "?").join(",");
+    const result = await db
+      .prepare(
+        `SELECT amex_statement_line_id, attendee_name
+         FROM amex_line_attendees
+         WHERE amex_statement_line_id IN (${placeholders})
+         ORDER BY created_at ASC`,
+      )
+      .bind(...chunk)
+      .all<{ amex_statement_line_id: string; attendee_name: string }>();
+    for (const row of result.results ?? []) {
+      attendeesByLine[row.amex_statement_line_id] ??= [];
+      attendeesByLine[row.amex_statement_line_id]!.push(row.attendee_name);
+    }
+  }
+  return attendeesByLine;
+}
+
 export async function updateAmexReconciliation(
   amexLineId: string,
   receiptId: string | null,

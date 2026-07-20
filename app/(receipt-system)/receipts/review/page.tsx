@@ -2,6 +2,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import {
   getAmexMatchFlagsByReceiptIds,
+  listAmexLineCountsByMonth,
   listDistinctTransactionMonths,
   listReceiptRecords,
 } from "@/lib/receipts/db";
@@ -9,14 +10,20 @@ import { RECEIPT_VIEW_LIMIT } from "@/lib/receipts/list-policy";
 import { assertReceiptsPageAccess } from "@/lib/receipts/auth-request";
 import { ReviewLayout } from "@/components/receipts/review/review-layout";
 import { buildQueueItems } from "@/lib/receipts/queue-items";
-import { getExtractionHealth } from "@/lib/receipts/extraction-state";
 import { getReceiptLocks } from "@/lib/receipts/receipt-locks";
+import { collectClosingAttentionReceiptIds } from "@/lib/receipts/review-attention";
+import { loadClosingScopeWorkingSet } from "@/lib/receipts/review-scope";
+import { DEFAULT_SORT, sortQueueItems } from "@/lib/receipts/queue-sort";
 import {
   buildReviewQueryParams,
   effectiveReviewMonth,
   ensureCurrentMonth,
   filterReviewQueue,
+  isConcreteMonth,
+  mergeMonthOptions,
   resolveReviewMonthScope,
+  resolveReviewScope,
+  type ReviewScope,
 } from "@/lib/receipts/review-queue-filter";
 import {
   InlineServerError,
@@ -51,22 +58,42 @@ async function renderReviewPage(
   const paymentPathFilter =
     typeof params.payment_path === "string" ? params.payment_path : undefined;
 
-  // Month scope (hybrid model: month/lock server-side, sort/search client-side).
-  // '' = default (current calendar month), 'all' = 200 most recent, else YYYY-MM.
+  // Month + scope (hybrid model: month/scope/lock/attention server-side, sort
+  // client-side). month '' = current calendar month, 'all' = recent window,
+  // else YYYY-MM. scope 'closing' (only valid for a concrete month) shows the
+  // monthly export/finalize membership instead of the transaction-date month.
   const rawMonth = typeof params.month === "string" ? params.month : undefined;
   const monthParam = rawMonth ?? "";
+  const rawScope = typeof params.scope === "string" ? params.scope : undefined;
+  const scope: ReviewScope = resolveReviewScope(rawScope, monthParam);
   const { month: monthScope, includeUndated } = resolveReviewMonthScope(rawMonth);
 
-  const receipts = await listReceiptRecords({
-    limit: RECEIPT_VIEW_LIMIT,
-    month: monthScope,
-    includeUndated,
-  });
-  const locks = await getReceiptLocks(receipts);
-  const queue = filterReviewQueue(receipts, filter, {
+  // Working set: closing-scope membership (export authority) vs the calendar
+  // transaction-date month. Closing scope reuses buildExportBundle(M).receipts
+  // + listUnknownInScopeReceipts(M) so the queue cannot drift from what ships.
+  let workingReceipts;
+  let amexMatchedIds: Set<string> | undefined;
+  if (scope === "closing" && isConcreteMonth(monthParam)) {
+    const workingSet = await loadClosingScopeWorkingSet(monthParam);
+    workingReceipts = workingSet.receipts;
+    amexMatchedIds = workingSet.amexMatchedIds;
+  } else {
+    workingReceipts = await listReceiptRecords({
+      limit: RECEIPT_VIEW_LIMIT,
+      month: monthScope,
+      includeUndated,
+    });
+  }
+
+  const locks = await getReceiptLocks(workingReceipts);
+  const attentionIds = await collectClosingAttentionReceiptIds(workingReceipts);
+  const queue = filterReviewQueue(workingReceipts, filter, {
     statusFilter,
     paymentPathFilter,
     locks,
+    attentionIds,
+    scope,
+    amexMatchedIds,
   });
 
   const amexFlags = await getAmexMatchFlagsByReceiptIds(queue.map((r) => r.id));
@@ -75,25 +102,40 @@ async function renderReviewPage(
       .filter(([, f]) => f.reReviewNeeded)
       .map(([rid]) => rid),
   );
-  const queueItems = buildQueueItems(queue, reReviewIds, Date.now(), locks);
+  // Server-side default sort matches the hydrated client (date-asc, undated
+  // last) so the bare-URL redirect + next/prev fallback land on the same row
+  // the sorted rail shows.
+  const queueItems = sortQueueItems(
+    buildQueueItems(queue, reReviewIds, Date.now(), locks),
+    DEFAULT_SORT,
+  );
 
-  const needsAttention = receipts.filter(
-    (r) =>
-      !locks.get(r.id)?.locked &&
-      (r.status === "needs_review" || r.status === "captured"),
+  // Amber need-attention count = unlocked working-set receipts in the shared
+  // closing-attention set. Exactly the Needs review tab's count for this scope.
+  const needsAttention = workingReceipts.filter(
+    (r) => !locks.get(r.id)?.locked && attentionIds.has(r.id),
   ).length;
-  const lockedCount = receipts.filter((r) => locks.get(r.id)?.locked).length;
 
   // Bare URL (no params at all) → rapid-review entry point: jump to the first
-  // unlocked item. Never redirect when a month/filter param is set.
-  const hasAnyParam = Boolean(rawMonth || filter || statusFilter || paymentPathFilter);
+  // (earliest) unlocked item. Any explicit month/scope/filter param suppresses
+  // the redirect.
+  const hasAnyParam = Boolean(
+    rawMonth || filter || statusFilter || paymentPathFilter || rawScope,
+  );
   if (queueItems.length > 0 && !hasAnyParam) {
-    redirect(`/receipts/review/${queueItems[0].id}`);
+    redirect(`/receipts/review/${queueItems[0]!.id}`);
   }
 
-  const queryParams = buildReviewQueryParams(params, monthParam);
-  const availableMonths = await listDistinctTransactionMonths();
+  const queryParams = buildReviewQueryParams(params, monthParam, scope);
   const effectiveMonth = effectiveReviewMonth(monthParam, monthScope);
+  const [receiptMonths, amexLineCounts] = await Promise.all([
+    listDistinctTransactionMonths(),
+    listAmexLineCountsByMonth(),
+  ]);
+  const availableMonths = ensureCurrentMonth(
+    mergeMonthOptions(receiptMonths, [...amexLineCounts.keys()], effectiveMonth),
+    effectiveMonth,
+  );
 
   return (
     <ReviewLayout
@@ -101,13 +143,12 @@ async function renderReviewPage(
       activeId={null}
       queryParams={queryParams}
       needsAttention={needsAttention}
-      workingSetCount={receipts.length}
-      lockedCount={lockedCount}
+      workingSetCount={workingReceipts.length}
       effectiveMonth={effectiveMonth}
-      availableMonths={ensureCurrentMonth(availableMonths, effectiveMonth)}
+      availableMonths={availableMonths}
       monthParam={monthParam}
       activeFilter={filter}
-      ocrHealth={getExtractionHealth(receipts)}
+      scope={scope}
       imagePane={
         <div className="flex h-full items-center justify-center bg-gray-100 text-sm text-gray-400">
           Select a receipt from the queue.

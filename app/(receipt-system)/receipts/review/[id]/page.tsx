@@ -4,6 +4,7 @@ import {
   getReceiptRecord,
   listAttendees,
   listDistinctTransactionMonths,
+  listAmexLineCountsByMonth,
   listReceiptRecords,
 } from "@/lib/receipts/db";
 import { RECEIPT_VIEW_LIMIT } from "@/lib/receipts/list-policy";
@@ -14,12 +15,19 @@ import { ImagePane } from "@/components/receipts/review/image-pane";
 import { FormPane } from "@/components/receipts/review/form-pane";
 import { listOpenExportMonths, naturalMonthForDate } from "@/lib/receipts/membership";
 import { getReceiptLocks, UNLOCKED_RECEIPT } from "@/lib/receipts/receipt-locks";
+import { collectClosingAttentionReceiptIds } from "@/lib/receipts/review-attention";
+import { loadClosingScopeWorkingSet } from "@/lib/receipts/review-scope";
+import { DEFAULT_SORT, sortQueueItems } from "@/lib/receipts/queue-sort";
 import {
   buildReviewQueryParams,
   effectiveReviewMonth,
   ensureCurrentMonth,
   filterReviewQueue,
+  isConcreteMonth,
+  mergeMonthOptions,
   resolveReviewMonthScope,
+  resolveReviewScope,
+  type ReviewScope,
 } from "@/lib/receipts/review-queue-filter";
 import {
   InlineServerError,
@@ -31,7 +39,6 @@ import {
   runComplianceChecksForReceipt,
 } from "@/lib/receipts/compliance";
 import { getComplianceSettings } from "@/lib/receipts/settings";
-import { getExtractionHealth } from "@/lib/receipts/extraction-state";
 import { listCategoryRules } from "@/lib/receipts/category-rules";
 import { getReceiptsDb } from "@/lib/cloudflare-runtime";
 import type { ReceiptRecord } from "@/lib/receipts/types";
@@ -71,16 +78,28 @@ async function renderReceiptPage(
     typeof sp.payment_path === "string" ? sp.payment_path : undefined;
   const rawMonth = typeof sp.month === "string" ? sp.month : undefined;
   const monthParam = rawMonth ?? "";
+  const rawScope = typeof sp.scope === "string" ? sp.scope : undefined;
+  const scope: ReviewScope = resolveReviewScope(rawScope, monthParam);
   const { month: monthScope, includeUndated } = resolveReviewMonthScope(rawMonth);
 
-  const [receipt, attendees, all] = await Promise.all([
-    getReceiptRecord(id),
-    listAttendees(id),
-    listReceiptRecords({
+  // Working set: closing-scope membership (export authority) vs calendar month.
+  let workingReceipts: ReceiptRecord[];
+  let amexMatchedIds: Set<string> | undefined;
+  if (scope === "closing" && isConcreteMonth(monthParam)) {
+    const workingSet = await loadClosingScopeWorkingSet(monthParam);
+    workingReceipts = workingSet.receipts;
+    amexMatchedIds = workingSet.amexMatchedIds;
+  } else {
+    workingReceipts = await listReceiptRecords({
       limit: RECEIPT_VIEW_LIMIT,
       month: monthScope,
       includeUndated,
-    }),
+    });
+  }
+
+  const [receipt, attendees] = await Promise.all([
+    getReceiptRecord(id),
+    listAttendees(id),
   ]);
   if (!receipt) notFound();
 
@@ -119,15 +138,19 @@ async function renderReceiptPage(
 
   // Locks are computed over the union of the active receipt and the queue set,
   // so the active receipt's lock is always known even when it lands outside
-  // the selected month (e.g. a deep link) — the form must never render
+  // the selected scope (e.g. a deep link) — the form must never render
   // editable for a receipt the server would refuse to mutate.
-  const locks = await getReceiptLocks(dedupeReceipts([receipt, ...all]));
+  const locks = await getReceiptLocks(dedupeReceipts([receipt, ...workingReceipts]));
   const activeLock = locks.get(receipt.id) ?? UNLOCKED_RECEIPT;
 
-  const queue = filterReviewQueue(all, filter, {
+  const attentionIds = await collectClosingAttentionReceiptIds(workingReceipts);
+  const queue = filterReviewQueue(workingReceipts, filter, {
     statusFilter,
     paymentPathFilter,
     locks,
+    attentionIds,
+    scope,
+    amexMatchedIds,
   });
 
   const amexFlags = await getAmexMatchFlagsByReceiptIds(
@@ -140,22 +163,30 @@ async function renderReceiptPage(
   );
   const activeFlags = amexFlags.get(id);
 
-  const queueItems = buildQueueItems(queue, reReviewIds, Date.now(), locks);
+  // Server-side default sort matches the hydrated client (date-asc, undated
+  // last) so the next/prev fallback follows the same order as the sorted rail.
+  const queueItems = sortQueueItems(
+    buildQueueItems(queue, reReviewIds, Date.now(), locks),
+    DEFAULT_SORT,
+  );
   const activeIndex = queueItems.findIndex((q) => q.id === id);
   const nextReceiptId = queueItems[activeIndex + 1]?.id ?? null;
   const prevReceiptId = queueItems[activeIndex - 1]?.id ?? null;
 
-  const needsAttention = all.filter(
-    (r) =>
-      !locks.get(r.id)?.locked &&
-      (r.status === "needs_review" || r.status === "captured"),
+  const needsAttention = workingReceipts.filter(
+    (r) => !locks.get(r.id)?.locked && attentionIds.has(r.id),
   ).length;
-  const lockedCount = all.filter((r) => locks.get(r.id)?.locked).length;
-  const ocrHealth = getExtractionHealth(all);
 
-  const queryParams = buildReviewQueryParams(sp, monthParam);
-  const availableMonths = await listDistinctTransactionMonths();
+  const queryParams = buildReviewQueryParams(sp, monthParam, scope);
   const effectiveMonth = effectiveReviewMonth(monthParam, monthScope);
+  const [receiptMonths, amexLineCounts] = await Promise.all([
+    listDistinctTransactionMonths(),
+    listAmexLineCountsByMonth(),
+  ]);
+  const availableMonths = ensureCurrentMonth(
+    mergeMonthOptions(receiptMonths, [...amexLineCounts.keys()], effectiveMonth),
+    effectiveMonth,
+  );
 
   // Category pattern rules → form-pane suggestion affordance (ADR: category-rules).
   const categoryRules = (await listCategoryRules(getReceiptsDb())).map((r) => ({
@@ -172,13 +203,12 @@ async function renderReceiptPage(
       activeId={id}
       queryParams={queryParams}
       needsAttention={needsAttention}
-      workingSetCount={all.length}
-      lockedCount={lockedCount}
+      workingSetCount={workingReceipts.length}
       effectiveMonth={effectiveMonth}
-      availableMonths={ensureCurrentMonth(availableMonths, effectiveMonth)}
+      availableMonths={availableMonths}
       monthParam={monthParam}
       activeFilter={filter}
-      ocrHealth={ocrHealth}
+      scope={scope}
       imagePane={
         <ImagePane
           receiptId={receipt.id}
