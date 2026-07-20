@@ -1,23 +1,36 @@
-// Review-queue lock surface (split-lock model, month-lock.ts header + audit A5).
+// Review-queue lock surface (three-gate model with a unified draft carve-out,
+// ADR 0012; see also month-lock.ts header + audit A5).
 //
 // The review queue hides receipts the server would refuse to mutate, so the
 // operator never types into a locked receipt and discovers the 409 at save
-// time. Two independent locks own disjoint populations:
+// time. The server enforces THREE independent gates; this module mirrors the
+// first two for display (gate #3 is a per-receipt status check the queue
+// infers from `status`):
 //
 //   1. EXPORT lock — a non-AMEX receipt (CASH/DIGITAL/UNKNOWN) whose
 //      transaction month is export-sealed: status='finalized' export exists
-//      AND no 'draft' revision (exactly loadSealedExportMonths). AMEX is
-//      intentionally NOT export-gated — it flows through (2).
-//   2. RECONCILIATION lock — an AMEX receipt matched to an amex_statement_lines
-//      row whose statement month's amex_reconciliation.status='finalized'
-//      (same join as rejectIfReceiptInFinalizedReconciliation in db.ts).
-//      CASH/DIGITAL have no statement line to match, so they are not recon-
-//      gated. UNKNOWN matched to a finalized line IS locked here too: the
-//      server's recon predicate is path-agnostic, and the UI must never
-//      under-report a server 409.
+//      AND no 'draft' revision (loadSealedExportMonths). AMEX is intentionally
+//      NOT export-gated — it flows through (2).
+//   2. RECONCILIATION lock — an AMEX/UNKNOWN receipt matched to an
+//      amex_statement_lines row whose statement month's
+//      amex_reconciliation.status='finalized'. CASH/DIGITAL have no statement
+//      line to match, so they are not recon-gated.
+//   3. PER-RECEIPT STATUS gate (server only — PATCH app/api/receipts/[id]/
+//      route.ts + softDeleteReceipt in db.ts): status='exported'/'archived'
+//      is refused, except 'exported' is released under the carve-out below.
+//
+// Unified draft carve-out (ADR 0012): an open export draft
+// (receipt_exports.status='draft') for a month is the SINGLE "month open for
+// correction" signal. It releases gate #1 (by definition), gate #2 for RECEIPT
+// edits only (loadReconciliationLockedReceiptIds excludes draft months; the
+// server's rejectIfReceiptInFinalizedReconciliation does the same), and gate #3
+// (isMonthLockedForEdits → false). The LINE-level reconciliation seal
+// (rejectIfFinalized on amex_statement_lines writes) is deliberately NOT
+// released — a format-only export revision must not reopen match assignments.
 //
 // Undated receipts are never EXPORT-locked (transactionMonthOf → null). They
-// may still be RECONCILIATION-locked when matched to a finalized line.
+// may still be RECONCILIATION-locked when matched to a finalized line (subject
+// to the carve-out).
 //
 // This module is read-only: it computes lock info for display. It does NOT
 // enforce anything — the API-side 409 backstop stays the source of truth.
@@ -124,7 +137,12 @@ export async function loadReconciliationLockedReceiptIds(
        JOIN amex_reconciliations AS ar
          ON ar.statement_month = asl.statement_month
         AND ar.status = 'finalized'
-       WHERE asl.matched_receipt_id IN (${placeholders})`,
+       WHERE asl.matched_receipt_id IN (${placeholders})
+         AND NOT EXISTS (
+           SELECT 1 FROM receipt_exports re
+           WHERE re.export_month = ar.statement_month
+             AND re.status = 'draft'
+         )`,
     )
     .bind(...receiptIds)
     .all<{ rid: string; m: string }>();

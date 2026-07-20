@@ -502,8 +502,8 @@ export function FormPane(props: FormPaneProps) {
           <span>
             {lockKind === "reconciliation" ? (
               <>
-                The {lockMonth} AMEX reconciliation is finalized. Reopen it to
-                edit.{" "}
+                The {lockMonth} AMEX reconciliation is finalized. Reopen it — or
+                open a correction export draft for {lockMonth} — to edit.{" "}
                 <Link
                   href="/receipts/reconcile"
                   className="font-semibold text-gray-900 underline"

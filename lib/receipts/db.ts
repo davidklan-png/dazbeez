@@ -3,6 +3,7 @@ import { createAuditEntry } from "@/lib/receipts/audit";
 import { D1_ID_CHUNK_SIZE, nowIso, newUuid, stringifyJson } from "@/lib/receipts/db-utils";
 import {
   assertTransactionMonthEditable,
+  isMonthLockedForEdits,
   transactionMonthOf,
 } from "@/lib/receipts/month-lock";
 import { shouldOverwriteMerchant } from "@/lib/receipts/reconciliation";
@@ -345,13 +346,13 @@ export async function updateReceiptRecord(
   }
 }
 
-async function rejectIfReceiptInFinalizedReconciliation(
+export async function rejectIfReceiptInFinalizedReconciliation(
   db: D1Database,
   receiptId: string,
 ): Promise<void> {
   const finalized = await db
     .prepare(
-      `SELECT ar.id
+      `SELECT ar.id, ar.statement_month AS statement_month
        FROM amex_statement_lines asl
        JOIN amex_reconciliations ar
          ON ar.statement_month = asl.statement_month
@@ -360,8 +361,15 @@ async function rejectIfReceiptInFinalizedReconciliation(
        LIMIT 1`,
     )
     .bind(receiptId)
-    .first<{ id: string }>();
-  if (finalized) {
+    .first<{ id: string; statement_month: string }>();
+  if (!finalized) return;
+  // Unified draft carve-out (ADR 0012): a finalized reconciliation releases
+  // RECEIPT edits when its statement month has an open export draft — the same
+  // single "month open for correction" signal the export lock uses. The
+  // LINE-level seal (rejectIfFinalized on amex_statement_lines writes) is
+  // intentionally NOT released here: a format-only export revision must not
+  // reopen match assignments.
+  if (await isMonthLockedForEdits(db, finalized.statement_month)) {
     throw new Error(`Receipt ${receiptId} is locked by a finalized reconciliation.`);
   }
 }
@@ -552,20 +560,34 @@ export async function softDeleteReceipt(
   id: string,
   actor: string,
   reason?: string,
+  db: D1Database = getReceiptsDb(),
 ): Promise<void> {
-  const db = getReceiptsDb();
-
   const record = await db
-    .prepare(`SELECT id, status FROM receipt_records WHERE id = ? LIMIT 1`)
+    .prepare(`SELECT id, status, exported_month FROM receipt_records WHERE id = ? LIMIT 1`)
     .bind(id)
-    .first<{ id: string; status: string }>();
+    .first<{ id: string; status: string; exported_month: string | null }>();
 
   if (!record) throw new Error(`Receipt ${id} not found.`);
 
-  if (!DELETABLE_STATUSES.has(record.status)) {
+  // Unified draft carve-out (ADR 0012): an exported receipt becomes deletable
+  // when its month has an open correction draft (isMonthLockedForEdits → false).
+  // Other non-deletable statuses (archived, etc.) stay refused. A non-empty
+  // reason is mandatory for the exported branch (loud-failure / audit theme).
+  const exportCarveout =
+    record.status === "exported" &&
+    record.exported_month !== null &&
+    !(await isMonthLockedForEdits(db, record.exported_month));
+  if (!DELETABLE_STATUSES.has(record.status) && !exportCarveout) {
     throw new Error(
-      `Receipt cannot be deleted because its status is "${record.status}". Only captured, needs_review, and reviewed receipts may be deleted.`,
+      `Receipt cannot be deleted because its status is "${record.status}". Only captured, needs_review, and reviewed receipts may be deleted${
+        record.status === "exported"
+          ? " (or exported, while a correction draft is open for its month)"
+          : ""
+      }.`,
     );
+  }
+  if (record.status === "exported" && (!reason || !reason.trim())) {
+    throw new Error(`Deleting an exported receipt requires a non-empty reason.`);
   }
 
   const now = nowIso();
@@ -2963,7 +2985,7 @@ export async function createExportRevision(
 
 // ─── Reconciliation signoff ────────────────────────────────────────────────
 
-async function rejectIfFinalized(db: D1Database, month: string): Promise<void> {
+export async function rejectIfFinalized(db: D1Database, month: string): Promise<void> {
   const finalized = await db
     .prepare(
       `SELECT id FROM amex_reconciliations WHERE statement_month = ? AND status = 'finalized' LIMIT 1`,

@@ -19,7 +19,7 @@ import { getComplianceSettings } from "@/lib/receipts/settings";
 import {
   validateInvoiceRegistrationNumber,
 } from "@/lib/receipts/invoice";
-import { ExportFinalizedError } from "@/lib/receipts/month-lock";
+import { ExportFinalizedError, isMonthLockedForEdits } from "@/lib/receipts/month-lock";
 import type {
   QualifiedInvoiceStatus,
   SourceType,
@@ -95,21 +95,30 @@ export async function PATCH(request: Request, { params }: RouteContext) {
       return NextResponse.json({ error: "Receipt not found." }, { status: 404 });
     }
 
-    if (receipt.status === "exported" || receipt.status === "archived") {
-      // Surface the revision endpoint when the receipt shipped in a
-      // finalized export — the operator can't edit it directly and must
-      // open a correction. exported_month tells us which month's revision
-      // endpoint to point at (audit A5 split-lock model).
-      const revisionHint =
-        receipt.status === "exported" && receipt.exported_month
-          ? ` POST /api/receipts/export/${receipt.exported_month}?correction=true to create a revision.`
-          : "";
+    // 'archived' is terminal — always refused. 'exported' is editable under the
+    // unified draft carve-out (ADR 0012): refuse only when the receipt has no
+    // exported_month or its month has no open correction draft.
+    if (receipt.status === "archived") {
       return NextResponse.json(
-        {
-          error: `Receipt is ${receipt.status} and cannot be edited.${revisionHint}`,
-        },
+        { error: `Receipt is ${receipt.status} and cannot be edited.` },
         { status: 409 },
       );
+    }
+    if (receipt.status === "exported") {
+      const month = receipt.exported_month;
+      const locked = !month || (await isMonthLockedForEdits(getReceiptsDb(), month));
+      if (locked) {
+        const revisionHint = month
+          ? ` POST /api/receipts/export/${month}?correction=true to create a revision.`
+          : "";
+        return NextResponse.json(
+          {
+            error: `Receipt is ${receipt.status} and cannot be edited.${revisionHint}`,
+          },
+          { status: 409 },
+        );
+      }
+      // Carve-out released (open draft) → fall through to the normal PATCH path.
     }
 
     const body = (await request.json()) as {
@@ -369,7 +378,18 @@ export async function DELETE(request: Request, { params }: RouteContext) {
     const actor = await requireReceiptsActor(request.headers);
     const { id } = await params;
 
-    await softDeleteReceipt(id, actor);
+    // Reason is optional for ordinary receipts but REQUIRED for exported ones
+    // (audit A1 loud-failure theme — softDeleteReceipt enforces it). Parse
+    // defensively: a missing/empty/non-JSON body is treated as no reason.
+    let reason: string | undefined;
+    try {
+      const body = (await request.json()) as { reason?: string };
+      reason = body.reason?.trim() || undefined;
+    } catch {
+      reason = undefined;
+    }
+
+    await softDeleteReceipt(id, actor, reason);
 
     return NextResponse.json({ ok: true }, { status: 200 });
   } catch (error) {
@@ -381,6 +401,9 @@ export async function DELETE(request: Request, { params }: RouteContext) {
     }
     if (error instanceof Error && error.message.includes("not found")) {
       return NextResponse.json({ error: "Receipt not found." }, { status: 404 });
+    }
+    if (error instanceof Error && error.message.includes("requires a non-empty reason")) {
+      return NextResponse.json({ error: error.message }, { status: 400 });
     }
     console.error("[api/receipts/[id]] DELETE failed", error);
     return NextResponse.json(
