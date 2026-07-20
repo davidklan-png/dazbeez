@@ -227,6 +227,79 @@ export async function hardDeleteReceipt(
   return true;
 }
 
+/**
+ * Build the SET clause + binds for a receipt update from a sparse input, using
+ * `!== undefined` presence (NOT `"field" in input`). Pure (no D1) so the
+ * sparse-update behavior is unit-testable: an omitted/undefined field binds
+ * nothing (no silent NULL clear of sticky data), explicit null clears a
+ * clearable field, and an attendees-only input yields no sets (→ no UPDATE, no
+ * generic audit). Exported for tests.
+ */
+export function buildReceiptUpdateSets(
+  input: UpdateReceiptInput,
+  before: ReceiptRecord,
+): { sets: string[]; binds: unknown[] } {
+  const sets: string[] = [];
+  const binds: unknown[] = [];
+
+  // Presence = value is not undefined (NOT `"field" in input`). An undefined
+  // own property — e.g. an omitted optional field a caller passed through — must
+  // NOT trigger a bind: `in` is true for an undefined-valued key and would bind
+  // the column to `undefined ?? null` → NULL, silently clearing sticky data
+  // (the 2026-07-20 membership-clearing root cause). Explicit null is honored
+  // (null !== undefined) for legitimately clearable fields. Applied to every
+  // optional field, not only exportStatementMonth.
+  if (input.paymentPath !== undefined) { sets.push("payment_path = ?"); binds.push(input.paymentPath); }
+  if (input.expenseType !== undefined) { sets.push("expense_type = ?"); binds.push(input.expenseType); }
+  if (input.transactionDate !== undefined) { sets.push("transaction_date = ?"); binds.push(input.transactionDate ?? null); }
+  if (input.merchant !== undefined) { sets.push("merchant = ?"); binds.push(input.merchant ?? null); }
+  if (input.amountMinor !== undefined) { sets.push("amount_minor = ?"); binds.push(input.amountMinor ?? null); }
+  if (input.currency !== undefined) { sets.push("currency = ?"); binds.push(input.currency); }
+  if (input.taxAmountMinor !== undefined) { sets.push("tax_amount_minor = ?"); binds.push(input.taxAmountMinor ?? null); }
+  if (input.businessPurpose !== undefined) { sets.push("business_purpose = ?"); binds.push(input.businessPurpose ?? null); }
+  if (input.alcoholPresent !== undefined) { sets.push("alcohol_present = ?"); binds.push(input.alcoholPresent ? 1 : 0); }
+  if (input.status !== undefined) { sets.push("status = ?"); binds.push(input.status); }
+  if (input.processedR2Key !== undefined) { sets.push("processed_r2_key = ?"); binds.push(input.processedR2Key ?? null); }
+  if (input.extractionJson !== undefined) { sets.push("extraction_json = ?"); binds.push(input.extractionJson ?? null); }
+  if (input.exportedMonth !== undefined) { sets.push("exported_month = ?"); binds.push(input.exportedMonth ?? null); }
+  // ADR 0006 §D6: discretionary override of the sticky export_statement_month.
+  // The route guards the target month is export-open and writes the dedicated
+  // audit entry; this just applies the column. Explicit override wins over the
+  // automatic assignment hook below.
+  if (input.exportStatementMonth !== undefined) {
+    sets.push("export_statement_month = ?");
+    binds.push(input.exportStatementMonth ?? null);
+  }
+  if (input.expenseCategoryCode !== undefined) { sets.push("expense_category_code = ?"); binds.push(input.expenseCategoryCode ?? null); }
+  if (input.sourceType !== undefined) { sets.push("source_type = ?"); binds.push(input.sourceType ?? null); }
+  if (input.invoiceRegistrationNumber !== undefined) { sets.push("invoice_registration_number = ?"); binds.push(input.invoiceRegistrationNumber ?? null); }
+  if (input.counterpartyName !== undefined) { sets.push("counterparty_name = ?"); binds.push(input.counterpartyName ?? null); }
+  if (input.taxRate !== undefined) { sets.push("tax_rate = ?"); binds.push(input.taxRate ?? null); }
+  if (input.qualifiedInvoiceStatus !== undefined) { sets.push("qualified_invoice_status = ?"); binds.push(input.qualifiedInvoiceStatus ?? "not_checked"); }
+  if (input.extractionState !== undefined) { sets.push("extraction_state = ?"); binds.push(input.extractionState); }
+  if (input.extractionEnqueuedAt !== undefined) { sets.push("extraction_enqueued_at = ?"); binds.push(input.extractionEnqueuedAt ?? null); }
+  if (input.extractionProcessedAt !== undefined) { sets.push("extraction_processed_at = ?"); binds.push(input.extractionProcessedAt ?? null); }
+  if (input.extractionAttempts !== undefined) { sets.push("extraction_attempts = ?"); binds.push(input.extractionAttempts); }
+  if (input.extractionProcessor !== undefined) { sets.push("extraction_processor = ?"); binds.push(input.extractionProcessor ?? null); }
+
+  // ADR 0001 root-cause guard: advancing a receipt past extraction (e.g. a
+  // human reviews a still-queued capture before the consumer drains it) must
+  // clear any stale pending extraction_state, or listPendingProcessingReceipts
+  // keeps the month-close gate blocked forever. Only when the caller didn't set
+  // the state itself and the row is still pending.
+  if (
+    input.status !== undefined &&
+    input.status !== "captured" &&
+    input.extractionState === undefined &&
+    before.extraction_state !== undefined &&
+    PENDING_EXTRACTION_STATES.includes(before.extraction_state)
+  ) {
+    sets.push("extraction_state = 'processed'");
+  }
+
+  return { sets, binds };
+}
+
 export async function updateReceiptRecord(
   id: string,
   input: UpdateReceiptInput,
@@ -248,62 +321,18 @@ export async function updateReceiptRecord(
   const effectivePaymentPath = input.paymentPath ?? before.payment_path;
   if (effectivePaymentPath === "CASH" || effectivePaymentPath === "DIGITAL") {
     const effectiveDate =
-      "transactionDate" in input ? input.transactionDate : before.transaction_date;
+      input.transactionDate !== undefined ? input.transactionDate : before.transaction_date;
     await assertTransactionMonthEditable(transactionMonthOf(effectiveDate));
   }
 
-  const sets: string[] = [];
-  const binds: unknown[] = [];
+  const { sets, binds } = buildReceiptUpdateSets(input, before);
 
-  if (input.paymentPath !== undefined) { sets.push("payment_path = ?"); binds.push(input.paymentPath); }
-  if (input.expenseType !== undefined) { sets.push("expense_type = ?"); binds.push(input.expenseType); }
-  if ("transactionDate" in input) { sets.push("transaction_date = ?"); binds.push(input.transactionDate ?? null); }
-  if ("merchant" in input) { sets.push("merchant = ?"); binds.push(input.merchant ?? null); }
-  if ("amountMinor" in input) { sets.push("amount_minor = ?"); binds.push(input.amountMinor ?? null); }
-  if (input.currency !== undefined) { sets.push("currency = ?"); binds.push(input.currency); }
-  if ("taxAmountMinor" in input) { sets.push("tax_amount_minor = ?"); binds.push(input.taxAmountMinor ?? null); }
-  if ("businessPurpose" in input) { sets.push("business_purpose = ?"); binds.push(input.businessPurpose ?? null); }
-  if (input.alcoholPresent !== undefined) { sets.push("alcohol_present = ?"); binds.push(input.alcoholPresent ? 1 : 0); }
-  if (input.status !== undefined) { sets.push("status = ?"); binds.push(input.status); }
-  if ("processedR2Key" in input) { sets.push("processed_r2_key = ?"); binds.push(input.processedR2Key ?? null); }
-  if ("extractionJson" in input) { sets.push("extraction_json = ?"); binds.push(input.extractionJson ?? null); }
-  if ("exportedMonth" in input) { sets.push("exported_month = ?"); binds.push(input.exportedMonth ?? null); }
-  // ADR 0006 §D6: discretionary override of the sticky export_statement_month.
-  // The route guards the target month is export-open and writes the dedicated
-  // audit entry; this just applies the column. Explicit override wins over the
-  // automatic assignment hook below.
-  if ("exportStatementMonth" in input) {
-    sets.push("export_statement_month = ?");
-    binds.push(input.exportStatementMonth ?? null);
-  }
-  if ("expenseCategoryCode" in input) { sets.push("expense_category_code = ?"); binds.push(input.expenseCategoryCode ?? null); }
-  if ("sourceType" in input) { sets.push("source_type = ?"); binds.push(input.sourceType ?? null); }
-  if ("invoiceRegistrationNumber" in input) { sets.push("invoice_registration_number = ?"); binds.push(input.invoiceRegistrationNumber ?? null); }
-  if ("counterpartyName" in input) { sets.push("counterparty_name = ?"); binds.push(input.counterpartyName ?? null); }
-  if ("taxRate" in input) { sets.push("tax_rate = ?"); binds.push(input.taxRate ?? null); }
-  if ("qualifiedInvoiceStatus" in input) { sets.push("qualified_invoice_status = ?"); binds.push(input.qualifiedInvoiceStatus ?? "not_checked"); }
-  if (input.extractionState !== undefined) { sets.push("extraction_state = ?"); binds.push(input.extractionState); }
-  if ("extractionEnqueuedAt" in input) { sets.push("extraction_enqueued_at = ?"); binds.push(input.extractionEnqueuedAt ?? null); }
-  if ("extractionProcessedAt" in input) { sets.push("extraction_processed_at = ?"); binds.push(input.extractionProcessedAt ?? null); }
-  if (input.extractionAttempts !== undefined) { sets.push("extraction_attempts = ?"); binds.push(input.extractionAttempts); }
-  if ("extractionProcessor" in input) { sets.push("extraction_processor = ?"); binds.push(input.extractionProcessor ?? null); }
-
-  // ADR 0001 root-cause guard: advancing a receipt past extraction (e.g. a
-  // human reviews a still-queued capture before the consumer drains it) must
-  // clear any stale pending extraction_state, or listPendingProcessingReceipts
-  // keeps the month-close gate blocked forever — and the consumer later acks the
-  // now-409 message without fixing it. Only when the caller didn't set the state
-  // itself and the row is still pending.
-  if (
-    input.status !== undefined &&
-    input.status !== "captured" &&
-    input.extractionState === undefined &&
-    before.extraction_state !== undefined &&
-    PENDING_EXTRACTION_STATES.includes(before.extraction_state)
-  ) {
-    sets.push("extraction_state = 'processed'");
-  }
-
+  // No receipt-field changes (e.g. an attendees-only PATCH after compaction):
+  // do NOT run a synthetic/empty UPDATE and do NOT emit a generic receipt.updated
+  // audit. The attendee mutation's own audit (written by the route via
+  // createAttendees) is authoritative; the membership hook is skipped too (no
+  // assignment on a no-op). The route still performs the attendee mutation and
+  // returns the receipt.
   if (sets.length === 0) return;
 
   sets.push("updated_at = ?");
@@ -334,9 +363,9 @@ export async function updateReceiptRecord(
   const membershipDate = postPatchMembershipDate({
     effectivePaymentPath,
     beforeExportStatementMonth: before.export_statement_month ?? null,
-    explicitOverrideInInput: "exportStatementMonth" in input,
+    explicitOverrideInInput: input.exportStatementMonth !== undefined,
     effectiveTransactionDate:
-      ("transactionDate" in input ? input.transactionDate : before.transaction_date) ?? null,
+      (input.transactionDate !== undefined ? input.transactionDate : before.transaction_date) ?? null,
   });
   if (membershipDate) {
     try {

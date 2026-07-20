@@ -41,8 +41,9 @@ import type { PaymentPath, ReceiptRecord } from "@/lib/receipts/types";
  * shipped AND have no open draft revision (the isMonthLockedForEdits
  * condition). Roll-forward and the override both treat these as closed targets.
  */
-export async function loadSealedExportMonths(): Promise<Set<string>> {
-  const db = getReceiptsDb();
+export async function loadSealedExportMonths(
+  db: D1Database = getReceiptsDb(),
+): Promise<Set<string>> {
   const res = await db
     .prepare(
       `SELECT export_month FROM receipt_exports
@@ -175,20 +176,26 @@ export async function assignMembershipForReceipt(
   receiptId: string,
   transactionDate: string | null,
   actor: string,
+  db: D1Database = getReceiptsDb(),
 ): Promise<AssignmentResult | null> {
   if (!transactionDate || !naturalMonth(transactionDate)) return null;
-  const sealedMonths = await loadSealedExportMonths();
+  const sealedMonths = await loadSealedExportMonths(db);
   const result = assignReceiptMembership(transactionDate, sealedMonths, {
     rollForward: true,
   });
-  const db = getReceiptsDb();
-  await db
+  // Conditional UPDATE gated on export_statement_month IS NULL: a lost race or
+  // an already-assigned row changes 0 rows. Only audit (and report success) when
+  // a row actually changed — never emit a false assignment audit.
+  const updateResult = await db
     .prepare(
       `UPDATE receipt_records SET export_statement_month = ?, updated_at = ?
        WHERE id = ? AND export_statement_month IS NULL`,
     )
     .bind(result.month, nowIso(), receiptId)
     .run();
+  if ((updateResult.meta.changes ?? 0) === 0) {
+    return null;
+  }
   await createAuditEntry(db, {
     actor,
     action:
