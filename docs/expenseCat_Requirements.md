@@ -45,9 +45,10 @@ Seed this exact list:
 | `payment_fees` | 支払手数料 | Payment and service fees | false | false |
 | `rent_lease` | 賃借料 | Rent and lease expenses | false | false |
 | `insurance` | 保険料 | Insurance premiums | false | false |
+| `research_development` | 研究開発費 | Research & Development | false | false |
 | `miscellaneous` | 雑費 | Miscellaneous expenses | false | false |
 
-Note (2026-07): `miscellaneous` (雑費) added as the 15th canonical category (migration 0018). The code is deliberately not `misc` — legacy `misc` values continue to map to null (require review).
+Note (2026-07): `miscellaneous` (雑費) added as the 15th canonical category (migration 0018). The code is deliberately not `misc` — legacy `misc` values continue to map to null (require review). Note (2026-07-20): `research_development` (研究開発費) added as the 16th canonical category (migration 0031), ordered immediately before `miscellaneous` at display_order 150; `miscellaneous` moved to display_order 160. Legacy `research` still maps to `newspapers_books` — only this canonical code is R&D.
 
 ---
 
@@ -305,7 +306,9 @@ type ExpenseCategoryCode =
   | "membership_dues"
   | "payment_fees"
   | "rent_lease"
-  | "insurance";
+  | "insurance"
+  | "research_development"
+  | "miscellaneous";
 ```
 
 If uncertain:
@@ -424,7 +427,7 @@ Attendees: David Klan (Dazbeez), Jane Smith (Client Co.)
 
 Add `expense_categories` table if one does not already exist.
 
-Seed all 14 categories idempotently.
+Seed all 16 categories idempotently.
 
 ### Task 2: Add Category References
 
@@ -494,7 +497,7 @@ Add tests for category seed, UI rendering, attendee requirements, AI category va
 
 Add or update tests for:
 
-1. Category seed contains all 14 Japanese categories.
+1. Category seed contains all 16 Japanese categories.
 2. Each category has an English translation.
 3. Category selector renders Japanese and English labels.
 4. Receipt review saves `expense_category_code`.
@@ -518,7 +521,7 @@ npm run build:cf
 
 ## Acceptance Criteria
 
-1. All 14 Japanese categories are maintained in the system.
+1. All 16 Japanese categories are maintained in the system.
 2. Each category has a stable code and English translation.
 3. The category list is stored in the system, not duplicated in UI components.
 4. Receipt review uses this category list.

@@ -16,6 +16,7 @@ export type ExpenseCategoryCode =
   | "payment_fees"
   | "rent_lease"
   | "insurance"
+  | "research_development"
   | "miscellaneous";
 
 export interface ExpenseCategory {
@@ -42,11 +43,12 @@ export const EXPENSE_CATEGORIES: ExpenseCategory[] = [
   { code: "payment_fees",          jaName: "支払手数料",   enName: "Payment and service fees",            requiresAttendees: false, defaultBusinessTripEligible: false, displayOrder: 120 },
   { code: "rent_lease",            jaName: "賃借料",       enName: "Rent and lease expenses",             requiresAttendees: false, defaultBusinessTripEligible: false, displayOrder: 130 },
   { code: "insurance",             jaName: "保険料",       enName: "Insurance premiums",                  requiresAttendees: false, defaultBusinessTripEligible: false, displayOrder: 140 },
+  { code: "research_development",  jaName: "研究開発費",   enName: "Research & Development",              requiresAttendees: false, defaultBusinessTripEligible: false, displayOrder: 150 },
   // NOTE: deliberately "miscellaneous", not "misc" — legacy free-text "misc"
   // values map to null in LEGACY_CATEGORY_MAP (require review), and
   // mapLegacyCategory() checks isCanonicalCode() first. A canonical code
   // named "misc" would silently legitimize old dumping-ground data.
-  { code: "miscellaneous",         jaName: "雑費",         enName: "Miscellaneous expenses",              requiresAttendees: false, defaultBusinessTripEligible: false, displayOrder: 150 },
+  { code: "miscellaneous",         jaName: "雑費",         enName: "Miscellaneous expenses",              requiresAttendees: false, defaultBusinessTripEligible: false, displayOrder: 160 },
 ];
 
 export const EXPENSE_CATEGORY_CODES = new Set<string>(EXPENSE_CATEGORIES.map((c) => c.code));
