@@ -531,6 +531,91 @@ export async function listAllReceiptsInMonth(
   }
 }
 
+// Projected column list for the Reconcile candidate read. Excludes the two
+// heavy text/JSON blobs the reconcile path does not read — `search_text`
+// (full-text search copy) and `compliance_warnings_json` — to keep the
+// month-window read lean. `extraction_json` IS included: the matcher's
+// brand-on-receipt fallback (reconciliation.ts rawTextOf) reads rawText from it.
+const RECONCILE_RECEIPT_COLUMNS =
+  "id, captured_at, captured_by, source, original_filename, " +
+  "payment_path, expense_type, transaction_date, merchant, amount_minor, " +
+  "currency, tax_amount_minor, business_purpose, alcohol_present, " +
+  "attendees_required, status, original_r2_key, original_sha256, " +
+  "original_content_type, original_size_bytes, processed_r2_key, " +
+  "extraction_json, legacy, exported_month, export_statement_month, " +
+  "expense_category_code, deleted_at, deleted_by, delete_reason, " +
+  "retention_until, legal_hold, source_type, preservation_status, " +
+  "confirmed_at, confirmed_by, invoice_registration_number, " +
+  "invoice_registration_status, qualified_invoice_status, tax_rate, " +
+  "counterparty_name, extraction_state, extraction_enqueued_at, " +
+  "extraction_processed_at, extraction_attempts, extraction_processor, " +
+  "extraction_r2_key, needs_render";
+
+/**
+ * Exhaustive AMEX receipt read for the Reconcile candidate window — REPLACES
+ * the old global newest-200 query (audit 2026-07-21 Phase 1, Part D). Returns
+ * EVERY non-deleted AMEX receipt dated in [start, end] PLUS every non-deleted
+ * AMEX receipt with a NULL transaction_date. Undated receipts (pending
+ * extraction — the rows most needing review) are fetched in a SEPARATE query so
+ * the dated BETWEEN clause keeps using the transaction_date index (and so undated
+ * retrieval stays distinct from dated window candidates, per Part D).
+ *
+ * Never silently truncates: pages internally and THROWS if the combined set
+ * reaches `hardCap` (default 5000), since a truncated reconcile view would hide
+ * real receipts. extraction_json is included (matcher rawText fallback);
+ * search_text and compliance_warnings_json are projected out (unused here).
+ */
+export async function listAmexReceiptsForReconcile(
+  window: { start: string; end: string },
+  opts: { hardCap?: number } = {},
+): Promise<ReceiptRecord[]> {
+  const db = getReceiptsDb();
+  const hardCap = opts.hardCap ?? 5000;
+  const PAGE = 500;
+  const out: ReceiptRecord[] = [];
+
+  // Dated in-window (index-backed via idx_receipts_transaction_date).
+  let offset = 0;
+  for (;;) {
+    const page = await db
+      .prepare(
+        `SELECT ${RECONCILE_RECEIPT_COLUMNS} FROM receipt_records
+         WHERE deleted_at IS NULL AND payment_path = 'AMEX'
+           AND transaction_date BETWEEN ? AND ?
+         ORDER BY transaction_date ASC LIMIT ? OFFSET ?`,
+      )
+      .bind(window.start, window.end, PAGE, offset)
+      .all<ReceiptRecord>();
+    const rows = page.results ?? [];
+    out.push(...rows);
+    if (rows.length < PAGE) break;
+    offset += PAGE;
+    if (out.length >= hardCap) {
+      throw new Error(
+        `listAmexReceiptsForReconcile(${window.start}..${window.end}) hit the hard cap of ${hardCap} dated rows — silent truncation would hide receipts from reconcile. Inspect the data or raise the cap.`,
+      );
+    }
+  }
+
+  // Undated (separate query — see javadoc). Small in practice (pending queue).
+  const undated = await db
+    .prepare(
+      `SELECT ${RECONCILE_RECEIPT_COLUMNS} FROM receipt_records
+       WHERE deleted_at IS NULL AND payment_path = 'AMEX'
+         AND transaction_date IS NULL`,
+    )
+    .all<ReceiptRecord>();
+  out.push(...(undated.results ?? []));
+
+  if (out.length >= hardCap) {
+    throw new Error(
+      `listAmexReceiptsForReconcile(${window.start}..${window.end}) hit the hard cap of ${hardCap} after union with undated rows — silent truncation would hide receipts from reconcile.`,
+    );
+  }
+
+  return out;
+}
+
 // Extraction-queue data access (listPendingProcessingReceipts +
 // reconcileExtractionState) lives in lib/receipts/extraction-queue-db.ts now;
 // re-exported here so existing @/lib/receipts/db import sites are unchanged.

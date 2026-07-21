@@ -194,15 +194,49 @@ starts. Design consequences:
    finalized-reconciliation guard also locks receipt edits. Resolution
    path: unfinalize 2026-05 → set receipt category → re-finalize. Verify
    an unfinalize flow exists before attempting.
-8. **Orphan classification: "upcoming" vs. true orphan.** The current 16
-   orphan receipts are all dated after the 2026-07 AMEX statement period —
-   they aren't errors, just receipts awaiting the next statement. Classify
-   orphans by date: receipt date after the latest statement period →
-   "upcoming" (expected to match when the next statement arrives); receipt
-   date within an existing statement's period → true orphan (needs
-   investigation). Derive at query time (no stored flag) so classification
-   flips automatically when a new statement lands. Surface the distinction
-   in reconcile/queue views so upcoming receipts don't read as problems.
+8. **Orphan classification: "upcoming" vs. true orphan.** Classify orphans by
+   date: receipt date after the latest statement period → "upcoming" (expected
+   to match when the next statement arrives); receipt date within an existing
+   statement's period → true orphan (needs investigation). Derive at query time
+   (no stored flag) so classification flips automatically when a new statement
+   lands. Surface the distinction in reconcile/queue views so upcoming receipts
+   don't read as problems.
+   HISTORY (2026-07-05): at that time the 16 orphan receipts observed were all
+   dated after the 2026-07 AMEX statement period — they weren't errors, just
+   receipts awaiting the next statement. That "all upcoming" framing was true
+   for that one snapshot.
+   AUDIT (2026-07-21, read-only): no longer true. The default reconcile month is
+   now 2026-08 (12 orphans). The 2026-08 orphan population is dominated by
+   **possible AMEX re-captures** (same canonical merchant + currency + amount +
+   date, distinct files — e.g. a HOLIDAY SKY LOUNGE ¥10680 triple, a 岡芳商店
+   ¥3862 triple) and **cross-month leakage** (a receipt confirmed in 2026-07
+   whose status drifted to "reviewed" appeared as a 2026-08 orphan because the
+   page built its linked-set from the displayed month only). Other live
+   duplicates: ロトンド / ブラチェリアロトンド and PERFECT / PBK四ッ谷
+   descriptor-vs-legal-name pairs, a NFCTAGS mobile-photo + desktop-PDF
+   cross-channel pair, and a MIURA re-capture of an already-exported receipt.
+   NOTE: the audit did **not** complete visual comparison of the receipt images
+   (the local viewer did not render and images were not sent to a third-party
+   vision service), so these are metadata-strong **possible** duplicates, not
+   pixel-confirmed. A legitimate JR round-trip (two ¥4280 えきねっと charges,
+   one day apart, reconciled to two distinct lines) must not be mislabeled.
+   PHASE 1 IMPLEMENTED ON BRANCH — NOT YET MERGED OR DEPLOYED: (a)
+   status-downgrade prevention — the public review PATCH owns only
+   captured/needs_review→reviewed, and ordinary autosaves omit status
+   (lib/receipts/receipt-status-policy.ts); (b)
+   cross-month false-orphan removal — receipts claimed by a matched/confirmed
+   line in another statement month are excluded from candidates and orphans,
+   keyed on the AMEX line relationship not receipt.status
+   (lib/receipts/cross-month-claims.ts); (c) honest classification — only true
+   in-period unmatched receipts count as "Orphan receipts"; leading-slack,
+   upcoming, and undated are separate labeled sections
+   (lib/receipts/orphan-classification.ts); (d) the global newest-200 AMEX
+   query is replaced by an exhaustive windowed read with a hard cap that throws
+   loudly (listAmexReceiptsForReconcile in db.ts); (e) non-blocking AMEX
+   possible-duplicate badges in Reconcile (lib/receipts/amex-duplicates.ts) —
+   never auto-matches/deletes. Open data-cleanup (operator action, NOT in this
+   code-only phase): the stray duplicate receipts identified by the audit still
+   need manual delete-after-review; no production data was mutated.
 9. **Consumer poison-pill handling + DLQ.** Undecodable files (pre-PDF-fix:
    PIL UnidentifiedImageError) fall into the generic retry path and redeliver
    until max-deliveries silently drops them — receipt stuck at
