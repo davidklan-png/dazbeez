@@ -194,6 +194,7 @@ function buildInput(
     // Category-driven attendee requirement (correction §3) — never hardcoded.
     attendeesRequired: requiresAttendees(row.expense_category_code),
     attendeesCount: signals.attendeesCount,
+    alcoholPresent: row.alcohol_present === 1,
     extractionState: row.extraction_state ?? null,
     hasOriginalFile: Boolean(row.original_r2_key),
     hasProofFile: signals.hasProofFile,
