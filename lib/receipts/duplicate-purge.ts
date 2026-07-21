@@ -433,9 +433,36 @@ export function rewriteSourceIds(
   const ids = parseSourceIds(json);
   if (ids === null) return null; // malformed (aborted earlier, not here)
   if (!ids.includes(targetId)) return null; // LIKE false positive → untouched
-  const next = ids.filter((x) => x !== targetId);
-  if (!next.includes(retainedId)) next.push(retainedId);
+  // §5: deduplicate the COMPLETE resulting ID list preserving first-seen order,
+  // remove the target, and ensure retained appears exactly once.
+  const seen = new Set<string>();
+  const next: string[] = [];
+  for (const id of ids) {
+    if (id === targetId) continue;
+    if (!seen.has(id)) {
+      seen.add(id);
+      next.push(id);
+    }
+  }
+  if (!seen.has(retainedId)) next.push(retainedId);
   return { rewritten: JSON.stringify(next) };
+}
+
+/** §4: Pure cluster-ID normalization (testable without Clerk/route). */
+export function normalizeClusterIds(
+  rawIds: string[],
+): { ok: true; ids: string[] } | { ok: false; error: string; status: 400 } {
+  const ids = rawIds.filter((s) => s.trim().length > 0);
+  if (ids.length < 2) {
+    return { ok: false, error: "Provide at least 2 ids.", status: 400 };
+  }
+  if (new Set(ids).size !== ids.length) {
+    return { ok: false, error: "Duplicate receipt IDs in cluster request.", status: 400 };
+  }
+  if (ids.length > PURGE_TARGET_CAP + 1) {
+    return { ok: false, error: `Cluster too large (${ids.length} ids); max is ${PURGE_TARGET_CAP + 1}.`, status: 400 };
+  }
+  return { ok: true, ids };
 }
 
 // ─── D1 batch builder (one atomic batch for all targets) ────────────────────

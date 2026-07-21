@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { requireReceiptsActor } from "@/lib/receipts/auth";
 import { getReceiptsDb } from "@/lib/cloudflare-runtime";
 import { recommendRetention } from "@/lib/receipts/duplicate-resolution-policy";
-import { fetchMemberAssessment, PURGE_TARGET_CAP } from "@/lib/receipts/duplicate-purge";
+import { fetchMemberAssessment, normalizeClusterIds } from "@/lib/receipts/duplicate-purge";
 
 // GET /api/receipts/duplicates/cluster?ids=a,b,c
 // Server-computed comparison + retention recommendation as an explicit JSON DTO
@@ -15,26 +15,18 @@ export async function GET(request: Request) {
   try {
     await requireReceiptsActor(request.headers);
     const db = getReceiptsDb();
-    const ids =
+    const rawIds =
       new URL(request.url).searchParams
         .get("ids")
         ?.split(",")
         .map((s) => s.trim())
         .filter(Boolean) ?? [];
-    if (ids.length < 2) {
-      return NextResponse.json({ error: "Provide at least 2 ids." }, { status: 400 });
+    // §4: pure cluster-ID normalization (testable without Clerk/route).
+    const norm = normalizeClusterIds(rawIds);
+    if (!norm.ok) {
+      return NextResponse.json({ error: norm.error }, { status: norm.status });
     }
-    // §7: reject duplicate IDs.
-    if (new Set(ids).size !== ids.length) {
-      return NextResponse.json({ error: "Duplicate receipt IDs in cluster request." }, { status: 400 });
-    }
-    // §7: cap at retained + PURGE_TARGET_CAP (max 1 + 10 = 11).
-    if (ids.length > PURGE_TARGET_CAP + 1) {
-      return NextResponse.json(
-        { error: `Cluster too large (${ids.length} ids); max is ${PURGE_TARGET_CAP + 1}.` },
-        { status: 400 },
-      );
-    }
+    const ids = norm.ids;
 
     const members = [];
     for (const id of ids) {

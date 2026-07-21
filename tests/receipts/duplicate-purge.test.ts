@@ -470,3 +470,272 @@ test("§5 trigger: request-wide multi-target atomic — target 2 fails → targe
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM receipt_records WHERE id='t1'").get().n, 1, "t1 must survive");
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM receipt_records WHERE id='t2'").get().n, 1, "t2 must survive");
 });
+
+// ─── §1: Insert-time guard tests ─────────────────────────────────────────────
+
+test("§1 insert guard: missing/hard-deleted target → rollback, no tombstone", () => {
+  const db = setupTestDb();
+  insertReceipt(db, "retained", { updated_at: "v1", status: "reconciled" });
+  // target NOT inserted (simulates hard-delete before batch).
+  assert.throws(() => {
+    db.exec("BEGIN");
+    db.prepare(`INSERT INTO duplicate_purge_log (id, purged_receipt_id, retained_receipt_id, actor, reason, duplicate_strength, expected_updated_at, retained_expected_updated_at, legal_hold_exception_acknowledged, status, created_at)
+                VALUES ('j','target','retained','op','dup','strong','v1','v1',1,'d1_pending','now')`).run();
+    db.exec("COMMIT");
+  }, /duplicate-purge/i);
+  try { db.exec("ROLLBACK"); } catch { /* */ }
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM duplicate_purge_log").get().n, 0, "no tombstone");
+});
+
+test("§1 insert guard: legal_hold_exception_acknowledged=0 → rollback", () => {
+  const db = setupTestDb();
+  insertReceipt(db, "retained", { updated_at: "v1", status: "reconciled" });
+  insertReceipt(db, "target", { updated_at: "v1", status: "reviewed" });
+  assert.throws(() => {
+    db.exec("BEGIN");
+    db.prepare(`INSERT INTO duplicate_purge_log (id, purged_receipt_id, retained_receipt_id, actor, reason, duplicate_strength, expected_updated_at, retained_expected_updated_at, legal_hold_exception_acknowledged, status, created_at)
+                VALUES ('j','target','retained','op','dup','strong','v1','v1',0,'d1_pending','now')`).run();
+    db.exec("COMMIT");
+  }, /legal_hold/i);
+  try { db.exec("ROLLBACK"); } catch { /* */ }
+});
+
+test("§1 insert guard: replay/second tombstone for same purged_receipt_id → UNIQUE", () => {
+  const db = setupTestDb();
+  insertReceipt(db, "retained", { updated_at: "v1", status: "reconciled" });
+  insertReceipt(db, "target", { updated_at: "v1", status: "reviewed" });
+  const ins = `INSERT INTO duplicate_purge_log (id, purged_receipt_id, retained_receipt_id, actor, reason, duplicate_strength, expected_updated_at, retained_expected_updated_at, legal_hold_exception_acknowledged, status, created_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?)`;
+  // First insert succeeds.
+  db.prepare(ins).run("j1", "target", "retained", "op", "dup", "strong", "v1", "v1", 1, "completed", "now");
+  // Second insert for the same purged_receipt_id fails on UNIQUE.
+  assert.throws(
+    () => db.prepare(ins).run("j2", "target", "retained", "op", "dup", "strong", "v1", "v1", 1, "d1_pending", "now"),
+    /UNIQUE/i,
+  );
+});
+
+// ─── §3: TOCTOU transfer/trigger tests ───────────────────────────────────────
+
+test("§3 business-trip: new link transferred to retained at write time", () => {
+  const db = setupTestDb();
+  insertReceipt(db, "retained", { updated_at: "v1", status: "reconciled" });
+  insertReceipt(db, "target", { updated_at: "v1", status: "reviewed" });
+  db.prepare("INSERT INTO business_trip_reports (id) VALUES ('trip1')").run();
+  db.prepare("INSERT INTO business_trip_report_receipts (id, business_trip_report_id, receipt_id, created_at) VALUES ('lr1','trip1','target','now')").run();
+  db.exec("BEGIN");
+  // Same SQL as buildAtomicBatch.
+  db.prepare(`INSERT OR IGNORE INTO business_trip_report_receipts (id, business_trip_report_id, receipt_id, created_at)
+               SELECT 'purge-' || ? || '-' || business_trip_report_id, business_trip_report_id, ?, ? FROM business_trip_report_receipts WHERE receipt_id = ?`)
+    .run("target", "retained", "now", "target");
+  db.prepare("DELETE FROM business_trip_report_receipts WHERE receipt_id = ?").run("target");
+  db.prepare(`INSERT INTO duplicate_purge_log (id, purged_receipt_id, retained_receipt_id, actor, reason, duplicate_strength, expected_updated_at, retained_expected_updated_at, legal_hold_exception_acknowledged, status, created_at)
+               VALUES ('j','target','retained','op','dup','strong','v1','v1',1,'d1_pending','now')`).run();
+  db.prepare("DELETE FROM receipt_records WHERE id = 'target'").run();
+  db.prepare("UPDATE duplicate_purge_log SET status='storage_pending' WHERE id='j'").run();
+  db.exec("COMMIT");
+  // Trip link transferred to retained, not lost.
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM business_trip_report_receipts WHERE receipt_id='retained'").get().n, 1);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM business_trip_report_receipts WHERE receipt_id='target'").get().n, 0);
+});
+
+test("§3 residual: business-trip link at DELETE → abort", () => {
+  const db = setupTestDb();
+  insertReceipt(db, "retained", { updated_at: "v1", status: "reconciled" });
+  insertReceipt(db, "target", { updated_at: "v1", status: "reviewed" });
+  db.prepare("INSERT INTO business_trip_reports (id) VALUES ('trip1')").run();
+  db.prepare("INSERT INTO business_trip_report_receipts (id, business_trip_report_id, receipt_id, created_at) VALUES ('lr1','trip1','target','now')").run();
+  // Skip the transfer + delete (simulate cleanup omission).
+  assert.throws(() => {
+    db.exec("BEGIN");
+    db.prepare(`INSERT INTO duplicate_purge_log (id, purged_receipt_id, retained_receipt_id, actor, reason, duplicate_strength, expected_updated_at, retained_expected_updated_at, legal_hold_exception_acknowledged, status, created_at)
+                VALUES ('j','target','retained','op','dup','strong','v1','v1',1,'d1_pending','now')`).run();
+    db.prepare("DELETE FROM receipt_records WHERE id = 'target'").run();
+    db.exec("COMMIT");
+  }, /residual business-trip/i);
+  try { db.exec("ROLLBACK"); } catch { /* */ }
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM receipt_records WHERE id='target'").get().n, 1);
+});
+
+test("§3 residual: email-intake reference → abort", () => {
+  const db = setupTestDb();
+  insertReceipt(db, "retained", { updated_at: "v1", status: "reconciled" });
+  insertReceipt(db, "target", { updated_at: "v1", status: "reviewed" });
+  db.prepare("INSERT INTO email_receipt_intake (id, promoted_receipt_id) VALUES ('e1','target')").run();
+  assert.throws(() => {
+    db.exec("BEGIN");
+    db.prepare(`INSERT INTO duplicate_purge_log (id, purged_receipt_id, retained_receipt_id, actor, reason, duplicate_strength, expected_updated_at, retained_expected_updated_at, legal_hold_exception_acknowledged, status, created_at)
+                VALUES ('j','target','retained','op','dup','strong','v1','v1',1,'d1_pending','now')`).run();
+    db.prepare("DELETE FROM receipt_records WHERE id = 'target'").run();
+    db.exec("COMMIT");
+  }, /residual email/i);
+  try { db.exec("ROLLBACK"); } catch { /* */ }
+});
+
+test("§3 category-rule: unrelated malformed JSON does NOT block", () => {
+  const db = setupTestDb();
+  insertReceipt(db, "retained", { updated_at: "v1", status: "reconciled" });
+  insertReceipt(db, "target", { updated_at: "v1", status: "reviewed" });
+  // Unrelated rule with malformed JSON (doesn't contain target).
+  db.prepare("INSERT INTO merchant_category_rules (id, source_receipt_ids_json) VALUES ('r1','{bad json}')").run();
+  db.exec("BEGIN");
+  db.prepare(`INSERT INTO duplicate_purge_log (id, purged_receipt_id, retained_receipt_id, actor, reason, duplicate_strength, expected_updated_at, retained_expected_updated_at, legal_hold_exception_acknowledged, status, created_at)
+              VALUES ('j','target','retained','op','dup','strong','v1','v1',1,'d1_pending','now')`).run();
+  db.prepare("DELETE FROM receipt_records WHERE id = 'target'").run();
+  db.prepare("UPDATE duplicate_purge_log SET status='storage_pending' WHERE id='j'").run();
+  db.exec("COMMIT");
+  // Succeeded — unrelated malformed rule didn't block.
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM receipt_records WHERE id='target'").get().n, 0);
+});
+
+test("§3 category-rule: malformed JSON containing target → abort", () => {
+  const db = setupTestDb();
+  insertReceipt(db, "retained", { updated_at: "v1", status: "reconciled" });
+  insertReceipt(db, "target", { updated_at: "v1", status: "reviewed" });
+  // Rule with malformed JSON containing the target substring.
+  db.prepare("INSERT INTO merchant_category_rules (id, source_receipt_ids_json) VALUES ('r1','{target bad}')").run();
+  assert.throws(() => {
+    db.exec("BEGIN");
+    db.prepare(`INSERT INTO duplicate_purge_log (id, purged_receipt_id, retained_receipt_id, actor, reason, duplicate_strength, expected_updated_at, retained_expected_updated_at, legal_hold_exception_acknowledged, status, created_at)
+                VALUES ('j','target','retained','op','dup','strong','v1','v1',1,'d1_pending','now')`).run();
+    db.prepare("DELETE FROM receipt_records WHERE id = 'target'").run();
+    db.exec("COMMIT");
+  }, /malformed category/i);
+  try { db.exec("ROLLBACK"); } catch { /* */ }
+});
+
+test("§3 category-rule: changed valid JSON still containing target → abort", () => {
+  const db = setupTestDb();
+  insertReceipt(db, "retained", { updated_at: "v1", status: "reconciled" });
+  insertReceipt(db, "target", { updated_at: "v1", status: "reviewed" });
+  // Prefetched value was '["target"]'. Optimistic UPDATE with old value → 0 rows.
+  // But the rule now has '["target","extra"]' (changed, still contains target).
+  // The optimistic UPDATE doesn't fire → residual check catches it.
+  db.prepare("INSERT INTO merchant_category_rules (id, source_receipt_ids_json) VALUES ('r1','[\"target\",\"extra\"]')").run();
+  assert.throws(() => {
+    db.exec("BEGIN");
+    // Optimistic UPDATE with the old value (won't match the changed value).
+    db.prepare("UPDATE merchant_category_rules SET source_receipt_ids_json = ? WHERE id = ? AND source_receipt_ids_json = ?")
+      .run('["retained"]', 'r1', '["target"]'); // old value → 0 rows updated.
+    db.prepare(`INSERT INTO duplicate_purge_log (id, purged_receipt_id, retained_receipt_id, actor, reason, duplicate_strength, expected_updated_at, retained_expected_updated_at, legal_hold_exception_acknowledged, status, created_at)
+                VALUES ('j','target','retained','op','dup','strong','v1','v1',1,'d1_pending','now')`).run();
+    db.prepare("DELETE FROM receipt_records WHERE id = 'target'").run();
+    db.exec("COMMIT");
+  }, /duplicate-purge/i);
+  try { db.exec("ROLLBACK"); } catch { /* */ }
+});
+
+test("§3 category-rule: changed rule no longer containing target → untouched + permits deletion", () => {
+  const db = setupTestDb();
+  insertReceipt(db, "retained", { updated_at: "v1", status: "reconciled" });
+  insertReceipt(db, "target", { updated_at: "v1", status: "reviewed" });
+  // Rule no longer contains target (concurrently removed).
+  db.prepare("INSERT INTO merchant_category_rules (id, source_receipt_ids_json) VALUES ('r1','[\"other\"]')").run();
+  db.exec("BEGIN");
+  db.prepare(`INSERT INTO duplicate_purge_log (id, purged_receipt_id, retained_receipt_id, actor, reason, duplicate_strength, expected_updated_at, retained_expected_updated_at, legal_hold_exception_acknowledged, status, created_at)
+              VALUES ('j','target','retained','op','dup','strong','v1','v1',1,'d1_pending','now')`).run();
+  db.prepare("DELETE FROM receipt_records WHERE id = 'target'").run();
+  db.prepare("UPDATE duplicate_purge_log SET status='storage_pending' WHERE id='j'").run();
+  db.exec("COMMIT");
+  // Succeeded — rule doesn't contain target so no residual.
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM receipt_records WHERE id='target'").get().n, 0);
+  // Rule untouched.
+  assert.equal(db.prepare("SELECT source_receipt_ids_json FROM merchant_category_rules WHERE id='r1'").get().source_receipt_ids_json, '["other"]');
+});
+
+test("§3 receipt_files: new row after inventory → abort", () => {
+  const db = setupTestDb();
+  insertReceipt(db, "retained", { updated_at: "v1", status: "reconciled" });
+  insertReceipt(db, "target", { updated_at: "v1", status: "reviewed" });
+  // Inventory captured no rows. A new row appeared after inventory.
+  db.prepare("INSERT INTO receipt_files (id, object_type, object_id, role, r2_bucket, r2_key, original_filename, content_type, file_size_bytes, sha256_hash, uploaded_by, uploaded_at, is_original, created_at, updated_at) VALUES ('f1','receipt','target','original','receipts','k.jpg','f','image/jpeg',1,'h','op','now',1,'now','now')").run();
+  assert.throws(() => {
+    db.exec("BEGIN");
+    // No receipt_files DELETE (inventory was empty).
+    db.prepare(`INSERT INTO duplicate_purge_log (id, purged_receipt_id, retained_receipt_id, actor, reason, duplicate_strength, expected_updated_at, retained_expected_updated_at, legal_hold_exception_acknowledged, status, created_at)
+                VALUES ('j','target','retained','op','dup','strong','v1','v1',1,'d1_pending','now')`).run();
+    db.prepare("DELETE FROM receipt_records WHERE id = 'target'").run();
+    db.exec("COMMIT");
+  }, /residual receipt_files/i);
+  try { db.exec("ROLLBACK"); } catch { /* */ }
+});
+
+test("§3 receipt_files: existing row bucket/key changed → abort", () => {
+  const db = setupTestDb();
+  insertReceipt(db, "retained", { updated_at: "v1", status: "reconciled" });
+  insertReceipt(db, "target", { updated_at: "v1", status: "reviewed" });
+  // Inventory captured (id='f1', bucket='receipts', key='old.jpg'). Row changed to 'new.jpg'.
+  db.prepare("INSERT INTO receipt_files (id, object_type, object_id, role, r2_bucket, r2_key, original_filename, content_type, file_size_bytes, sha256_hash, uploaded_by, uploaded_at, is_original, created_at, updated_at) VALUES ('f1','receipt','target','original','receipts','new.jpg','f','image/jpeg',1,'h','op','now',1,'now','now')").run();
+  assert.throws(() => {
+    db.exec("BEGIN");
+    // Compare-and-delete with OLD values (won't match the changed row).
+    db.prepare("DELETE FROM receipt_files WHERE id = ? AND object_type = 'receipt' AND object_id = ? AND r2_bucket = ? AND r2_key = ?")
+      .run("f1", "target", "receipts", "old.jpg"); // 0 rows deleted (key changed).
+    db.prepare(`INSERT INTO duplicate_purge_log (id, purged_receipt_id, retained_receipt_id, actor, reason, duplicate_strength, expected_updated_at, retained_expected_updated_at, legal_hold_exception_acknowledged, status, created_at)
+                VALUES ('j','target','retained','op','dup','strong','v1','v1',1,'d1_pending','now')`).run();
+    db.prepare("DELETE FROM receipt_records WHERE id = 'target'").run();
+    db.exec("COMMIT");
+  }, /residual receipt_files/i);
+  try { db.exec("ROLLBACK"); } catch { /* */ }
+});
+
+test("§3 receipt_files: unchanged exact compare-and-delete → permits deletion", () => {
+  const db = setupTestDb();
+  insertReceipt(db, "retained", { updated_at: "v1", status: "reconciled" });
+  insertReceipt(db, "target", { updated_at: "v1", status: "reviewed" });
+  db.prepare("INSERT INTO receipt_files (id, object_type, object_id, role, r2_bucket, r2_key, original_filename, content_type, file_size_bytes, sha256_hash, uploaded_by, uploaded_at, is_original, created_at, updated_at) VALUES ('f1','receipt','target','original','receipts','exact.jpg','f','image/jpeg',1,'h','op','now',1,'now','now')").run();
+  db.exec("BEGIN");
+  db.prepare("DELETE FROM receipt_files WHERE id = ? AND object_type = 'receipt' AND object_id = ? AND r2_bucket = ? AND r2_key = ?")
+    .run("f1", "target", "receipts", "exact.jpg");
+  db.prepare(`INSERT INTO duplicate_purge_log (id, purged_receipt_id, retained_receipt_id, actor, reason, duplicate_strength, expected_updated_at, retained_expected_updated_at, legal_hold_exception_acknowledged, status, created_at)
+              VALUES ('j','target','retained','op','dup','strong','v1','v1',1,'d1_pending','now')`).run();
+  db.prepare("DELETE FROM receipt_records WHERE id = 'target'").run();
+  db.prepare("UPDATE duplicate_purge_log SET status='storage_pending' WHERE id='j'").run();
+  db.exec("COMMIT");
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM receipt_records WHERE id='target'").get().n, 0);
+});
+
+test("§3 residual: attendee row at DELETE → abort", () => {
+  const db = setupTestDb();
+  insertReceipt(db, "retained", { updated_at: "v1", status: "reconciled" });
+  insertReceipt(db, "target", { updated_at: "v1", status: "reviewed" });
+  db.prepare("INSERT INTO receipt_attendees (id, receipt_id, attendee_name, created_at) VALUES ('a1','target','Alice','now')").run();
+  assert.throws(() => {
+    db.exec("BEGIN");
+    db.prepare(`INSERT INTO duplicate_purge_log (id, purged_receipt_id, retained_receipt_id, actor, reason, duplicate_strength, expected_updated_at, retained_expected_updated_at, legal_hold_exception_acknowledged, status, created_at)
+                VALUES ('j','target','retained','op','dup','strong','v1','v1',1,'d1_pending','now')`).run();
+    db.prepare("DELETE FROM receipt_records WHERE id = 'target'").run();
+    db.exec("COMMIT");
+  }, /residual attendees/i);
+  try { db.exec("ROLLBACK"); } catch { /* */ }
+});
+
+test("§3 residual: compliance row at DELETE → abort", () => {
+  const db = setupTestDb();
+  insertReceipt(db, "retained", { updated_at: "v1", status: "reconciled" });
+  insertReceipt(db, "target", { updated_at: "v1", status: "reviewed" });
+  db.prepare("INSERT INTO receipt_compliance_checks (id, object_type, object_id, check_type, status, severity, message, checked_at, created_at) VALUES ('c1','receipt','target','test','open','info','m','now','now')").run();
+  assert.throws(() => {
+    db.exec("BEGIN");
+    db.prepare(`INSERT INTO duplicate_purge_log (id, purged_receipt_id, retained_receipt_id, actor, reason, duplicate_strength, expected_updated_at, retained_expected_updated_at, legal_hold_exception_acknowledged, status, created_at)
+                VALUES ('j','target','retained','op','dup','strong','v1','v1',1,'d1_pending','now')`).run();
+    db.prepare("DELETE FROM receipt_records WHERE id = 'target'").run();
+    db.exec("COMMIT");
+  }, /residual compliance/i);
+  try { db.exec("ROLLBACK"); } catch { /* */ }
+});
+
+test("§3 residual: audit row at DELETE → abort", () => {
+  const db = setupTestDb();
+  insertReceipt(db, "retained", { updated_at: "v1", status: "reconciled" });
+  insertReceipt(db, "target", { updated_at: "v1", status: "reviewed" });
+  db.prepare("INSERT INTO receipt_audit_log (id, actor, action, object_type, object_id, created_at) VALUES ('al1','op','test','receipt','target','now')").run();
+  assert.throws(() => {
+    db.exec("BEGIN");
+    db.prepare(`INSERT INTO duplicate_purge_log (id, purged_receipt_id, retained_receipt_id, actor, reason, duplicate_strength, expected_updated_at, retained_expected_updated_at, legal_hold_exception_acknowledged, status, created_at)
+                VALUES ('j','target','retained','op','dup','strong','v1','v1',1,'d1_pending','now')`).run();
+    db.prepare("DELETE FROM receipt_records WHERE id = 'target'").run();
+    db.exec("COMMIT");
+  }, /residual audit/i);
+  try { db.exec("ROLLBACK"); } catch { /* */ }
+});
