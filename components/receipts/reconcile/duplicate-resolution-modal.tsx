@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { ReceiptImageViewer } from "@/components/receipts/receipt-image-viewer";
 import { Btn } from "@/components/ui/btn";
 import { Pill } from "@/components/ui/pill";
-import { WarningIcon, CheckIcon } from "@/components/ui/icons";
+import { CheckIcon } from "@/components/ui/icons";
 import { assessSelection, type DuplicateMemberInput } from "@/lib/receipts/duplicate-resolution-policy";
 
 export interface ClusterMemberView {

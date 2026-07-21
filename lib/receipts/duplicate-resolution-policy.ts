@@ -300,7 +300,6 @@ export function recommendRetention(
   const retainedReasons: string[] = [];
   if (retainedAssessment.tier === "protected") retainedReasons.push("Protected — cannot purge");
   if (retainedAssessment.tier === "registered") retainedReasons.push("Registered linkage");
-  const tierGroups = new Set(members.map((m) => assessments.get(m.id)!.tierRank));
   // "More complete record" only when it actually won on completeness among its tier.
   const sameTier = members.filter((m) => assessments.get(m.id)!.tierRank === retainedAssessment.tierRank);
   if (sameTier.length > 1 && retainedAssessment.completeness.score === Math.max(...sameTier.map((m) => assessments.get(m.id)!.completeness.score))) {
