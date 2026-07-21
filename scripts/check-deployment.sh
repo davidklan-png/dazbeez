@@ -70,7 +70,19 @@ if [[ -z "${RECEIPTS_PROCESSOR_KEY:-}" ]] && [[ -f "$CONSUMER_ENV" ]]; then
   RECEIPTS_PROCESSOR_KEY="$(grep -E '^RECEIPTS_PROCESSOR_KEY=' "$CONSUMER_ENV" | head -1 | cut -d= -f2-)"
 fi
 # Stable needs_review receipt; override via env if it ever 404s.
-SMOKE_RECEIPT_ID="${SMOKE_RECEIPT_ID:-dabbd12e-b5a9-445d-98c9-3b824c145229}"
+# Dynamically select a valid (non-deleted, with an original file) receipt ID
+# rather than hardcoding one that may be purged. Falls back to a known-good ID.
+SMOKE_RECEIPT_ID="${SMOKE_RECEIPT_ID:-}"
+if [[ -z "$SMOKE_RECEIPT_ID" ]]; then
+  SMOKE_RECEIPT_ID="$(curl -sf \
+    -H "x-receipts-processor-key: ${RECEIPTS_PROCESSOR_KEY:-}" \
+    "${BASE_URL}/api/receipts?limit=1&nonDeleted=true" 2>/dev/null \
+    | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('receipts',[{}])[0].get('id',''))" 2>/dev/null || true)"
+  # Fallback: a known stable receipt that is not a purge target.
+  if [[ -z "$SMOKE_RECEIPT_ID" ]]; then
+    SMOKE_RECEIPT_ID="ea865f68-184d-4114-92a5-094a64cd210c"
+  fi
+fi
 
 if [[ -z "${RECEIPTS_PROCESSOR_KEY:-}" ]]; then
   echo "SKIP /api/receipts/<id>/file (processor-key HEAD): RECEIPTS_PROCESSOR_KEY not set and $CONSUMER_ENV missing"
