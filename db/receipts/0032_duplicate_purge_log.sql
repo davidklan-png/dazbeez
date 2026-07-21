@@ -122,11 +122,28 @@ BEGIN
     FROM duplicate_purge_log j
    WHERE j.purged_receipt_id = OLD.id AND j.status = 'd1_pending'
      AND EXISTS (SELECT 1 FROM email_receipt_intake WHERE promoted_receipt_id = OLD.id);
+  -- §3 hardening: a rule containing the target substring with malformed JSON →
+  -- abort (prevents a bad rule from being silently ignored or poisoning every
+  -- purge via json_each errors).
+  SELECT RAISE(ROLLBACK, 'duplicate-purge guard: malformed category rule containing target')
+    FROM duplicate_purge_log j
+   WHERE j.purged_receipt_id = OLD.id AND j.status = 'd1_pending'
+     AND EXISTS (
+       SELECT 1 FROM merchant_category_rules r
+        WHERE r.source_receipt_ids_json LIKE '%' || OLD.id || '%'
+          AND r.source_receipt_ids_json IS NOT NULL
+          AND json_valid(r.source_receipt_ids_json) = 0
+     );
+  -- Exact membership only over valid JSON (json_valid gates json_each so a
+  -- malformed unrelated rule cannot poison the check).
   SELECT RAISE(ROLLBACK, 'duplicate-purge guard: residual category-rule membership')
     FROM duplicate_purge_log j
    WHERE j.purged_receipt_id = OLD.id AND j.status = 'd1_pending'
      AND EXISTS (
-       SELECT 1 FROM merchant_category_rules r, json_each(r.source_receipt_ids_json)
+       SELECT 1 FROM merchant_category_rules r, json_each(
+         CASE WHEN json_valid(r.source_receipt_ids_json)
+              THEN r.source_receipt_ids_json ELSE '[]' END
+       )
         WHERE r.source_receipt_ids_json LIKE '%' || OLD.id || '%'
           AND json_each.value = OLD.id
      );
@@ -146,4 +163,44 @@ BEGIN
     FROM duplicate_purge_log j
    WHERE j.purged_receipt_id = OLD.id AND j.status = 'd1_pending'
      AND EXISTS (SELECT 1 FROM receipt_audit_log WHERE object_type='receipt' AND object_id = OLD.id);
+END;
+
+-- ─── Insert-time target guard (item 1) ──────────────────────────────────────
+-- Fires when a d1_pending job is created (the first statement of the purge
+-- batch). Prevents the race where the target was hard-deleted by another path
+-- between preflight and batch: the DELETE then matches 0 rows, the BEFORE DELETE
+-- trigger never fires, and the job falsely transitions to storage_pending with
+-- R2 cleanup. This trigger RAISE(ROLLBACK)s the entire batch at INSERT time.
+CREATE TRIGGER IF NOT EXISTS duplicate_purge_guard_before_insert
+BEFORE INSERT ON duplicate_purge_log
+WHEN NEW.status = 'd1_pending'
+BEGIN
+  SELECT RAISE(ROLLBACK, 'duplicate-purge insert guard: legal_hold not acknowledged')
+    WHERE NEW.legal_hold_exception_acknowledged != 1;
+  SELECT RAISE(ROLLBACK, 'duplicate-purge insert guard: target missing/changed')
+    WHERE NOT EXISTS (
+      SELECT 1 FROM receipt_records r
+       WHERE r.id = NEW.purged_receipt_id
+         AND r.deleted_at IS NULL
+         AND r.updated_at = NEW.expected_updated_at
+         AND r.status IN ('captured','needs_review','reviewed')
+    );
+  SELECT RAISE(ROLLBACK, 'duplicate-purge insert guard: target has AMEX claim')
+    WHERE EXISTS (
+      SELECT 1 FROM amex_statement_lines l
+       WHERE l.matched_receipt_id = NEW.purged_receipt_id
+         AND l.match_status IN ('matched','confirmed')
+    );
+  SELECT RAISE(ROLLBACK, 'duplicate-purge insert guard: target has export item')
+    WHERE EXISTS (
+      SELECT 1 FROM receipt_export_items i
+       WHERE i.item_type = 'receipt' AND i.item_id = NEW.purged_receipt_id
+    );
+  SELECT RAISE(ROLLBACK, 'duplicate-purge insert guard: retained missing/changed')
+    WHERE NOT EXISTS (
+      SELECT 1 FROM receipt_records r
+       WHERE r.id = NEW.retained_receipt_id
+         AND r.deleted_at IS NULL
+         AND r.updated_at = NEW.retained_expected_updated_at
+    );
 END;

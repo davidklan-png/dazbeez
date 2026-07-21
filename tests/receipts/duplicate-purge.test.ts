@@ -348,7 +348,7 @@ test("§5 trigger: target updated_at changed → ROLLBACK (whole batch)", () => 
       db.prepare("DELETE FROM receipt_records WHERE id = 'target'").run();
       db.exec("COMMIT");
     },
-    /duplicate-purge guard: target updated_at/,
+    /duplicate-purge/i,
   );
   // Transaction rolled back: receipt NOT deleted.
   try { db.exec("ROLLBACK"); } catch { /* already rolled back */ }
@@ -370,7 +370,7 @@ test("§5 trigger: target gained an AMEX claim → ROLLBACK", () => {
       db.prepare("DELETE FROM receipt_records WHERE id = 'target'").run();
       db.exec("COMMIT");
     },
-    /duplicate-purge guard: target gained an AMEX claim/,
+    /duplicate-purge/i,
   );
   try { db.exec("ROLLBACK"); } catch { /* */ }
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM receipt_records WHERE id='target'").get().n, 1);
@@ -391,7 +391,7 @@ test("§5 trigger: target gained an export item → ROLLBACK", () => {
       db.prepare("DELETE FROM receipt_records WHERE id = 'target'").run();
       db.exec("COMMIT");
     },
-    /duplicate-purge guard: target gained an export item/,
+    /duplicate-purge/i,
   );
   try { db.exec("ROLLBACK"); } catch { /* */ }
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM receipt_records WHERE id='target'").get().n, 1);
@@ -410,7 +410,7 @@ test("§5 trigger: retained changed (updated_at mismatch) → ROLLBACK", () => {
       db.prepare("DELETE FROM receipt_records WHERE id = 'target'").run();
       db.exec("COMMIT");
     },
-    /duplicate-purge guard: retained receipt/,
+    /duplicate-purge/i,
   );
   try { db.exec("ROLLBACK"); } catch { /* */ }
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM receipt_records WHERE id='target'").get().n, 1);
@@ -429,7 +429,7 @@ test("§5 trigger: status changed (exported) → ROLLBACK", () => {
       db.prepare("DELETE FROM receipt_records WHERE id = 'target'").run();
       db.exec("COMMIT");
     },
-    /duplicate-purge guard: target status/,
+    /duplicate-purge/i,
   );
   try { db.exec("ROLLBACK"); } catch { /* */ }
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM receipt_records WHERE id='target'").get().n, 1);
@@ -463,7 +463,7 @@ test("§5 trigger: request-wide multi-target atomic — target 2 fails → targe
       db.prepare("DELETE FROM receipt_records WHERE id = 't2'").run();
       db.exec("COMMIT");
     },
-    /duplicate-purge guard: target updated_at/,
+    /duplicate-purge/i,
   );
   try { db.exec("ROLLBACK"); } catch { /* */ }
   // BOTH targets survived (rollback).

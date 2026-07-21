@@ -279,7 +279,7 @@ export async function fetchMemberAssessment(
 export async function inventoryR2Keys(
   db: D1Database,
   receiptId: string,
-): Promise<{ keys: R2KeyRef[]; originalSha256: string | null; unknownBuckets: string[]; fileRowIds: string[] }> {
+): Promise<{ keys: R2KeyRef[]; originalSha256: string | null; unknownBuckets: string[]; fileRows: Array<{id: string; r2_bucket: string; r2_key: string}> }> {
   const r = await db
     .prepare(`SELECT original_r2_key, processed_r2_key, extraction_r2_key, original_sha256 FROM receipt_records WHERE id = ?`)
     .bind(receiptId)
@@ -304,7 +304,7 @@ export async function inventoryR2Keys(
   // Manifest rows carry their own r2_bucket — map it; reject unknown. Also
   // capture the row ids so the batch can delete ONLY inventoried rows (§3 TOCTOU:
   // a new manifest row appearing after inventory must not be silently deleted).
-  const fileRowIds: string[] = [];
+  const fileRows: Array<{id: string; r2_bucket: string; r2_key: string}> = [];
   const files = await db
     .prepare(`SELECT id, r2_bucket, r2_key FROM receipt_files WHERE object_type='receipt' AND object_id=?`)
     .bind(receiptId)
@@ -315,11 +315,11 @@ export async function inventoryR2Keys(
       unknownBuckets.push(`${f.r2_bucket}:${f.r2_key}`);
       continue;
     }
-    fileRowIds.push(f.id);
+    fileRows.push({ id: f.id, r2_bucket: f.r2_bucket, r2_key: f.r2_key });
     add(bucket, f.r2_key);
   }
 
-  return { keys, originalSha256: r?.original_sha256 ?? null, unknownBuckets, fileRowIds };
+  return { keys, originalSha256: r?.original_sha256 ?? null, unknownBuckets, fileRows };
 }
 
 /** Prefix-list a bucket under `receipts/<id>/` for unmanifested derivatives. */
@@ -444,7 +444,7 @@ interface PreflightTarget {
   input: DuplicateMemberInput;
   row: ReceiptRecord;
   strength: "strong" | "near";
-  inventory: { keys: R2KeyRef[]; originalSha256: string | null; fileRowIds: string[] };
+  inventory: { keys: R2KeyRef[]; originalSha256: string | null; fileRows: Array<{id: string; r2_bucket: string; r2_key: string}> };
 }
 
 function buildAtomicBatch(
@@ -497,12 +497,18 @@ function buildAtomicBatch(
     // Reference cleanup.
     stmts.push(db.prepare(`DELETE FROM receipt_attendees WHERE receipt_id = ?`).bind(id));
     stmts.push(db.prepare(`DELETE FROM receipt_compliance_checks WHERE object_type = 'receipt' AND object_id = ?`).bind(id));
-    // §3 TOCTOU: Delete ONLY inventoried manifest rows (by id). A new manifest
-    // row appearing after inventory is not inventoried → not deleted → the
-    // trigger's residual receipt_files check aborts the batch.
-    if (t.pt.inventory.fileRowIds.length > 0) {
-      const ph = t.pt.inventory.fileRowIds.map(() => "?").join(",");
-      stmts.push(db.prepare(`DELETE FROM receipt_files WHERE id IN (${ph})`).bind(...t.pt.inventory.fileRowIds));
+    // §3 TOCTOU + item 2: Full compare-and-delete for each manifest row. Deletes
+    // only if (id, object_type, object_id, r2_bucket, r2_key) all match the
+    // inventoried values. If a row's bucket/key changed after inventory, the
+    // DELETE matches 0 rows → the row survives → the trigger's residual
+    // receipt_files check aborts the batch. A new row appearing after inventory
+    // is not inventoried → not deleted → same residual abort.
+    for (const fr of t.pt.inventory.fileRows) {
+      stmts.push(
+        db.prepare(
+          `DELETE FROM receipt_files WHERE id = ? AND object_type = 'receipt' AND object_id = ? AND r2_bucket = ? AND r2_key = ?`,
+        ).bind(fr.id, id, fr.r2_bucket, fr.r2_key),
+      );
     }
     stmts.push(db.prepare(`DELETE FROM receipt_audit_log WHERE object_type = 'receipt' AND object_id = ?`).bind(id));
     // Tombstone (d1_pending) — carries the optimistic guards the trigger checks.
@@ -581,7 +587,11 @@ async function deleteAndVerify(
       errors.push(`R2 head-verify failed for ${ref.bucket}:${ref.key}: ${(err as Error).message}`);
     }
   }
-  if (remaining === 0 && errors.length === 0) {
+  // §4: Final state is authoritative. If every head confirms absence, cleanup is
+  // completed — delete-call errors are warnings, not failures (the object is
+  // gone regardless of whether the API call threw). Only a present object or a
+  // head error (can't verify) leaves storage_failed.
+  if (remaining === 0) {
     return { ok: true, error: null, remaining: 0 };
   }
   return {
@@ -650,7 +660,7 @@ export async function purgeDuplicate(req: PurgeRequest): Promise<PurgeResult> {
     if (strength === null) {
       throw new PurgeEligibilityError(409, `Target ${id.slice(0, 8)} is not a duplicate candidate of the retained receipt (revalidated server-side).`);
     }
-    prefetched.push({ input: t.input, row: t.row, strength, inventory: { keys: [], originalSha256: null, fileRowIds: [] } });
+    prefetched.push({ input: t.input, row: t.row, strength, inventory: { keys: [], originalSha256: null, fileRows: [] } });
   }
 
   // ── 3. Inventory R2 keys + parse provenance for EVERY target (before batch) ─
@@ -675,7 +685,7 @@ export async function purgeDuplicate(req: PurgeRequest): Promise<PurgeResult> {
         `Target ${pt.input.id.slice(0, 8)} has unknown manifest bucket value(s): ${inv.unknownBuckets.join(", ")} — refusing to purge.`,
       );
     }
-    pt.inventory = { keys: inv.keys, originalSha256: inv.originalSha256, fileRowIds: inv.fileRowIds };
+    pt.inventory = { keys: inv.keys, originalSha256: inv.originalSha256, fileRows: inv.fileRows };
 
     // Full R2 inventory incl. prefix-listed derivatives across both buckets.
     const seen = new Set<string>();
