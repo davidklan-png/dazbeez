@@ -79,6 +79,8 @@ export interface PurgedTargetResult {
   status: "completed" | "storage_failed";
   strength: "strong" | "near";
   objectCount: number;
+  /** 0 for completed; actual unverifiable/remaining count for storage_failed. */
+  remainingKeys: number;
   originalSha256: string | null;
   errorText: string | null;
 }
@@ -780,6 +782,7 @@ export async function purgeDuplicate(req: PurgeRequest): Promise<PurgeResult> {
         status: "completed",
         strength: tm.pt.strength,
         objectCount: keys.length,
+        remainingKeys: 0,
         originalSha256: tm.pt.inventory.originalSha256,
         errorText: null,
       });
@@ -794,6 +797,7 @@ export async function purgeDuplicate(req: PurgeRequest): Promise<PurgeResult> {
         status: "storage_failed",
         strength: tm.pt.strength,
         objectCount: keys.length,
+        remainingKeys: del.remaining,
         originalSha256: tm.pt.inventory.originalSha256,
         errorText: del.error,
       });

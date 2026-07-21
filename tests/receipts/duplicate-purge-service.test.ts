@@ -62,7 +62,7 @@ interface BatchStmt { sql: string; binds: unknown[]; }
 function makeMockDb(cfg: Fixture) {
   let batchCalled = false;
   const batchStmts: BatchStmt[][] = [];
-  const runCalls: string[] = [];
+  const runStmts: Array<{ sql: string; binds: unknown[] }> = [];
 
   function respond(sqlRaw: string, binds: unknown[]): { first: Record<string, unknown> | null; results: Record<string, unknown>[] } {
     const s = sqlRaw.replace(/\s+/g, " ").trim();
@@ -113,7 +113,7 @@ function makeMockDb(cfg: Fixture) {
         return { results: respond(sql, binds).results as T[], success: true, meta: { changes: 0 } };
       },
       async run(): Promise<{ success: true; meta: { changes: number } }> {
-        runCalls.push(sql);
+        runStmts.push({ sql, binds });
         return { success: true, meta: { changes: 1 } };
       },
     };
@@ -131,7 +131,8 @@ function makeMockDb(cfg: Fixture) {
     _batchCalled: () => batchCalled,
     _batchCount: () => batchStmts.length,
     _batchStmts: () => batchStmts,
-    _runCount: () => runCalls.length,
+    _runCount: () => runStmts.length,
+    _runStmts: () => runStmts,
   };
 }
 
@@ -523,4 +524,151 @@ test("rewriteSourceIds: deduplicates complete list preserving first-seen order",
   assert.ok(rw);
   const result = JSON.parse(rw!.rewritten) as string[];
   assert.deepEqual(result, ["a", "b", "retained"]);
+});
+
+// ─── §1 multi-key R2: first delete throws, all attempted, all absent → completed
+
+test("§1 multi-key: first delete throws, all 3 keys attempted for delete + head, all absent → completed", async () => {
+  const cfg = defaultFixture();
+  const k1 = "col/image.jpg", k2 = "manifest/proof.jpg", k3 = "manifest/deriv.jpg";
+  cfg.receipts.target = mkReceipt({ id: "target", original_r2_key: k1, updated_at: "tv1" });
+  cfg.files = { target: [
+    { id: "f1", r2_bucket: "receipts", r2_key: k2 },
+    { id: "f2", r2_bucket: "receipts", r2_key: k3 },
+  ] };
+  const db = makeMockDb(cfg);
+  // k1 NOT in the bucket (already gone). Delete throws for k1. k2, k3 present.
+  const rb = makeMockBucket(new Set([k2, k3]), { failDeleteFor: k1 });
+  const ab = makeMockBucket(new Set());
+  const res = await purgeDuplicate(makeReq(db, rb, ab, cfg));
+  assert.equal(res.completed, true);
+  assert.equal(res.targets[0]!.status, "completed");
+  assert.equal(res.targets[0]!.remainingKeys, 0);
+  // All 3 keys must be in deleteCalls (even though k1 threw).
+  assert.ok(rb.deleteCalls.includes(k1), "k1 delete attempted despite throw");
+  assert.ok(rb.deleteCalls.includes(k2));
+  assert.ok(rb.deleteCalls.includes(k3));
+  assert.equal(rb.deleteCalls.length, 3, "all 3 keys must receive a delete attempt");
+  // All 3 keys must be in headCalls.
+  assert.ok(rb.headCalls.includes(k1));
+  assert.ok(rb.headCalls.includes(k2));
+  assert.ok(rb.headCalls.includes(k3));
+});
+
+// ─── §1 multi-key: exactly 1 key remains → storage_failed, remainingKeys=1
+
+test("§1 multi-key: one key remains → storage_failed, remainingKeys=1", async () => {
+  const cfg = defaultFixture();
+  const k1 = "col/image.jpg", k2 = "manifest/proof.jpg", k3 = "manifest/deriv.jpg";
+  cfg.receipts.target = mkReceipt({ id: "target", original_r2_key: k1, updated_at: "tv1" });
+  cfg.files = { target: [
+    { id: "f1", r2_bucket: "receipts", r2_key: k2 },
+    { id: "f2", r2_bucket: "receipts", r2_key: k3 },
+  ] };
+  const db = makeMockDb(cfg);
+  // All 3 in bucket. Delete throws for k1 (stays). k2, k3 deleted. → 1 remaining.
+  const rb = makeMockBucket(new Set([k1, k2, k3]), { failDeleteFor: k1 });
+  const ab = makeMockBucket(new Set());
+  const res = await purgeDuplicate(makeReq(db, rb, ab, cfg));
+  assert.equal(res.completed, false);
+  assert.equal(res.targets[0]!.status, "storage_failed");
+  assert.equal(res.targets[0]!.remainingKeys, 1, "exactly 1 key remaining");
+});
+
+// ─── §3 head-error → storage_failed, remainingKeys includes unverifiable
+
+test("§3 head error: delete OK but head throws → storage_failed + remainingKeys", async () => {
+  const cfg = defaultFixture();
+  const k1 = "col/image.jpg", k2 = "manifest/proof.jpg";
+  cfg.receipts.target = mkReceipt({ id: "target", original_r2_key: k1, updated_at: "tv1" });
+  cfg.files = { target: [{ id: "f1", r2_bucket: "receipts", r2_key: k2 }] };
+  const db = makeMockDb(cfg);
+  const rb = makeMockBucket(new Set([k1, k2]), { headErrorFor: new Set([k2]) });
+  const ab = makeMockBucket(new Set());
+  const res = await purgeDuplicate(makeReq(db, rb, ab, cfg));
+  assert.equal(res.completed, false);
+  assert.equal(res.targets[0]!.status, "storage_failed");
+  assert.ok(res.targets[0]!.remainingKeys >= 1, "head error must count as remaining");
+});
+
+// ─── §4 pending inventory retention on failure + cleared on success
+
+test("§4 storage_failed: tombstone INSERT has full pending_keys_json; failure UPDATE doesn't clear it", async () => {
+  const cfg = defaultFixture();
+  const key = cfg.receipts.target.original_r2_key!;
+  cfg.files = { target: [{ id: "f1", r2_bucket: "receipts", r2_key: key }] };
+  const db = makeMockDb(cfg);
+  const rb = makeMockBucket(new Set([key]), { failDeleteFor: key });
+  const ab = makeMockBucket(new Set());
+  await purgeDuplicate(makeReq(db, rb, ab, cfg));
+  // The batch INSERT must have pending_keys_json with the key.
+  const batchStmts = db._batchStmts().flat();
+  const insert = batchStmts.find((s) => s.sql.includes("INSERT INTO duplicate_purge_log"));
+  assert.ok(insert, "tombstone INSERT must be in the batch");
+  const pendingBind = insert!.binds.find((b) => typeof b === "string" && b.includes(key));
+  assert.ok(pendingBind, "INSERT must bind pending_keys_json containing the key");
+  // The failure run UPDATE must NOT clear pending_keys_json.
+  const failUpdate = db._runStmts().find((s) => s.sql.includes("storage_failed"));
+  assert.ok(failUpdate, "failure UPDATE must be called");
+  assert.ok(!failUpdate!.sql.includes("pending_keys_json=NULL"), "failure UPDATE must NOT clear pending_keys_json");
+});
+
+test("§4 completed: completion UPDATE clears pending_keys_json", async () => {
+  const cfg = defaultFixture();
+  const key = cfg.receipts.target.original_r2_key!;
+  cfg.files = { target: [{ id: "f1", r2_bucket: "receipts", r2_key: key }] };
+  const db = makeMockDb(cfg);
+  const rb = makeMockBucket(new Set([key]));
+  const ab = makeMockBucket(new Set());
+  await purgeDuplicate(makeReq(db, rb, ab, cfg));
+  const completedUpdate = db._runStmts().find((s) => s.sql.includes("completed"));
+  assert.ok(completedUpdate, "completion UPDATE must be called");
+  assert.ok(completedUpdate!.sql.includes("pending_keys_json=NULL"), "completion UPDATE must clear pending_keys_json");
+});
+
+// ─── §5 prefix-derived object count
+
+test("§5 prefix inventory: column key + prefix derivative → count=2, both deleted + head-verified", async () => {
+  const cfg = defaultFixture();
+  const colKey = "receipts/2026/06/1/image.jpg";
+  const prefixKey = "receipts/target/rendered.pdf";
+  cfg.receipts.target = mkReceipt({ id: "target", original_r2_key: colKey, updated_at: "tv1" });
+  cfg.files = { target: [] }; // no manifest rows
+  const db = makeMockDb(cfg);
+  // Mock bucket has both the column key and the prefix derivative.
+  const rb = makeMockBucket(new Set([colKey, prefixKey]));
+  const ab = makeMockBucket(new Set());
+  const res = await purgeDuplicate(makeReq(db, rb, ab, cfg));
+  assert.equal(res.completed, true);
+  assert.equal(res.targets[0]!.objectCount, 2, "storage_object_count must include prefix derivative");
+  assert.ok(res.targets[0]!.remainingKeys === 0);
+  // Both keys must receive delete + head.
+  assert.ok(rb.deleteCalls.includes(colKey));
+  assert.ok(rb.deleteCalls.includes(prefixKey));
+  assert.ok(rb.headCalls.includes(colKey));
+  assert.ok(rb.headCalls.includes(prefixKey));
+  // The tombstone INSERT must have both keys in pending_keys_json + count=2.
+  const batchStmts = db._batchStmts().flat();
+  const insert = batchStmts.find((s) => s.sql.includes("INSERT INTO duplicate_purge_log"));
+  assert.ok(insert);
+  const pendingBind = insert!.binds.find((b) => typeof b === "string" && b.includes(prefixKey));
+  assert.ok(pendingBind, "tombstone must include prefix key in pending_keys_json");
+  const countBind = insert!.binds.find((b) => b === 2);
+  assert.ok(countBind, "storage_object_count bind must be 2");
+});
+
+// ─── §6 empty targets → 400, no batch, no R2
+
+test("§6 empty targets: 400, no db.batch, no R2 delete/head", async () => {
+  const cfg = defaultFixture();
+  const db = makeMockDb(cfg);
+  const rb = makeMockBucket(new Set());
+  const ab = makeMockBucket(new Set());
+  await assert.rejects(
+    () => purgeDuplicate(makeReq(db, rb, ab, cfg, { targets: [], confirmationText: "PURGE 0" })),
+    (e: PurgeEligibilityError) => e.status === 400,
+  );
+  assert.equal(db._batchCalled(), false);
+  assert.equal(rb.deleteCalls.length, 0);
+  assert.equal(rb.headCalls.length, 0);
 });

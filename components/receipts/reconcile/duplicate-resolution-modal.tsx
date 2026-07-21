@@ -63,7 +63,7 @@ export function DuplicateResolutionModal({
   const [reason, setReason] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [partialWarning, setPartialWarning] = useState<
-    Array<{ purgeJobId: string; receiptId: string; error: string | null }> | null
+    Array<{ purgeJobId: string; receiptId: string; remainingKeys: number; error: string | null }> | null
   >(null);
 
   useEffect(() => {
@@ -164,7 +164,7 @@ export function DuplicateResolutionModal({
       const json = (await res.json().catch(() => ({}))) as {
         error?: string;
         completed?: boolean;
-        targets?: Array<{ receiptId: string; purgeJobId: string; status: string; errorText: string | null }>;
+        targets?: Array<{ receiptId: string; purgeJobId: string; status: string; remainingKeys?: number; errorText: string | null }>;
       };
       if (!res.ok) {
         setError(json.error ?? "Purge failed.");
@@ -177,7 +177,7 @@ export function DuplicateResolutionModal({
       }
       const failed = (json.targets ?? []).filter((t) => t.status === "storage_failed");
       setPartialWarning(
-        failed.map((t) => ({ purgeJobId: t.purgeJobId, receiptId: t.receiptId, error: t.errorText })),
+        failed.map((t) => ({ purgeJobId: t.purgeJobId, receiptId: t.receiptId, remainingKeys: t.remainingKeys ?? 0, error: t.errorText })),
       );
       router.refresh();
     } catch {
@@ -236,7 +236,7 @@ export function DuplicateResolutionModal({
               <ul className="mt-1 list-disc pl-5">
                 {partialWarning.map((p) => (
                   <li key={p.purgeJobId}>
-                    {p.receiptId.slice(0, 8)}: {p.error}{" "}
+                    {p.receiptId.slice(0, 8)}: {p.remainingKeys} key(s) remaining — {p.error}{" "}
                     <button type="button" onClick={() => retryJob(p.purgeJobId)} className="font-semibold underline">
                       Retry cleanup
                     </button>
