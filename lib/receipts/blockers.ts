@@ -13,7 +13,7 @@
 import { requiresAttendees } from "@/lib/receipts/categories";
 import { isPendingProcessing } from "@/lib/receipts/extraction-state";
 import { resolveLineCategory } from "@/lib/receipts/line-classification";
-import { canonicalizeMerchant, detectMerchantChain } from "@/lib/receipts/merchant";
+import { canonicalMerchantComparisonKey, detectMerchantChain } from "@/lib/receipts/merchant";
 import type { AmexStatementLine, ReceiptRecord } from "@/lib/receipts/types";
 
 // ─── Shared predicates (tile ⇄ gate) ─────────────────────────────────────
@@ -324,12 +324,14 @@ function clusterDuplicates(
   for (const r of receipts) {
     if (r.payment_path !== "CASH" && r.payment_path !== "DIGITAL") continue;
     if (!r.transaction_date || r.merchant == null || r.amount_minor == null) continue;
-    // Canonicalize the merchant in the grouping key so OCR-garbled variants of
-    // the same chain cluster together (2026-06: "セブンーエレブン" + "セブン-イレブン
-    // 東中野末広橋店" — two photos of one PASMO top-up — never clustered because
-    // the raw strings differ). Display still uses r.merchant verbatim.
+    // Comparison key for duplicate grouping: canonicalizeMerchant folds OCR-
+    // garbled conbini-chain variants (2026-06: "セブンーエレブン" + "セブン-イレブン
+    // 東中野末広橋店" — two photos of one PASMO top-up), and the shared helper then
+    // NFKC + lowercases + whitespace-normalizes so case/width/spacing variants
+    // also cluster. Read-side only — never persisted, never used for category-rule
+    // keys (those keep canonicalizeMerchant's raw output). Display uses r.merchant.
     const key = JSON.stringify([
-      canonicalizeMerchant(r.merchant),
+      canonicalMerchantComparisonKey(r.merchant),
       r.amount_minor,
       r.transaction_date,
     ]);

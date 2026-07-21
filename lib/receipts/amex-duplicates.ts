@@ -26,7 +26,7 @@
 // already claimed by an AMEX line — the authoritative "is this matched" signal,
 // never receipt.status (which can drift).
 
-import { canonicalizeMerchant } from "@/lib/receipts/merchant";
+import { canonicalMerchantComparisonKey } from "@/lib/receipts/merchant";
 import type { ReceiptRecord, ReceiptStatus } from "@/lib/receipts/types";
 
 export type AmexDuplicateStrength = "strong" | "near";
@@ -57,6 +57,7 @@ function daysBetween(a: string, b: string): number {
 function normMerchant(m: string | null | undefined): string {
   return (m ?? "").normalize("NFKC").toLowerCase().replace(/\s+/g, " ").trim();
 }
+
 
 /**
  * For each orphan receipt, find possible re-capture candidates in the pool.
@@ -94,7 +95,7 @@ export function findAmexDuplicateCandidates(
     const arr = byAmount.get(key) ?? [];
     arr.push({
       r,
-      canon: canonicalizeMerchant(r.merchant),
+      canon: canonicalMerchantComparisonKey(r.merchant),
       norm: normMerchant(r.merchant),
       date: r.transaction_date,
     });
@@ -113,7 +114,7 @@ export function findAmexDuplicateCandidates(
     }
     const key = `${orphan.currency.toUpperCase()}|${orphan.amount_minor}`;
     const candidates = byAmount.get(key) ?? [];
-    const oCanon = canonicalizeMerchant(orphan.merchant);
+    const oCanon = canonicalMerchantComparisonKey(orphan.merchant);
     const oNorm = normMerchant(orphan.merchant);
     const found: AmexDuplicateCandidate[] = [];
 
