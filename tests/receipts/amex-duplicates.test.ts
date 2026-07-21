@@ -119,16 +119,30 @@ test("different amounts never match", () => {
   assert.equal(out.size, 0);
 });
 
-test("HOLIDAY triple: each orphan sees the other two as strong candidates", () => {
+test("HOLIDAY triple: case-only merchant variants all cluster as STRONG (each sees the other two)", () => {
+  // The three prod re-captures: two "HOLIDAY…" and one "Holiday…" (case-only
+  // difference). The strong key is case-insensitive (dupCanonKey), so all three
+  // pair up as strong — none falls into the gap between strong and near.
   const a = rc({ id: "h1", merchant: "HOLIDAY SKY LOUNGE 新宿", amount_minor: 10680, transaction_date: "2026-06-06" });
   const b = rc({ id: "h2", merchant: "Holiday Sky Lounge 新宿", amount_minor: 10680, transaction_date: "2026-06-06" });
   const c = rc({ id: "h3", merchant: "HOLIDAY SKY LOUNGE 新宿", amount_minor: 10680, transaction_date: "2026-06-06" });
   const out = findAmexDuplicateCandidates([a, b, c], [a, b, c], NONE);
-  // a & c share exact merchant; b differs only in case → normalized equal, so
-  // canonicalizeMerchant (raw passthrough) makes a-vs-b "strong" only if canon
-  // matches. canon for non-chain = raw string, so "HOLIDAY…" ≠ "Holiday…".
-  // a sees c (strong) and b (near, same date + merchant text differs by case).
-  const aCands = out.get("h1")!;
-  assert.ok(aCands.some((x) => x.otherReceiptId === "h3" && x.strength === "strong"));
-  assert.ok(aCands.length >= 1);
+  for (const id of ["h1", "h2", "h3"]) {
+    const cands = out.get(id)!;
+    assert.equal(cands.length, 2, `${id} should see the other two`);
+    assert.ok(cands.every((x) => x.strength === "strong"), `${id} candidates should all be strong`);
+  }
+  // The case-variant (h2) is explicitly flagged, not stranded badge-less.
+  assert.ok(out.get("h2")!.some((x) => x.otherReceiptId === "h1"));
+  assert.ok(out.get("h2")!.some((x) => x.otherReceiptId === "h3"));
+});
+
+test("strong key stays chain-aware: garbled conbini variants still cluster (case-insensitive canon)", () => {
+  // dupCanonKey = canonicalize (fold chain) THEN lowercase. Two Seven-Eleven
+  // spellings + a re-photo with a branch suffix all canonicalize to the chain
+  // token, then lowercase — strong cluster, case-insensitive.
+  const a = rc({ id: "s1", merchant: "セブンーエレブン", amount_minor: 10000, transaction_date: "2026-06-20" });
+  const b = rc({ id: "s2", merchant: "セブン-イレブン 東中野末広橋店", amount_minor: 10000, transaction_date: "2026-06-20" });
+  const out = findAmexDuplicateCandidates([a], [a, b], NONE);
+  assert.equal(out.get("s1")![0]!.strength, "strong");
 });

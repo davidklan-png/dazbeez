@@ -59,6 +59,26 @@ function normMerchant(m: string | null | undefined): string {
 }
 
 /**
+ * Case-insensitive (and width-folded) canonical merchant key for DUPLICATE
+ * GROUPING. canonicalizeMerchant folds OCR-garbled conbini-chain variants to
+ * their chain token; this additionally lowercases + NFKC-folds so a case-only
+ * difference ("HOLIDAY SKY LOUNGE 新宿" vs "Holiday Sky Lounge 新宿") clusters
+ * as a STRONG duplicate instead of falling into the gap between the strong key
+ * (case-sensitive canon) and the near key (case-insensitive norm).
+ *
+ * Deliberately NOT applied to canonicalizeMerchant itself: that function is the
+ * STORED category-rule match key (category-rules.ts normalizeMatchValue writes
+ * canonicalizeMerchant(matchValue) to D1, and merchantRuleMatches compares
+ * canonicalizeMerchant(merchant) === rule.match_value). Lowercasing it would
+ * silently break every existing merchant category rule already stored under the
+ * raw-case key. Case-folding for duplicate detection is applied here, at the
+ * read-side dup layer only. (architect follow-up 2026-07-21.)
+ */
+function dupCanonKey(merchant: string | null | undefined): string {
+  return canonicalizeMerchant(merchant).normalize("NFKC").toLowerCase();
+}
+
+/**
  * For each orphan receipt, find possible re-capture candidates in the pool.
  *
  * @param orphanReceipts receipts currently shown as orphans (the subjects).
@@ -94,7 +114,7 @@ export function findAmexDuplicateCandidates(
     const arr = byAmount.get(key) ?? [];
     arr.push({
       r,
-      canon: canonicalizeMerchant(r.merchant),
+      canon: dupCanonKey(r.merchant),
       norm: normMerchant(r.merchant),
       date: r.transaction_date,
     });
@@ -113,7 +133,7 @@ export function findAmexDuplicateCandidates(
     }
     const key = `${orphan.currency.toUpperCase()}|${orphan.amount_minor}`;
     const candidates = byAmount.get(key) ?? [];
-    const oCanon = canonicalizeMerchant(orphan.merchant);
+    const oCanon = dupCanonKey(orphan.merchant);
     const oNorm = normMerchant(orphan.merchant);
     const found: AmexDuplicateCandidate[] = [];
 
