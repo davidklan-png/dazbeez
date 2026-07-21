@@ -52,6 +52,8 @@ export interface DuplicateMemberInput {
   counterparty_name: string | null;
   attendeesRequired: boolean;
   attendeesCount: number;
+  /** Actual names are used only for preservation/loss detection. */
+  attendeeNames: string[];
   alcoholPresent: boolean;
   extractionState: ExtractionState | null;
   hasOriginalFile: boolean;
@@ -210,6 +212,29 @@ export function populatedPreservationFields(
   m: DuplicateMemberInput,
 ): PreservationField[] {
   return PRESERVATION_FIELDS.filter((f) => preservationFieldPopulated(f, m));
+}
+
+function attendeeComparisonKey(name: string): string {
+  return name.normalize("NFKC").toLocaleLowerCase().replace(/\s+/g, " ").trim();
+}
+
+/** Populated target fields whose actual value would be lost by retaining the
+ * other member. Attendees are compared as sets rather than a boolean/count. */
+export function missingPreservationFields(
+  target: DuplicateMemberInput,
+  retained: DuplicateMemberInput,
+): PreservationField[] {
+  const retainedPopulated = new Set(populatedPreservationFields(retained));
+  const missing = populatedPreservationFields(target).filter(
+    (field) => !retainedPopulated.has(field),
+  );
+  if (target.attendeeNames.length > 0 && retained.attendeeNames.length > 0) {
+    const retainedNames = new Set(retained.attendeeNames.map(attendeeComparisonKey));
+    if (target.attendeeNames.some((name) => !retainedNames.has(attendeeComparisonKey(name)))) {
+      if (!missing.includes("attendees")) missing.push("attendees");
+    }
+  }
+  return missing;
 }
 
 /**
@@ -390,12 +415,10 @@ export function recommendRetention(
 
   // Required transfers (A.6): populated on a purge target, missing on retained.
   // Uses populatedPreservationFields (tax split into amount + rate independently).
-  const retainedPopulated = new Set<PreservationField>(populatedPreservationFields(retained));
   const requiredTransfers: RequiredTransfer[] = [];
   for (const m of members) {
     if (m.id === retained.id) continue;
-    const targetPopulated = populatedPreservationFields(m);
-    const missingFromRetained = targetPopulated.filter((f) => !retainedPopulated.has(f));
+    const missingFromRetained = missingPreservationFields(m, retained);
     if (missingFromRetained.length > 0) {
       requiredTransfers.push({ fromId: m.id, fields: missingFromRetained });
     }
@@ -477,10 +500,6 @@ export function assessSelection(
   const blockReasons: string[] = [];
 
   const retainedTierRank = retained ? protectionTier(retained).rank : 0;
-  const retainedPopulated = retained
-    ? new Set<PreservationField>(populatedPreservationFields(retained))
-    : new Set<PreservationField>();
-
   for (const targetId of targetIds) {
     const blockers: string[] = [];
     const missingFieldsToCopy: PreservationField[] = [];
@@ -505,9 +524,7 @@ export function assessSelection(
       }
       // §4: Use populatedPreservationFields (tax split into amount + rate
       // independently; attendees populated = count > 0), NOT completeness.
-      for (const f of populatedPreservationFields(target)) {
-        if (!retainedPopulated.has(f)) missingFieldsToCopy.push(f);
-      }
+      missingFieldsToCopy.push(...missingPreservationFields(target, retained));
       if (missingFieldsToCopy.length > 0) {
         blockers.push(
           `Target has accounting field(s) {${missingFieldsToCopy.join(", ")}} missing from the retained receipt — copy/resolve first.`,

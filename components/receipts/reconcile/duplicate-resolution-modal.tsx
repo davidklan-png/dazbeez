@@ -6,8 +6,9 @@ import { ReceiptImageViewer } from "@/components/receipts/receipt-image-viewer";
 import { Btn } from "@/components/ui/btn";
 import { Pill } from "@/components/ui/pill";
 import { CheckIcon } from "@/components/ui/icons";
-import { assessSelection, type DuplicateMemberInput, type SelectionAssessment } from "@/lib/receipts/duplicate-resolution-policy";
+import { assessSelection, type DuplicateMemberInput } from "@/lib/receipts/duplicate-resolution-policy";
 import { MergeResolutionSection } from "@/components/receipts/reconcile/merge-resolution-section";
+import type { DuplicateMergeApiResult } from "@/lib/receipts/duplicate-merge-contract";
 
 export interface ClusterMemberView {
   input: DuplicateMemberInput;
@@ -66,6 +67,10 @@ export function DuplicateResolutionModal({
   const [partialWarning, setPartialWarning] = useState<
     Array<{ purgeJobId: string; receiptId: string; remainingKeys: number; error: string | null }> | null
   >(null);
+  const [mergeNotice, setMergeNotice] = useState<{
+    tone: "green" | "amber";
+    message: string;
+  } | null>(null);
 
   // Reload the cluster from the server (used on mount and after merge). After a
   // merge, ALL destructive confirmations must be cleared (post-merge reset).
@@ -75,7 +80,11 @@ export function DuplicateResolutionModal({
     const json = (await res.json().catch(() => ({}))) as ClusterResponse | { error?: string };
     if (res.ok && "members" in json) {
       setData(json);
-      if (!postMerge) setRetainedId(json.recommendation.retainedId);
+      setRetainedId((current) =>
+        postMerge && current && json.members.some((member) => member.input.id === current)
+          ? current
+          : json.recommendation.retainedId,
+      );
       // Post-merge reset: clear every destructive confirmation so the operator
       // must re-examine the updated retained record and reselect targets.
       setPurgeSelected(new Set());
@@ -89,6 +98,33 @@ export function DuplicateResolutionModal({
     if (!res.ok) setError((json as { error?: string }).error ?? "Failed to load cluster.");
     return false;
   }, [clusterIds]);
+
+  async function handleMerged(result: DuplicateMergeApiResult) {
+    // Clear destructive state immediately after the server confirms the merge,
+    // before any reload can fail or race with another operator action.
+    setPurgeSelected(new Set());
+    setConfirmText("");
+    setVisualConfirmed(false);
+    setLegalAck(false);
+    setMergeNotice({ tone: "green", message: "Merge committed. Reloading the comparison…" });
+    try {
+      const reloaded = await reloadCluster(true);
+      if (!reloaded) {
+        setMergeNotice({ tone: "amber", message: "Merge committed, but the comparison could not reload. Close and reopen this dialog before purging." });
+        return;
+      }
+      const correctionText = result.correction
+        ? ` Correction draft ${result.correction.month} revision ${result.correction.revision} remains open and must be re-finalized.`
+        : "";
+      const warningText = result.warnings.length ? ` ${result.warnings.join(" ")}` : "";
+      setMergeNotice({
+        tone: result.warnings.length ? "amber" : "green",
+        message: `Merge committed (${result.updatedFields.join(", ") || "attendees"}). Recheck the retained receipt and reselect purge targets.${correctionText}${warningText}`,
+      });
+    } catch {
+      setMergeNotice({ tone: "amber", message: "Merge committed, but the comparison reload failed. Close and reopen this dialog before purging." });
+    }
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -106,7 +142,7 @@ export function DuplicateResolutionModal({
     return () => { cancelled = true; };
   }, [reloadCluster]);
 
-  const members = data?.members ?? [];
+  const members = useMemo(() => data?.members ?? [], [data]);
 
   // Changing the retained receipt clears all purge selections and recomputes the
   // preview/blockers for the operator's actual selection (correction §1/§3).
@@ -256,6 +292,11 @@ export function DuplicateResolutionModal({
               </ul>
             </div>
           )}
+          {mergeNotice && (
+            <div className={`mb-3 rounded-lg border px-3 py-2 text-sm ${mergeNotice.tone === "green" ? "border-green-200 bg-green-50 text-green-800" : "border-amber-300 bg-amber-50 text-amber-900"}`}>
+              {mergeNotice.message}
+            </div>
+          )}
 
           {data && !loading && (
             <>
@@ -342,14 +383,13 @@ export function DuplicateResolutionModal({
               </div>
 
               {/* Data-resolution section: resolve target-only fields before purge */}
-              {selectionBlocked && selection && retainedId && retainedRow && (
+              {selectedTargetIds.length > 0 && selection && retainedId && retainedRow && (
                 <MergeResolutionSection
                   retainedId={retainedId}
                   retainedUpdatedAt={retainedRow.input.updated_at}
                   targets={selectedTargetIds}
                   members={members}
-                  selection={selection}
-                  onMerged={() => void reloadCluster(true)}
+                  onMerged={handleMerged}
                 />
               )}
             </>

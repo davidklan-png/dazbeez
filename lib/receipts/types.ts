@@ -116,6 +116,7 @@ export type AuditAction =
   | "receipt.file_downloaded"
   | "receipt.search_performed"
   | "receipt.compliance_checked"
+  | "receipt.duplicate_merge_applied"
   | "amex.imported"
   | "amex.artifact_created"
   | "amex.line_categorized"

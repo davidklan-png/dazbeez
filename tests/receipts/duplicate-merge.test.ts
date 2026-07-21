@@ -16,7 +16,7 @@ function m(partial: Partial<DuplicateMemberInput> & Pick<DuplicateMemberInput, "
     transaction_date: null, merchant: null, amount_minor: null, currency: "JPY",
     expense_category_code: null, business_purpose: null, tax_amount_minor: null,
     tax_rate: null, invoice_registration_number: null, qualified_invoice_status: "not_checked",
-    counterparty_name: null, attendeesRequired: false, attendeesCount: 0,
+    counterparty_name: null, attendeesRequired: false, attendeesCount: 0, attendeeNames: [],
     alcoholPresent: false, extractionState: null, hasOriginalFile: false, hasProofFile: false,
     ...partial,
   } as DuplicateMemberInput;

@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { requireReceiptsActor } from "@/lib/receipts/auth";
 import { getReceiptsDb } from "@/lib/cloudflare-runtime";
 import { applyDuplicateMerge, MergeError } from "@/lib/receipts/duplicate-merge";
-import type { PreservationField } from "@/lib/receipts/duplicate-resolution-policy";
+import type { FieldResolution } from "@/lib/receipts/duplicate-merge-contract";
 
 // POST /api/receipts/duplicates/merge
 // Server-authoritative duplicate-merge: resolves target-only/conflicting
@@ -16,13 +16,7 @@ export async function POST(request: Request) {
       retainedReceiptId?: string;
       retainedExpectedUpdatedAt?: string;
       sources?: Array<{ receiptId: string; expectedUpdatedAt: string }>;
-      resolutionPlan?: Array<{
-        field: PreservationField;
-        action: "copy_from_source" | "keep_retained" | "manual_value";
-        sourceReceiptId?: string;
-        manualValue?: string | number | null;
-      }>;
-      correctionReason?: string;
+      resolutionPlan?: FieldResolution[];
     };
 
     if (!body.retainedReceiptId || typeof body.retainedExpectedUpdatedAt !== "string" || !Array.isArray(body.sources) || !Array.isArray(body.resolutionPlan)) {
@@ -39,7 +33,6 @@ export async function POST(request: Request) {
       sources: body.sources,
       resolutionPlan: body.resolutionPlan,
       actor,
-      correctionReason: body.correctionReason,
     });
 
     return NextResponse.json(result, { status: 200 });
