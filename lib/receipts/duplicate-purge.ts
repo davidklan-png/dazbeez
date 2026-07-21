@@ -840,7 +840,6 @@ export async function retryR2Cleanup(args: {
   // mark the job completed). It stays storage_failed.
   const keys = parsePendingKeys(job.pending_keys_json);
   if (keys === null) {
-    const ts = nowIso();
     await args.db
       .prepare(`UPDATE duplicate_purge_log SET status='storage_failed', error_text=? WHERE id=?`)
       .bind(`Malformed or missing pending key inventory for ${args.purgeJobId}`, args.purgeJobId)

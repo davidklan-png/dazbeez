@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-// @ts-ignore — node:sqlite is available at runtime in Node 25 but not yet in @types/node.
+// @ts-expect-error — node:sqlite is available at runtime in Node 25 but not yet in @types/node.
 import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
 import {
