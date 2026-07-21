@@ -5,28 +5,45 @@ import {
   getReceiptsBucket,
   getReceiptsArchiveBucket,
 } from "@/lib/cloudflare-runtime";
-import { purgeDuplicate, PurgeEligibilityError } from "@/lib/receipts/duplicate-purge";
+import { purgeDuplicate, PURGE_TARGET_CAP, PurgeEligibilityError } from "@/lib/receipts/duplicate-purge";
 
 // POST /api/receipts/duplicates/purge
-// Operator-confirmed permanent duplicate purge. Server revalidates everything
-// (never trusts client scores). D1 reference cleanup + receipt deletion are one
-// atomic batch; R2 cleanup is loud + retryable. This is the ONLY path that
-// performs permanent purge — the ordinary soft-delete is separate.
+// Operator-confirmed permanent duplicate purge (correction §2 contract). Server
+// revalidates everything; one request-wide atomic D1 batch (trigger-guarded);
+// R2 cleanup loud + retryable. The ONLY path that performs permanent purge.
+//
+// Strength is NOT sent by the client — the server derives it per retained/target
+// pair (mixed strong/near clusters store the correct strength per target).
 export async function POST(request: Request) {
   try {
     const actor = await requireReceiptsActor(request.headers);
     const body = (await request.json()) as {
       retainedReceiptId?: string;
-      purgeReceiptIds?: string[];
-      expectedUpdatedAt?: Record<string, string>;
+      retainedExpectedUpdatedAt?: string;
+      targets?: Array<{ receiptId: string; expectedUpdatedAt: string }>;
       visualConfirmed?: boolean;
+      legalHoldExceptionAcknowledged?: boolean;
       confirmationText?: string;
       reason?: string;
-      strength?: "strong" | "near";
     };
 
-    if (!body.retainedReceiptId || !Array.isArray(body.purgeReceiptIds)) {
-      return NextResponse.json({ error: "retainedReceiptId and purgeReceiptIds are required." }, { status: 400 });
+    if (!body.retainedReceiptId || typeof body.retainedExpectedUpdatedAt !== "string" || !Array.isArray(body.targets)) {
+      return NextResponse.json(
+        { error: "retainedReceiptId, retainedExpectedUpdatedAt, and targets[] are required." },
+        { status: 400 },
+      );
+    }
+    // Light shape check before handing to the authoritative validator.
+    if (body.targets.length > PURGE_TARGET_CAP) {
+      return NextResponse.json(
+        { error: `Too many targets; cap is ${PURGE_TARGET_CAP}.` },
+        { status: 400 },
+      );
+    }
+    for (const t of body.targets) {
+      if (typeof t.receiptId !== "string" || typeof t.expectedUpdatedAt !== "string") {
+        return NextResponse.json({ error: "Each target needs { receiptId, expectedUpdatedAt }." }, { status: 400 });
+      }
     }
 
     const result = await purgeDuplicate({
@@ -34,12 +51,12 @@ export async function POST(request: Request) {
       receiptsBucket: getReceiptsBucket(),
       archiveBucket: getReceiptsArchiveBucket(),
       retainedReceiptId: body.retainedReceiptId,
-      purgeReceiptIds: body.purgeReceiptIds,
-      expectedUpdatedAt: body.expectedUpdatedAt ?? {},
+      retainedExpectedUpdatedAt: body.retainedExpectedUpdatedAt,
+      targets: body.targets,
       visualConfirmed: !!body.visualConfirmed,
+      legalHoldExceptionAcknowledged: !!body.legalHoldExceptionAcknowledged,
       confirmationText: body.confirmationText ?? "",
       reason: body.reason ?? "",
-      strength: body.strength === "near" ? "near" : "strong",
       actor,
     });
 

@@ -58,7 +58,10 @@ export interface DuplicateMemberInput {
 }
 
 /** The accounting completeness parameters (rule A.2). Order is stable for
- *  display; none of these are timestamps/UUIDs/internal-queue fields. */
+ *  display; none of these are timestamps/UUIDs/internal-queue fields.
+ *  Extraction/queue state is intentionally NOT scored (correction §3): it is an
+ *  internal processing state, not accounting data, and must not make one receipt
+ *  preferable to another. Extraction remains a purge-eligibility guard only. */
 export const SCORE_FIELDS = [
   "transaction_date",
   "merchant",
@@ -69,7 +72,6 @@ export const SCORE_FIELDS = [
   "invoice_number",
   "counterparty",
   "attendees",
-  "extraction",
   "files",
 ] as const;
 export type ScoreField = (typeof SCORE_FIELDS)[number];
@@ -110,10 +112,6 @@ export function fieldCompleted(
       // Not required by the category → trivially satisfied (no gap). Required →
       // satisfied only when attendees are present.
       return !m.attendeesRequired || m.attendeesCount > 0;
-    case "extraction":
-      // "processed" = structured extraction landed. queued/processing/failed
-      // have no usable structured data.
-      return m.extractionState === "processed";
     case "files":
       // Original is the accounting record; a proof copy alone is not.
       return m.hasOriginalFile;
@@ -341,6 +339,103 @@ export function recommendRetention(
     retainedReasons,
     conflicts,
     requiredTransfers,
+    blocked: blockReasons.length > 0,
+    blockReasons,
+  };
+}
+
+// ─── Selection assessment (correction §3) ───────────────────────────────────
+// Pure evaluation of the OPERATOR's actual selection (retained + chosen purge
+// targets), recomputed whenever the selection changes. Unlike recommendRetention
+// (advisory, initial), this drives the UI's purge button/preview AND is mirrored
+// server-side. The server additionally revalidates the candidate relationship +
+// write-time guards from D1; this function covers the deterministic policy
+// predicates derivable from the member inputs.
+
+export interface TargetAssessment {
+  id: string;
+  purgeable: boolean;
+  blockers: string[];
+  /** Target-only populated accounting fields missing from the retained receipt. */
+  missingFieldsToCopy: ScoreField[];
+}
+
+export interface SelectionAssessment {
+  retainedId: string;
+  targetIds: string[];
+  perTarget: TargetAssessment[];
+  blocked: boolean;
+  /** Human-readable union of all target blockers. */
+  blockReasons: string[];
+}
+
+/**
+ * Assess the operator's chosen retained receipt and purge targets against the
+ * deterministic selection policy:
+ *   • a target may not be protected;
+ *   • a target's tier may not exceed the retained tier;
+ *   • at equal tier, a target may not be more complete than the retained;
+ *   • no populated target accounting field may be missing from the retained.
+ * The candidate-relationship + AMEX-claim + write-time checks are enforced
+ * server-side (they need live D1); this function never claims "purgeable" for a
+ * protected/registered-above-retained/more-complete/field-richer target.
+ */
+export function assessSelection(
+  members: DuplicateMemberInput[],
+  retainedId: string,
+  targetIds: string[],
+): SelectionAssessment {
+  const retained = members.find((m) => m.id === retainedId) ?? null;
+  const perTarget: TargetAssessment[] = [];
+  const blockReasons: string[] = [];
+
+  const retainedTierRank = retained ? protectionTier(retained).rank : 0;
+  const retainedCompleted = retained
+    ? new Set<ScoreField>(completeness(retained).completed)
+    : new Set<ScoreField>();
+
+  for (const targetId of targetIds) {
+    const blockers: string[] = [];
+    const missingFieldsToCopy: ScoreField[] = [];
+    const target = members.find((m) => m.id === targetId) ?? null;
+    if (!retained) {
+      blockers.push("Retained receipt not in cluster.");
+    } else if (!target) {
+      blockers.push("Target not in cluster.");
+    } else if (target.id === retained.id) {
+      blockers.push("Target is the retained receipt.");
+    } else {
+      const tTier = protectionTier(target);
+      const tComp = completeness(target);
+      if (tTier.tier === "protected") {
+        blockers.push("Protected receipt (exported/AMEX/archived) — cannot purge.");
+      }
+      if (tTier.rank > retainedTierRank) {
+        blockers.push(`Target tier (${tTier.tier}) is higher than the retained tier — retain it instead.`);
+      }
+      if (tTier.rank === retainedTierRank && tComp.score > completeness(retained!).score) {
+        blockers.push("Target is more complete than the retained receipt — copy its fields first or retain it.");
+      }
+      for (const f of tComp.completed) {
+        if (!retainedCompleted.has(f)) missingFieldsToCopy.push(f);
+      }
+      if (missingFieldsToCopy.length > 0) {
+        blockers.push(
+          `Target has accounting field(s) {${missingFieldsToCopy.join(", ")}} missing from the retained receipt — copy/resolve first.`,
+        );
+      }
+    }
+    const purgeable = blockers.length === 0;
+    if (!purgeable) {
+      blockReasons.push(`${targetId.slice(0, 8)}: ${blockers.join(" ")}`);
+    }
+    perTarget.push({ id: targetId, purgeable, blockers, missingFieldsToCopy });
+  }
+
+  return {
+    retainedId,
+    targetIds,
+    perTarget,
     blocked: blockReasons.length > 0,
     blockReasons,
   };

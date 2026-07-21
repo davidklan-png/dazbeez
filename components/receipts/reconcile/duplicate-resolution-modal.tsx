@@ -1,42 +1,25 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ReceiptImageViewer } from "@/components/receipts/receipt-image-viewer";
 import { Btn } from "@/components/ui/btn";
 import { Pill } from "@/components/ui/pill";
 import { WarningIcon, CheckIcon } from "@/components/ui/icons";
+import { assessSelection, type DuplicateMemberInput } from "@/lib/receipts/duplicate-resolution-policy";
 
 export interface ClusterMemberView {
-  id: string;
-  isRetained: boolean;
+  input: DuplicateMemberInput;
   captured_at: string;
   captured_by: string;
   source: string;
   original_content_type: string;
   original_filename: string | null;
-  transaction_date: string | null;
-  merchant: string | null;
-  amount_minor: number | null;
-  currency: string;
-  expense_category_code: string | null;
-  business_purpose: string | null;
-  tax_amount_minor: number | null;
-  tax_rate: string | null;
-  invoice_registration_number: string | null;
-  counterparty_name: string | null;
-  attendees: string[];
   status: string;
-  extraction_state: string | null;
-  updated_at: string;
-  tier: "protected" | "registered" | "unregistered";
-  canPurge: boolean;
-  completenessScore: number;
-  completedFields: string[];
-  missingFields: string[];
-  registrationReasons: string[];
+  attendees: string[];
   amexClaim: { month: string; lineId: string } | null;
   exportMonths: string[];
+  registrationReasons: string[];
 }
 
 interface ClusterResponse {
@@ -45,8 +28,16 @@ interface ClusterResponse {
     retainedReasons: string[];
     conflicts: Array<{ field: string; values: Array<{ id: string; value: string | number | null }> }>;
     requiredTransfers: Array<{ fromId: string; fields: string[] }>;
-    blocked: boolean;
     blockReasons: string[];
+    assessments: Array<{
+      id: string;
+      tier: "protected" | "registered" | "unregistered";
+      canPurge: boolean;
+      completenessScore: number;
+      completedFields: string[];
+      missingFields: string[];
+      isRetained: boolean;
+    }>;
   };
   members: ClusterMemberView[];
 }
@@ -63,10 +54,13 @@ export function DuplicateResolutionModal({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [retainedId, setRetainedId] = useState<string | null>(null);
+  // Explicit purge-target selection. EMPTY BY DEFAULT (correction §1). The
+  // recommendation is advisory only; nothing is purged unless checked.
+  const [purgeSelected, setPurgeSelected] = useState<Set<string>>(new Set());
   const [visualConfirmed, setVisualConfirmed] = useState(false);
+  const [legalAck, setLegalAck] = useState(false);
   const [confirmText, setConfirmText] = useState("");
   const [reason, setReason] = useState("");
-  const [strength, setStrength] = useState<"strong" | "near">("strong");
   const [submitting, setSubmitting] = useState(false);
   const [partialWarning, setPartialWarning] = useState<
     Array<{ purgeJobId: string; receiptId: string; error: string | null }> | null
@@ -87,6 +81,7 @@ export function DuplicateResolutionModal({
         if (cancelled) return;
         setData(json);
         setRetainedId(json.recommendation.retainedId);
+        setPurgeSelected(new Set()); // none by default
       } catch {
         setError("Network error.");
       } finally {
@@ -99,27 +94,55 @@ export function DuplicateResolutionModal({
   }, [clusterIds]);
 
   const members = data?.members ?? [];
-  const purgeTargets = members.filter((m) => m.id !== retainedId);
-  const protectedPurgeTarget = purgeTargets.find((m) => !m.canPurge);
-  const expectedUpdatedAt: Record<string, string> = {};
-  for (const m of purgeTargets) expectedUpdatedAt[m.id] = m.updated_at;
-  const expectedToken = String(purgeTargets.length);
-  const confirmOk =
-    confirmText.trim() === expectedToken ||
-    purgeTargets.some((m) => confirmText.trim().startsWith(m.id.slice(0, 8)));
-  const blocked = !!data?.recommendation.blocked;
+
+  // Changing the retained receipt clears all purge selections and recomputes the
+  // preview/blockers for the operator's actual selection (correction §1/§3).
+  function changeRetained(id: string) {
+    setRetainedId(id);
+    setPurgeSelected(new Set());
+    setConfirmText("");
+  }
+  function togglePurge(id: string) {
+    setPurgeSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+    setConfirmText("");
+  }
+
+  const selectedTargetIds = useMemo(() => [...purgeSelected], [purgeSelected]);
+  // Recompute per-target purgeability for the operator's selection (pure).
+  const selection = useMemo(() => {
+    if (!data || !retainedId) return null;
+    return assessSelection(
+      members.map((m) => m.input),
+      retainedId,
+      selectedTargetIds,
+    );
+  }, [data, retainedId, selectedTargetIds, members]);
+
+  const retainedRow = members.find((m) => m.input.id === retainedId) ?? null;
+  const targetsPayload = selectedTargetIds.map((id) => {
+    const m = members.find((x) => x.input.id === id);
+    return { receiptId: id, expectedUpdatedAt: m?.input.updated_at ?? "" };
+  });
+
+  const expectedConfirm = `PURGE ${selectedTargetIds.length}`;
+  const selectionBlocked = !!selection?.blocked;
   const canSubmit =
-    !!retainedId &&
-    purgeTargets.length >= 1 &&
-    !protectedPurgeTarget &&
+    !!retainedRow &&
+    selectedTargetIds.length >= 1 &&
+    !selectionBlocked &&
     visualConfirmed &&
-    confirmOk &&
+    legalAck &&
+    confirmText.trim() === expectedConfirm &&
     reason.trim().length > 0 &&
-    !blocked &&
     !submitting;
 
   async function submitPurge() {
-    if (!data || !retainedId) return;
+    if (!data || !retainedId || !retainedRow) return;
     setSubmitting(true);
     setError(null);
     try {
@@ -128,12 +151,12 @@ export function DuplicateResolutionModal({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           retainedReceiptId: retainedId,
-          purgeReceiptIds: purgeTargets.map((m) => m.id),
-          expectedUpdatedAt,
+          retainedExpectedUpdatedAt: retainedRow.input.updated_at,
+          targets: targetsPayload,
           visualConfirmed,
+          legalHoldExceptionAcknowledged: legalAck,
           confirmationText: confirmText,
           reason,
-          strength,
         }),
       });
       const json = (await res.json().catch(() => ({}))) as {
@@ -150,7 +173,6 @@ export function DuplicateResolutionModal({
         onClose();
         return;
       }
-      // Partial: D1 purged, some R2 cleanup failed — persistent retryable warning.
       const failed = (json.targets ?? []).filter((t) => t.status === "storage_failed");
       setPartialWarning(
         failed.map((t) => ({ purgeJobId: t.purgeJobId, receiptId: t.receiptId, error: t.errorText })),
@@ -191,7 +213,7 @@ export function DuplicateResolutionModal({
           <div>
             <div className="text-base font-bold text-gray-900">Resolve possible duplicate</div>
             <div className="text-xs text-gray-500">
-              Compare documents, keep the canonical receipt, purge the duplicate(s) permanently.
+              Compare documents, keep the canonical receipt, then explicitly check each duplicate to purge.
             </div>
           </div>
           <button type="button" onClick={onClose} className="rounded-lg px-2 py-1 text-gray-500 hover:bg-gray-100">
@@ -202,11 +224,8 @@ export function DuplicateResolutionModal({
         <div className="max-h-[70vh] overflow-auto px-6 py-4">
           {loading && <div className="py-10 text-center text-sm text-gray-500">Loading comparison…</div>}
           {error && (
-            <div className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-              {error}
-            </div>
+            <div className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>
           )}
-
           {partialWarning && partialWarning.length > 0 && (
             <div className="mb-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
               <div className="font-semibold">
@@ -216,11 +235,7 @@ export function DuplicateResolutionModal({
                 {partialWarning.map((p) => (
                   <li key={p.purgeJobId}>
                     {p.receiptId.slice(0, 8)}: {p.error}{" "}
-                    <button
-                      type="button"
-                      onClick={() => retryJob(p.purgeJobId)}
-                      className="font-semibold underline"
-                    >
+                    <button type="button" onClick={() => retryJob(p.purgeJobId)} className="font-semibold underline">
                       Retry cleanup
                     </button>
                   </li>
@@ -239,18 +254,16 @@ export function DuplicateResolutionModal({
                     .join("; ")}
                 </div>
               )}
-              {blocked && (
-                <div className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
-                  {data.recommendation.blockReasons.join(" ")}
-                </div>
-              )}
 
               <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
                 {members.map((m) => {
-                  const isRetained = m.id === retainedId;
+                  const a = data.recommendation.assessments.find((x) => x.id === m.input.id)!;
+                  const isRetained = m.input.id === retainedId;
+                  const isPurgeSelected = purgeSelected.has(m.input.id);
+                  const selTarget = selection?.perTarget.find((t) => t.id === m.input.id);
                   return (
                     <div
-                      key={m.id}
+                      key={m.input.id}
                       className={[
                         "rounded-xl border p-4",
                         isRetained ? "border-amber-500 ring-1 ring-amber-500" : "border-gray-200",
@@ -258,47 +271,57 @@ export function DuplicateResolutionModal({
                     >
                       <div className="mb-2 flex items-start justify-between gap-2">
                         <label className="flex items-center gap-2 text-sm font-semibold text-gray-900">
-                          <input
-                            type="radio"
-                            name="retained"
-                            checked={isRetained}
-                            onChange={() => setRetainedId(m.id)}
-                          />
+                          <input type="radio" name="retained" checked={isRetained} onChange={() => changeRetained(m.input.id)} />
                           Keep (canonical)
                         </label>
                         <div className="flex flex-wrap justify-end gap-1">
-                          {m.isRetained && data.recommendation.retainedReasons.map((r) => (
+                          {a.isRetained && data.recommendation.retainedReasons.map((r) => (
                             <Pill key={r} tone="green" size="sm">{r}</Pill>
                           ))}
                           {m.registrationReasons.map((r) => (
-                            <Pill key={r} tone={m.tier === "protected" ? "gray" : "blue"} size="sm">{r}</Pill>
+                            <Pill key={r} tone={a.tier === "protected" ? "gray" : "blue"} size="sm">{r}</Pill>
                           ))}
-                          <Pill tone="gray" size="sm">completeness {m.completenessScore}/11</Pill>
+                          <Pill tone="gray" size="sm">completeness {a.completenessScore}/10</Pill>
                         </div>
                       </div>
 
                       <div className="mb-3">
-                        <ReceiptImageViewer receiptId={m.id} contentType={m.original_content_type} />
+                        <ReceiptImageViewer receiptId={m.input.id} contentType={m.original_content_type} />
                       </div>
 
                       <div className="space-y-1 text-xs text-gray-700">
-                        <Row k="Merchant" v={m.merchant ?? "—"} />
-                        <Row k="Date" v={m.transaction_date ?? "(no date)"} />
-                        <Row k="Amount" v={`${m.currency} ${m.amount_minor ?? "—"}`} />
-                        <Row k="Category" v={m.expense_category_code ?? "—"} />
-                        <Row k="Purpose" v={m.business_purpose ?? "—"} />
-                        <Row k="Tax" v={m.tax_amount_minor != null ? String(m.tax_amount_minor) : m.tax_rate ?? "—"} />
-                        <Row k="Invoice no." v={m.invoice_registration_number ?? "—"} />
-                        <Row k="Counterparty" v={m.counterparty_name ?? "—"} />
+                        <Row k="Merchant" v={m.input.merchant ?? "—"} />
+                        <Row k="Date" v={m.input.transaction_date ?? "(no date)"} />
+                        <Row k="Amount" v={`${m.input.currency} ${m.input.amount_minor ?? "—"}`} />
+                        <Row k="Category" v={m.input.expense_category_code ?? "—"} />
+                        <Row k="Purpose" v={m.input.business_purpose ?? "—"} />
+                        <Row k="Tax" v={m.input.tax_amount_minor != null ? String(m.input.tax_amount_minor) : m.input.tax_rate ?? "—"} />
+                        <Row k="Invoice no." v={m.input.invoice_registration_number ?? "—"} />
+                        <Row k="Counterparty" v={m.input.counterparty_name ?? "—"} />
                         <Row k="Attendees" v={m.attendees.length ? m.attendees.join(", ") : "—"} />
                         <Row k="Captured" v={`${m.source} · ${m.captured_by} · ${m.captured_at.slice(0, 10)}`} />
-                        <Row k="Extraction" v={m.extraction_state ?? "—"} />
                         <Row k="AMEX claim" v={m.amexClaim ? `${m.amexClaim.month} · ${m.amexClaim.lineId.slice(0, 8)}` : "—"} />
                         <Row k="Export" v={m.exportMonths.length ? m.exportMonths.join(", ") : "—"} />
-                        {m.missingFields.length > 0 && (
-                          <div className="pt-1 text-gray-400">Missing: {m.missingFields.join(", ")}</div>
-                        )}
+                        {a.missingFields.length > 0 && <div className="pt-1 text-gray-400">Missing: {a.missingFields.join(", ")}</div>}
                       </div>
+
+                      {/* Explicit purge-target checkbox (correction §1). Protected
+                          members can never be checked. Unselected → untouched. */}
+                      {!isRetained && (
+                        <label className={`mt-2 flex items-center gap-2 text-sm ${a.canPurge ? "text-gray-900" : "text-gray-400"}`}>
+                          <input
+                            type="checkbox"
+                            checked={isPurgeSelected}
+                            disabled={!a.canPurge}
+                            onChange={() => togglePurge(m.input.id)}
+                          />
+                          Purge this duplicate
+                          {!a.canPurge && <span className="text-[11px]">(protected — cannot purge)</span>}
+                          {isPurgeSelected && selTarget && !selTarget.purgeable && (
+                            <span className="text-[11px] text-red-600">{selTarget.blockers.join(" ")}</span>
+                          )}
+                        </label>
+                      )}
                     </div>
                   );
                 })}
@@ -309,38 +332,27 @@ export function DuplicateResolutionModal({
 
         {data && !loading && (
           <div className="border-t border-gray-150 bg-gray-50 px-6 py-4">
-            {protectedPurgeTarget && (
+            {selectionBlocked && (
               <div className="mb-2 text-xs text-red-700">
-                A protected receipt cannot be purged. Select it as the canonical record, or cancel.
+                {selection?.blockReasons.join(" | ")}
               </div>
             )}
             <div className="mb-2 flex flex-wrap items-center gap-3 text-xs text-gray-700">
-              <label>
-                Strength:
-                <select
-                  value={strength}
-                  onChange={(e) => setStrength(e.target.value as "strong" | "near")}
-                  className="ml-1 rounded border border-gray-200 px-1 py-0.5"
-                >
-                  <option value="strong">strong</option>
-                  <option value="near">near</option>
-                </select>
+              <label className="flex items-center gap-1">
+                <input type="checkbox" checked={visualConfirmed} onChange={(e) => setVisualConfirmed(e.target.checked)} />
+                I visually confirmed the checked files represent the same receipt/charge.
               </label>
               <label className="flex items-center gap-1">
-                <input
-                  type="checkbox"
-                  checked={visualConfirmed}
-                  onChange={(e) => setVisualConfirmed(e.target.checked)}
-                />
-                I visually confirmed these files represent the same receipt/charge.
+                <input type="checkbox" checked={legalAck} onChange={(e) => setLegalAck(e.target.checked)} />
+                I acknowledge this is the narrow duplicate exception to receipt retention / legal hold.
               </label>
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <input
                 value={confirmText}
                 onChange={(e) => setConfirmText(e.target.value)}
-                placeholder={`Type ${expectedToken} (purge count) or a target ID prefix`}
-                className="h-9 w-64 rounded-lg border border-gray-300 px-2 text-sm"
+                placeholder={`Type exactly: ${expectedConfirm}`}
+                className="h-9 w-56 rounded-lg border border-gray-300 px-2 font-mono text-sm"
               />
               <input
                 value={reason}
@@ -348,19 +360,13 @@ export function DuplicateResolutionModal({
                 placeholder="Reason (required)"
                 className="h-9 flex-1 rounded-lg border border-gray-300 px-2 text-sm"
               />
-              <Btn
-                kind="danger"
-                size="md"
-                onClick={submitPurge}
-                disabled={!canSubmit}
-                leftIcon={<CheckIcon size={14} className="text-white" />}
-              >
+              <Btn kind="danger" size="md" onClick={submitPurge} disabled={!canSubmit} leftIcon={<CheckIcon size={14} className="text-white" />}>
                 {submitting ? "Purging…" : "Purge duplicate permanently"}
               </Btn>
             </div>
             <div className="mt-1 text-[11px] text-gray-400">
-              Permanent: removes D1 + R2. Ordinary soft-delete is unaffected. Purge targets:{" "}
-              {purgeTargets.map((m) => m.id.slice(0, 8)).join(", ") || "(select a canonical to keep)"}
+              Permanent: removes D1 + R2. Only checked targets are purged:{" "}
+              {selectedTargetIds.map((id) => id.slice(0, 8)).join(", ") || "(none checked)"}
             </div>
           </div>
         )}
