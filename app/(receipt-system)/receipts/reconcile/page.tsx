@@ -20,6 +20,7 @@ import {
 } from "@/lib/receipts/cross-month-claims";
 import { findAmexDuplicateCandidates } from "@/lib/receipts/amex-duplicates";
 import type { AmexDuplicateCandidate } from "@/lib/receipts/amex-duplicates";
+import { listIncompletePurgeJobs } from "@/lib/receipts/duplicate-purge";
 import { ReconcileScreen } from "@/components/receipts/reconcile/reconcile-screen";
 import { assertReceiptsPageAccess } from "@/lib/receipts/auth-request";
 import type { MonthOption } from "@/components/receipts/month-switcher";
@@ -161,6 +162,11 @@ export default async function ReconcilePage({
   const duplicateCandidates: Map<string, AmexDuplicateCandidate[]> =
     findAmexDuplicateCandidates(datedUnmatched, poolReceipts, claimedReceiptIds);
 
+  // Persistent partial-cleanup banner: any duplicate-purge tombstone whose R2
+  // cleanup is incomplete (storage_failed / storage_pending). Operator can retry
+  // from the banner without re-opening the cluster.
+  const incompletePurgeJobs = await listIncompletePurgeJobs(getReceiptsDb());
+
   // Bulk-fetch attendee names once for every receipt that could be shown in the
   // detail pane or orphan list. Single query — keeps the detail pane N+1-free.
   const attendeeReceiptIds = Array.from(
@@ -192,6 +198,7 @@ export default async function ReconcilePage({
       upcomingReceipts={partition.upcoming}
       undatedReceipts={partition.undated}
       duplicateCandidates={duplicateCandidates}
+      incompletePurgeJobs={incompletePurgeJobs}
       month={month}
       monthLabel={formatMonth(month)}
       monthsAvailable={availableMonths}

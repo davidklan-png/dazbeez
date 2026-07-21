@@ -175,11 +175,21 @@ export async function getReceiptRecord(
 }
 
 /**
- * Hard-delete a receipt and everything that references it. Used by the
- * upload routes' compensating-delete path when the receipt_files manifest
- * write fails (audit finding A1) — the receipt was inserted moments ago,
- * nothing downstream has had time to reference it, but we clean every
- * possible reference for safety. Atomic via db.batch.
+ * Compensating D1 cleanup for a just-inserted receipt whose upload failed part
+ * way (audit finding A1) — the upload routes call this when the receipt_files
+ * manifest write fails. The receipt was inserted moments ago, nothing downstream
+ * has had time to reference it, but every possible reference is cleaned for
+ * safety. Atomic via db.batch.
+ *
+ * ⚠️ SCOPE FOOTGUN (audit 2026-07-21, spec G): this is NOT a complete duplicate
+ * purge. It removes D1 rows (and NULLs the AMEX match backreference) but does
+ * NOT purge all associated R2 objects, does not transfer business-trip /
+ * email-intake / category-rule provenance, does not validate duplicate-purge
+ * eligibility, and does not write a purge tombstone. Do not reuse it as a
+ * full purge. Operator-confirmed duplicate removal goes through the separate
+ * `lib/receipts/duplicate-purge.ts` service (purgeDuplicate), which inventories
+ * R2, transfers provenance to the retained receipt, and records a retryable
+ * tombstone. The upload routes' compensating-delete behavior is unchanged.
  *
  * Returns true on success, false if the receipt row was already gone
  * (idempotent — caller can retry safely).
