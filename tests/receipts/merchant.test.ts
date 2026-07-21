@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   canonicalizeMerchant,
+  canonicalMerchantComparisonKey,
   detectMerchantChain,
   normalizeMerchantKey,
   CHAIN_CANONICAL,
@@ -81,6 +82,44 @@ test("merchant: canonicalize returns the merchant unchanged when not a chain", (
   assert.equal(canonicalizeMerchant("HOLIDAY SKY LOUNGE 新宿"), "HOLIDAY SKY LOUNGE 新宿");
   assert.equal(canonicalizeMerchant(""), "");
   assert.equal(canonicalizeMerchant(null), "");
+});
+
+// ─── canonicalMerchantComparisonKey ────────────────────────────────────────
+// Read-side duplicate-grouping key: canonicalize THEN NFKC + lowercase +
+// whitespace-normalize + trim. NOT the stored category-rule key.
+
+test("merchant: comparison key is case-insensitive (HOLIDAY vs Holiday)", () => {
+  // The 2026-07-21 prod gap: these two re-captures must share a key.
+  assert.equal(
+    canonicalMerchantComparisonKey("HOLIDAY SKY LOUNGE 新宿"),
+    canonicalMerchantComparisonKey("Holiday Sky Lounge 新宿"),
+  );
+  assert.equal(
+    canonicalMerchantComparisonKey("HOLIDAY SKY LOUNGE 新宿"),
+    "holiday sky lounge 新宿",
+  );
+});
+
+test("merchant: comparison key still folds chain variants (Japanese garble)", () => {
+  // canonicalize first → both Seven-Eleven spellings collapse to the chain
+  // token, then lowercase. Regression for existing conbini clustering.
+  assert.equal(
+    canonicalMerchantComparisonKey("セブンーエレブン"),
+    canonicalMerchantComparisonKey("セブン-イレブン 東中野末広橋店"),
+  );
+  assert.equal(
+    canonicalMerchantComparisonKey("7-Eleven"),
+    canonicalMerchantComparisonKey("セブン-イレブン"),
+  );
+  assert.equal(canonicalMerchantComparisonKey("Lawson"), canonicalMerchantComparisonKey("LAWSON"));
+});
+
+test("merchant: comparison key normalizes width + whitespace; handles null/empty", () => {
+  assert.equal(canonicalMerchantComparisonKey("ＰＣ　Ｄｅｐｏｔ"), canonicalMerchantComparisonKey("pc depot")); // full-width → half, lowercased
+  assert.equal(canonicalMerchantComparisonKey("PC   Depot"), canonicalMerchantComparisonKey("PC Depot")); // whitespace collapse
+  assert.equal(canonicalMerchantComparisonKey("  PC Depot  "), "pc depot"); // trim
+  assert.equal(canonicalMerchantComparisonKey(""), "");
+  assert.equal(canonicalMerchantComparisonKey(null), "");
 });
 
 // ─── normalizeMerchantKey ──────────────────────────────────────────────────

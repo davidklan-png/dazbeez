@@ -130,3 +130,29 @@ export function canonicalizeMerchant(merchant: string | null | undefined): strin
   const chain = detectMerchantChain(merchant);
   return chain ? CHAIN_CANONICAL[chain] : merchant;
 }
+
+/**
+ * Read-only COMPARISON key for duplicate grouping: canonicalizeMerchant (folds
+ * OCR-garbled conbini-chain variants to their chain token) then NFKC + lowercase
+ * + whitespace-normalize + trim. Used by BOTH the AMEX duplicate helper
+ * (amex-duplicates.ts) and the CASH/DIGITAL duplicate clustering (blockers.ts)
+ * so that case-only / width / whitespace variants of the same merchant cluster
+ * together (2026-07-21: "HOLIDAY SKY LOUNGE 新宿" vs "Holiday Sky Lounge 新宿"
+ * re-captures were splitting across the strong/near gap).
+ *
+ * Deliberately NOT a replacement for canonicalizeMerchant, and NOT for stored
+ * category-rule keys: category-rules.ts persists canonicalizeMerchant's raw
+ * output as the rule match key (normalizeMatchValue → merchantRuleMatches).
+ * Changing the stored key would silently break every existing merchant category
+ * rule. This helper is read-side duplicate comparison only — never persisted,
+ * never used for category-rule matching.
+ */
+export function canonicalMerchantComparisonKey(
+  merchant: string | null | undefined,
+): string {
+  return canonicalizeMerchant(merchant)
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+}

@@ -319,6 +319,64 @@ test("ic-card warning: does NOT fire on a ¥1,900 EMot rail fare (actual usage, 
   );
 });
 
+test("CASH/DIGITAL duplicate clustering: case-only merchant variants cluster (canonicalMerchantComparisonKey)", () => {
+  // Same vendor, same amount, same date — merchants differ ONLY by case. The
+  // shared comparison key lowercases, so these must form ONE cluster of 2
+  // (regression for the 2026-07-21 case-sensitivity gap shared with AMEX).
+  const receipts: ReceiptRecord[] = [
+    makeReceipt({
+      id: "cash-upper",
+      payment_path: "CASH",
+      merchant: "STARBUCKS COFFEE",
+      amount_minor: 1200,
+      transaction_date: "2026-06-11",
+    }),
+    makeReceipt({
+      id: "cash-mixed",
+      payment_path: "CASH",
+      merchant: "Starbucks Coffee",
+      amount_minor: 1200,
+      transaction_date: "2026-06-11",
+    }),
+  ];
+  const clusters = groupDuplicateReceipts(receipts);
+  assert.equal(
+    clusters.length,
+    1,
+    `case-only variants must cluster, got: ${JSON.stringify(clusters)}`,
+  );
+  assert.equal(clusters[0]!.ids.length, 2);
+
+  // And it surfaces as a non-blocking warning.
+  const warnings = computeDuplicateReceiptWarnings(receipts);
+  assert.equal(warnings.length, 1);
+  assert.equal(warnings[0]!.count, 2);
+});
+
+test("CASH/DIGITAL duplicate clustering: still folds Japanese chain variants", () => {
+  // Regression: the shared key canonicalizes the chain first (garble fold),
+  // THEN lowercases — so the prod セブン garble pair still clusters.
+  const receipts: ReceiptRecord[] = [
+    makeReceipt({
+      id: "seven-a",
+      payment_path: "CASH",
+      merchant: "セブンーエレブン",
+      amount_minor: 10000,
+      transaction_date: "2026-06-11",
+    }),
+    makeReceipt({
+      id: "seven-b",
+      payment_path: "CASH",
+      merchant: "セブン-イレブン 東中野末広橋店",
+      amount_minor: 10000,
+      transaction_date: "2026-06-11",
+    }),
+  ];
+  const clusters = groupDuplicateReceipts(receipts);
+  assert.equal(clusters.length, 1);
+  assert.equal(clusters[0]!.ids.length, 2);
+});
+
 test("ic-card predicate: AMEX path is out of scope even with round sum + venue + travel", () => {
   // The trigger is CASH/DIGITAL receipts. An AMEX charge would surface as a
   // statement line, not a receipt — so an AMEX-path receipt is never a
