@@ -42,7 +42,12 @@ CREATE TABLE IF NOT EXISTS duplicate_purge_log (
 );
 
 CREATE INDEX IF NOT EXISTS idx_duplicate_purge_status ON duplicate_purge_log(status);
-CREATE INDEX IF NOT EXISTS idx_duplicate_purge_purged ON duplicate_purge_log(purged_receipt_id);
+-- UNIQUE on purged_receipt_id: prevents concurrent/replayed double-purge.
+-- Two requests that both preflight the same target: request A inserts a
+-- tombstone + deletes the receipt; request B's INSERT for the same
+-- purged_receipt_id fails on UNIQUE → the whole batch aborts (no second
+-- tombstone, no R2 cleanup, no false second-purge report).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_duplicate_purge_purged ON duplicate_purge_log(purged_receipt_id);
 CREATE INDEX IF NOT EXISTS idx_duplicate_purge_retained ON duplicate_purge_log(retained_receipt_id);
 
 -- ─── Write-time guard trigger (correction §5) ───────────────────────────────
@@ -105,4 +110,40 @@ BEGIN
           AND r.deleted_at IS NULL
           AND r.updated_at = j.retained_expected_updated_at
      );
+  -- ── §3 TOCTOU: residual target references after cleanup/transfer ──────
+  -- These fire BEFORE the DELETE commits. If any reference to the target
+  -- survived the batch's cleanup statements (because it was added/changed
+  -- AFTER preflight), the whole batch aborts — no partial purge.
+  SELECT RAISE(ROLLBACK, 'duplicate-purge guard: residual business-trip links')
+    FROM duplicate_purge_log j
+   WHERE j.purged_receipt_id = OLD.id AND j.status = 'd1_pending'
+     AND EXISTS (SELECT 1 FROM business_trip_report_receipts WHERE receipt_id = OLD.id);
+  SELECT RAISE(ROLLBACK, 'duplicate-purge guard: residual email-intake promotion')
+    FROM duplicate_purge_log j
+   WHERE j.purged_receipt_id = OLD.id AND j.status = 'd1_pending'
+     AND EXISTS (SELECT 1 FROM email_receipt_intake WHERE promoted_receipt_id = OLD.id);
+  SELECT RAISE(ROLLBACK, 'duplicate-purge guard: residual category-rule membership')
+    FROM duplicate_purge_log j
+   WHERE j.purged_receipt_id = OLD.id AND j.status = 'd1_pending'
+     AND EXISTS (
+       SELECT 1 FROM merchant_category_rules r, json_each(r.source_receipt_ids_json)
+        WHERE r.source_receipt_ids_json LIKE '%' || OLD.id || '%'
+          AND json_each.value = OLD.id
+     );
+  SELECT RAISE(ROLLBACK, 'duplicate-purge guard: residual receipt_files')
+    FROM duplicate_purge_log j
+   WHERE j.purged_receipt_id = OLD.id AND j.status = 'd1_pending'
+     AND EXISTS (SELECT 1 FROM receipt_files WHERE object_type='receipt' AND object_id = OLD.id);
+  SELECT RAISE(ROLLBACK, 'duplicate-purge guard: residual attendees')
+    FROM duplicate_purge_log j
+   WHERE j.purged_receipt_id = OLD.id AND j.status = 'd1_pending'
+     AND EXISTS (SELECT 1 FROM receipt_attendees WHERE receipt_id = OLD.id);
+  SELECT RAISE(ROLLBACK, 'duplicate-purge guard: residual compliance checks')
+    FROM duplicate_purge_log j
+   WHERE j.purged_receipt_id = OLD.id AND j.status = 'd1_pending'
+     AND EXISTS (SELECT 1 FROM receipt_compliance_checks WHERE object_type='receipt' AND object_id = OLD.id);
+  SELECT RAISE(ROLLBACK, 'duplicate-purge guard: residual audit log')
+    FROM duplicate_purge_log j
+   WHERE j.purged_receipt_id = OLD.id AND j.status = 'd1_pending'
+     AND EXISTS (SELECT 1 FROM receipt_audit_log WHERE object_type='receipt' AND object_id = OLD.id);
 END;

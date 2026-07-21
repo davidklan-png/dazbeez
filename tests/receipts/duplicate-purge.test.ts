@@ -293,6 +293,15 @@ function setupTestDb(): DatabaseSync {
       item_type TEXT NOT NULL,
       item_id TEXT NOT NULL
     );
+    -- §3: tables the extended trigger's residual-reference checks need.
+    CREATE TABLE business_trip_report_receipts (id TEXT PRIMARY KEY, business_trip_report_id TEXT NOT NULL, receipt_id TEXT NOT NULL, created_at TEXT NOT NULL);
+    CREATE TABLE business_trip_reports (id TEXT PRIMARY KEY);
+    CREATE TABLE email_receipt_intake (id TEXT PRIMARY KEY, promoted_receipt_id TEXT);
+    CREATE TABLE merchant_category_rules (id TEXT PRIMARY KEY, match_type TEXT, match_value TEXT, expense_category_code TEXT, accepted_by TEXT, accepted_at TEXT, source_receipt_ids_json TEXT);
+    CREATE TABLE receipt_files (id TEXT PRIMARY KEY, object_type TEXT NOT NULL, object_id TEXT NOT NULL, role TEXT NOT NULL, r2_bucket TEXT NOT NULL, r2_key TEXT NOT NULL, original_filename TEXT, content_type TEXT, file_size_bytes INTEGER, sha256_hash TEXT, uploaded_by TEXT, uploaded_at TEXT, is_original INTEGER, created_at TEXT, updated_at TEXT);
+    CREATE TABLE receipt_attendees (id TEXT PRIMARY KEY, receipt_id TEXT NOT NULL, attendee_name TEXT NOT NULL, created_at TEXT NOT NULL);
+    CREATE TABLE receipt_compliance_checks (id TEXT PRIMARY KEY, object_type TEXT NOT NULL, object_id TEXT NOT NULL, check_type TEXT, status TEXT, severity TEXT, message TEXT, details_json TEXT, checked_at TEXT, resolved_at TEXT, resolved_by TEXT, created_at TEXT);
+    CREATE TABLE receipt_audit_log (id TEXT PRIMARY KEY, actor TEXT, action TEXT, object_type TEXT, object_id TEXT, old_value_json TEXT, new_value_json TEXT, created_at TEXT);
   `);
   // Apply migration 0032 (table + trigger).
   const migration = readFileSync("db/receipts/0032_duplicate_purge_log.sql", "utf8");

@@ -165,6 +165,7 @@ function buildInput(
     emailIntakePromoted: boolean;
     attendeesCount: number;
     hasProofFile: boolean;
+    exported: boolean;
   },
 ): DuplicateMemberInput {
   return {
@@ -172,7 +173,7 @@ function buildInput(
     captured_at: row.captured_at,
     updated_at: row.updated_at,
     status: row.status,
-    exported: row.status === "exported",
+    exported: signals.exported,
     archived: row.status === "archived",
     claimedByConfirmedAmexLine: signals.claimedByConfirmedAmexLine,
     businessTripLinked: signals.businessTripLinked,
@@ -254,6 +255,9 @@ export async function fetchMemberAssessment(
     emailIntakePromoted: !!email,
     attendeesCount: attendees.length,
     hasProofFile: !!proof,
+    // §1 correction: export-item membership is authoritative, not just status.
+    // A receipt in receipt_export_items is protected even if status drifted.
+    exported: row.status === "exported" || (exportItems?.n ?? 0) > 0,
   });
 
   return {
@@ -275,7 +279,7 @@ export async function fetchMemberAssessment(
 export async function inventoryR2Keys(
   db: D1Database,
   receiptId: string,
-): Promise<{ keys: R2KeyRef[]; originalSha256: string | null; unknownBuckets: string[] }> {
+): Promise<{ keys: R2KeyRef[]; originalSha256: string | null; unknownBuckets: string[]; fileRowIds: string[] }> {
   const r = await db
     .prepare(`SELECT original_r2_key, processed_r2_key, extraction_r2_key, original_sha256 FROM receipt_records WHERE id = ?`)
     .bind(receiptId)
@@ -297,21 +301,25 @@ export async function inventoryR2Keys(
   add("RECEIPTS_BUCKET", r?.processed_r2_key);
   add("RECEIPTS_BUCKET", r?.extraction_r2_key);
 
-  // Manifest rows carry their own r2_bucket — map it; reject unknown.
+  // Manifest rows carry their own r2_bucket — map it; reject unknown. Also
+  // capture the row ids so the batch can delete ONLY inventoried rows (§3 TOCTOU:
+  // a new manifest row appearing after inventory must not be silently deleted).
+  const fileRowIds: string[] = [];
   const files = await db
-    .prepare(`SELECT r2_bucket, r2_key FROM receipt_files WHERE object_type='receipt' AND object_id=?`)
+    .prepare(`SELECT id, r2_bucket, r2_key FROM receipt_files WHERE object_type='receipt' AND object_id=?`)
     .bind(receiptId)
-    .all<{ r2_bucket: string; r2_key: string }>();
+    .all<{ id: string; r2_bucket: string; r2_key: string }>();
   for (const f of files.results ?? []) {
     const bucket = mapBucketName(f.r2_bucket);
     if (bucket === null) {
       unknownBuckets.push(`${f.r2_bucket}:${f.r2_key}`);
       continue;
     }
+    fileRowIds.push(f.id);
     add(bucket, f.r2_key);
   }
 
-  return { keys, originalSha256: r?.original_sha256 ?? null, unknownBuckets };
+  return { keys, originalSha256: r?.original_sha256 ?? null, unknownBuckets, fileRowIds };
 }
 
 /** Prefix-list a bucket under `receipts/<id>/` for unmanifested derivatives. */
@@ -436,7 +444,7 @@ interface PreflightTarget {
   input: DuplicateMemberInput;
   row: ReceiptRecord;
   strength: "strong" | "near";
-  inventory: { keys: R2KeyRef[]; originalSha256: string | null };
+  inventory: { keys: R2KeyRef[]; originalSha256: string | null; fileRowIds: string[] };
 }
 
 function buildAtomicBatch(
@@ -448,6 +456,7 @@ function buildAtomicBatch(
     pt: PreflightTarget;
     purgeJobId: string;
     pendingKeysJson: string;
+    objectCount: number;
     reason: string;
     actor: string;
     legalAck: boolean;
@@ -459,32 +468,42 @@ function buildAtomicBatch(
 
   for (const t of targets) {
     const id = t.pt.input.id;
-    // Transfer business-trip provenance (INSERT OR IGNORE per trip → retained).
-    for (const link of t.tripLinks) {
-      stmts.push(
-        db.prepare(`INSERT OR IGNORE INTO business_trip_report_receipts (id, business_trip_report_id, receipt_id, created_at) VALUES (?, ?, ?, ?)`)
-          .bind(newUuid(), link.business_trip_report_id, retainedId, now),
-      );
-    }
-    if (t.tripLinks.length > 0) {
-      stmts.push(db.prepare(`DELETE FROM business_trip_report_receipts WHERE receipt_id = ?`).bind(id));
-    }
+    // §3 TOCTOU: Transfer ALL current target trip links to retained at write
+    // time (not from a preflight snapshot). A new link added after preflight is
+    // included. Uses a deterministic id derived from (target, trip) for uniqueness.
+    stmts.push(
+      db.prepare(
+        `INSERT OR IGNORE INTO business_trip_report_receipts (id, business_trip_report_id, receipt_id, created_at)
+           SELECT 'purge-' || ? || '-' || business_trip_report_id, business_trip_report_id, ?, ?
+             FROM business_trip_report_receipts WHERE receipt_id = ?`,
+      ).bind(id, retainedId, now, id),
+    );
+    stmts.push(db.prepare(`DELETE FROM business_trip_report_receipts WHERE receipt_id = ?`).bind(id));
     // Transfer email-intake promotion.
     stmts.push(
       db.prepare(`UPDATE email_receipt_intake SET promoted_receipt_id = ? WHERE promoted_receipt_id = ?`).bind(retainedId, id),
     );
-    // Rewrite category rules (only those whose exact parsed array contains the target).
+    // §3 TOCTOU: Optimistic comparison on source_receipt_ids_json. If the value
+    // changed concurrently, the UPDATE matches 0 rows → the rule still contains
+    // the target → the trigger's residual json_each check aborts the batch.
     for (const rule of t.categoryRules) {
       const rw = rewriteSourceIds(rule.source_receipt_ids_json, id, retainedId);
       if (rw === null) continue; // LIKE false positive → untouched
       stmts.push(
-        db.prepare(`UPDATE merchant_category_rules SET source_receipt_ids_json = ? WHERE id = ?`).bind(rw.rewritten, rule.id),
+        db.prepare(`UPDATE merchant_category_rules SET source_receipt_ids_json = ? WHERE id = ? AND source_receipt_ids_json = ?`)
+          .bind(rw.rewritten, rule.id, rule.source_receipt_ids_json),
       );
     }
     // Reference cleanup.
     stmts.push(db.prepare(`DELETE FROM receipt_attendees WHERE receipt_id = ?`).bind(id));
     stmts.push(db.prepare(`DELETE FROM receipt_compliance_checks WHERE object_type = 'receipt' AND object_id = ?`).bind(id));
-    stmts.push(db.prepare(`DELETE FROM receipt_files WHERE object_type = 'receipt' AND object_id = ?`).bind(id));
+    // §3 TOCTOU: Delete ONLY inventoried manifest rows (by id). A new manifest
+    // row appearing after inventory is not inventoried → not deleted → the
+    // trigger's residual receipt_files check aborts the batch.
+    if (t.pt.inventory.fileRowIds.length > 0) {
+      const ph = t.pt.inventory.fileRowIds.map(() => "?").join(",");
+      stmts.push(db.prepare(`DELETE FROM receipt_files WHERE id IN (${ph})`).bind(...t.pt.inventory.fileRowIds));
+    }
     stmts.push(db.prepare(`DELETE FROM receipt_audit_log WHERE object_type = 'receipt' AND object_id = ?`).bind(id));
     // Tombstone (d1_pending) — carries the optimistic guards the trigger checks.
     stmts.push(
@@ -502,7 +521,7 @@ function buildAtomicBatch(
         t.reason,
         t.pt.strength,
         t.pt.inventory.originalSha256,
-        t.pt.inventory.keys.length,
+        t.objectCount,
         t.pendingKeysJson,
         t.pt.input.updated_at, // expected_updated_at (preflight)
         retainedExpectedUpdatedAt,
@@ -532,33 +551,44 @@ function bucketFor(ref: R2KeyRef, receiptsBucket: R2Bucket, archiveBucket: R2Buc
   return ref.bucket === "RECEIPTS_ARCHIVE_BUCKET" ? archiveBucket : receiptsBucket;
 }
 
+// §5 correction: attempt delete for EVERY key, then head-verify EVERY key (even
+// if some deletes failed), report combined failures + actual remaining count.
+// Never stop early on the first error — a later key might still be deletable.
 async function deleteAndVerify(
   keys: R2KeyRef[],
   receiptsBucket: R2Bucket,
   archiveBucket: R2Bucket,
 ): Promise<{ ok: boolean; error: string | null; remaining: number }> {
-  let remaining = keys.length;
+  const errors: string[] = [];
+  // Phase 1: attempt delete every key (collect errors, don't stop).
   for (const ref of keys) {
     const bkt = bucketFor(ref, receiptsBucket, archiveBucket);
     try {
       await bkt.delete(ref.key);
     } catch (err) {
-      return { ok: false, error: `R2 delete failed for ${ref.bucket}:${ref.key}: ${(err as Error).message}`, remaining };
+      errors.push(`R2 delete failed for ${ref.bucket}:${ref.key}: ${(err as Error).message}`);
     }
   }
+  // Phase 2: head-verify every key (even if some deletes failed).
+  let remaining = 0;
   for (const ref of keys) {
     const bkt = bucketFor(ref, receiptsBucket, archiveBucket);
     try {
       const after = await bkt.head(ref.key);
-      if (after) {
-        return { ok: false, error: `R2 object still present after delete: ${ref.bucket}:${ref.key}`, remaining };
-      }
-      remaining -= 1;
+      if (after) remaining += 1;
     } catch (err) {
-      return { ok: false, error: `R2 head-verify failed for ${ref.bucket}:${ref.key}: ${(err as Error).message}`, remaining };
+      remaining += 1; // can't verify → treat as remaining
+      errors.push(`R2 head-verify failed for ${ref.bucket}:${ref.key}: ${(err as Error).message}`);
     }
   }
-  return { ok: true, error: null, remaining: 0 };
+  if (remaining === 0 && errors.length === 0) {
+    return { ok: true, error: null, remaining: 0 };
+  }
+  return {
+    ok: false,
+    error: errors.join("; ") || `${remaining} key(s) still present after delete`,
+    remaining,
+  };
 }
 
 // ─── orchestrator ───────────────────────────────────────────────────────────
@@ -620,7 +650,7 @@ export async function purgeDuplicate(req: PurgeRequest): Promise<PurgeResult> {
     if (strength === null) {
       throw new PurgeEligibilityError(409, `Target ${id.slice(0, 8)} is not a duplicate candidate of the retained receipt (revalidated server-side).`);
     }
-    prefetched.push({ input: t.input, row: t.row, strength, inventory: { keys: [], originalSha256: null } });
+    prefetched.push({ input: t.input, row: t.row, strength, inventory: { keys: [], originalSha256: null, fileRowIds: [] } });
   }
 
   // ── 3. Inventory R2 keys + parse provenance for EVERY target (before batch) ─
@@ -629,6 +659,7 @@ export async function purgeDuplicate(req: PurgeRequest): Promise<PurgeResult> {
     pt: PreflightTarget;
     purgeJobId: string;
     pendingKeysJson: string;
+    objectCount: number;
     reason: string;
     actor: string;
     legalAck: boolean;
@@ -644,7 +675,7 @@ export async function purgeDuplicate(req: PurgeRequest): Promise<PurgeResult> {
         `Target ${pt.input.id.slice(0, 8)} has unknown manifest bucket value(s): ${inv.unknownBuckets.join(", ")} — refusing to purge.`,
       );
     }
-    pt.inventory = inv;
+    pt.inventory = { keys: inv.keys, originalSha256: inv.originalSha256, fileRowIds: inv.fileRowIds };
 
     // Full R2 inventory incl. prefix-listed derivatives across both buckets.
     const seen = new Set<string>();
@@ -679,6 +710,7 @@ export async function purgeDuplicate(req: PurgeRequest): Promise<PurgeResult> {
       pt,
       purgeJobId: newUuid(),
       pendingKeysJson: JSON.stringify(allKeys),
+      objectCount: allKeys.length, // §5: final deduplicated count incl. derivatives
       reason: req.reason,
       actor: req.actor,
       legalAck: req.legalHoldExceptionAcknowledged,

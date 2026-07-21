@@ -127,6 +127,27 @@ export function completeness(m: DuplicateMemberInput): CompletenessResult {
   return { score: completed.length, completed, missing };
 }
 
+// ─── Populated-field detection (correction §4) ──────────────────────────────
+// DISTINCT from completeness: for transfer/loss detection, a field is "populated"
+// only when it carries actual data the retained receipt might lose. Attendees
+// are "populated" when attendeesCount > 0 (NOT when the category doesn't require
+// them — a non-required category with zero attendees has no attendee data to
+// transfer). Completeness treats not-required attendees as "completed" (no gap),
+// which is correct for scoring but wrong for loss detection.
+
+export function fieldPopulated(
+  field: ScoreField,
+  m: DuplicateMemberInput,
+): boolean {
+  if (field === "attendees") return m.attendeesCount > 0;
+  return fieldCompleted(field, m);
+}
+
+/** Fields that carry actual data (for transfer/loss detection). Pure. */
+export function populatedScoreFields(m: DuplicateMemberInput): ScoreField[] {
+  return SCORE_FIELDS.filter((f) => fieldPopulated(f, m));
+}
+
 /**
  * Protection/registration tier (rule A.1). A PROTECTED receipt can never be
  * purged; REGISTERED (business-trip / email-intake linkage) is purgeable only
@@ -304,12 +325,14 @@ export function recommendRetention(
   }
 
   // Required transfers (A.6): populated on a purge target, missing on retained.
-  const retainedCompleted = new Set<ScoreField>(retainedAssessment.completeness.completed);
+  // §4: Uses populatedScoreFields (strict attendees = count > 0), not
+  // completeness().completed (which treats not-required attendees as completed).
+  const retainedPopulated = new Set<ScoreField>(populatedScoreFields(retained));
   const requiredTransfers: RequiredTransfer[] = [];
   for (const m of members) {
     if (m.id === retained.id) continue;
-    const targetCompleted = assessments.get(m.id)!.completeness.completed;
-    const missingFromRetained = targetCompleted.filter((f) => !retainedCompleted.has(f));
+    const targetPopulated = populatedScoreFields(m);
+    const missingFromRetained = targetPopulated.filter((f) => !retainedPopulated.has(f));
     if (missingFromRetained.length > 0) {
       requiredTransfers.push({ fromId: m.id, fields: missingFromRetained });
     }
@@ -390,8 +413,8 @@ export function assessSelection(
   const blockReasons: string[] = [];
 
   const retainedTierRank = retained ? protectionTier(retained).rank : 0;
-  const retainedCompleted = retained
-    ? new Set<ScoreField>(completeness(retained).completed)
+  const retainedPopulated = retained
+    ? new Set<ScoreField>(populatedScoreFields(retained))
     : new Set<ScoreField>();
 
   for (const targetId of targetIds) {
@@ -416,8 +439,12 @@ export function assessSelection(
       if (tTier.rank === retainedTierRank && tComp.score > completeness(retained!).score) {
         blockers.push("Target is more complete than the retained receipt — copy its fields first or retain it.");
       }
-      for (const f of tComp.completed) {
-        if (!retainedCompleted.has(f)) missingFieldsToCopy.push(f);
+      // §4: Use populatedScoreFields (strict: attendees populated = count > 0),
+      // NOT completeness().completed (which treats not-required attendees as
+      // "completed"). This prevents false "missing field" detection for
+      // categories that don't require attendees.
+      for (const f of populatedScoreFields(target)) {
+        if (!retainedPopulated.has(f)) missingFieldsToCopy.push(f);
       }
       if (missingFieldsToCopy.length > 0) {
         blockers.push(

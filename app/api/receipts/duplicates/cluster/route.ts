@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { requireReceiptsActor } from "@/lib/receipts/auth";
 import { getReceiptsDb } from "@/lib/cloudflare-runtime";
 import { recommendRetention } from "@/lib/receipts/duplicate-resolution-policy";
-import { fetchMemberAssessment } from "@/lib/receipts/duplicate-purge";
+import { fetchMemberAssessment, PURGE_TARGET_CAP } from "@/lib/receipts/duplicate-purge";
 
 // GET /api/receipts/duplicates/cluster?ids=a,b,c
 // Server-computed comparison + retention recommendation as an explicit JSON DTO
@@ -24,11 +24,29 @@ export async function GET(request: Request) {
     if (ids.length < 2) {
       return NextResponse.json({ error: "Provide at least 2 ids." }, { status: 400 });
     }
+    // §7: reject duplicate IDs.
+    if (new Set(ids).size !== ids.length) {
+      return NextResponse.json({ error: "Duplicate receipt IDs in cluster request." }, { status: 400 });
+    }
+    // §7: cap at retained + PURGE_TARGET_CAP (max 1 + 10 = 11).
+    if (ids.length > PURGE_TARGET_CAP + 1) {
+      return NextResponse.json(
+        { error: `Cluster too large (${ids.length} ids); max is ${PURGE_TARGET_CAP + 1}.` },
+        { status: 400 },
+      );
+    }
 
     const members = [];
     for (const id of ids) {
       const rec = await fetchMemberAssessment(db, id);
-      if (!rec) continue;
+      // §7: reject if any requested receipt is missing/deleted — do NOT silently
+      // compare a different subset.
+      if (!rec) {
+        return NextResponse.json(
+          { error: `Receipt ${id.slice(0, 8)} not found or deleted.` },
+          { status: 404 },
+        );
+      }
       const reasons: string[] = [];
       if (
         rec.input.status === "reconciled" ||

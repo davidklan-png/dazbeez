@@ -72,7 +72,9 @@ export function DuplicateResolutionModal({
       setLoading(true);
       setError(null);
       try {
-        const res = await fetch(`/api/receipts/duplicates/cluster?ids=${clusterIds.join(",")}`);
+        // §7: encode query using URLSearchParams (not manual string concat).
+        const params = new URLSearchParams({ ids: clusterIds.join(",") });
+        const res = await fetch(`/api/receipts/duplicates/cluster?${params}`);
         const json = (await res.json().catch(() => ({}))) as ClusterResponse | { error?: string };
         if (!res.ok || !("members" in json)) {
           setError((json as { error?: string }).error ?? "Failed to load cluster.");
@@ -208,7 +210,7 @@ export function DuplicateResolutionModal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center overflow-auto bg-black/40 p-4">
-      <div className="my-6 w-full max-w-6xl rounded-2xl bg-white shadow-xl">
+      <div className={`my-6 w-full rounded-2xl bg-white shadow-xl ${members.length >= 3 ? "max-w-7xl" : "max-w-6xl"}`}>
         <div className="flex items-center justify-between border-b border-gray-150 px-6 py-4">
           <div>
             <div className="text-base font-bold text-gray-900">Resolve possible duplicate</div>
@@ -255,7 +257,8 @@ export function DuplicateResolutionModal({
                 </div>
               )}
 
-              <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+              {/* §8: three-column for 3+ member clusters at desktop; two for pairs. */}
+              <div className={`grid grid-cols-1 gap-4 ${members.length >= 3 ? "lg:grid-cols-3" : "lg:grid-cols-2"}`}>
                 {members.map((m) => {
                   const a = data.recommendation.assessments.find((x) => x.id === m.input.id)!;
                   const isRetained = m.input.id === retainedId;
