@@ -34,6 +34,7 @@ function m(partial: Partial<DuplicateMemberInput> & Pick<DuplicateMemberInput, "
     counterparty_name: null,
     attendeesRequired: false,
     attendeesCount: 0,
+    attendeeNames: [],
     extractionState: null,
     hasOriginalFile: false,
     hasProofFile: false,

@@ -52,6 +52,9 @@ export interface DuplicateMemberInput {
   counterparty_name: string | null;
   attendeesRequired: boolean;
   attendeesCount: number;
+  /** Actual names are used only for preservation/loss detection. */
+  attendeeNames: string[];
+  alcoholPresent: boolean;
   extractionState: ExtractionState | null;
   hasOriginalFile: boolean;
   hasProofFile: boolean;
@@ -148,6 +151,92 @@ export function populatedScoreFields(m: DuplicateMemberInput): ScoreField[] {
   return SCORE_FIELDS.filter((f) => fieldPopulated(f, m));
 }
 
+// ─── Preservation fields (merge workflow: tax split) ────────────────────────
+// Completeness treats "tax" as ONE score dimension (either amount OR rate
+// populated = complete). But PRESERVATION must inspect tax_amount_minor and
+// tax_rate INDEPENDENTLY — having one must not make the other appear resolved.
+// The MIURA case: target has tax_amount_minor=829 + tax_rate="10.0"; retained
+// has neither. Both must be individually transferable.
+
+/** A field that can be preserved through the merge workflow. Splits "tax" into
+ *  its two independent components. */
+export type PreservationField =
+  | "transaction_date"
+  | "merchant"
+  | "amount"
+  | "category"
+  | "business_purpose"
+  | "alcohol_present"
+  | "tax_amount"
+  | "tax_rate"
+  | "invoice_number"
+  | "counterparty"
+  | "attendees";
+
+export const PRESERVATION_FIELDS: readonly PreservationField[] = [
+  "transaction_date",
+  "merchant",
+  "amount",
+  "category",
+  "business_purpose",
+  "alcohol_present",
+  "tax_amount",
+  "tax_rate",
+  "invoice_number",
+  "counterparty",
+  "attendees",
+];
+
+/** Whether a preservation field is populated (has actual transferable data). */
+export function preservationFieldPopulated(
+  field: PreservationField,
+  m: DuplicateMemberInput,
+): boolean {
+  switch (field) {
+    case "tax_amount":
+      return m.tax_amount_minor != null;
+    case "tax_rate":
+      return !!m.tax_rate && m.tax_rate.trim().length > 0;
+    case "alcohol_present":
+      // Meaningful only when true on the source.
+      return m.alcoholPresent;
+    default:
+      // Reuse the existing populatedScoreFields logic for the non-split fields.
+      if (field === "attendees") return m.attendeesCount > 0;
+      return fieldPopulated(field as ScoreField, m);
+  }
+}
+
+/** Preservation-level populated fields (tax split into amount + rate). Pure. */
+export function populatedPreservationFields(
+  m: DuplicateMemberInput,
+): PreservationField[] {
+  return PRESERVATION_FIELDS.filter((f) => preservationFieldPopulated(f, m));
+}
+
+function attendeeComparisonKey(name: string): string {
+  return name.normalize("NFKC").toLocaleLowerCase().replace(/\s+/g, " ").trim();
+}
+
+/** Populated target fields whose actual value would be lost by retaining the
+ * other member. Attendees are compared as sets rather than a boolean/count. */
+export function missingPreservationFields(
+  target: DuplicateMemberInput,
+  retained: DuplicateMemberInput,
+): PreservationField[] {
+  const retainedPopulated = new Set(populatedPreservationFields(retained));
+  const missing = populatedPreservationFields(target).filter(
+    (field) => !retainedPopulated.has(field),
+  );
+  if (target.attendeeNames.length > 0 && retained.attendeeNames.length > 0) {
+    const retainedNames = new Set(retained.attendeeNames.map(attendeeComparisonKey));
+    if (target.attendeeNames.some((name) => !retainedNames.has(attendeeComparisonKey(name)))) {
+      if (!missing.includes("attendees")) missing.push("attendees");
+    }
+  }
+  return missing;
+}
+
 /**
  * Protection/registration tier (rule A.1). A PROTECTED receipt can never be
  * purged; REGISTERED (business-trip / email-intake linkage) is purgeable only
@@ -185,10 +274,11 @@ export interface FieldConflict {
 }
 
 /** A populated accounting field on a purge target that is MISSING on the retained
- *  receipt — must be copied/resolved before purge (rule A.6). */
+ *  receipt — must be copied/resolved before purge (rule A.6). Uses
+ *  PreservationField (tax split into amount + rate independently). */
 export interface RequiredTransfer {
   fromId: string;
-  fields: ScoreField[];
+  fields: PreservationField[];
 }
 
 export interface RetentionRecommendation {
@@ -324,14 +414,11 @@ export function recommendRetention(
   }
 
   // Required transfers (A.6): populated on a purge target, missing on retained.
-  // §4: Uses populatedScoreFields (strict attendees = count > 0), not
-  // completeness().completed (which treats not-required attendees as completed).
-  const retainedPopulated = new Set<ScoreField>(populatedScoreFields(retained));
+  // Uses populatedPreservationFields (tax split into amount + rate independently).
   const requiredTransfers: RequiredTransfer[] = [];
   for (const m of members) {
     if (m.id === retained.id) continue;
-    const targetPopulated = populatedScoreFields(m);
-    const missingFromRetained = targetPopulated.filter((f) => !retainedPopulated.has(f));
+    const missingFromRetained = missingPreservationFields(m, retained);
     if (missingFromRetained.length > 0) {
       requiredTransfers.push({ fromId: m.id, fields: missingFromRetained });
     }
@@ -378,8 +465,9 @@ export interface TargetAssessment {
   id: string;
   purgeable: boolean;
   blockers: string[];
-  /** Target-only populated accounting fields missing from the retained receipt. */
-  missingFieldsToCopy: ScoreField[];
+  /** Target-only populated accounting fields missing from the retained receipt
+   *  (PreservationField: tax split into amount + rate independently). */
+  missingFieldsToCopy: PreservationField[];
 }
 
 export interface SelectionAssessment {
@@ -412,13 +500,9 @@ export function assessSelection(
   const blockReasons: string[] = [];
 
   const retainedTierRank = retained ? protectionTier(retained).rank : 0;
-  const retainedPopulated = retained
-    ? new Set<ScoreField>(populatedScoreFields(retained))
-    : new Set<ScoreField>();
-
   for (const targetId of targetIds) {
     const blockers: string[] = [];
-    const missingFieldsToCopy: ScoreField[] = [];
+    const missingFieldsToCopy: PreservationField[] = [];
     const target = members.find((m) => m.id === targetId) ?? null;
     if (!retained) {
       blockers.push("Retained receipt not in cluster.");
@@ -438,13 +522,9 @@ export function assessSelection(
       if (tTier.rank === retainedTierRank && tComp.score > completeness(retained!).score) {
         blockers.push("Target is more complete than the retained receipt — copy its fields first or retain it.");
       }
-      // §4: Use populatedScoreFields (strict: attendees populated = count > 0),
-      // NOT completeness().completed (which treats not-required attendees as
-      // "completed"). This prevents false "missing field" detection for
-      // categories that don't require attendees.
-      for (const f of populatedScoreFields(target)) {
-        if (!retainedPopulated.has(f)) missingFieldsToCopy.push(f);
-      }
+      // §4: Use populatedPreservationFields (tax split into amount + rate
+      // independently; attendees populated = count > 0), NOT completeness.
+      missingFieldsToCopy.push(...missingPreservationFields(target, retained));
       if (missingFieldsToCopy.length > 0) {
         blockers.push(
           `Target has accounting field(s) {${missingFieldsToCopy.join(", ")}} missing from the retained receipt — copy/resolve first.`,

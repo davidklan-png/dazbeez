@@ -166,6 +166,7 @@ function buildInput(
     businessTripLinked: boolean;
     emailIntakePromoted: boolean;
     attendeesCount: number;
+    attendeeNames: string[];
     hasProofFile: boolean;
     exported: boolean;
   },
@@ -194,6 +195,8 @@ function buildInput(
     // Category-driven attendee requirement (correction §3) — never hardcoded.
     attendeesRequired: requiresAttendees(row.expense_category_code),
     attendeesCount: signals.attendeesCount,
+    attendeeNames: signals.attendeeNames,
+    alcoholPresent: row.alcohol_present === 1,
     extractionState: row.extraction_state ?? null,
     hasOriginalFile: Boolean(row.original_r2_key),
     hasProofFile: signals.hasProofFile,
@@ -256,6 +259,7 @@ export async function fetchMemberAssessment(
     businessTripLinked: (tripRows.results ?? []).length > 0,
     emailIntakePromoted: !!email,
     attendeesCount: attendees.length,
+    attendeeNames: attendees,
     hasProofFile: !!proof,
     // §1 correction: export-item membership is authoritative, not just status.
     // A receipt in receipt_export_items is protected even if status drifted.
