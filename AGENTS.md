@@ -220,7 +220,9 @@ starts. Design consequences:
    vision service), so these are metadata-strong **possible** duplicates, not
    pixel-confirmed. A legitimate JR round-trip (two ¥4280 えきねっと charges,
    one day apart, reconciled to two distinct lines) must not be mislabeled.
-   PHASE 1 IMPLEMENTED ON BRANCH — NOT YET MERGED OR DEPLOYED: (a)
+   PHASE 1 DONE — merged via PR #145 (merge commit b1edaa3, deployed to
+   production 2026-07-21, Worker version 35af2121). Verified live against the
+   default 2026-08 Reconcile population: (a)
    status-downgrade prevention — the public review PATCH owns only
    captured/needs_review→reviewed, and ordinary autosaves omit status
    (lib/receipts/receipt-status-policy.ts); (b)
