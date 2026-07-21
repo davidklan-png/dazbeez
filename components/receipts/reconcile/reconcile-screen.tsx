@@ -46,6 +46,7 @@ import type {
 import type { StatementWindow } from "@/lib/receipts/statement-window";
 import type { AmexDuplicateCandidate } from "@/lib/receipts/amex-duplicates";
 import type { MonthOption } from "@/components/receipts/month-switcher";
+import { DuplicateResolutionModal } from "@/components/receipts/reconcile/duplicate-resolution-modal";
 import {
   BAND_DISPLAY,
   bandForLine,
@@ -70,6 +71,16 @@ export interface ReconcileScreenProps {
   undatedReceipts: ReceiptRecord[];
   /** Non-blocking AMEX possible-re-capture candidates per orphan receipt id. */
   duplicateCandidates: Map<string, AmexDuplicateCandidate[]>;
+  /** Duplicate-purge tombstones with incomplete R2 cleanup (persistent banner). */
+  incompletePurgeJobs: Array<{
+    id: string;
+    purged_receipt_id: string;
+    retained_receipt_id: string;
+    status: string;
+    error_text: string | null;
+    storage_object_count: number;
+    created_at: string;
+  }>;
   month: string;
   monthLabel: string;
   monthsAvailable: MonthOption[];
@@ -103,6 +114,9 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
   // operator sees the banner even after the page reloads the new state.
   const [warnings, setWarnings] = useState<string[] | null>(null);
   const [confirmType, setConfirmType] = useState<string>("");
+  // Duplicate-resolution comparison modal: the badge opens it with the cluster's
+  // receipt ids ([orphan, ...candidate ids]).
+  const [clusterIds, setClusterIds] = useState<string[] | null>(null);
   const [showFinalizeModal, setShowFinalizeModal] = useState(false);
   const [isRefreshing, startRefresh] = useTransition();
 
@@ -515,6 +529,37 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
         </div>
       )}
 
+      {props.incompletePurgeJobs.length > 0 && (
+        <div className="border-b border-amber-300 bg-amber-50 px-8 py-2 text-xs text-amber-900">
+          <span className="font-semibold">
+            Duplicate-purge storage cleanup incomplete ({props.incompletePurgeJobs.length}):
+          </span>{" "}
+          {props.incompletePurgeJobs.map((j) => (
+            <span key={j.id} className="mr-3 inline-flex items-center gap-1">
+              {j.purged_receipt_id.slice(0, 8)} ({j.status}, {j.storage_object_count} obj)
+              <button
+                type="button"
+                onClick={async () => {
+                  try {
+                    const res = await fetch("/api/receipts/duplicates/purge/retry", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ purgeJobId: j.id }),
+                    });
+                    if (res.ok) router.refresh();
+                  } catch {
+                    /* ignore — banner persists */
+                  }
+                }}
+                className="font-semibold text-amber-800 underline"
+              >
+                Retry
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+
       <div className="grid min-h-0 flex-1 grid-cols-[540px_minmax(0,1fr)]">
         <LinesPane
           linesWithBand={linesWithBand}
@@ -530,6 +575,7 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
           upcomingReceipts={props.upcomingReceipts}
           undatedReceipts={props.undatedReceipts}
           duplicateCandidates={props.duplicateCandidates}
+          onOpenCluster={setClusterIds}
         />
         <DetailPane
           active={active}
@@ -575,6 +621,10 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
           busy={signoffBusy}
         />
       )}
+
+      {clusterIds && (
+        <DuplicateResolutionModal clusterIds={clusterIds} onClose={() => setClusterIds(null)} />
+      )}
     </div>
   );
 }
@@ -595,6 +645,7 @@ function LinesPane({
   upcomingReceipts,
   undatedReceipts,
   duplicateCandidates,
+  onOpenCluster,
 }: {
   linesWithBand: Array<{
     line: AmexStatementLine;
@@ -620,6 +671,7 @@ function LinesPane({
   upcomingReceipts: ReceiptRecord[];
   undatedReceipts: ReceiptRecord[];
   duplicateCandidates: Map<string, AmexDuplicateCandidate[]>;
+  onOpenCluster: (ids: string[]) => void;
 }) {
   const groupReview = linesWithBand.filter(
     (l) =>
@@ -755,6 +807,7 @@ function LinesPane({
             upcoming={upcomingReceipts}
             undated={undatedReceipts}
             duplicateCandidates={duplicateCandidates}
+            onOpenCluster={onOpenCluster}
           />
         )}
         {tab === "trips" && (
@@ -934,12 +987,14 @@ function OrphansList({
   upcoming,
   undated,
   duplicateCandidates,
+  onOpenCluster,
 }: {
   orphans: ReceiptRecord[];
   leadingSlack: ReceiptRecord[];
   upcoming: ReceiptRecord[];
   undated: ReceiptRecord[];
   duplicateCandidates: Map<string, AmexDuplicateCandidate[]>;
+  onOpenCluster: (ids: string[]) => void;
 }) {
   // Part C — only true in-period unmatched receipts are "Orphan receipts".
   // Leading-slack / upcoming / undated are shown in separate, honestly-labeled
@@ -959,7 +1014,7 @@ function OrphansList({
         <>
           <SectionHeader label="Orphan receipts" count={orphans.length} dot="bg-red-400" />
           {orphans.map((r) => (
-            <OrphanRow key={r.id} r={r} duplicateCandidates={duplicateCandidates} />
+            <OrphanRow key={r.id} r={r} duplicateCandidates={duplicateCandidates} onOpenCluster={onOpenCluster} />
           ))}
         </>
       )}
@@ -967,19 +1022,19 @@ function OrphansList({
         <SectionHeader label="Awaiting next statement" count={upcoming.length} dot="bg-gray-300" />
       )}
       {upcoming.map((r) => (
-        <OrphanRow key={r.id} r={r} duplicateCandidates={duplicateCandidates} />
+        <OrphanRow key={r.id} r={r} duplicateCandidates={duplicateCandidates} onOpenCluster={onOpenCluster} />
       ))}
       {leadingSlack.length > 0 && (
         <SectionHeader label="Before statement range" count={leadingSlack.length} dot="bg-gray-300" />
       )}
       {leadingSlack.map((r) => (
-        <OrphanRow key={r.id} r={r} duplicateCandidates={duplicateCandidates} />
+        <OrphanRow key={r.id} r={r} duplicateCandidates={duplicateCandidates} onOpenCluster={onOpenCluster} />
       ))}
       {undated.length > 0 && (
         <SectionHeader label="Needs date" count={undated.length} dot="bg-amber-400" />
       )}
       {undated.map((r) => (
-        <OrphanRow key={r.id} r={r} />
+        <OrphanRow key={r.id} r={r} onOpenCluster={onOpenCluster} />
       ))}
     </div>
   );
@@ -988,9 +1043,11 @@ function OrphansList({
 function OrphanRow({
   r,
   duplicateCandidates,
+  onOpenCluster,
 }: {
   r: ReceiptRecord;
   duplicateCandidates?: Map<string, AmexDuplicateCandidate[]>;
+  onOpenCluster: (ids: string[]) => void;
 }) {
   const dups = duplicateCandidates?.get(r.id);
   return (
@@ -1007,7 +1064,13 @@ function OrphanRow({
         <div className="text-[11px] text-gray-500">
           {r.transaction_date ?? "(no date)"}
         </div>
-        {dups && dups.length > 0 && <DuplicateBadge candidates={dups} />}
+        {dups && dups.length > 0 && (
+          <DuplicateBadge
+            subjectId={r.id}
+            candidates={dups}
+            onOpenCluster={onOpenCluster}
+          />
+        )}
       </div>
       <Link
         href={`/receipts/review/${r.id}`}
@@ -1019,30 +1082,39 @@ function OrphanRow({
   );
 }
 
-// Part E — non-blocking, link-only duplicate badge. Never auto-matches or
-// suppresses; it just points the operator at a receipt to compare against.
+// Part E — non-blocking duplicate badge. Clicking it opens the same-page
+// duplicate-resolution comparison modal (no navigation). Never auto-matches or
+// suppresses; the operator compares, picks the canonical, and confirms purge.
 // Wording is deliberately cautious: only a STRONG candidate (canonical merchant
 // + currency + amount + date) is called a "re-capture"; a NEAR candidate
 // (amount/date match but merchant text differs — possible OCR/descriptor drift)
 // is "related receipt", never conclusively a re-capture (architect review).
-function DuplicateBadge({ candidates }: { candidates: AmexDuplicateCandidate[] }) {
-  // Representative target: prefer a matched strong candidate, then any strong,
-  // then the first near. The label follows the representative's strength.
+function DuplicateBadge({
+  subjectId,
+  candidates,
+  onOpenCluster,
+}: {
+  subjectId: string;
+  candidates: AmexDuplicateCandidate[];
+  onOpenCluster: (ids: string[]) => void;
+}) {
   const matchedStrong = candidates.find((c) => c.strength === "strong" && c.otherMatched);
   const anyStrong = candidates.find((c) => c.strength === "strong");
   const target = matchedStrong ?? anyStrong ?? candidates[0]!;
-  const href = `/receipts/review/${target.otherReceiptId}`;
   const baseLabel =
     target.strength === "strong"
       ? target.otherMatched
-        ? "Possible re-capture — compare with matched receipt"
+        ? "Possible re-capture — compare"
         : "Possible re-capture"
       : "Possible related receipt — same amount/date";
   const label =
     candidates.length > 1 ? `${baseLabel} · ${candidates.length}` : baseLabel;
+  // Cluster = the subject + every candidate receipt id.
+  const clusterIds = [subjectId, ...candidates.map((c) => c.otherReceiptId)];
   return (
-    <Link
-      href={href}
+    <button
+      type="button"
+      onClick={() => onOpenCluster(clusterIds)}
       className="mt-1 inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[10.5px] font-medium text-amber-800 hover:bg-amber-200"
       title={candidates
         .map((c) => `${c.strength}: ${c.reasons.join(", ")}`)
@@ -1050,7 +1122,7 @@ function DuplicateBadge({ candidates }: { candidates: AmexDuplicateCandidate[] }
     >
       <WarningIcon size={11} className="text-amber-600" />
       <span>{label}</span>
-    </Link>
+    </button>
   );
 }
 
