@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ReceiptImageViewer } from "@/components/receipts/receipt-image-viewer";
 import { Btn } from "@/components/ui/btn";
 import { Pill } from "@/components/ui/pill";
 import { CheckIcon } from "@/components/ui/icons";
-import { assessSelection, type DuplicateMemberInput } from "@/lib/receipts/duplicate-resolution-policy";
+import { assessSelection, type DuplicateMemberInput, type SelectionAssessment } from "@/lib/receipts/duplicate-resolution-policy";
+import { MergeResolutionSection } from "@/components/receipts/reconcile/merge-resolution-section";
 
 export interface ClusterMemberView {
   input: DuplicateMemberInput;
@@ -66,34 +67,44 @@ export function DuplicateResolutionModal({
     Array<{ purgeJobId: string; receiptId: string; remainingKeys: number; error: string | null }> | null
   >(null);
 
+  // Reload the cluster from the server (used on mount and after merge). After a
+  // merge, ALL destructive confirmations must be cleared (post-merge reset).
+  const reloadCluster = useCallback(async (postMerge = false) => {
+    const params = new URLSearchParams({ ids: clusterIds.join(",") });
+    const res = await fetch(`/api/receipts/duplicates/cluster?${params}`);
+    const json = (await res.json().catch(() => ({}))) as ClusterResponse | { error?: string };
+    if (res.ok && "members" in json) {
+      setData(json);
+      if (!postMerge) setRetainedId(json.recommendation.retainedId);
+      // Post-merge reset: clear every destructive confirmation so the operator
+      // must re-examine the updated retained record and reselect targets.
+      setPurgeSelected(new Set());
+      setConfirmText("");
+      if (postMerge) {
+        setVisualConfirmed(false);
+        setLegalAck(false);
+      }
+      return true;
+    }
+    if (!res.ok) setError((json as { error?: string }).error ?? "Failed to load cluster.");
+    return false;
+  }, [clusterIds]);
+
   useEffect(() => {
     let cancelled = false;
     void (async () => {
       setLoading(true);
       setError(null);
       try {
-        // §7: encode query using URLSearchParams (not manual string concat).
-        const params = new URLSearchParams({ ids: clusterIds.join(",") });
-        const res = await fetch(`/api/receipts/duplicates/cluster?${params}`);
-        const json = (await res.json().catch(() => ({}))) as ClusterResponse | { error?: string };
-        if (!res.ok || !("members" in json)) {
-          setError((json as { error?: string }).error ?? "Failed to load cluster.");
-          return;
-        }
-        if (cancelled) return;
-        setData(json);
-        setRetainedId(json.recommendation.retainedId);
-        setPurgeSelected(new Set()); // none by default
+        await reloadCluster();
       } catch {
-        setError("Network error.");
+        if (!cancelled) setError("Network error.");
       } finally {
         if (!cancelled) setLoading(false);
       }
     })();
-    return () => {
-      cancelled = true;
-    };
-  }, [clusterIds]);
+    return () => { cancelled = true; };
+  }, [reloadCluster]);
 
   const members = data?.members ?? [];
 
@@ -329,6 +340,18 @@ export function DuplicateResolutionModal({
                   );
                 })}
               </div>
+
+              {/* Data-resolution section: resolve target-only fields before purge */}
+              {selectionBlocked && selection && retainedId && retainedRow && (
+                <MergeResolutionSection
+                  retainedId={retainedId}
+                  retainedUpdatedAt={retainedRow.input.updated_at}
+                  targets={selectedTargetIds}
+                  members={members}
+                  selection={selection}
+                  onMerged={() => void reloadCluster(true)}
+                />
+              )}
             </>
           )}
         </div>
