@@ -26,6 +26,10 @@ import {
   formatCategoryLabel,
 } from "@/lib/receipts/categories";
 import { findCategorySuggestion, type CategoryRule } from "@/lib/receipts/category-rules";
+import {
+  canMarkReviewed,
+  canPromoteToReviewed,
+} from "@/lib/receipts/receipt-status-policy";
 import type {
   PaymentPath,
   ReceiptAttendee,
@@ -251,9 +255,14 @@ export function FormPane(props: FormPaneProps) {
               currency,
               businessPurpose: businessPurpose.trim() || null,
               attendees: attendees.map((a) => a.trim()).filter(Boolean),
-              status: (markReviewed
-                ? "reviewed"
-                : receipt.status) as ReceiptStatus,
+              // Audit 2026-07-21 Phase 1: ordinary autosaves NEVER send status —
+              // a stale client value must not be able to overwrite a lifecycle
+              // status an internal flow (reconcile/export) has since advanced.
+              // "reviewed" is sent only by the explicit Mark-reviewed path below,
+              // and only when the receipt is still in a pre-review state.
+              ...(markReviewed && canPromoteToReviewed(receipt.status)
+                ? { status: "reviewed" as ReceiptStatus }
+                : {}),
             }),
             signal: ctrl.signal,
           });
@@ -377,7 +386,13 @@ export function FormPane(props: FormPaneProps) {
             currency,
             businessPurpose: businessPurpose.trim() || null,
             attendees: attendees.map((a) => a.trim()).filter(Boolean),
-            status: "reviewed" as ReceiptStatus,
+            // Promote to reviewed only when still in a pre-review state. For an
+            // already-reviewed/reconciled/exported/archived receipt the server
+            // would reject the downgrade; we simply don't send it. Fields still
+            // save and the operator advances to the next queue item.
+            ...(canPromoteToReviewed(receipt.status)
+              ? { status: "reviewed" as ReceiptStatus }
+              : {}),
           }),
         });
         if (!res.ok) {
@@ -403,6 +418,7 @@ export function FormPane(props: FormPaneProps) {
     })();
   }, [
     receipt.id,
+    receipt.status,
     paymentPath,
     expenseCategoryCode,
     transactionDate,
@@ -418,7 +434,10 @@ export function FormPane(props: FormPaneProps) {
 
   useKeyboardShortcuts({
     s: (e) => {
-      if (isLocked) return; // sealed — `s` does nothing, no PATCH fires
+      // Same shared gate as the button (canMarkReviewed): a reconciled/reviewed/
+      // exported/archived receipt must not save-and-advance through a shortcut
+      // presented as "Mark reviewed" (architect review 2026-07-21).
+      if (!canMarkReviewed(receipt.status, isLocked)) return;
       e.preventDefault();
       onMarkReviewed();
     },
@@ -762,7 +781,7 @@ export function FormPane(props: FormPaneProps) {
             kind="primary"
             size="md"
             onClick={onMarkReviewed}
-            disabled={isLocked}
+            disabled={!canMarkReviewed(receipt.status, isLocked)}
             rightIcon={<ArrowRightIcon size={14} className="text-white" />}
           >
             Mark reviewed → next

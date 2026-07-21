@@ -44,6 +44,7 @@ import type {
   ReconciliationMatch,
 } from "@/lib/receipts/types";
 import type { StatementWindow } from "@/lib/receipts/statement-window";
+import type { AmexDuplicateCandidate } from "@/lib/receipts/amex-duplicates";
 import type { MonthOption } from "@/components/receipts/month-switcher";
 import {
   BAND_DISPLAY,
@@ -56,7 +57,19 @@ export interface ReconcileScreenProps {
   amexLines: AmexStatementLine[];
   receipts: ReceiptRecord[];
   autoMatches: ReconciliationMatch[];
+  /** Honest orphan population: ONLY true in-period unmatched receipts
+   *  (audit 2026-07-21 Phase 1, Part C). The other unmatched sub-populations
+   *  are passed separately and labeled, not counted as orphans. */
   orphanReceipts: ReceiptRecord[];
+  /** Date before the statement cycle (inside the leading ±5d pad) — prior-cycle,
+   *  not orphans of this month. */
+  leadingSlackReceipts: ReceiptRecord[];
+  /** Date after the statement cycle — "Awaiting next statement". */
+  upcomingReceipts: ReceiptRecord[];
+  /** No transaction_date — "Needs date"; must not repeat as an orphan monthly. */
+  undatedReceipts: ReceiptRecord[];
+  /** Non-blocking AMEX possible-re-capture candidates per orphan receipt id. */
+  duplicateCandidates: Map<string, AmexDuplicateCandidate[]>;
   month: string;
   monthLabel: string;
   monthsAvailable: MonthOption[];
@@ -513,6 +526,10 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
           setTab={setTab}
           counts={counts}
           orphanReceipts={props.orphanReceipts}
+          leadingSlackReceipts={props.leadingSlackReceipts}
+          upcomingReceipts={props.upcomingReceipts}
+          undatedReceipts={props.undatedReceipts}
+          duplicateCandidates={props.duplicateCandidates}
         />
         <DetailPane
           active={active}
@@ -574,6 +591,10 @@ function LinesPane({
   setTab,
   counts,
   orphanReceipts,
+  leadingSlackReceipts,
+  upcomingReceipts,
+  undatedReceipts,
+  duplicateCandidates,
 }: {
   linesWithBand: Array<{
     line: AmexStatementLine;
@@ -595,6 +616,10 @@ function LinesPane({
     orphan: number;
   };
   orphanReceipts: ReceiptRecord[];
+  leadingSlackReceipts: ReceiptRecord[];
+  upcomingReceipts: ReceiptRecord[];
+  undatedReceipts: ReceiptRecord[];
+  duplicateCandidates: Map<string, AmexDuplicateCandidate[]>;
 }) {
   const groupReview = linesWithBand.filter(
     (l) =>
@@ -723,7 +748,15 @@ function LinesPane({
             )}
           </>
         )}
-        {tab === "orphans" && <OrphansList receipts={orphanReceipts} />}
+        {tab === "orphans" && (
+          <OrphansList
+            orphans={orphanReceipts}
+            leadingSlack={leadingSlackReceipts}
+            upcoming={upcomingReceipts}
+            undated={undatedReceipts}
+            duplicateCandidates={duplicateCandidates}
+          />
+        )}
         {tab === "trips" && (
           <div className="px-6 py-10 text-center text-sm text-gray-400">
             Business trip detection runs at import time. No candidates for this
@@ -896,47 +929,128 @@ function LineRow({
 }
 
 function OrphansList({
-  receipts,
+  orphans,
+  leadingSlack,
+  upcoming,
+  undated,
+  duplicateCandidates,
 }: {
-  receipts: ReceiptRecord[];
+  orphans: ReceiptRecord[];
+  leadingSlack: ReceiptRecord[];
+  upcoming: ReceiptRecord[];
+  undated: ReceiptRecord[];
+  duplicateCandidates: Map<string, AmexDuplicateCandidate[]>;
 }) {
-  if (receipts.length === 0) {
+  // Part C — only true in-period unmatched receipts are "Orphan receipts".
+  // Leading-slack / upcoming / undated are shown in separate, honestly-labeled
+  // sections so they don't read as problems (audit 2026-07-21 Phase 1).
+  const total =
+    orphans.length + leadingSlack.length + upcoming.length + undated.length;
+  if (total === 0) {
     return (
       <div className="px-6 py-10 text-center text-sm text-gray-400">
-        No orphan receipts for this window.
+        No unmatched AMEX receipts for this window.
       </div>
     );
   }
   return (
     <div>
-      <SectionHeader label="Receipts with no matching AMEX line" count={receipts.length} dot="bg-gray-400" />
-      {receipts.map((r) => (
-        <div
-          key={r.id}
-          className="flex items-center gap-3 border-b border-gray-100 px-4 py-3"
-        >
-          <ReceiptThumb
-            size={28}
-            merchant={(r.merchant ?? "RECEIPT").slice(0, 8)}
-            amount={formatJpy(r.amount_minor ?? 0, r.currency)}
-          />
-          <div className="min-w-0 flex-1">
-            <div className="truncate text-[13px] font-semibold text-gray-900">
-              {r.merchant ?? "Unnamed receipt"}
-            </div>
-            <div className="text-[11px] text-gray-500">
-              {r.transaction_date ?? "(no date)"}
-            </div>
-          </div>
-          <Link
-            href={`/receipts/review/${r.id}`}
-            className="text-[12px] font-semibold text-amber-700 hover:text-amber-800"
-          >
-            Open ↗
-          </Link>
-        </div>
+      {orphans.length > 0 && (
+        <>
+          <SectionHeader label="Orphan receipts" count={orphans.length} dot="bg-red-400" />
+          {orphans.map((r) => (
+            <OrphanRow key={r.id} r={r} duplicateCandidates={duplicateCandidates} />
+          ))}
+        </>
+      )}
+      {upcoming.length > 0 && (
+        <SectionHeader label="Awaiting next statement" count={upcoming.length} dot="bg-gray-300" />
+      )}
+      {upcoming.map((r) => (
+        <OrphanRow key={r.id} r={r} duplicateCandidates={duplicateCandidates} />
+      ))}
+      {leadingSlack.length > 0 && (
+        <SectionHeader label="Before statement range" count={leadingSlack.length} dot="bg-gray-300" />
+      )}
+      {leadingSlack.map((r) => (
+        <OrphanRow key={r.id} r={r} duplicateCandidates={duplicateCandidates} />
+      ))}
+      {undated.length > 0 && (
+        <SectionHeader label="Needs date" count={undated.length} dot="bg-amber-400" />
+      )}
+      {undated.map((r) => (
+        <OrphanRow key={r.id} r={r} />
       ))}
     </div>
+  );
+}
+
+function OrphanRow({
+  r,
+  duplicateCandidates,
+}: {
+  r: ReceiptRecord;
+  duplicateCandidates?: Map<string, AmexDuplicateCandidate[]>;
+}) {
+  const dups = duplicateCandidates?.get(r.id);
+  return (
+    <div className="flex items-center gap-3 border-b border-gray-100 px-4 py-3">
+      <ReceiptThumb
+        size={28}
+        merchant={(r.merchant ?? "RECEIPT").slice(0, 8)}
+        amount={formatJpy(r.amount_minor ?? 0, r.currency)}
+      />
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-[13px] font-semibold text-gray-900">
+          {r.merchant ?? "Unnamed receipt"}
+        </div>
+        <div className="text-[11px] text-gray-500">
+          {r.transaction_date ?? "(no date)"}
+        </div>
+        {dups && dups.length > 0 && <DuplicateBadge candidates={dups} />}
+      </div>
+      <Link
+        href={`/receipts/review/${r.id}`}
+        className="text-[12px] font-semibold text-amber-700 hover:text-amber-800"
+      >
+        Open ↗
+      </Link>
+    </div>
+  );
+}
+
+// Part E — non-blocking, link-only duplicate badge. Never auto-matches or
+// suppresses; it just points the operator at a receipt to compare against.
+// Wording is deliberately cautious: only a STRONG candidate (canonical merchant
+// + currency + amount + date) is called a "re-capture"; a NEAR candidate
+// (amount/date match but merchant text differs — possible OCR/descriptor drift)
+// is "related receipt", never conclusively a re-capture (architect review).
+function DuplicateBadge({ candidates }: { candidates: AmexDuplicateCandidate[] }) {
+  // Representative target: prefer a matched strong candidate, then any strong,
+  // then the first near. The label follows the representative's strength.
+  const matchedStrong = candidates.find((c) => c.strength === "strong" && c.otherMatched);
+  const anyStrong = candidates.find((c) => c.strength === "strong");
+  const target = matchedStrong ?? anyStrong ?? candidates[0]!;
+  const href = `/receipts/review/${target.otherReceiptId}`;
+  const baseLabel =
+    target.strength === "strong"
+      ? target.otherMatched
+        ? "Possible re-capture — compare with matched receipt"
+        : "Possible re-capture"
+      : "Possible related receipt — same amount/date";
+  const label =
+    candidates.length > 1 ? `${baseLabel} · ${candidates.length}` : baseLabel;
+  return (
+    <Link
+      href={href}
+      className="mt-1 inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[10.5px] font-medium text-amber-800 hover:bg-amber-200"
+      title={candidates
+        .map((c) => `${c.strength}: ${c.reasons.join(", ")}`)
+        .join(" | ")}
+    >
+      <WarningIcon size={11} className="text-amber-600" />
+      <span>{label}</span>
+    </Link>
   );
 }
 

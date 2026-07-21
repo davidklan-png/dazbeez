@@ -29,6 +29,7 @@ import {
   compactUndefinedReceiptUpdate,
   parseExportStatementMonthOverride,
 } from "@/lib/receipts/receipt-update";
+import { planReviewStatusTransition } from "@/lib/receipts/receipt-status-policy";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -47,14 +48,6 @@ const VALID_EXPENSE_TYPES: ExpenseType[] = [
   "business_trip",
   "misc",
   "UNKNOWN",
-];
-const VALID_RECEIPT_STATUSES: ReceiptStatus[] = [
-  "captured",
-  "needs_review",
-  "reviewed",
-  "reconciled",
-  "exported",
-  "archived",
 ];
 
 function normalizeOptionalText(
@@ -157,12 +150,24 @@ export async function PATCH(request: Request, { params }: RouteContext) {
     ) {
       return NextResponse.json({ error: "Invalid expenseType." }, { status: 400 });
     }
-    if (
-      body.status !== undefined &&
-      !VALID_RECEIPT_STATUSES.includes(body.status as ReceiptStatus)
-    ) {
-      return NextResponse.json({ error: "Invalid status." }, { status: 400 });
+    // Status authority (audit 2026-07-21, Phase 1): the public review PATCH
+    // owns only captured/needs_review → reviewed. Any other status value — and
+    // any attempt to demote a reconciled/exported/archived receipt — is rejected
+    // here. Ordinary autosaves omit status entirely (plan → noop, status left
+    // untouched). Internal reconciliation/export flows keep their own status
+    // write paths and never route through this planner.
+    const statusPlan = planReviewStatusTransition({
+      currentStatus: receipt.status,
+      requestedStatus: body.status,
+    });
+    if (statusPlan.outcome === "reject") {
+      return NextResponse.json(
+        { error: statusPlan.reason },
+        { status: statusPlan.httpStatus },
+      );
     }
+    const statusForUpdate: ReceiptStatus | undefined =
+      statusPlan.outcome === "apply" ? statusPlan.status : undefined;
     if (
       body.transactionDate !== undefined &&
       body.transactionDate !== null &&
@@ -311,6 +316,13 @@ export async function PATCH(request: Request, { params }: RouteContext) {
     // column to `undefined ?? null` → NULL, silently clearing sticky data (the
     // 2026-07-20 membership-clearing root cause). The same compacted object drives
     // the SQL mutation and the generic audit.
+    //
+    // Status authority (audit 2026-07-21 Phase 1): status is taken from
+    // planReviewStatusTransition (statusForUpdate) — undefined for ordinary
+    // autosaves, so no status change — NOT the raw body.status. compactUndefined-
+    // ReceiptUpdate then drops the undefined key entirely, so an autosave can
+    // never reach updateReceiptRecord with a status that would downgrade a
+    // reconciled/exported/archived receipt.
     const receiptUpdate = compactUndefinedReceiptUpdate({
       paymentPath: body.paymentPath as PaymentPath | undefined,
       expenseType: body.expenseType as ExpenseType | undefined,
@@ -322,7 +334,7 @@ export async function PATCH(request: Request, { params }: RouteContext) {
       businessPurpose,
       expenseCategoryCode,
       exportStatementMonth,
-      status: body.status as ReceiptStatus | undefined,
+      status: statusForUpdate,
       sourceType,
       invoiceRegistrationNumber,
       counterpartyName,
