@@ -17,14 +17,21 @@ import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
 // .env.production and .dev.vars). Clerk's auth.protect() redirects
 // unauthenticated users there.
 
-const isPublicRoute = createRouteMatcher([
+// ─── Matched routes exempted from auth.protect() ─────────────────────────────
+//
+// These still run through `clerkMiddleware` (so `auth()` is populated for the
+// human-actor fall-through), but skip `auth.protect()` because the handler
+// performs its own layered auth. Exported so the middleware-routing test can
+// assert the exemption list without reading source text; consumed directly by
+// `createRouteMatcher` below (single-sourced — no duplicate list).
+export const PUBLIC_ROUTES: string[] = [
   "/receipts/sign-in(.*)",
   // Processor-only routes — Mac MLX consumer (ADR 0001). These do layered
   // auth INSIDE the route handler: valid `x-receipts-processor-key` header
   // OR a Clerk-authenticated human actor (file: GET/HEAD at
   // app/api/receipts/[id]/file/route.ts:61,94; extract: POST at
-  // app/api/receipts/[id]/extract/route.ts:52-58). They MUST stay in
-  // config.matcher below — clerkMiddleware has to RUN on them so that
+  // app/api/receipts/[id]/extract/route.ts:52-58). They MUST stay matched
+  // (via /api/receipts/:path* in config.matcher) so clerkMiddleware RUNS and
   // `auth()` is populated for the human-actor fall-through
   // (requireReceiptsActor in lib/receipts/auth.ts reads `auth()`).
   // Listing them here only skips `auth.protect()`; the handler then decides
@@ -44,7 +51,9 @@ const isPublicRoute = createRouteMatcher([
   // 404-rewrites the consumer's processor-key POST before the handler runs.
   "/api/receipts/:id/render",
   "/api/receipts/inbox/:id/promote",
-]);
+];
+
+const isPublicRoute = createRouteMatcher(PUBLIC_ROUTES);
 
 export default clerkMiddleware(async (auth, request) => {
   if (!isPublicRoute(request)) {
@@ -58,11 +67,34 @@ export default clerkMiddleware(async (auth, request) => {
   }
 });
 
+// IMPORTANT: server-side `auth()` — used by `requireReceiptsActor()` in
+// `lib/receipts/auth.ts` (→ `auth()` / `clerkClient()`) — REQUIRES
+// `clerkMiddleware()` to run for the request. It does NOT read the Clerk
+// session cookie on its own: `@clerk/nextjs` documents `auth()` as "Requires
+// `clerkMiddleware()` to be configured", and the runtime raises
+// `auth_signature_invalid` ("the Clerk middleware did not run … matches the
+// current route") when it didn't. Therefore every `/api/*` handler that calls
+// `requireReceiptsActor` MUST be matched here.
+//
+// The one `/api/mobile/*` matched route is `/api/mobile/auth/complete-pairing`:
+// the browser-side operator-approval POST ("Pair this iPhone"), whose handler
+// calls `requireReceiptsActor`. Every OTHER `/api/mobile/*` endpoint uses a
+// device-bearer token or a pairing code and is intentionally NOT matched.
+//
+// NOTE: `matcher` MUST be a static array literal — Next.js statically extracts
+// `config.matcher` at build time and rejects variable references. So the
+// matcher list lives inline here as the canonical source; the middleware-
+// routing test asserts against `config.matcher` directly (no duplicated list).
 export const config = {
   matcher: [
     "/receipts/:path*",
     "/admin/:path*",
     "/api/receipts/:path*",
-    // /api/mobile/* intentionally NOT matched (bearer-token scheme, never Clerk)
+    // Operator-approval POST from /receipts/pair: its handler calls
+    // requireReceiptsActor → auth()/clerkClient(), which only returns usable
+    // identity when clerkMiddleware ran on the request. The ONE /api/mobile/*
+    // route that is Clerk-matched.
+    "/api/mobile/auth/complete-pairing",
   ],
 };
+

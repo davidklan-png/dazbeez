@@ -58,7 +58,7 @@ deployment is not verified from this tree.
 Core config files:
 
 - `wrangler.jsonc` — Worker entry + bindings: D1 (`DB`, `CRM_DB`, `RECEIPTS_DB`), R2 (`CRM_IMAGES`, `RECEIPTS_BUCKET`, `RECEIPTS_ARCHIVE_BUCKET`), Queue producer (`RECEIPTS_QUEUE`), Workers AI (`AI`), self-reference service; checked-in `vars` include the Clerk publishable key and the accountant/notify-from email addresses. Routes: `dazbeez.com/*`, `www.dazbeez.com/*`.
-- `middleware.ts` — Clerk middleware; the active auth gate for `/admin`, `/receipts`, `/api/receipts`. `/api/mobile/*` is intentionally not matched (device-bearer scheme).
+- `middleware.ts` — Clerk middleware; the active auth gate for `/admin`, `/receipts`, `/api/receipts`, and `/api/mobile/auth/complete-pairing` (the one `/api/mobile/*` exception — its handler calls `requireReceiptsActor()` → `auth()`, which needs `clerkMiddleware` to have run). All other `/api/mobile/*` routes are intentionally not matched (device-bearer scheme).
 - `open-next.config.ts` — OpenNext adapter config
 - `next.config.ts` — OpenNext dev init, redirects, headers, unoptimized images
 - `db/schema.sql` — D1 schema for contact submissions (`DB`)
@@ -121,7 +121,7 @@ Next.js App Router app.
 - **Public marketing** — home, `/services` + `/services/[slug]` (SSG via `generateStaticParams`), `/contact`, `/nfc`, `/business-card`, plus legal pages. Mostly server components; the contact form and NFC widget are client components.
 - **Admin CRM** (`app/admin/*`, `app/admin/api/*`) — business-card batch ingestion, contacts/companies, review tasks, drafts, settings. Live D1-backed CRM (`CRM_DB`), Clerk-authed (not the former static seed-data dashboard).
 - **Receipts module** (`app/(receipt-system)/receipts/*` route group + `app/api/receipts/*`) — capture, review, reconcile, amex, export, settings; domain logic in `lib/receipts/*`.
-- **API routes** — `/api/contact` (dual-writes `DB` + `CRM_DB`), `/api/receipts/*` (Clerk), `/api/mobile/*` (device-bearer; iOS capture + business-card upload), `/api/vcard`.
+- **API routes** — `/api/contact` (dual-writes `DB` + `CRM_DB`), `/api/receipts/*` (Clerk), `/api/mobile/*` (device-bearer; iOS capture + business-card upload; **except** `/api/mobile/auth/complete-pairing`, the Clerk operator-approval step), `/api/vcard`.
 - **Shared libs** — `lib/receipts/*` (receipts domain + the client-safe `upload-policy.ts` capture policy), `lib/crm*` (CRM domain), `lib/cloudflare-runtime.ts` (binding accessors).
 
 **Rendering pattern:** server components by default; `"use client"` only where

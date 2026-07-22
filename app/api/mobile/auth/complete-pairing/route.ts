@@ -2,10 +2,16 @@ import { NextResponse } from "next/server";
 import { requireReceiptsActor } from "@/lib/receipts/auth";
 import { completePairing } from "@/lib/receipts/mobile-pairing";
 
-// Cloudflare-Access-protected endpoint hit from the browser pairing page.
-// Consumes the pairing code and enrolls the mobile device. The bearer token
-// is NOT returned to the browser — it is stored on the pairing-codes row and
-// picked up by the polling iPhone via /check.
+// Clerk-protected operator-approval endpoint, hit from the browser pairing
+// page (/receipts/pair). This route is the ONE /api/mobile/* exception in
+// Clerk's config.matcher: clerkMiddleware runs on it and auth.protect()
+// gates it, so a signed-in operator reaches requireReceiptsActor() with
+// usable Clerk auth state (server-side auth() requires clerkMiddleware to
+// have run for the request). Consumes the pairing code and enrolls the
+// mobile device. The bearer token is NOT returned to the browser — it is
+// stored on the pairing-codes row and picked up by the polling iPhone via
+// /check. Every other /api/mobile/* endpoint stays outside Clerk
+// (device-bearer / pairing-code auth).
 export async function POST(request: Request) {
   try {
     const actor = await requireReceiptsActor(request.headers);

@@ -34,12 +34,16 @@ in [runbooks/clerk-auth-migration.md](runbooks/clerk-auth-migration.md).
   `/messages/ack` calls use a separate `CF_API_TOKEN` (scoped `queues_read` +
   `queues_write`), not the processor key. (Optional Cloudflare Access
   service-token headers are a separate edge layer.)
-- **Device bearer** — `/api/mobile/*` (iOS/Android capture + business-card
-  upload) uses a mobile-device bearer-token scheme
-  (`lib/receipts/trusted-devices.ts`), also independent of Clerk. (The legacy
-  "remember this browser" web cookie was retired in the Clerk Phase 3
-  device-trust cleanup; the table still holds historical browser rows, inert
-  and hidden — only paired mobile devices are managed or authorized.)
+- **Device bearer** — most `/api/mobile/*` endpoints (iOS/Android capture +
+  business-card upload) use a mobile-device bearer-token scheme
+  (`lib/receipts/trusted-devices.ts`), independent of Clerk. **Exception:**
+  `/api/mobile/auth/complete-pairing` is the browser operator-approval step and
+  runs through Clerk (`requireReceiptsActor()` → `auth()`, which requires
+  `clerkMiddleware` to have run, so it is the one `/api/mobile/*` route in the
+  Clerk matcher); `/api/mobile/auth/start-pairing` and `/check` use the pairing
+  code. (The legacy "remember this browser" web cookie was retired in the Clerk
+  Phase 3 device-trust cleanup; the table still holds historical browser rows,
+  inert and hidden — only paired mobile devices are managed or authorized.)
 
 **Legacy (not active for login).** Cloudflare Access JWT verification
 (`CF_ACCESS_TEAM` / `CF_ACCESS_AUD`) and HTTP Basic
