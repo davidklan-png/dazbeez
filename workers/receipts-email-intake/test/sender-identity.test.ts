@@ -46,17 +46,26 @@ test("unquoted display name with angle brackets → mailbox", () => {
 
 // ─── resolveBlockedSenderIdentity ────────────────────────────────────────────
 // Uses a minimal fake D1 that returns a row for specified emails.
+// Handles both single-email WHERE = ? queries and IN (?,?) queries.
 
 function makeFakeBlockedDb(blockedEmails: Set<string>) {
   return {
     prepare(sql: string) {
       return {
-        bind(email: string) {
+        bind(...emails: string[]) {
           return {
             first: () => {
-              if (sql.toUpperCase().includes("FROM BLOCKED_INTAKE_SENDERS") && blockedEmails.has(email)) {
-                return { "1": 1 };
+              const s = sql.toUpperCase();
+              if (!s.includes("FROM BLOCKED_INTAKE_SENDERS")) return null;
+              if (s.includes(" IN (")) {
+                // IN clause: find the first blocked identity in bind order.
+                for (const e of emails) {
+                  if (blockedEmails.has(e)) return { email: e };
+                }
+                return null;
               }
+              // Single WHERE = ? : return {email} or null.
+              if (blockedEmails.has(emails[0]!)) return { email: emails[0] };
               return null;
             },
           };
@@ -104,7 +113,7 @@ test("resolveBlockedSenderIdentity: header/envelope mismatch, only envelope bloc
   assert.equal(r.fromHeader, false);
 });
 
-test("resolveBlockedSenderIdentity: lookup error falls back to matched=false (not a false positive)", async () => {
+test("resolveBlockedSenderIdentity: lookup error PROPAGATES (does NOT silently return matched=false)", async () => {
   const db = {
     prepare() {
       return {
@@ -114,12 +123,58 @@ test("resolveBlockedSenderIdentity: lookup error falls back to matched=false (no
       };
     },
   } as any;
-  const r = await resolveBlockedSenderIdentity(db, "a@b.com", "c@d.com");
-  assert.equal(r.matched, false);
+  await assert.rejects(
+    () => resolveBlockedSenderIdentity(db, "a@b.com", "c@d.com"),
+    /D1 down/,
+  );
 });
 
 test("resolveBlockedSenderIdentity: null header + null envelope → matched=false", async () => {
   const db = makeFakeBlockedDb(new Set(["x@y.com"]));
   const r = await resolveBlockedSenderIdentity(db, null, null);
   assert.equal(r.matched, false);
+});
+
+test("resolveBlockedSenderIdentity: duplicate header/envelope identities deduplicated → single query", async () => {
+  let queryCount = 0;
+  const db = {
+    prepare(sql: string) {
+      return {
+        bind(..._args: unknown[]) {
+          return {
+            first: () => {
+              queryCount++;
+              return null;
+            },
+          };
+        },
+      };
+    },
+  } as any;
+  // Both identities are the same → only 1 query, not 2.
+  await resolveBlockedSenderIdentity(db, "same@example.com", "same@example.com");
+  assert.equal(queryCount, 1, "duplicate identities must issue a single query");
+});
+
+test("resolveBlockedSenderIdentity: two distinct identities → single query with IN clause", async () => {
+  let queryCount = 0;
+  let lastSql = "";
+  const db = {
+    prepare(sql: string) {
+      return {
+        bind(..._args: unknown[]) {
+          return {
+            first: () => {
+              queryCount++;
+              lastSql = sql.toUpperCase();
+              return null;
+            },
+          };
+        },
+      };
+    },
+  } as any;
+  await resolveBlockedSenderIdentity(db, "a@example.com", "b@example.com");
+  assert.equal(queryCount, 1, "two distinct identities must issue a single query");
+  assert.ok(lastSql.includes("IN ("), "should use an IN clause for multiple identities");
 });

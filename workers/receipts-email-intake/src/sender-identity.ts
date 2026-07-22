@@ -41,30 +41,69 @@ export interface BlockedIdentityResult {
 
 /**
  * Resolve whether EITHER the RFC From header mailbox OR the envelope MAIL FROM
- * is on the blocklist. Checks both identities against blocked_intake_senders.
- * On lookup failure, returns { matched: false } (falls back to normal triage
- * rather than falsely blocking).
+ * is on the blocklist.
+ *
+ * Implementation:
+ *   - Normalizes and deduplicates the non-null identities (header takes
+ *     priority).
+ *   - Issues a SINGLE D1 query for all identities.
+ *   - Let a D1 failure PROPAGATE — the caller must catch it, log visibly,
+ *     and continue to normal triage. This resolver never silently swallows
+ *     a lookup error.
  */
 export async function resolveBlockedSenderIdentity(
   db: D1Database,
   headerFrom: string | null,
   envelopeFrom: string | null,
 ): Promise<BlockedIdentityResult> {
-  const identities: Array<{ email: string; fromHeader: boolean }> = [];
-  if (headerFrom) identities.push({ email: headerFrom, fromHeader: true });
-  if (envelopeFrom) identities.push({ email: envelopeFrom, fromHeader: false });
-
-  for (const { email, fromHeader } of identities) {
-    try {
-      const row = await db
-        .prepare(`SELECT 1 FROM blocked_intake_senders WHERE email = ? LIMIT 1`)
-        .bind(email)
-        .first();
-      if (row) return { matched: true, identity: email, fromHeader };
-    } catch {
-      // Lookup failure for this identity — log will happen at call site.
-      // Continue to the next identity rather than falsely claiming a match.
-    }
+  // Build a deduplicated, priority-ordered list: RFC From first, then envelope.
+  const ordered: Array<{ email: string; fromHeader: boolean }> = [];
+  const seen = new Set<string>();
+  if (headerFrom) {
+    ordered.push({ email: headerFrom, fromHeader: true });
+    seen.add(headerFrom);
   }
-  return { matched: false, identity: null, fromHeader: false };
+  if (envelopeFrom && !seen.has(envelopeFrom)) {
+    ordered.push({ email: envelopeFrom, fromHeader: false });
+    seen.add(envelopeFrom);
+  }
+
+  if (ordered.length === 0) {
+    return { matched: false, identity: null, fromHeader: false };
+  }
+
+  // Single query for all identities. If this throws, the error propagates
+  // to the caller — never silently swallowed.
+  if (ordered.length === 1) {
+    const row = await db
+      .prepare(`SELECT 1 FROM blocked_intake_senders WHERE email = ? LIMIT 1`)
+      .bind(ordered[0]!.email)
+      .first();
+    if (row) {
+      return { matched: true, identity: ordered[0]!.email, fromHeader: ordered[0]!.fromHeader };
+    }
+    return { matched: false, identity: null, fromHeader: false };
+  }
+
+  // Two distinct identities: one query with IN (...).
+  const placeholders = ordered.map(() => "?").join(",");
+  const row = await db
+    .prepare(
+      `SELECT email FROM blocked_intake_senders WHERE email IN (${placeholders}) ORDER BY CASE email`,
+    )
+    .bind(...ordered.map((o) => o.email))
+    .first<{ email: string }>();
+
+  if (!row) {
+    return { matched: false, identity: null, fromHeader: false };
+  }
+
+  // Preserve header priority: if the header identity is the one that matched,
+  // return it with fromHeader=true.
+  const matchedEntry = ordered.find((o) => o.email === row.email);
+  return {
+    matched: true,
+    identity: row.email,
+    fromHeader: matchedEntry?.fromHeader ?? false,
+  };
 }

@@ -53,12 +53,25 @@ const worker = {
     // minimal delivery-attempt record.
     const envelopeFrom = (message.from ?? "").trim().toLowerCase();
     const headerFrom = parseRfcFromMailbox(message.headers.get("from"));
-    const blockResult = await resolveBlockedSenderIdentity(
-      env.RECEIPTS_DB,
-      headerFrom,
-      envelopeFrom,
-    );
-    if (blockResult.matched && blockResult.identity) {
+
+    // Blocklist lookup — if it fails, log clearly and continue to normal
+    // triage (fail-open, never falsely block or discard).
+    let blockResult;
+    try {
+      blockResult = await resolveBlockedSenderIdentity(
+        env.RECEIPTS_DB,
+        headerFrom,
+        envelopeFrom,
+      );
+    } catch (blockErr) {
+      console.error("[receipts-email-intake] blocklist lookup failed; continuing to normal triage", {
+        headerFrom: headerFrom ?? null,
+        envelopeFrom: envelopeFrom || null,
+        error: blockErr instanceof Error ? blockErr.message : String(blockErr),
+      });
+      blockResult = null;
+    }
+    if (blockResult?.matched && blockResult.identity) {
       const matchedBlockedIdentity = blockResult.identity;
       // Record ONE minimal rejected row (metadata only — no body/headers/
       // attachment/R2). Use the RFC From mailbox when available (it's what
