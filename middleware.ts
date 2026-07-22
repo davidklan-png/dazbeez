@@ -97,4 +97,3 @@ export const config = {
     "/api/mobile/auth/complete-pairing",
   ],
 };
-
