@@ -23,6 +23,7 @@ import type {
 } from "@/lib/receipts/types";
 import type { StatementWindow } from "@/lib/receipts/statement-window";
 import type { CategoryRule } from "@/lib/receipts/category-rules";
+import { withWorkMonth } from "@/lib/receipts/work-month";
 
 export interface ReviewScreenProps {
   month: string;
@@ -92,6 +93,7 @@ export function ReviewScreen(props: ReviewScreenProps) {
         <AdditionalChargesSection
           chargeRows={chargeRows}
           monthLabel={props.monthLabel}
+          month={props.month}
           dupBadgeById={dupBadgeById}
           finalized={finalized}
           reconciliationSealed={props.reconciliationSealed}
@@ -525,6 +527,7 @@ function ConsolidatedGroup({
 function AdditionalChargesSection({
   chargeRows,
   monthLabel,
+  month,
   dupBadgeById,
   finalized,
   reconciliationSealed,
@@ -532,6 +535,8 @@ function AdditionalChargesSection({
 }: {
   chargeRows: ExportRow[];
   monthLabel: string;
+  /** Concrete work month, carried into duplicate-cluster Review deep-links. */
+  month: string;
   dupBadgeById: Map<string, DuplicateBadge>;
   finalized: boolean;
   reconciliationSealed: boolean;
@@ -573,7 +578,7 @@ function AdditionalChargesSection({
                   <span className="truncate font-medium text-gray-900">{r.merchant ?? "—"}</span>
                   {dupBadge && (
                     <Link
-                      href={`/receipts/review/${dupBadge.firstId}`}
+                      href={withWorkMonth(`/receipts/review/${dupBadge.firstId}`, month)}
                       className="inline-flex shrink-0 items-center rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold text-amber-700 hover:bg-amber-200"
                       title={`Part of a ${dupBadge.count}-receipt duplicate cluster (same canonical merchant + amount + date). Open the first to review.`}
                     >

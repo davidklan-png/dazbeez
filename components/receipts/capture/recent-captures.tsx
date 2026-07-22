@@ -127,10 +127,18 @@ export function RecentCaptures({
   items,
   workMonth,
   variant = "card",
+  refreshUnavailable = false,
+  onRetry,
 }: {
   items: RecentCapture[];
   workMonth: string | null;
   variant?: "card" | "inline";
+  /** True when the last refresh failed (non-2xx/throw) and polling is retrying.
+   *  Shows a compact amber notice so a persistent status failure isn't silent. */
+  refreshUnavailable?: boolean;
+  /** Optional manual retry; the coalesced refresh path is also retried
+   *  automatically on the 15s cadence and on tab visibility. */
+  onRetry?: () => void;
 }) {
   const header = (
     <div className="flex items-baseline gap-2.5">
@@ -157,12 +165,28 @@ export function RecentCaptures({
     </ul>
   );
 
+  const unavailableNotice = refreshUnavailable ? (
+    <div className="flex items-center justify-between gap-2 border-t border-amber-200 bg-amber-50 px-3 py-2 text-[11.5px] text-amber-800">
+      <span>Status refresh unavailable — retrying</span>
+      {onRetry && (
+        <button
+          type="button"
+          onClick={onRetry}
+          className="font-semibold text-amber-900 underline hover:text-amber-950"
+        >
+          Retry
+        </button>
+      )}
+    </div>
+  ) : null;
+
   if (variant === "inline") {
     return (
       <section className="mt-4">
         {header}
         <div className="mt-2 overflow-hidden rounded-xl border border-gray-200 bg-white">
           {list}
+          {unavailableNotice}
         </div>
       </section>
     );
@@ -173,6 +197,7 @@ export function RecentCaptures({
       <div className="mb-2.5 flex items-center gap-2.5">{header}</div>
       <div className="overflow-hidden rounded-xl border border-gray-200 bg-white">
         {list}
+        {unavailableNotice}
       </div>
     </section>
   );

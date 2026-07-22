@@ -37,17 +37,22 @@ export function resolveWorkMonth(
 }
 
 /**
- * Append `?month=YYYY-MM` to a path when there is a valid work month, else
- * return the path unchanged. The single source of truth for "carry the month
- * into a receipts link": every nav/shortcut that should preserve context calls
- * this, so the rule lives in one place.
+ * Stamp `?month=YYYY-MM` onto a path when there is a valid work month, else
+ * return the path UNCHANGED (including its query string and fragment). The
+ * single source of truth for "carry the month into a receipts link": every
+ * nav/shortcut that should preserve context calls this, so the rule lives in
+ * one place.
  *
- * - Preserves an existing query string (`/receipts/capture?payment=CASH` →
- *   `…&month=2026-06`), so shortcut links keep their own params.
- * - Never propagates `month=all` or invalid input (returns the path bare).
- * - Never duplicates an existing `month` param: destinations that already own
- *   their month (Review/Reconcile/Export read `searchParams` directly) build
- *   their own hrefs and don't route through here.
+ * Contract:
+ *   - Invalid / null / `all` month → path returned verbatim (query + hash kept).
+ *   - Unrelated query params are preserved in place.
+ *   - An existing `month` param is REPLACED, never duplicated (so a link that
+ *     already carries a concrete month is updated, not corrupted with two).
+ *   - A URL fragment (`#…`) is preserved after the query string.
+ *
+ * Parsing is deliberately manual (split on the first `?` and first `#`) rather
+ * than `new URL()`, because callers pass bare paths (`/receipts/review/…`) with
+ * no origin. `URLSearchParams` is used only to round-trip the query safely.
  */
 export function withWorkMonth(
   path: string,
@@ -55,6 +60,23 @@ export function withWorkMonth(
 ): string {
   const m = resolveWorkMonth(month);
   if (!m) return path;
-  const sep = path.includes("?") ? "&" : "?";
-  return `${path}${sep}month=${m}`;
+
+  // Split off the fragment (everything after the first '#'), then the query
+  // (everything after the first '?'). Re-joining with the captured separators
+  // preserves any stray '#'/`?' inside the fragment/query verbatim.
+  const hashIndex = path.indexOf("#");
+  const beforeHash = hashIndex === -1 ? path : path.slice(0, hashIndex);
+  const hash = hashIndex === -1 ? "" : path.slice(hashIndex);
+
+  const queryIndex = beforeHash.indexOf("?");
+  const pathname = queryIndex === -1 ? beforeHash : beforeHash.slice(0, queryIndex);
+  const existingQuery =
+    queryIndex === -1 ? "" : beforeHash.slice(queryIndex + 1);
+
+  const params = new URLSearchParams(existingQuery);
+  params.set("month", m);
+  const query = params.toString();
+  const queryStr = query ? `?${query}` : "";
+
+  return `${pathname}${queryStr}${hash}`;
 }

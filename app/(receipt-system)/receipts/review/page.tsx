@@ -14,6 +14,7 @@ import { getReceiptLocks } from "@/lib/receipts/receipt-locks";
 import { collectClosingAttentionReceiptIds } from "@/lib/receipts/review-attention";
 import { loadClosingScopeWorkingSet } from "@/lib/receipts/review-scope";
 import { DEFAULT_SORT, sortQueueItems } from "@/lib/receipts/queue-sort";
+import { resolveWorkMonth, withWorkMonth } from "@/lib/receipts/work-month";
 import {
   buildReviewQueryParams,
   effectiveReviewMonth,
@@ -64,6 +65,9 @@ async function renderReviewPage(
   // monthly export/finalize membership instead of the transaction-date month.
   const rawMonth = typeof params.month === "string" ? params.month : undefined;
   const monthParam = rawMonth ?? "";
+  // Concrete work month (exact YYYY-MM) carried into cross-page links from this
+  // view. `all`/malformed/missing → null (nothing to propagate).
+  const workMonth = resolveWorkMonth(rawMonth);
   const rawScope = typeof params.scope === "string" ? params.scope : undefined;
   const scope: ReviewScope = resolveReviewScope(rawScope, monthParam);
   const { month: monthScope, includeUndated } = resolveReviewMonthScope(rawMonth);
@@ -166,7 +170,7 @@ async function renderReviewPage(
                   Nothing matches this filter. Capture more or change filter.
                 </p>
                 <Link
-                  href="/receipts/capture?mode=rapid"
+                  href={withWorkMonth("/receipts/capture?mode=rapid", workMonth)}
                   className="mt-4 inline-block rounded-lg bg-amber-500 px-4 py-2 text-xs font-semibold text-white hover:bg-amber-600"
                 >
                   Capture a receipt

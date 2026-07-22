@@ -46,6 +46,7 @@ import type {
 import type { StatementWindow } from "@/lib/receipts/statement-window";
 import type { AmexDuplicateCandidate } from "@/lib/receipts/amex-duplicates";
 import type { MonthOption } from "@/components/receipts/month-switcher";
+import { withWorkMonth } from "@/lib/receipts/work-month";
 import { DuplicateResolutionModal } from "@/components/receipts/reconcile/duplicate-resolution-modal";
 import {
   BAND_DISPLAY,
@@ -570,6 +571,7 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
           tab={tab}
           setTab={setTab}
           counts={counts}
+          month={props.month}
           orphanReceipts={props.orphanReceipts}
           leadingSlackReceipts={props.leadingSlackReceipts}
           upcomingReceipts={props.upcomingReceipts}
@@ -582,6 +584,7 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
           receiptMap={receiptMap}
           confirmedLinesByReceipt={confirmedLinesByReceipt}
           attendeesByReceiptId={props.attendeesByReceiptId}
+          month={props.month}
           locked={locked}
           busyLineId={busy}
           onConfirm={(line, receiptId) =>
@@ -640,6 +643,7 @@ function LinesPane({
   tab,
   setTab,
   counts,
+  month,
   orphanReceipts,
   leadingSlackReceipts,
   upcomingReceipts,
@@ -666,6 +670,8 @@ function LinesPane({
     noMatch: number;
     orphan: number;
   };
+  /** Concrete work month, carried into cross-page receipt links. */
+  month: string;
   orphanReceipts: ReceiptRecord[];
   leadingSlackReceipts: ReceiptRecord[];
   upcomingReceipts: ReceiptRecord[];
@@ -791,7 +797,7 @@ function LinesPane({
               <div className="px-6 py-10 text-center text-sm text-gray-400">
                 No AMEX lines for this month. <br />
                 <Link
-                  href="/receipts/amex"
+                  href={withWorkMonth("/receipts/amex", month)}
                   className="mt-2 inline-block text-amber-700 hover:text-amber-800"
                 >
                   Import a CSV →
@@ -807,6 +813,7 @@ function LinesPane({
             upcoming={upcomingReceipts}
             undated={undatedReceipts}
             duplicateCandidates={duplicateCandidates}
+            month={month}
             onOpenCluster={onOpenCluster}
           />
         )}
@@ -987,6 +994,7 @@ function OrphansList({
   upcoming,
   undated,
   duplicateCandidates,
+  month,
   onOpenCluster,
 }: {
   orphans: ReceiptRecord[];
@@ -994,6 +1002,8 @@ function OrphansList({
   upcoming: ReceiptRecord[];
   undated: ReceiptRecord[];
   duplicateCandidates: Map<string, AmexDuplicateCandidate[]>;
+  /** Concrete work month, carried into each orphan's Review deep-link. */
+  month: string;
   onOpenCluster: (ids: string[]) => void;
 }) {
   // Part C — only true in-period unmatched receipts are "Orphan receipts".
@@ -1014,7 +1024,7 @@ function OrphansList({
         <>
           <SectionHeader label="Orphan receipts" count={orphans.length} dot="bg-red-400" />
           {orphans.map((r) => (
-            <OrphanRow key={r.id} r={r} duplicateCandidates={duplicateCandidates} onOpenCluster={onOpenCluster} />
+            <OrphanRow key={r.id} r={r} duplicateCandidates={duplicateCandidates} month={month} onOpenCluster={onOpenCluster} />
           ))}
         </>
       )}
@@ -1022,19 +1032,19 @@ function OrphansList({
         <SectionHeader label="Awaiting next statement" count={upcoming.length} dot="bg-gray-300" />
       )}
       {upcoming.map((r) => (
-        <OrphanRow key={r.id} r={r} duplicateCandidates={duplicateCandidates} onOpenCluster={onOpenCluster} />
+        <OrphanRow key={r.id} r={r} duplicateCandidates={duplicateCandidates} month={month} onOpenCluster={onOpenCluster} />
       ))}
       {leadingSlack.length > 0 && (
         <SectionHeader label="Before statement range" count={leadingSlack.length} dot="bg-gray-300" />
       )}
       {leadingSlack.map((r) => (
-        <OrphanRow key={r.id} r={r} duplicateCandidates={duplicateCandidates} onOpenCluster={onOpenCluster} />
+        <OrphanRow key={r.id} r={r} duplicateCandidates={duplicateCandidates} month={month} onOpenCluster={onOpenCluster} />
       ))}
       {undated.length > 0 && (
         <SectionHeader label="Needs date" count={undated.length} dot="bg-amber-400" />
       )}
       {undated.map((r) => (
-        <OrphanRow key={r.id} r={r} onOpenCluster={onOpenCluster} />
+        <OrphanRow key={r.id} r={r} month={month} onOpenCluster={onOpenCluster} />
       ))}
     </div>
   );
@@ -1043,10 +1053,13 @@ function OrphansList({
 function OrphanRow({
   r,
   duplicateCandidates,
+  month,
   onOpenCluster,
 }: {
   r: ReceiptRecord;
   duplicateCandidates?: Map<string, AmexDuplicateCandidate[]>;
+  /** Concrete work month, carried into the Review deep-link. */
+  month: string;
   onOpenCluster: (ids: string[]) => void;
 }) {
   const dups = duplicateCandidates?.get(r.id);
@@ -1073,7 +1086,7 @@ function OrphanRow({
         )}
       </div>
       <Link
-        href={`/receipts/review/${r.id}`}
+        href={withWorkMonth(`/receipts/review/${r.id}`, month)}
         className="text-[12px] font-semibold text-amber-700 hover:text-amber-800"
       >
         Open ↗
@@ -1133,6 +1146,7 @@ function DetailPane({
   receiptMap,
   confirmedLinesByReceipt,
   attendeesByReceiptId,
+  month,
   locked,
   busyLineId,
   onConfirm,
@@ -1151,6 +1165,8 @@ function DetailPane({
   receiptMap: Map<string, ReceiptRecord>;
   confirmedLinesByReceipt: Map<string, AmexStatementLine[]>;
   attendeesByReceiptId: Map<string, string[]>;
+  /** Concrete work month, carried into the matched-receipt Review deep-links. */
+  month: string;
   locked: boolean;
   busyLineId: string | null;
   onConfirm: (line: AmexStatementLine, receiptId: string) => void;
@@ -1273,7 +1289,7 @@ function DetailPane({
                   Matched receipt R-{receipt.id.slice(0, 8)}
                 </SideHeader>
                 <Link
-                  href={`/receipts/review/${receipt.id}`}
+                  href={withWorkMonth(`/receipts/review/${receipt.id}`, month)}
                   className="text-[11px] font-semibold text-amber-700 hover:text-amber-800"
                 >
                   Pick different
@@ -1391,7 +1407,7 @@ function DetailPane({
           <span className="flex-1" />
           {receipt && (
             <Link
-              href={`/receipts/review/${receipt.id}`}
+              href={withWorkMonth(`/receipts/review/${receipt.id}`, month)}
               className="text-[12.5px] font-semibold text-gray-600 hover:text-gray-900"
             >
               Open receipt ↗

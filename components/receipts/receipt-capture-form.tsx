@@ -101,8 +101,11 @@ export function ReceiptCaptureForm({
   const { phase, upload, reset, cancel } = useReceiptUpload();
   // DB-backed recent-captures rail: seeded from the server, refreshed after
   // each successful upload and polled while anything is still processing.
-  const { items: recentItems, refresh: refreshRecent } =
-    useRecentCaptures(recentCaptures);
+  const {
+    items: recentItems,
+    refresh: refreshRecent,
+    refreshUnavailable: recentRefreshUnavailable,
+  } = useRecentCaptures(recentCaptures);
   // Seed the queue from sessionStorage on the very first client render
   // (server snapshot is always empty so hydration matches the empty SSR
   // markup; the client snapshot reads the persisted queue immediately,
@@ -197,6 +200,8 @@ export function ReceiptCaptureForm({
         workMonth={workMonth}
         todayCount={todayCount}
         recentCaptures={recentItems}
+        recentRefreshUnavailable={recentRefreshUnavailable}
+        onRecentRetry={refreshRecent}
         phase={phase}
         onPickFile={onPickFile}
         onCancel={cancel}
@@ -211,6 +216,8 @@ export function ReceiptCaptureForm({
       sessionUploads={sessionUploads}
       workMonth={workMonth}
       recentCaptures={recentItems}
+      recentRefreshUnavailable={recentRefreshUnavailable}
+      onRecentRetry={refreshRecent}
     />
   );
 }

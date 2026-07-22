@@ -23,6 +23,10 @@ export interface CaptureMobileProps {
   workMonth: string | null;
   todayCount: number | null;
   recentCaptures: RecentCapture[];
+  /** True when the last recent-captures refresh failed (polling is retrying). */
+  recentRefreshUnavailable?: boolean;
+  /** Manual retry for the recent-captures refresh. */
+  onRecentRetry?: () => void;
   phase: CapturePhase;
   onPickFile: (file: File) => void;
   onCancel: () => void;
@@ -71,6 +75,8 @@ export function CaptureMobile(props: CaptureMobileProps) {
           setPaymentChip={props.setPaymentChip}
           workMonth={props.workMonth}
           recentCaptures={props.recentCaptures}
+          recentRefreshUnavailable={props.recentRefreshUnavailable}
+          onRecentRetry={props.onRecentRetry}
           onTapCapture={pickFile}
           error={props.phase.kind === "error" ? props.phase.message : null}
         />
@@ -89,6 +95,8 @@ function CaptureIdleMobile({
   setPaymentChip,
   workMonth,
   recentCaptures,
+  recentRefreshUnavailable,
+  onRecentRetry,
   onTapCapture,
   error,
 }: {
@@ -97,6 +105,8 @@ function CaptureIdleMobile({
   setPaymentChip: (p: PaymentPath | null) => void;
   workMonth: string | null;
   recentCaptures: RecentCapture[];
+  recentRefreshUnavailable?: boolean;
+  onRecentRetry?: () => void;
   onTapCapture: () => void;
   error: string | null;
 }) {
@@ -210,6 +220,8 @@ function CaptureIdleMobile({
           items={recentCaptures}
           workMonth={workMonth}
           variant="inline"
+          refreshUnavailable={recentRefreshUnavailable}
+          onRetry={onRecentRetry}
         />
 
         <div className="pb-28" />

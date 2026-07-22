@@ -38,7 +38,10 @@ export default async function CapturePage({
   );
 
   // Load the initial recent list and today's count in parallel on the server.
-  // Both return null/empty on failure rather than throwing the page.
+  // countCapturedToday() swallows DB errors → null ("—" in the mobile header).
+  // The recent list is deliberately NOT swallowed: listRecentCaptures() throws
+  // on DB failure so the page fails visibly rather than silently rendering an
+  // authoritative empty rail for a transient DB error.
   const [todayCount, recentCaptures] = await Promise.all([
     countCapturedToday(),
     listRecentCaptures(),

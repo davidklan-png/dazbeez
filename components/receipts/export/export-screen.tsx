@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/icons";
 import type { ReceiptExport, ReceiptRecord } from "@/lib/receipts/types";
 import type { Blocker } from "@/lib/receipts/blockers";
+import { withWorkMonth } from "@/lib/receipts/work-month";
 
 export type { Blocker } from "@/lib/receipts/blockers";
 
@@ -54,8 +55,11 @@ export interface ExportScreenProps {
  * so the residue is visible on the screen where it gets fixed. */
 function UnassignedReceiptsSection({
   unassignable,
+  month,
 }: {
   unassignable: ReceiptRecord[];
+  /** Concrete work month, carried into each receipt's Review deep-link. */
+  month: string;
 }) {
   if (unassignable.length === 0) return null;
   return (
@@ -72,7 +76,10 @@ function UnassignedReceiptsSection({
       <ul className="mt-2 space-y-0.5 text-[12.5px]">
         {unassignable.map((r) => (
           <li key={r.id}>
-            <Link href={`/receipts/review/${r.id}`} className="text-amber-700 hover:underline">
+            <Link
+              href={withWorkMonth(`/receipts/review/${r.id}`, month)}
+              className="text-amber-700 hover:underline"
+            >
               {r.merchant ?? `R-${r.id.slice(0, 8)}`} ·{" "}
               {r.transaction_date
                 ? `${r.transaction_date} — assign a month`
@@ -155,6 +162,7 @@ export function ExportScreen(props: ExportScreenProps) {
           )}
           <UnassignedReceiptsSection
             unassignable={props.unassignableReceipts}
+            month={props.month}
           />
           {draftBuilt ? (
             <DraftPreview
@@ -538,7 +546,11 @@ function DraftPreview({
 
       <div className="flex items-center gap-2 border-t border-gray-150 px-5 py-3">
         <span className="text-sm leading-none">🐝</span>
-        <p className="text-[12px] text-gray-500">Format is locked at finalize.</p>
+        <p className="text-[12px] text-gray-500">
+          <strong className="font-semibold text-gray-700">
+            Format is locked at finalize.
+          </strong>
+        </p>
       </div>
     </Card>
   );
@@ -676,7 +688,7 @@ function ReviewLinkCard({
           </div>
         </div>
         <Link
-          href={`/receipts/export/${month}/review`}
+          href={withWorkMonth(`/receipts/export/${month}/review`, month)}
           className="mt-4 flex items-center justify-center gap-1.5 rounded-lg bg-gray-900 px-4 py-2.5 text-[13px] font-semibold text-white hover:bg-gray-800"
         >
           {finalized ? "View review" : "Review & finalize"}

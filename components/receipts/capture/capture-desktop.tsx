@@ -33,6 +33,10 @@ export interface CaptureDesktopProps {
   workMonth: string | null;
   /** DB-backed recent captures, rendered below the session batch. */
   recentCaptures: RecentCapture[];
+  /** True when the last recent-captures refresh failed (polling is retrying). */
+  recentRefreshUnavailable?: boolean;
+  /** Manual retry for the recent-captures refresh. */
+  onRecentRetry?: () => void;
 }
 
 export function CaptureDesktop(props: CaptureDesktopProps) {
@@ -234,6 +238,8 @@ export function CaptureDesktop(props: CaptureDesktopProps) {
             items={props.recentCaptures}
             workMonth={props.workMonth}
             variant="card"
+            refreshUnavailable={props.recentRefreshUnavailable}
+            onRetry={props.onRecentRetry}
           />
         </div>
 

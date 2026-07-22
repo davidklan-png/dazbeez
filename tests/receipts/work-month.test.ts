@@ -110,3 +110,63 @@ test("withWorkMonth: month validity is shape-only — an impossible-but-well-sha
     "/r?month=2026-13",
   );
 });
+
+// ─── withWorkMonth: hardened contract (replace / preserve / fragment) ────────
+
+test("withWorkMonth: replaces an existing month param instead of duplicating", () => {
+  // A link that already carries a concrete month is updated to the new month,
+  // not corrupted with two `month=` params.
+  assert.equal(
+    withWorkMonth("/receipts/review?month=2026-05", "2026-08"),
+    "/receipts/review?month=2026-08",
+  );
+  assert.equal(
+    withWorkMonth("/receipts/export/2026-05/review?month=2026-05", "2026-08"),
+    "/receipts/export/2026-05/review?month=2026-08",
+  );
+});
+
+test("withWorkMonth: replaces an existing month while preserving unrelated params", () => {
+  assert.equal(
+    withWorkMonth("/receipts/review?status=needs_review&month=2026-05", "2026-08"),
+    "/receipts/review?status=needs_review&month=2026-08",
+  );
+  // Unrelated params are preserved even when they sit after the month.
+  assert.equal(
+    withWorkMonth("/receipts/review?month=2026-05&scope=closing", "2026-08"),
+    "/receipts/review?month=2026-08&scope=closing",
+  );
+});
+
+test("withWorkMonth: preserves a URL fragment after the query string", () => {
+  // Fragment with no existing query.
+  assert.equal(
+    withWorkMonth("/receipts/review#orphans", "2026-06"),
+    "/receipts/review?month=2026-06#orphans",
+  );
+  // Fragment with an existing query (month appended, fragment stays last).
+  assert.equal(
+    withWorkMonth("/receipts/review?payment=CASH#orphans", "2026-06"),
+    "/receipts/review?payment=CASH&month=2026-06#orphans",
+  );
+  // Fragment + existing month (replaced, fragment preserved).
+  assert.equal(
+    withWorkMonth("/receipts/review?month=2026-05#blockers", "2026-08"),
+    "/receipts/review?month=2026-08#blockers",
+  );
+});
+
+test("withWorkMonth: invalid/all leaves path fully unchanged (query + fragment)", () => {
+  assert.equal(
+    withWorkMonth("/receipts/review?month=2026-05&scope=closing#orphans", "all"),
+    "/receipts/review?month=2026-05&scope=closing#orphans",
+  );
+  assert.equal(
+    withWorkMonth("/receipts/review?status=x#frag", null),
+    "/receipts/review?status=x#frag",
+  );
+  assert.equal(
+    withWorkMonth("/receipts/review#frag", "garbage"),
+    "/receipts/review#frag",
+  );
+});
