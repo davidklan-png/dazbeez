@@ -1,11 +1,13 @@
 import { NextResponse } from "next/server";
+import { OwnerAuthorizationError, requireOwnerActor } from "@/lib/clerk-owner";
 import { detectBusinessCardsFromImage } from "@/lib/crm-provider";
-import { assertAdminPageAccessFromHeaders } from "@/lib/admin-page-auth";
 import { getImageSizeValidationError } from "@/lib/crm-upload-limits";
 
 export async function POST(request: Request) {
   try {
-    assertAdminPageAccessFromHeaders(request.headers);
+    // Owner authorization FIRST (awaited) — before reading the body or any
+    // provider work. Clerk middleware checks signed-in; this checks the role.
+    await requireOwnerActor();
     const formData = await request.formData();
     const file = formData.get("image");
     const expectedCount = Number(formData.get("expectedCount") ?? 9);
@@ -40,6 +42,9 @@ export async function POST(request: Request) {
 
     return NextResponse.json({ detections }, { status: 200 });
   } catch (error) {
+    if (error instanceof OwnerAuthorizationError) {
+      return NextResponse.json({ error: "Owner access required." }, { status: 403 });
+    }
     console.error("[admin/detect-cards] failed", error);
     return NextResponse.json(
       {

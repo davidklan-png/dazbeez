@@ -41,8 +41,9 @@ The system is several cooperating Cloudflare units (detail in
 
 Authentication: `/admin`, `/receipts`, and `/api/receipts` are gated by **Clerk**
 (Phase 2, PR #59; `middleware.ts` + `lib/receipts/auth.ts`); `/api/mobile/*`
-uses a device-bearer scheme. (The earlier HTTP-Basic auth for `/admin` has been
-replaced.)
+uses a device-bearer scheme. (The earlier HTTP-Basic / Cloudflare Access auth
+was replaced by Clerk and the legacy code removed in Phase 4B; see
+[docs/runbooks/clerk-auth.md](docs/runbooks/clerk-auth.md).)
 
 Key runtime integrations:
 

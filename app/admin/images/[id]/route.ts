@@ -1,13 +1,15 @@
 import { NextResponse } from "next/server";
-import { assertAdminPageAccessFromHeaders } from "@/lib/admin-page-auth";
+import { OwnerAuthorizationError, requireOwnerActor } from "@/lib/clerk-owner";
 import { getImageBlob } from "@/lib/crm";
 
 export async function GET(
-  request: Request,
+  _request: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
   try {
-    assertAdminPageAccessFromHeaders(request.headers);
+    // Owner authorization FIRST (awaited) — before resolving params or
+    // loading the image. Clerk middleware checks signed-in; this checks role.
+    await requireOwnerActor();
     const { id } = await params;
     const imageId = Number(id);
     if (!Number.isInteger(imageId) || imageId <= 0) {
@@ -28,6 +30,9 @@ export async function GET(
       },
     });
   } catch (error) {
+    if (error instanceof OwnerAuthorizationError) {
+      return new NextResponse("Forbidden", { status: 403 });
+    }
     return new NextResponse(error instanceof Error ? error.message : "Unable to load image.", {
       status: 500,
     });

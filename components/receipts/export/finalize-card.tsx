@@ -182,7 +182,7 @@ export function FinalizeCard({
                   : `Finalize ${monthLabel}`}
             </Btn>
             <div className="mt-2 text-center text-[11px] text-gray-400">
-              Signoff with your CF Access identity
+              Signoff uses your Clerk operator identity
             </div>
           </div>
         )}

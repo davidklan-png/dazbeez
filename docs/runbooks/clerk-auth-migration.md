@@ -250,15 +250,57 @@ Status: the web/browser trust half is removed (draft PR `codex/receipts-mobile-d
 
 ### Phase 4 — Retire the old mechanisms (after a 2-day burn-in period on Clerk with no issues — decided)
 
-- [ ] Delete the Cloudflare Access application/policy in the dashboard.
-- [ ] Delete the `RECEIPTS_AUTH_USERNAME`/`RECEIPTS_AUTH_PASSWORD` Basic-auth code path and secrets.
-- [ ] Delete the `ADMIN_PAGE_USERNAME`/`ADMIN_PAGE_PASSWORD` Basic-auth code and secrets.
-- [ ] Delete `lib/receipts/owners.ts`'s env-var allowlist path entirely.
-- [ ] Remove now-dead Wrangler secrets: `CF_ACCESS_TEAM`, `CF_ACCESS_AUD`, `RECEIPTS_AUTH_USERNAME`,
-      `RECEIPTS_AUTH_PASSWORD`, `ADMIN_PAGE_USERNAME`, `ADMIN_PAGE_PASSWORD`, `RECEIPTS_OWNER_EMAILS`.
-- [ ] Archive `docs/runbooks/cf-access-app.md` (or delete it) and write a replacement
-      `docs/runbooks/clerk-auth.md` documenting the new single-system setup, so the next "sign-in doesn't
-      persist" investigation starts from Clerk's dashboard, not a stale CF Access runbook.
+Split into 4A (read-only audit), 4B (code cleanup while Access stays active), and
+4C (control-plane retirement).
+
+#### Phase 4A — Audit (DONE)
+
+Read-only dependency map (legacy callers, route matrix, Clerk readiness, Access
+footprint, secret inventory, behavior probes). Key findings: Clerk owns
+`/receipts`, `/admin`, `/api/receipts/*`; the only live Access interception is
+`/api/mobile/auth/complete-pairing*`; the Mac consumer has no Access
+service-token configured; all legacy Basic/Access symbols are dead code.
+
+#### Phase 4B — Code cleanup while Cloudflare Access remains active (IMPLEMENTED in draft PR — NOT yet deployed)
+
+- [x] Remove the dead CF Access JWT chain + receipts Basic-auth chain from
+      `lib/receipts/auth.ts` (keep `isReceiptsAuthorizedLight`, `requireReceiptsActor`).
+- [x] Remove the admin Basic-auth shim (`lib/admin-page-auth.ts` deleted); admin
+      handlers now call `await requireOwnerActor()` directly.
+- [x] **Security fix:** the three admin handlers (`/admin/api/batches`,
+      `/admin/api/detect-cards`, `/admin/images/[id]`) previously called the
+      async owner guard without `await`, so signed-in non-owners bypassed it.
+      Now awaited; signed-in non-owners get 403 (API/image) / 404 (pages).
+- [x] Single-source owner predicate (`isOwnerRole`) shared by `requireOwnerActor`
+      and `isReceiptsOwner`; remove `getReceiptsOwnerEmails`/`DEFAULT_OWNER_EMAILS`
+      and the unused `isReceiptsOwner` actor param.
+- [x] Remove optional Access service-token header code from the Mac consumer
+      (`consumer.py`) and the consumer `.env.example`.
+- [x] Remove obsolete env/type declarations (`receipts-env.d.ts`, `.env.example`,
+      `docker-compose.yml`) and update active code comments/UI copy.
+- [x] Add `docs/runbooks/clerk-auth.md` (current spec); banner `cf-access-app.md`
+      as legacy/transitional.
+- [ ] **Still to do before 4C:** deploy 4B and verify (build, smoke, owner/non-owner
+      behavior on production Clerk sessions).
+
+#### Phase 4C — Control-plane retirement (BLOCKED — do NOT mark complete)
+
+- [ ] Capture a read-only JSON snapshot of the exact Access application + policies
+      **and compute a SHA-256 fingerprint** (BLOCKER: the wrangler OAuth token
+      lacks Access read scope — `GET /accounts/.../access/apps` returns 403; needs a
+      dedicated read token or dashboard capture by the operator).
+- [ ] Confirm the Access application protects nothing outside
+      `/api/mobile/auth/complete-pairing*` (NO-GO gate for whole-app deletion).
+- [ ] Delete the Access application/policies (and the service token only if
+      dedicated/unused elsewhere).
+- [ ] Delete the now-dead Wrangler secrets: `CF_ACCESS_TEAM`, `CF_ACCESS_AUD`,
+      `RECEIPTS_AUTH_USERNAME`, `RECEIPTS_AUTH_PASSWORD`, `ADMIN_PAGE_USERNAME`,
+      `ADMIN_PAGE_PASSWORD`, `RECEIPTS_OWNER_EMAILS`.
+- [ ] Re-verify Clerk protection directly in production (complete-pairing no longer
+      302s to Access).
+
+> Access and all legacy secrets are **still present** in production until 4C. 4B
+> only removes dead code and docs; it does not delete any secret or Access resource.
 
 ## Decisions
 

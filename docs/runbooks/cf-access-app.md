@@ -1,8 +1,18 @@
 # Runbook — Cloudflare Access Application for the receipts module
 
-The receipts module relies on a Cloudflare Access application at the edge to gate every `/receipts/*` and `/api/receipts/*` request. The Worker only verifies the JWT after Access lets the request through — so when sign-in "doesn't persist", the bug is almost always in the **Application configuration in the dashboard**, not in the receipts code.
+> ⚠️ **LEGACY / TRANSITIONAL — retained for rollback only.**
+> Receipts web authentication is now **Clerk** (`middleware.ts` +
+> `auth.protect()`). The current authentication spec is
+> [`clerk-auth.md`](clerk-auth.md).
+>
+> This document is kept solely as the control-plane/rollback reference for the
+> still-deployed Access application, which (as of the Phase 4A audit) intercepts
+> only `/api/mobile/auth/complete-pairing*` at the edge. It will be removed in
+> **Phase 4C**, after the Access application/policy snapshot is captured. Do not
+> treat the CF Access / Basic-auth flow below as a live login path.
+The receipts module **formerly relied** on this Cloudflare Access application at the edge to gate every `/receipts/*` and `/api/receipts/*` request (the Worker verified the Access JWT only after Access let the request through). That flow is retired — receipts web authentication is now Clerk-owned; see [`clerk-auth.md`](clerk-auth.md) for the current system.
 
-This runbook is the source-of-truth for what that Application config should be. The repo cannot pin it (it lives entirely in Cloudflare's dashboard), so without this doc it drifts silently and breaks sessions in ways that look like receipts bugs.
+The configuration below is retained **only as a reconstruction template** for the still-deployed (but mostly dormant) Access application. It does **not** describe current Clerk-owned authentication. The live application's exact scope is still **unverified** — the Phase 4A API audit lacked Access read permission (the `GET /accounts/.../access/apps` call returned 403). Phase 4C must capture the live application/policy snapshot before deletion; this historical template is **not** a substitute for that snapshot.
 
 ## What Access does here
 

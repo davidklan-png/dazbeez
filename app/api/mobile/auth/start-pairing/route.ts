@@ -3,7 +3,7 @@ import { createPairingCode } from "@/lib/receipts/mobile-pairing";
 
 // Public endpoint — the iPhone has no token yet at this stage. The bearer
 // token is only ever delivered through /check after the pairing code is
-// consumed by an operator behind Cloudflare Access.
+// consumed by a signed-in (Clerk-authenticated) operator.
 export async function POST() {
   try {
     const { code, expiresAt } = await createPairingCode();

@@ -21,8 +21,10 @@ All routes and `/api/receipts/*` are protected, noindexed, and not linked from t
 **Active human gate — Clerk.** `/receipts` and `/api/receipts/*` are
 authenticated via Clerk (`middleware.ts` + `lib/receipts/auth.ts` →
 `requireReceiptsActor`). Human users no longer go through a separate
-Cloudflare Access or Basic-auth step in production. Migration history/status is
-in [runbooks/clerk-auth-migration.md](runbooks/clerk-auth-migration.md).
+Cloudflare Access or Basic-auth step in production (that legacy code was removed
+in Phase 4B). Current spec:
+[runbooks/clerk-auth.md](runbooks/clerk-auth.md); migration history in
+[runbooks/clerk-auth-migration.md](runbooks/clerk-auth-migration.md).
 
 **Separate, still-active machine paths:**
 
@@ -32,8 +34,8 @@ in [runbooks/clerk-auth-migration.md](runbooks/clerk-auth-migration.md).
   (ADR 0001), independent of Clerk. This does **not** authenticate queue pulls.
 - **Queues API** — the consumer's Cloudflare Queues `/messages/pull` and
   `/messages/ack` calls use a separate `CF_API_TOKEN` (scoped `queues_read` +
-  `queues_write`), not the processor key. (Optional Cloudflare Access
-  service-token headers are a separate edge layer.)
+  `queues_write`), not the processor key. (The consumer no longer sends optional
+  Cloudflare Access service-token headers — that code was removed in Phase 4B.)
 - **Device bearer** — most `/api/mobile/*` endpoints (iOS/Android capture +
   business-card upload) use a mobile-device bearer-token scheme
   (`lib/receipts/trusted-devices.ts`), independent of Clerk. **Exception:**
@@ -45,12 +47,12 @@ in [runbooks/clerk-auth-migration.md](runbooks/clerk-auth-migration.md).
   Phase 3 device-trust cleanup; the table still holds historical browser rows,
   inert and hidden — only paired mobile devices are managed or authorized.)
 
-**Legacy (not active for login).** Cloudflare Access JWT verification
+**Legacy (not active for login).** The Cloudflare Access JWT verification
 (`CF_ACCESS_TEAM` / `CF_ACCESS_AUD`) and HTTP Basic
-(`RECEIPTS_AUTH_USERNAME` / `RECEIPTS_AUTH_PASSWORD`, local-dev only) remain in
-`lib/receipts/auth.ts` as dead / local-only code pending Phase 4 removal. If a
-request is not authenticated by Clerk or any machine path, the module denies
-access (fail-closed).
+(`RECEIPTS_AUTH_USERNAME` / `RECEIPTS_AUTH_PASSWORD`) code paths were **removed
+in Phase 4B**. Their Wrangler secrets remain until the Phase 4C control-plane
+step. If a request is not authenticated by Clerk or any machine path, the module
+denies access (fail-closed).
 
 ## Cloudflare Bindings
 
@@ -116,7 +118,7 @@ The application does not expose hard-delete flows for retained tax records. Soft
 | File | Purpose |
 |------|---------|
 | `types.ts` | All TypeScript types |
-| `auth.ts` | Clerk session auth (active human gate); legacy CF-Access/Basic helpers retained as dead/local-only code |
+| `auth.ts` | Clerk session auth (active human gate: `requireReceiptsActor`, `isReceiptsAuthorizedLight`); legacy CF-Access/Basic chain removed in Phase 4B |
 | `auth-request.ts` | Server-side `assertReceiptsPageAccess()` helper |
 | `db.ts` | D1 data access |
 | `storage.ts` | R2 upload/download/archive |

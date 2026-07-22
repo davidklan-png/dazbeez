@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { assertAdminPageAccessFromHeaders, getAdminPageUsernameFromHeaders } from "@/lib/admin-page-auth";
+import { OwnerAuthorizationError, requireOwnerActor } from "@/lib/clerk-owner";
 import { createBusinessCardBatch } from "@/lib/crm";
 import { extractBusinessCardDetails } from "@/lib/crm-provider";
 import type { CardDetectionCandidate } from "@/lib/crm-types";
@@ -15,8 +15,10 @@ type CropManifestEntry = {
 
 export async function POST(request: Request) {
   try {
-    assertAdminPageAccessFromHeaders(request.headers);
-    const actor = getAdminPageUsernameFromHeaders(request.headers) ?? "admin";
+    // Owner authorization FIRST — Clerk middleware verified the caller is
+    // signed in, but only the owner role check (awaited) gates this handler.
+    // Must run before reading the request body or any CRM/provider work.
+    const actor = await requireOwnerActor();
     const formData = await request.formData();
 
     const compositeImage = formData.get("compositeImage");
@@ -122,6 +124,9 @@ export async function POST(request: Request) {
 
     return NextResponse.json({ batchId }, { status: 200 });
   } catch (error) {
+    if (error instanceof OwnerAuthorizationError) {
+      return NextResponse.json({ error: "Owner access required." }, { status: 403 });
+    }
     console.error("[admin/batches] failed", error);
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Batch ingestion failed." },

@@ -9,19 +9,45 @@ type SessionClaimsWithRole = {
 };
 
 /**
+ * Thrown when the current Clerk session is NOT an owner — either no signed-in
+ * user, or `publicMetadata.role !== "owner"`. This is a narrow, typed error so
+ * callers can branch on `instanceof OwnerAuthorizationError` (route handlers
+ * return 403; admin pages call `notFound()`) instead of matching arbitrary
+ * error text.
+ */
+export class OwnerAuthorizationError extends Error {
+  constructor(message = "Owner role required.") {
+    super(message);
+    this.name = "OwnerAuthorizationError";
+  }
+}
+
+/**
+ * Pure predicate: does the given Clerk session claim carry the owner role?
+ * Single source of truth for "owner" — used by `requireOwnerActor` (throws)
+ * and `isReceiptsOwner` (boolean). The role lives in
+ * `sessionClaims.publicMetadata`, which Clerk includes in the session JWT, so
+ * this needs no network call.
+ */
+export function isOwnerRole(sessionClaims: unknown): boolean {
+  const role = (
+    sessionClaims as SessionClaimsWithRole | undefined
+  )?.publicMetadata?.role;
+  return role === "owner";
+}
+
+/**
  * Returns the actor email if the current Clerk session's user has
- * `publicMetadata.role === "owner"`, otherwise throws. Single source of
- * truth for /admin and cross-user device revoke. The role is read from
- * `sessionClaims.publicMetadata` (no network call) since Clerk includes
- * publicMetadata in the session JWT by default; the email requires a
- * `clerkClient.users.getUser()` lookup.
+ * `publicMetadata.role === "owner"`, otherwise throws
+ * `OwnerAuthorizationError`. Owner privilege for `/admin`, admin API routes,
+ * and cross-user device revoke. Clerk middleware (`auth.protect()`) already
+ * verifies the caller is signed in before this runs; this enforces the owner
+ * role. The email requires a `clerkClient.users.getUser()` lookup.
  */
 export async function requireOwnerActor(): Promise<string> {
   const session = await auth();
-  const role = (session.sessionClaims as SessionClaimsWithRole | undefined)
-    ?.publicMetadata?.role;
-  if (!session.userId || role !== "owner") {
-    throw new Error("Unauthorized: owner role required.");
+  if (!session.userId || !isOwnerRole(session.sessionClaims)) {
+    throw new OwnerAuthorizationError();
   }
   const client = await clerkClient();
   const user = await client.users.getUser(session.userId);

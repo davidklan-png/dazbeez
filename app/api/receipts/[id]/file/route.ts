@@ -20,7 +20,7 @@ function timingSafeEqual(a: string, b: string): boolean {
 }
 
 // Returns true when the request presents the valid processor key. When false,
-// the caller must fall through to human auth (CF Access / device cookie).
+// the caller must fall through to a Clerk-authenticated operator.
 function isProcessorRequest(request: Request): boolean {
   const processorKey = getReceiptsProcessorKey();
   const presented = request.headers.get("x-receipts-processor-key");
