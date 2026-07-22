@@ -780,16 +780,18 @@ def is_auto_promote_eligible(
         return False
     if normalized not in trusted_senders:
         return False
-    # Prospective trust: received_at >= trusted.created_at
+    # Prospective trust: received_at AND trusted_created_at are MANDATORY.
+    # Missing, null, malformed, or timezone-incompatible → ineligible.
     trusted_created = trusted_senders.get(normalized)
-    if received_at and trusted_created:
-        try:
-            recv_dt = datetime.fromisoformat(received_at.replace("Z", "+00:00"))
-            trust_dt = datetime.fromisoformat(trusted_created.replace("Z", "+00:00"))
-            if recv_dt < trust_dt:
-                return False
-        except (ValueError, TypeError):
-            return False  # malformed timestamp → ineligible
+    if not received_at or not trusted_created:
+        return False
+    try:
+        recv_dt = datetime.fromisoformat(received_at.replace("Z", "+00:00"))
+        trust_dt = datetime.fromisoformat(trusted_created.replace("Z", "+00:00"))
+        if recv_dt < trust_dt:
+            return False
+    except (ValueError, TypeError):
+        return False
     return True
 
 

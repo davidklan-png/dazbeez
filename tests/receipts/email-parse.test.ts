@@ -8,6 +8,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   withinMessageSizeCeiling,
+  extractMailboxFromHeader,
   mapPostalAttachments,
   extractAuthVerdicts,
   pickRawHeadersSubset,
@@ -283,7 +284,7 @@ test("parseTrustedIntakeSenders: null/undefined/blank → []", () => {
 // address: only an allowlisted sender with passing SPF AND DKIM and NO valid
 // attachment gets auto-promoted with no operator click.
 
-test("isAutoPromoteEligible: allowlisted + SPF+DKIM + body-only → true", () => {
+test("isAutoPromoteEligible: allowlisted + SPF+DKIM + body-only + timestamps → true", () => {
   assert.equal(
     isAutoPromoteEligible({
       fromAddress: "david@gmail.com",
@@ -291,6 +292,8 @@ test("isAutoPromoteEligible: allowlisted + SPF+DKIM + body-only → true", () =>
       dkimPass: true,
       hasValidAttachment: false,
       trustedSenders: ["david@gmail.com", "other@x.com"],
+      receivedAt: "2026-08-01T00:00:00.000Z",
+      trustedCreatedAt: "2026-07-01T00:00:00.000Z",
     }),
     true,
   );
@@ -340,6 +343,8 @@ test("isAutoPromoteEligible: from_address matched case-insensitively", () => {
       dkimPass: true,
       hasValidAttachment: false,
       trustedSenders: ["david@gmail.com"],
+      receivedAt: "2026-08-01T00:00:00.000Z",
+      trustedCreatedAt: "2026-07-01T00:00:00.000Z",
     }),
     true,
   );
@@ -436,7 +441,7 @@ test("isAutoPromoteEligible: malformed trusted_created_at → false", () => {
   );
 });
 
-test("isAutoPromoteEligible: no trustedCreatedAt → true (backward compat)", () => {
+test("isAutoPromoteEligible: missing trustedCreatedAt → false (mandatory)", () => {
   assert.equal(
     isAutoPromoteEligible({
       fromAddress: "david@gmail.com",
@@ -444,8 +449,61 @@ test("isAutoPromoteEligible: no trustedCreatedAt → true (backward compat)", ()
       dkimPass: true,
       hasValidAttachment: false,
       trustedSenders: ["david@gmail.com"],
-      receivedAt: "2026-01-01T00:00:00.000Z",
+      receivedAt: "2026-08-01T00:00:00.000Z",
     }),
-    true,
+    false,
   );
+});
+
+test("isAutoPromoteEligible: missing receivedAt → false (mandatory)", () => {
+  assert.equal(
+    isAutoPromoteEligible({
+      fromAddress: "david@gmail.com",
+      spfPass: true,
+      dkimPass: true,
+      hasValidAttachment: false,
+      trustedSenders: ["david@gmail.com"],
+      trustedCreatedAt: "2026-07-01T00:00:00.000Z",
+    }),
+    false,
+  );
+});
+
+test("isAutoPromoteEligible: null trustedCreatedAt → false (mandatory)", () => {
+  assert.equal(
+    isAutoPromoteEligible({
+      fromAddress: "david@gmail.com",
+      spfPass: true,
+      dkimPass: true,
+      hasValidAttachment: false,
+      trustedSenders: ["david@gmail.com"],
+      receivedAt: "2026-08-01T00:00:00.000Z",
+      trustedCreatedAt: null,
+    }),
+    false,
+  );
+});
+
+// ─── extractMailboxFromHeader (pre-raw block identity) ──────────────────────
+
+test("extractMailboxFromHeader: display-name form → bare mailbox", () => {
+  assert.equal(extractMailboxFromHeader("Example Vendor <billing@example.com>"), "billing@example.com");
+});
+
+test("extractMailboxFromHeader: bare email → bare email", () => {
+  assert.equal(extractMailboxFromHeader("foo@bar.com"), "foo@bar.com");
+});
+
+test("extractMailboxFromHeader: lowercases", () => {
+  assert.equal(extractMailboxFromHeader("Name <FOO@BAR.COM>"), "foo@bar.com");
+});
+
+test("extractMailboxFromHeader: malformed → null", () => {
+  assert.equal(extractMailboxFromHeader("not an email"), null);
+});
+
+test("extractMailboxFromHeader: null/undefined → null", () => {
+  assert.equal(extractMailboxFromHeader(null), null);
+  assert.equal(extractMailboxFromHeader(undefined), null);
+  assert.equal(extractMailboxFromHeader(""), null);
 });

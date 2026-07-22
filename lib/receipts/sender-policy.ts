@@ -1,14 +1,18 @@
 // ADR 0011 follow-up (2026-07-22): sender-policy transitions and shared state.
 //
-// Trusted and blocked are MUTUALLY EXCLUSIVE: trusting removes any blocked row,
-// blocking removes any trusted row. Both transitions use a D1 batch so the
-// mutual exclusion is atomic — an address can never be present in both tables
-// after a transition, even under concurrent requests.
+// Trusted and blocked are MUTUALLY EXCLUSIVE. ALL mutations go through this
+// module — the add/remove helpers in trusted-senders.ts and blocked-senders.ts
+// are read/list only. This centralizes the mutual-exclusion guarantee so no
+// caller can bypass it.
 //
-// If inconsistent data somehow exists (e.g. a pre-batching legacy row), blocked
-// wins defensively in every eligibility check (isAutoPromoteEligible +
-// isBlockedSender + the processor promotion gate).
+// Concurrency-safe algorithm: each transition unconditionally DELETEs the
+// counterpart row and INSERTs its own row with ON CONFLICT DO NOTHING, all in
+// one D1 batch. D1 serializes each batch, so whichever complete transition
+// runs last owns the final state — two concurrent opposite transitions cannot
+// leave an address in both tables. Audit entries are emitted based on the
+// ACTUAL change counts from the batch results (not stale pre-batch reads).
 
+import { createAuditEntry } from "@/lib/receipts/audit";
 import { nowIso, newUuid, stringifyJson } from "@/lib/receipts/db-utils";
 import {
   normalizeSenderEmail,
@@ -40,39 +44,13 @@ export async function resolveSenderState(
   return trusted ? "trusted" : "unrecognized";
 }
 
-function auditStmt(
-  db: D1Database,
-  actor: string,
-  action: string,
-  objectType: string,
-  objectId: string,
-  valueJson: Record<string, unknown> | null,
-  isOld: boolean,
-): D1PreparedStatement {
-  return db
-    .prepare(
-      `INSERT INTO receipt_audit_log
-        (id, actor, action, object_type, object_id,
-         old_value_json, new_value_json, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .bind(
-      newUuid(),
-      actor,
-      action,
-      objectType,
-      objectId,
-      isOld ? stringifyJson(valueJson) : null,
-      isOld ? null : stringifyJson(valueJson),
-      nowIso(),
-    );
-}
-
 /**
- * Trust a sender: atomically remove any blocked row + insert the trusted row.
- * Audits only the state changes that ACTUALLY occurred (no duplicate audit if
- * already trusted; audit blocked_sender.removed only if a blocked row was
- * actually removed). Idempotent.
+ * Trust a sender: unconditionally DELETE any blocked row + INSERT the trusted
+ * row (ON CONFLICT DO NOTHING preserves the original created_at on idempotent
+ * re-trust). Audits only state changes that ACTUALLY occurred (based on the
+ * batch change counts). Concurrency-safe: two concurrent trustSender calls
+ * produce one trusted row; a concurrent trustSender + blockSender ends in
+ * exactly one state (whichever batch runs last).
  */
 export async function trustSender(
   db: D1Database,
@@ -86,49 +64,44 @@ export async function trustSender(
     );
   }
 
-  const wasBlocked = await db
-    .prepare(`SELECT 1 FROM blocked_intake_senders WHERE email = ? LIMIT 1`)
-    .bind(normalized)
-    .first();
-  const wasTrusted = await db
-    .prepare(`SELECT 1 FROM trusted_intake_senders WHERE email = ? LIMIT 1`)
-    .bind(normalized)
-    .first();
-
-  if (!wasBlocked && wasTrusted) return; // already trusted, not blocked — no-op
-
   const now = nowIso();
-  const batch: D1PreparedStatement[] = [];
+  const results = await db.batch([
+    db.prepare(`DELETE FROM blocked_intake_senders WHERE email = ?`).bind(normalized),
+    db
+      .prepare(
+        `INSERT INTO trusted_intake_senders (email, added_by, created_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT(email) DO NOTHING`,
+      )
+      .bind(normalized, actor, now),
+  ]);
 
-  if (wasBlocked) {
-    batch.push(
-      db.prepare(`DELETE FROM blocked_intake_senders WHERE email = ?`).bind(normalized),
-    );
-    batch.push(
-      auditStmt(db, actor, "blocked_sender.removed", "blocked_sender", normalized, { email: normalized }, true),
-    );
-  }
-  if (!wasTrusted) {
-    batch.push(
-      db
-        .prepare(
-          `INSERT INTO trusted_intake_senders (email, added_by, created_at)
-           VALUES (?, ?, ?)
-           ON CONFLICT(email) DO NOTHING`,
-        )
-        .bind(normalized, actor, now),
-    );
-    batch.push(
-      auditStmt(db, actor, "trusted_sender.added", "trusted_sender", normalized, { email: normalized }, false),
-    );
-  }
+  const blockedRemoved = results[0]?.meta?.changes ?? 0;
+  const trustedAdded = results[1]?.meta?.changes ?? 0;
 
-  if (batch.length > 0) await db.batch(batch);
+  if (blockedRemoved > 0) {
+    await createAuditEntry(db, {
+      actor,
+      action: "blocked_sender.removed",
+      objectType: "blocked_sender",
+      objectId: normalized,
+      oldValueJson: stringifyJson({ email: normalized }),
+    });
+  }
+  if (trustedAdded > 0) {
+    await createAuditEntry(db, {
+      actor,
+      action: "trusted_sender.added",
+      objectType: "trusted_sender",
+      objectId: normalized,
+      newValueJson: stringifyJson({ email: normalized }),
+    });
+  }
 }
 
 /**
- * Block a sender: atomically remove any trusted row + insert the blocked row.
- * Audits only actual state changes. Idempotent.
+ * Block a sender: unconditionally DELETE any trusted row + INSERT the blocked
+ * row (ON CONFLICT DO NOTHING). Audits only actual changes.
  */
 export async function blockSender(
   db: D1Database,
@@ -142,42 +115,89 @@ export async function blockSender(
     );
   }
 
-  const wasTrusted = await db
-    .prepare(`SELECT 1 FROM trusted_intake_senders WHERE email = ? LIMIT 1`)
-    .bind(normalized)
-    .first();
-  const wasBlocked = await db
-    .prepare(`SELECT 1 FROM blocked_intake_senders WHERE email = ? LIMIT 1`)
-    .bind(normalized)
-    .first();
-
-  if (wasBlocked && !wasTrusted) return; // already blocked, not trusted — no-op
-
   const now = nowIso();
-  const batch: D1PreparedStatement[] = [];
+  const results = await db.batch([
+    db.prepare(`DELETE FROM trusted_intake_senders WHERE email = ?`).bind(normalized),
+    db
+      .prepare(
+        `INSERT INTO blocked_intake_senders (email, blocked_by, created_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT(email) DO NOTHING`,
+      )
+      .bind(normalized, actor, now),
+  ]);
 
-  if (wasTrusted) {
-    batch.push(
-      db.prepare(`DELETE FROM trusted_intake_senders WHERE email = ?`).bind(normalized),
-    );
-    batch.push(
-      auditStmt(db, actor, "trusted_sender.removed", "trusted_sender", normalized, { email: normalized }, true),
-    );
-  }
-  if (!wasBlocked) {
-    batch.push(
-      db
-        .prepare(
-          `INSERT INTO blocked_intake_senders (email, blocked_by, created_at)
-           VALUES (?, ?, ?)
-           ON CONFLICT(email) DO NOTHING`,
-        )
-        .bind(normalized, actor, now),
-    );
-    batch.push(
-      auditStmt(db, actor, "blocked_sender.added", "blocked_sender", normalized, { email: normalized }, false),
-    );
-  }
+  const trustedRemoved = results[0]?.meta?.changes ?? 0;
+  const blockedAdded = results[1]?.meta?.changes ?? 0;
 
-  if (batch.length > 0) await db.batch(batch);
+  if (trustedRemoved > 0) {
+    await createAuditEntry(db, {
+      actor,
+      action: "trusted_sender.removed",
+      objectType: "trusted_sender",
+      objectId: normalized,
+      oldValueJson: stringifyJson({ email: normalized }),
+    });
+  }
+  if (blockedAdded > 0) {
+    await createAuditEntry(db, {
+      actor,
+      action: "blocked_sender.added",
+      objectType: "blocked_sender",
+      objectId: normalized,
+      newValueJson: stringifyJson({ email: normalized }),
+    });
+  }
+}
+
+/**
+ * Remove a sender from the trusted list (untrust). Idempotent; audits only if
+ * a row was actually removed.
+ */
+export async function untrustSender(
+  db: D1Database,
+  email: string,
+  actor: string,
+): Promise<void> {
+  const normalized = normalizeSenderEmail(email);
+  const result = await db
+    .prepare(`DELETE FROM trusted_intake_senders WHERE email = ?`)
+    .bind(normalized)
+    .run();
+
+  if ((result.meta?.changes ?? 0) > 0) {
+    await createAuditEntry(db, {
+      actor,
+      action: "trusted_sender.removed",
+      objectType: "trusted_sender",
+      objectId: normalized,
+      oldValueJson: stringifyJson({ email: normalized }),
+    });
+  }
+}
+
+/**
+ * Remove a sender from the blocklist (unblock). Idempotent; audits only if a
+ * row was actually removed.
+ */
+export async function unblockSender(
+  db: D1Database,
+  email: string,
+  actor: string,
+): Promise<void> {
+  const normalized = normalizeSenderEmail(email);
+  const result = await db
+    .prepare(`DELETE FROM blocked_intake_senders WHERE email = ?`)
+    .bind(normalized)
+    .run();
+
+  if ((result.meta?.changes ?? 0) > 0) {
+    await createAuditEntry(db, {
+      actor,
+      action: "blocked_sender.removed",
+      objectType: "blocked_sender",
+      objectId: normalized,
+      oldValueJson: stringifyJson({ email: normalized }),
+    });
+  }
 }

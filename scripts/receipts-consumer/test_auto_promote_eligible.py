@@ -34,7 +34,10 @@ class IsAutoPromoteEligibleTests(unittest.TestCase):
 
     def test_trusted_body_only_spf_dkim_is_eligible(self):
         self.assertTrue(
-            is_auto_promote_eligible("david@gmail.com", True, True, False, TRUSTED, set())
+            is_auto_promote_eligible(
+                "david@gmail.com", True, True, False, TRUSTED, set(),
+                received_at="2026-08-01T00:00:00Z",
+            )
         )
 
     def test_attachment_never_auto_promoted(self):
@@ -57,7 +60,10 @@ class IsAutoPromoteEligibleTests(unittest.TestCase):
 
     def test_case_insensitive_vs_lowercase_stored(self):
         self.assertTrue(
-            is_auto_promote_eligible("DAVID@Gmail.com", True, True, False, TRUSTED, set())
+            is_auto_promote_eligible(
+                "DAVID@Gmail.com", True, True, False, TRUSTED, set(),
+                received_at="2026-08-01T00:00:00Z",
+            )
         )
 
     # ── ADR 0011 follow-up: blocked + prospective ──
@@ -113,9 +119,23 @@ class IsAutoPromoteEligibleTests(unittest.TestCase):
             )
         )
 
-    def test_no_received_at_backward_compat_eligible(self):
-        self.assertTrue(
-            is_auto_promote_eligible("david@gmail.com", True, True, False, TRUSTED, set())
+    def test_missing_received_at_ineligible(self):
+        """Missing received_at is ineligible (mandatory for prospective trust)."""
+        self.assertFalse(
+            is_auto_promote_eligible(
+                "david@gmail.com", True, True, False, TRUSTED, set(),
+                received_at=None,
+            )
+        )
+
+    def test_missing_trusted_created_at_ineligible(self):
+        """Missing trusted created_at is ineligible (sender has no trust timestamp)."""
+        trusted_no_date = {"david@gmail.com": None}
+        self.assertFalse(
+            is_auto_promote_eligible(
+                "david@gmail.com", True, True, False, trusted_no_date, set(),
+                received_at="2026-08-01T00:00:00Z",
+            )
         )
 
 

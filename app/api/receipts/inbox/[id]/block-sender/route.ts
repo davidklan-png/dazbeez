@@ -30,21 +30,40 @@ export async function POST(
     await blockSender(db, intake.from_address, actor);
 
     // Reject ONLY this row (not other pending rows from the same sender).
-    // rejectIntake throws if the row is already promoted/rejected — surface as
-    // a 409 so the UI can handle it gracefully.
+    // Only the documented already-terminal conflict (already promoted/rejected)
+    // is a safe partial success; any other failure is a real error.
     try {
       await rejectIntake(db, id, "blocked_sender", actor);
-    } catch {
-      // Row was already promoted/rejected — sender is still blocked; surface
-      // the partial result so the UI knows the block succeeded.
+    } catch (rejectErr) {
+      const msg = rejectErr instanceof Error ? rejectErr.message : String(rejectErr);
+      if (/already (promoted|rejected)/i.test(msg)) {
+        // Row was already terminal — sender is still blocked; this is a safe
+        // partial result (the block succeeded; the row just didn't need
+        // rejecting).
+        return NextResponse.json(
+          {
+            ok: true,
+            blocked: intake.from_address,
+            rejected: false,
+            note: "Sender blocked; row was already terminal and could not be rejected.",
+          },
+          { status: 200 },
+        );
+      }
+      // Genuine failure (D1/audit error) — sender blocking succeeded but row
+      // rejection failed. Report clearly; do NOT misreport as a race.
+      console.error("[api/receipts/inbox/block-sender] rejectIntake failed after block", {
+        id,
+        blocked: intake.from_address,
+        error: msg,
+      });
       return NextResponse.json(
         {
-          ok: true,
+          error: `Sender blocked, but row rejection failed: ${msg}`,
           blocked: intake.from_address,
           rejected: false,
-          note: "Sender blocked; row was already terminal and could not be rejected.",
         },
-        { status: 200 },
+        { status: 500 },
       );
     }
 

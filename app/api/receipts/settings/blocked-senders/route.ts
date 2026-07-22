@@ -1,16 +1,12 @@
 import { NextResponse } from "next/server";
 import { requireReceiptsActor } from "@/lib/receipts/auth";
 import { getReceiptsDb } from "@/lib/cloudflare-runtime";
-import {
-  listBlockedSenders,
-  addBlockedSender,
-  removeBlockedSender,
-} from "@/lib/receipts/blocked-senders";
+import { listBlockedSenders } from "@/lib/receipts/blocked-senders";
 import { isValidSenderEmail } from "@/lib/receipts/trusted-senders";
+import { blockSender, unblockSender } from "@/lib/receipts/sender-policy";
 
-// Settings page backing for the ADR 0011 follow-up sender blocklist
-// (blocked_intake_senders). Clerk-gated (requireReceiptsActor) — same
-// convention as the trusted-senders route.
+// Settings page backing for the ADR 0011 follow-up sender blocklist.
+// Uses the canonical sender-policy transitions (mutual-exclusion-safe).
 
 export async function GET(request: Request) {
   try {
@@ -40,8 +36,6 @@ export async function POST(request: Request) {
         { status: 400 },
       );
     }
-    // Use the policy transition (removes any trusted row first).
-    const { blockSender } = await import("@/lib/receipts/sender-policy");
     await blockSender(getReceiptsDb(), email, actor);
     const senders = await listBlockedSenders(getReceiptsDb());
     return NextResponse.json({ senders }, { status: 200 });
@@ -67,7 +61,7 @@ export async function DELETE(request: Request) {
     if (!email) {
       return NextResponse.json({ error: "email is required." }, { status: 400 });
     }
-    await removeBlockedSender(getReceiptsDb(), email, actor);
+    await unblockSender(getReceiptsDb(), email, actor);
     const senders = await listBlockedSenders(getReceiptsDb());
     return NextResponse.json({ senders }, { status: 200 });
   } catch (error) {

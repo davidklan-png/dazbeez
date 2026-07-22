@@ -92,6 +92,27 @@ export function extractAuthVerdicts(authResults: string | null | undefined): Aut
   };
 }
 
+// ─── RFC From header mailbox extraction (pre-raw block check) ────────────────
+
+/**
+ * Extract the first valid mailbox address from an RFC 5322 `From` header value
+ * WITHOUT reading/parsing the raw MIME body. Handles:
+ *   - "Name <email@example.com>" → email@example.com
+ *   - "email@example.com" → email@example.com
+ *   - malformed/missing → null
+ * Returns the LOWERCASED mailbox (matching the normalization used by the policy
+ * tables). Pure — safe to call in the Worker's email() handler before message.raw.
+ */
+export function extractMailboxFromHeader(fromHeader: string | null | undefined): string | null {
+  if (!fromHeader || typeof fromHeader !== "string") return null;
+  // Try angle-bracket form first: "Name <email@domain>"
+  const angleMatch = fromHeader.match(/<([^<>]+)>/);
+  const candidate = (angleMatch ? angleMatch[1] : fromHeader).trim().toLowerCase();
+  // Validate it looks like an email (same shape as policy tables).
+  if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(candidate)) return candidate;
+  return null;
+}
+
 // ─── Raw header subset (audit-friendly, bounded) ────────────────────────────
 
 /**
@@ -254,13 +275,14 @@ export function isAutoPromoteEligible(args: {
   if (!args.spfPass || !args.dkimPass) return false;
   if (!args.trustedSenders.includes(normalized)) return false;
 
-  // Prospective trust: received_at must be at or after trusted.created_at.
-  if (args.receivedAt !== undefined && args.trustedCreatedAt !== undefined && args.trustedCreatedAt !== null) {
-    const receivedMs = parseIsoMs(args.receivedAt);
-    const trustedMs = parseIsoMs(args.trustedCreatedAt);
-    if (receivedMs === null || trustedMs === null) return false; // malformed → ineligible
-    if (receivedMs < trustedMs) return false; // older than trust → ineligible
-  }
+  // Prospective trust: received_at AND trusted_created_at are MANDATORY for
+  // automatic promotion. Missing, null, malformed, or timezone-incompatible
+  // timestamps are ineligible (safe default).
+  if (!args.receivedAt || !args.trustedCreatedAt) return false;
+  const receivedMs = parseIsoMs(args.receivedAt);
+  const trustedMs = parseIsoMs(args.trustedCreatedAt);
+  if (receivedMs === null || trustedMs === null) return false;
+  if (receivedMs < trustedMs) return false; // older than trust → ineligible
 
   return true;
 }

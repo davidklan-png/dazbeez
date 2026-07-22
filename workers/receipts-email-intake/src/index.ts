@@ -24,6 +24,7 @@ import {
   withinMessageSizeCeiling,
   mapPostalAttachments,
   extractAuthVerdicts,
+  extractMailboxFromHeader,
   pickRawHeadersSubset,
   staleCutoffIso,
   capBody,
@@ -44,11 +45,62 @@ const worker = {
     env: Env,
     ctx: ExecutionContext,
   ): Promise<void> {
+    // ADR 0011 follow-up (2026-07-22): check the blocklist BEFORE the size
+    // ceiling and BEFORE reading/parsing message.raw. Check BOTH identities:
+    //   1. The SMTP envelope MAIL FROM (message.from)
+    //   2. The RFC 5322 From header mailbox (parsed from message.headers)
+    // A match on EITHER blocks the delivery. This must run before the size
+    // check so an oversized message from a blocked sender still creates its
+    // minimal delivery-attempt record.
+    const envelopeFrom = (message.from ?? "").trim().toLowerCase();
+    const headerFrom = extractMailboxFromHeader(message.headers.get("from"));
+    const identitiesToCheck = [headerFrom, envelopeFrom].filter(
+      (v): v is string => !!v,
+    );
+    let matchedBlockedIdentity: string | null = null;
+    for (const identity of identitiesToCheck) {
+      try {
+        if (await isBlockedSender(env.RECEIPTS_DB, identity)) {
+          matchedBlockedIdentity = identity;
+          break;
+        }
+      } catch (err) {
+        console.error("[receipts-email-intake] blocked-sender lookup failed; continuing to normal triage", {
+          identity,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    if (matchedBlockedIdentity) {
+      // Record ONE minimal rejected row (metadata only — no body/headers/
+      // attachment/R2). Use the RFC From mailbox when available (it's what
+      // the operator sees); otherwise the matched envelope identity.
+      try {
+        const { spf, dkim } = extractAuthVerdicts(message.headers.get("authentication-results"));
+        const subject = message.headers.get("subject");
+        await recordBlockedIntake(env.RECEIPTS_DB, {
+          receivedAt: new Date().toISOString(),
+          fromAddress: headerFrom ?? matchedBlockedIdentity,
+          toAddress: message.to ?? null,
+          subject,
+          spfPass: spf,
+          dkimPass: dkim,
+        });
+        console.log("[receipts-email-intake] blocked delivery recorded (metadata only)", {
+          identity: matchedBlockedIdentity,
+        });
+      } catch (err) {
+        console.error("[receipts-email-intake] blocked delivery recording failed; mail NOT processed", {
+          identity: matchedBlockedIdentity,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      return; // never read/parse the raw MIME for a blocked sender
+    }
+
     // Hard pre-parse size ceiling (ADR 0011 "Negative"). Check the declared
     // rawSize BEFORE reading/parsing anything. If it exceeds the ceiling, drop
-    // (do not process) and log. We deliberately do NOT call message.setReject:
-    // its bounce semantics aren't specified in the ADR and guessing wrong could
-    // bounce legitimate mail to a real sender.
+    // (do not process) and log.
     if (!withinMessageSizeCeiling(message.rawSize, INTAKE_MAX_MESSAGE_BYTES)) {
       console.warn("[receipts-email-intake] message exceeds size ceiling, dropping", {
         from: message.from,
@@ -57,48 +109,6 @@ const worker = {
         ceiling: INTAKE_MAX_MESSAGE_BYTES,
       });
       return;
-    }
-
-    // ADR 0011 follow-up (2026-07-22): check the blocklist BEFORE reading or
-    // parsing message.raw. If the envelope sender is blocked, record one
-    // minimal rejected row (metadata only — no body/headers/attachment/R2)
-    // and return without processing. If the lookup fails, log visibly and
-    // continue into ordinary pending triage (the promote route's policy gate
-    // is the final safety net).
-    const envelopeFrom = (message.from ?? "").trim().toLowerCase();
-    if (envelopeFrom) {
-      let blocked = false;
-      try {
-        blocked = await isBlockedSender(env.RECEIPTS_DB, envelopeFrom);
-      } catch (err) {
-        console.error("[receipts-email-intake] blocked-sender lookup failed; continuing to normal triage", {
-          from: envelopeFrom,
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
-      if (blocked) {
-        try {
-          const { spf, dkim } = extractAuthVerdicts(message.headers.get("authentication-results"));
-          const subject = message.headers.get("subject");
-          await recordBlockedIntake(env.RECEIPTS_DB, {
-            receivedAt: new Date().toISOString(),
-            fromAddress: envelopeFrom,
-            toAddress: message.to ?? null,
-            subject,
-            spfPass: spf,
-            dkimPass: dkim,
-          });
-          console.log("[receipts-email-intake] blocked delivery recorded (metadata only)", {
-            from: envelopeFrom,
-          });
-        } catch (err) {
-          console.error("[receipts-email-intake] blocked delivery recording failed; mail NOT processed", {
-            from: envelopeFrom,
-            error: err instanceof Error ? err.message : String(err),
-          });
-        }
-        return; // never read/parse the raw MIME for a blocked sender
-      }
     }
 
     let rawBytes: Uint8Array | null = null;

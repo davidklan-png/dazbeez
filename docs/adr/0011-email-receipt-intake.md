@@ -317,4 +317,3 @@ The Phase B auto-promote allowlist (`trusted_intake_senders`, managed from Setti
 5. **Explicit human Promote override.** A Clerk-authenticated human Promote is NOT gated by the auto-promotion policy — it remains an explicit override for any promotable message, even if the sender is now blocked (decision 10).
 
 6. **Inbox block action rejects only the selected row.** Blocking from an Inbox row blocks the sender AND rejects that ONE intake row. Other pending rows from the same sender are NOT mass-rejected (decision 11).
-

@@ -1,12 +1,8 @@
 import { NextResponse } from "next/server";
 import { requireReceiptsActor } from "@/lib/receipts/auth";
 import { getReceiptsDb } from "@/lib/cloudflare-runtime";
-import {
-  listTrustedSenders,
-  addTrustedSender,
-  removeTrustedSender,
-  isValidSenderEmail,
-} from "@/lib/receipts/trusted-senders";
+import { listTrustedSenders, isValidSenderEmail } from "@/lib/receipts/trusted-senders";
+import { trustSender, untrustSender } from "@/lib/receipts/sender-policy";
 
 // Settings page backing for the ADR 0011 Phase B auto-promote allowlist
 // (trusted_intake_senders). Clerk-gated like the compliance settings route
@@ -42,7 +38,7 @@ export async function POST(request: Request) {
         { status: 400 },
       );
     }
-    await addTrustedSender(getReceiptsDb(), email, actor);
+    await trustSender(getReceiptsDb(), email, actor);
     const senders = await listTrustedSenders(getReceiptsDb());
     return NextResponse.json({ senders }, { status: 200 });
   } catch (error) {
@@ -72,7 +68,7 @@ export async function DELETE(request: Request) {
         { status: 400 },
       );
     }
-    await removeTrustedSender(getReceiptsDb(), email, actor);
+    await untrustSender(getReceiptsDb(), email, actor);
     const senders = await listTrustedSenders(getReceiptsDb());
     return NextResponse.json({ senders }, { status: 200 });
   } catch (error) {
