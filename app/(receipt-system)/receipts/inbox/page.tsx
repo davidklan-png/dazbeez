@@ -1,18 +1,24 @@
 import { assertReceiptsPageAccess } from "@/lib/receipts/auth-request";
 import { getReceiptsDb } from "@/lib/cloudflare-runtime";
 import { listPendingIntake } from "@/lib/receipts/email-intake";
+import { listTrustedSenders } from "@/lib/receipts/trusted-senders";
+import { listBlockedSenders } from "@/lib/receipts/blocked-senders";
+import { normalizeSenderEmail } from "@/lib/receipts/trusted-senders";
 import { InboxRow } from "@/components/receipts/inbox/inbox-row";
 
 export const dynamic = "force-dynamic";
 
-// ADR 0011: human triage queue for emailed receipts (receipts@dazbeez.com).
-// Unauthenticated mail never writes to receipt_records directly — it lands in
-// email_receipt_intake at pending_triage and only an explicit Promote creates
-// a real receipt. This screen is deliberately separate from /receipts/review
-// (whose lock/month-scoping semantics don't apply to unreviewed mail).
 export default async function InboxPage() {
   await assertReceiptsPageAccess();
-  const rows = await listPendingIntake(getReceiptsDb());
+  const db = getReceiptsDb();
+  const [rows, trusted, blocked] = await Promise.all([
+    listPendingIntake(db),
+    listTrustedSenders(db),
+    listBlockedSenders(db),
+  ]);
+
+  const trustedSet = new Set(trusted.map((t) => t.email));
+  const blockedSet = new Set(blocked.map((b) => b.email));
 
   return (
     <main className="mx-auto w-full max-w-3xl px-4 py-8 sm:px-8">
@@ -21,8 +27,8 @@ export default async function InboxPage() {
         <p className="mt-1 text-sm text-gray-500">
           Mail sent to <span className="font-medium">receipts@</span> or{" "}
           <span className="font-medium">receipt@dazbeez.com</span>. Promote
-          to create a real receipt; reject to dismiss. SPF/DKIM verdicts are
-          informational — nothing is auto-accepted or auto-rejected.
+          to create a real receipt; reject to dismiss. Use Trust/Block to
+          manage sender policy for future mail.
         </p>
       </header>
 
@@ -35,9 +41,21 @@ export default async function InboxPage() {
         </div>
       ) : (
         <ul className="space-y-3">
-          {rows.map((intake) => (
-            <InboxRow key={intake.id} intake={intake} />
-          ))}
+          {rows.map((intake) => {
+            const norm = normalizeSenderEmail(intake.from_address);
+            const senderState = blockedSet.has(norm)
+              ? "blocked"
+              : trustedSet.has(norm)
+                ? "trusted"
+                : "unrecognized";
+            return (
+              <InboxRow
+                key={intake.id}
+                intake={intake}
+                senderState={senderState}
+              />
+            );
+          })}
         </ul>
       )}
     </main>

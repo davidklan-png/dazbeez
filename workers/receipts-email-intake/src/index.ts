@@ -14,6 +14,7 @@
 import PostalMime from "postal-mime";
 import {
   recordIntake,
+  recordBlockedIntake,
   INTAKE_MAX_MESSAGE_BYTES,
   INTAKE_STALE_DAYS,
   INTAKE_BODY_TEXT_MAX_BYTES,
@@ -27,6 +28,7 @@ import {
   staleCutoffIso,
   capBody,
 } from "../../../lib/receipts/email-parse";
+import { parseRfcFromMailbox, resolveBlockedSenderIdentity } from "./sender-identity";
 
 interface Env {
   RECEIPTS_DB: D1Database;
@@ -42,11 +44,65 @@ const worker = {
     env: Env,
     ctx: ExecutionContext,
   ): Promise<void> {
+    // ADR 0011 follow-up (2026-07-22): check the blocklist BEFORE the size
+    // ceiling and BEFORE reading/parsing message.raw. Check BOTH identities:
+    //   1. The SMTP envelope MAIL FROM (message.from)
+    //   2. The RFC 5322 From header mailbox (parsed from message.headers)
+    // A match on EITHER blocks the delivery. This must run before the size
+    // check so an oversized message from a blocked sender still creates its
+    // minimal delivery-attempt record.
+    const envelopeFrom = (message.from ?? "").trim().toLowerCase();
+    const headerFrom = parseRfcFromMailbox(message.headers.get("from"));
+
+    // Blocklist lookup — if it fails, log clearly and continue to normal
+    // triage (fail-open, never falsely block or discard).
+    let blockResult;
+    try {
+      blockResult = await resolveBlockedSenderIdentity(
+        env.RECEIPTS_DB,
+        headerFrom,
+        envelopeFrom,
+      );
+    } catch (blockErr) {
+      console.error("[receipts-email-intake] blocklist lookup failed; continuing to normal triage", {
+        headerFrom: headerFrom ?? null,
+        envelopeFrom: envelopeFrom || null,
+        error: blockErr instanceof Error ? blockErr.message : String(blockErr),
+      });
+      blockResult = null;
+    }
+    if (blockResult?.matched && blockResult.identity) {
+      const matchedBlockedIdentity = blockResult.identity;
+      // Record ONE minimal rejected row (metadata only — no body/headers/
+      // attachment/R2). Use the RFC From mailbox when available (it's what
+      // the operator sees); otherwise the matched envelope identity.
+      try {
+        const { spf, dkim } = extractAuthVerdicts(message.headers.get("authentication-results"));
+        const subject = message.headers.get("subject");
+        await recordBlockedIntake(env.RECEIPTS_DB, {
+          receivedAt: new Date().toISOString(),
+          fromAddress: headerFrom ?? matchedBlockedIdentity,
+          toAddress: message.to ?? null,
+          subject,
+          spfPass: spf,
+          dkimPass: dkim,
+          blockedSenderEmail: matchedBlockedIdentity,
+        });
+        console.log("[receipts-email-intake] blocked delivery recorded (metadata only)", {
+          identity: matchedBlockedIdentity,
+        });
+      } catch (err) {
+        console.error("[receipts-email-intake] blocked delivery recording failed; mail NOT processed", {
+          identity: matchedBlockedIdentity,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      return; // never read/parse the raw MIME for a blocked sender
+    }
+
     // Hard pre-parse size ceiling (ADR 0011 "Negative"). Check the declared
     // rawSize BEFORE reading/parsing anything. If it exceeds the ceiling, drop
-    // (do not process) and log. We deliberately do NOT call message.setReject:
-    // its bounce semantics aren't specified in the ADR and guessing wrong could
-    // bounce legitimate mail to a real sender.
+    // (do not process) and log.
     if (!withinMessageSizeCeiling(message.rawSize, INTAKE_MAX_MESSAGE_BYTES)) {
       console.warn("[receipts-email-intake] message exceeds size ceiling, dropping", {
         from: message.from,

@@ -283,7 +283,7 @@ test("parseTrustedIntakeSenders: null/undefined/blank → []", () => {
 // address: only an allowlisted sender with passing SPF AND DKIM and NO valid
 // attachment gets auto-promoted with no operator click.
 
-test("isAutoPromoteEligible: allowlisted + SPF+DKIM + body-only → true", () => {
+test("isAutoPromoteEligible: allowlisted + SPF+DKIM + body-only + timestamps → true", () => {
   assert.equal(
     isAutoPromoteEligible({
       fromAddress: "david@gmail.com",
@@ -291,6 +291,8 @@ test("isAutoPromoteEligible: allowlisted + SPF+DKIM + body-only → true", () =>
       dkimPass: true,
       hasValidAttachment: false,
       trustedSenders: ["david@gmail.com", "other@x.com"],
+      receivedAt: "2026-08-01T00:00:00.000Z",
+      trustedCreatedAt: "2026-07-01T00:00:00.000Z",
     }),
     true,
   );
@@ -340,7 +342,143 @@ test("isAutoPromoteEligible: from_address matched case-insensitively", () => {
       dkimPass: true,
       hasValidAttachment: false,
       trustedSenders: ["david@gmail.com"],
+      receivedAt: "2026-08-01T00:00:00.000Z",
+      trustedCreatedAt: "2026-07-01T00:00:00.000Z",
     }),
     true,
+  );
+});
+
+// ─── isAutoPromoteEligible: ADR 0011 follow-up — prospective trust + blocked ─
+
+test("isAutoPromoteEligible: blocked sender → false even if also trusted + SPF + DKIM", () => {
+  assert.equal(
+    isAutoPromoteEligible({
+      fromAddress: "david@gmail.com",
+      spfPass: true,
+      dkimPass: true,
+      hasValidAttachment: false,
+      trustedSenders: ["david@gmail.com"],
+      blockedSenders: ["david@gmail.com"],
+    }),
+    false,
+  );
+});
+
+test("isAutoPromoteEligible: prospective — older intake → false", () => {
+  assert.equal(
+    isAutoPromoteEligible({
+      fromAddress: "david@gmail.com",
+      spfPass: true,
+      dkimPass: true,
+      hasValidAttachment: false,
+      trustedSenders: ["david@gmail.com"],
+      receivedAt: "2026-06-01T00:00:00.000Z",
+      trustedCreatedAt: "2026-07-01T00:00:00.000Z",
+    }),
+    false,
+  );
+});
+
+test("isAutoPromoteEligible: prospective — equal timestamp → true", () => {
+  assert.equal(
+    isAutoPromoteEligible({
+      fromAddress: "david@gmail.com",
+      spfPass: true,
+      dkimPass: true,
+      hasValidAttachment: false,
+      trustedSenders: ["david@gmail.com"],
+      receivedAt: "2026-07-01T00:00:00.000Z",
+      trustedCreatedAt: "2026-07-01T00:00:00.000Z",
+    }),
+    true,
+  );
+});
+
+test("isAutoPromoteEligible: prospective — newer intake → true", () => {
+  assert.equal(
+    isAutoPromoteEligible({
+      fromAddress: "david@gmail.com",
+      spfPass: true,
+      dkimPass: true,
+      hasValidAttachment: false,
+      trustedSenders: ["david@gmail.com"],
+      receivedAt: "2026-08-01T00:00:00.000Z",
+      trustedCreatedAt: "2026-07-01T00:00:00.000Z",
+    }),
+    true,
+  );
+});
+
+test("isAutoPromoteEligible: malformed received_at → false", () => {
+  assert.equal(
+    isAutoPromoteEligible({
+      fromAddress: "david@gmail.com",
+      spfPass: true,
+      dkimPass: true,
+      hasValidAttachment: false,
+      trustedSenders: ["david@gmail.com"],
+      receivedAt: "not-a-date",
+      trustedCreatedAt: "2026-07-01T00:00:00.000Z",
+    }),
+    false,
+  );
+});
+
+test("isAutoPromoteEligible: malformed trusted_created_at → false", () => {
+  assert.equal(
+    isAutoPromoteEligible({
+      fromAddress: "david@gmail.com",
+      spfPass: true,
+      dkimPass: true,
+      hasValidAttachment: false,
+      trustedSenders: ["david@gmail.com"],
+      receivedAt: "2026-08-01T00:00:00.000Z",
+      trustedCreatedAt: "garbage",
+    }),
+    false,
+  );
+});
+
+test("isAutoPromoteEligible: missing trustedCreatedAt → false (mandatory)", () => {
+  assert.equal(
+    isAutoPromoteEligible({
+      fromAddress: "david@gmail.com",
+      spfPass: true,
+      dkimPass: true,
+      hasValidAttachment: false,
+      trustedSenders: ["david@gmail.com"],
+      receivedAt: "2026-08-01T00:00:00.000Z",
+    }),
+    false,
+  );
+});
+
+test("isAutoPromoteEligible: missing receivedAt → false (mandatory)", () => {
+  assert.equal(
+    isAutoPromoteEligible({
+      fromAddress: "david@gmail.com",
+      spfPass: true,
+      dkimPass: true,
+      hasValidAttachment: false,
+      trustedSenders: ["david@gmail.com"],
+      trustedCreatedAt: "2026-07-01T00:00:00.000Z",
+    }),
+    false,
+  );
+});
+
+test("isAutoPromoteEligible: null trustedCreatedAt → false (mandatory)", () => {
+  assert.equal(
+    isAutoPromoteEligible({
+      fromAddress: "david@gmail.com",
+      spfPass: true,
+      dkimPass: true,
+      hasValidAttachment: false,
+      trustedSenders: ["david@gmail.com"],
+      receivedAt: "2026-08-01T00:00:00.000Z",
+      trustedCreatedAt: null,
+    }),
+    false,
   );
 });

@@ -297,3 +297,25 @@ Attachments are validated against the exact same `ALLOWED_RECEIPT_MIME_TYPES` / 
 - Whether to add a low-noise notification (e.g. folded into the existing Resend notify email) when the inbox has unpromoted items, and at what age. Still open.
 - Whether SPF/DKIM failure should downgrade an attachment to "visible but not promotable" rather than just an informational flag, once real spam volume is observed. Still open.
 - Whether an unattended third worker (no monitoring/alerting) is acceptable long-term or just for launch — flagged in the Decision record's operational-impact note.
+
+## Follow-up decision (2026-07-22): sender controls — blocklist, prospective trust, blocked-delivery metadata
+
+### Context
+
+The Phase B auto-promote allowlist (`trusted_intake_senders`, managed from Settings) lets a trusted sender's body-only emails auto-file with no human review. The operator requested visibility into unrecognized senders, the ability to block senders, and prospective trust (trusting a sender should not retroactively promote old pending mail).
+
+### Decisions
+
+1. **Operator-managed blocklist.** A new `blocked_intake_senders` table (migration `0034`) mirrors `trusted_intake_senders`. Trusted and blocked are mutually exclusive (trusting removes a blocked row; blocking removes a trusted row). Blocked wins defensively if inconsistent data exists.
+
+2. **Prospective trust.** Auto-promotion now requires `intake.received_at >= trusted_sender.created_at`. Mail received before the sender was trusted stays `pending_triage` (an explicit human Promote still works). This also scopes the consumer's previously unbounded replay of ALL pending rows.
+
+3. **Metadata-only blocked delivery.** Future mail from blocked senders is recorded as ONE minimal `rejected` row (`reject_reason='blocked_sender'`) with only sender, recipient, received time, SPF/DKIM, a bounded subject, and `blocked_sender_email` (the exact normalized policy identity that matched) — no raw headers, body, attachment, or R2 object. The block check runs in the Email Worker BEFORE reading `message.raw`, checking BOTH the RFC 5322 From header mailbox (parsed via postal-mime `addressParser`) and the SMTP envelope MAIL FROM. A match on either blocks the delivery. If the blocklist lookup fails, the Worker logs visibly and continues into ordinary pending triage (the promotion gate is the final safety net). The `blocked_sender_email` column (migration 0034 `ALTER TABLE`) enables accurate blocked-delivery activity counts without fragile joins against display `from_address`.
+
+4. **Defense in depth (intake + promotion).** Block enforcement happens in three layers: (a) the Email Worker (before reading raw), (b) the Python auto-promote consumer, and (c) authoritatively in the processor-key promotion route (`POST /api/receipts/inbox/[id]/promote`) immediately before promotion. The route re-reads the intake + current sender policy and returns 409 if the intake fails prospective auto-promotion policy. This closes the race where a sender is blocked between the consumer's selection and the promotion call.
+
+5. **Explicit human Promote override.** A Clerk-authenticated human Promote is NOT gated by the auto-promotion policy — it remains an explicit override for any promotable message, even if the sender is now blocked (decision 10).
+
+6. **Inbox block action rejects only the selected row.** Blocking from an Inbox row blocks the sender AND rejects that ONE intake row. Other pending rows from the same sender are NOT mass-rejected (decision 11).
+
+7. **Atomic audit.** Every sender-policy transition (Trust/Block/Untrust/Unblock) executes its conditional audit INSERTs and mutation statements in ONE D1 `batch()` — so mutation and audit are atomic. If any statement fails, the entire batch rolls back. No post-batch `meta.changes`-derived audit writes.

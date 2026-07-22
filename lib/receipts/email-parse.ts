@@ -220,6 +220,15 @@ export function parseTrustedIntakeSenders(
  * DKIM gets auto-promoted; everyone else stays pending_triage (visible per
  * Phase A, manual Promote). Pure — the call site passes the verdicts and the
  * parsed allowlist.
+ *
+ * ADR 0011 follow-up (2026-07-22):
+ * - Prospective trust: auto-promotion requires intake.received_at >= the
+ *   sender's trust row created_at. Mail received BEFORE the sender was trusted
+ *   stays pending (explicit human Promote still works).
+ * - Blocked sender defense: blocked senders are never auto-promoted, even if
+ *   they are somehow also in the trusted set.
+ * - Malformed timestamps (either received_at or trusted_created_at) →
+ *   ineligible (safe default).
  */
 export function isAutoPromoteEligible(args: {
   fromAddress: string;
@@ -228,9 +237,42 @@ export function isAutoPromoteEligible(args: {
   /** true if the email has at least one VALID receipt attachment. */
   hasValidAttachment: boolean;
   trustedSenders: readonly string[];
+  /** Blocked sender set (normalized lowercase). */
+  blockedSenders?: readonly string[];
+  /** ISO timestamp of the intake's received_at. */
+  receivedAt?: string;
+  /** ISO timestamp of the matched trusted sender's created_at (prospective gate). */
+  trustedCreatedAt?: string | null;
 }): boolean {
+  const normalized = args.fromAddress.trim().toLowerCase();
+
+  // Blocked wins defensively (mutual-exclusion safety net).
+  if (args.blockedSenders?.includes(normalized)) return false;
+
   // Attachments use the normal manual triage path regardless of sender.
   if (args.hasValidAttachment) return false;
   if (!args.spfPass || !args.dkimPass) return false;
-  return args.trustedSenders.includes(args.fromAddress.toLowerCase());
+  if (!args.trustedSenders.includes(normalized)) return false;
+
+  // Prospective trust: received_at AND trusted_created_at are MANDATORY for
+  // automatic promotion. Missing, null, malformed, or timezone-incompatible
+  // timestamps are ineligible (safe default).
+  if (!args.receivedAt || !args.trustedCreatedAt) return false;
+  const receivedMs = parseIsoMs(args.receivedAt);
+  const trustedMs = parseIsoMs(args.trustedCreatedAt);
+  if (receivedMs === null || trustedMs === null) return false;
+  if (receivedMs < trustedMs) return false; // older than trust → ineligible
+
+  return true;
+}
+
+/**
+ * Parse an ISO-8601 timestamp to epoch-ms, returning null if malformed.
+ * Uses Date.parse (UTC-aware for ISO strings with 'Z'). Avoids locale
+ * formatting issues.
+ */
+function parseIsoMs(iso: string): number | null {
+  if (!iso || typeof iso !== "string") return null;
+  const ms = Date.parse(iso);
+  return Number.isNaN(ms) ? null : ms;
 }
