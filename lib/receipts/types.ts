@@ -355,6 +355,9 @@ export interface EmailReceiptIntake {
   body_html: string | null;
   body_truncated: number;
   created_at: string;
+  // ADR 0011 follow-up: the exact normalized blocklist key that matched at
+  // intake-time rejection. NULL for non-blocked rows and historical rows.
+  blocked_sender_email?: string | null;
 }
 
 export interface ReceiptAttendee {

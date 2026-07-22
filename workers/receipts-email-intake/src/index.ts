@@ -28,8 +28,7 @@ import {
   staleCutoffIso,
   capBody,
 } from "../../../lib/receipts/email-parse";
-import { isBlockedSender } from "../../../lib/receipts/blocked-senders";
-import { parseRfcFromMailbox } from "./sender-identity";
+import { parseRfcFromMailbox, resolveBlockedSenderIdentity } from "./sender-identity";
 
 interface Env {
   RECEIPTS_DB: D1Database;
@@ -54,24 +53,13 @@ const worker = {
     // minimal delivery-attempt record.
     const envelopeFrom = (message.from ?? "").trim().toLowerCase();
     const headerFrom = parseRfcFromMailbox(message.headers.get("from"));
-    const identitiesToCheck = [headerFrom, envelopeFrom].filter(
-      (v): v is string => !!v,
+    const blockResult = await resolveBlockedSenderIdentity(
+      env.RECEIPTS_DB,
+      headerFrom,
+      envelopeFrom,
     );
-    let matchedBlockedIdentity: string | null = null;
-    for (const identity of identitiesToCheck) {
-      try {
-        if (await isBlockedSender(env.RECEIPTS_DB, identity)) {
-          matchedBlockedIdentity = identity;
-          break;
-        }
-      } catch (err) {
-        console.error("[receipts-email-intake] blocked-sender lookup failed; continuing to normal triage", {
-          identity,
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
-    if (matchedBlockedIdentity) {
+    if (blockResult.matched && blockResult.identity) {
+      const matchedBlockedIdentity = blockResult.identity;
       // Record ONE minimal rejected row (metadata only — no body/headers/
       // attachment/R2). Use the RFC From mailbox when available (it's what
       // the operator sees); otherwise the matched envelope identity.

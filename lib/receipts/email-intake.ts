@@ -336,48 +336,60 @@ export async function recordBlockedIntake(
     blockedSenderEmail: string;
   },
 ): Promise<string> {
+  // Normalize the policy identity — reject malformed/empty.
+  const normalizedBlocked = input.blockedSenderEmail?.trim().toLowerCase();
+  if (!normalizedBlocked || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedBlocked)) {
+    throw new Error("recordBlockedIntake requires a valid normalized blockedSenderEmail.");
+  }
+
   const id = newUuid();
   const now = nowIso();
+  const auditId = newUuid();
   const boundedSubject = input.subject
     ? input.subject.slice(0, BLOCKED_SUBJECT_MAX_CHARS)
     : null;
 
-  await db
-    .prepare(
-      `INSERT INTO email_receipt_intake
-        (id, received_at, from_address, subject, spf_pass, dkim_pass,
-         attachment_r2_key, attachment_sha256, attachment_content_type,
-         attachment_size_bytes, attachment_filename, status, reject_reason,
-         promoted_receipt_id, raw_headers_json, created_at, to_address,
-         body_text, body_html, body_truncated, blocked_sender_email)
-       VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, 'rejected', 'blocked_sender', NULL, NULL, ?, ?, NULL, NULL, 0, ?)`,
-    )
-    .bind(
-      id,
-      input.receivedAt,
-      input.fromAddress,
-      boundedSubject,
-      input.spfPass ? 1 : 0,
-      input.dkimPass ? 1 : 0,
-      now,
-      input.toAddress,
-      input.blockedSenderEmail,
-    )
-    .run();
-
-  await createAuditEntry(db, {
-    actor: "email-worker",
-    action: "email_intake.rejected",
-    objectType: "email_intake",
-    objectId: id,
-    newValueJson: stringifyJson({
-      reason: "blocked_sender",
-      from_address: input.fromAddress,
-      subject: boundedSubject,
-      spf_pass: input.spfPass,
-      dkim_pass: input.dkimPass,
-    }),
+  const auditJson = stringifyJson({
+    reason: "blocked_sender",
+    from_address: input.fromAddress,
+    subject: boundedSubject,
+    spf_pass: input.spfPass,
+    dkim_pass: input.dkimPass,
+    blocked_sender_email: normalizedBlocked,
   });
+
+  // Atomic: row insert + audit insert in ONE D1 batch. If either fails, the
+  // entire batch rolls back — no row without audit, no audit without row.
+  await db.batch([
+    db
+      .prepare(
+        `INSERT INTO email_receipt_intake
+          (id, received_at, from_address, subject, spf_pass, dkim_pass,
+           attachment_r2_key, attachment_sha256, attachment_content_type,
+           attachment_size_bytes, attachment_filename, status, reject_reason,
+           promoted_receipt_id, raw_headers_json, created_at, to_address,
+           body_text, body_html, body_truncated, blocked_sender_email)
+         VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, 'rejected', 'blocked_sender', NULL, NULL, ?, ?, NULL, NULL, 0, ?)`,
+      )
+      .bind(
+        id,
+        input.receivedAt,
+        input.fromAddress,
+        boundedSubject,
+        input.spfPass ? 1 : 0,
+        input.dkimPass ? 1 : 0,
+        now,
+        input.toAddress,
+        normalizedBlocked,
+      ),
+    db
+      .prepare(
+        `INSERT INTO receipt_audit_log
+          (id, actor, action, object_type, object_id, old_value_json, new_value_json, created_at)
+         VALUES (?, 'email-worker', 'email_intake.rejected', 'email_intake', ?, NULL, ?, ?)`,
+      )
+      .bind(auditId, id, auditJson, now),
+  ]);
 
   return id;
 }

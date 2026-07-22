@@ -10,7 +10,6 @@
 // blockSender is symmetric. D1 serializes batches, so whichever complete
 // transition runs last owns the final state.
 
-import { createAuditEntry } from "@/lib/receipts/audit";
 import { nowIso, newUuid, stringifyJson } from "@/lib/receipts/db-utils";
 import {
   normalizeSenderEmail,

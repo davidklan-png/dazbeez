@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
 import { requireReceiptsActor } from "@/lib/receipts/auth";
 import { getReceiptsDb } from "@/lib/cloudflare-runtime";
-import { listTrustedSenders, isValidSenderEmail } from "@/lib/receipts/trusted-senders";
+import { isValidSenderEmail, listTrustedSenders } from "@/lib/receipts/trusted-senders";
 import { trustSender, untrustSender } from "@/lib/receipts/sender-policy";
+import { getSenderControlsSnapshot } from "@/lib/receipts/sender-activity";
 
 // Settings page backing for the ADR 0011 Phase B auto-promote allowlist
 // (trusted_intake_senders). Clerk-gated like the compliance settings route
@@ -38,9 +39,10 @@ export async function POST(request: Request) {
         { status: 400 },
       );
     }
-    await trustSender(getReceiptsDb(), email, actor);
-    const senders = await listTrustedSenders(getReceiptsDb());
-    return NextResponse.json({ senders }, { status: 200 });
+    const db = getReceiptsDb();
+    await trustSender(db, email, actor);
+    const snapshot = await getSenderControlsSnapshot(db);
+    return NextResponse.json(snapshot, { status: 200 });
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("Unauthorized")) {
       return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
@@ -68,9 +70,10 @@ export async function DELETE(request: Request) {
         { status: 400 },
       );
     }
-    await untrustSender(getReceiptsDb(), email, actor);
-    const senders = await listTrustedSenders(getReceiptsDb());
-    return NextResponse.json({ senders }, { status: 200 });
+    const db = getReceiptsDb();
+    await untrustSender(db, email, actor);
+    const snapshot = await getSenderControlsSnapshot(db);
+    return NextResponse.json(snapshot, { status: 200 });
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("Unauthorized")) {
       return NextResponse.json({ error: "Unauthorized." }, { status: 401 });

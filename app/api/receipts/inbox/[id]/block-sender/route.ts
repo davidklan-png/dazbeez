@@ -3,6 +3,7 @@ import { requireReceiptsActor } from "@/lib/receipts/auth";
 import { getReceiptsDb } from "@/lib/cloudflare-runtime";
 import { getIntake, rejectIntake } from "@/lib/receipts/email-intake";
 import { blockSender } from "@/lib/receipts/sender-policy";
+import { classifyBlockRejectError } from "@/lib/receipts/block-sender-result";
 
 // POST /api/receipts/inbox/[id]/block-sender
 // Combined action (ADR 0011 follow-up decision 11): blocks the sender (removes
@@ -35,34 +36,18 @@ export async function POST(
     try {
       await rejectIntake(db, id, "blocked_sender", actor);
     } catch (rejectErr) {
-      const msg = rejectErr instanceof Error ? rejectErr.message : String(rejectErr);
-      if (/already (promoted|rejected)/i.test(msg)) {
-        // Row was already terminal — sender is still blocked; this is a safe
-        // partial result (the block succeeded; the row just didn't need
-        // rejecting).
+      const result = classifyBlockRejectError(rejectErr);
+      if (result.kind === "partial-success") {
         return NextResponse.json(
-          {
-            ok: true,
-            blocked: intake.from_address,
-            rejected: false,
-            note: "Sender blocked; row was already terminal and could not be rejected.",
-          },
+          { ok: true, blocked: intake.from_address, rejected: false, note: result.note },
           { status: 200 },
         );
       }
-      // Genuine failure (D1/audit error) — sender blocking succeeded but row
-      // rejection failed. Report clearly; do NOT misreport as a race.
       console.error("[api/receipts/inbox/block-sender] rejectIntake failed after block", {
-        id,
-        blocked: intake.from_address,
-        error: msg,
+        id, blocked: intake.from_address, error: result.message,
       });
       return NextResponse.json(
-        {
-          error: `Sender blocked, but row rejection failed: ${msg}`,
-          blocked: intake.from_address,
-          rejected: false,
-        },
+        { error: result.message, blocked: intake.from_address, rejected: false },
         { status: 500 },
       );
     }
