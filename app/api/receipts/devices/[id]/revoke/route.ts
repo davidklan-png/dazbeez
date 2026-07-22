@@ -2,10 +2,8 @@ import { NextResponse } from "next/server";
 import { requireReceiptsActor } from "@/lib/receipts/auth";
 import { isReceiptsOwner } from "@/lib/receipts/owners";
 import {
-  buildClearDeviceCookie,
-  getCurrentDeviceId,
-  revokeDevice,
-  revokeDeviceById,
+  revokeMobileDevice,
+  revokeMobileDeviceById,
 } from "@/lib/receipts/trusted-devices";
 
 export async function POST(
@@ -19,23 +17,16 @@ export async function POST(
       return NextResponse.json({ error: "Device id required." }, { status: 400 });
     }
 
-    // Owners can revoke any device; everyone else only their own.
+    // Owners can revoke any paired mobile device; everyone else only their own.
+    // Both revoke paths constrain platform to ios|android, so a guessed
+    // historical browser row id is never revoked here.
     if (await isReceiptsOwner(actor)) {
-      await revokeDeviceById(id);
+      await revokeMobileDeviceById(id);
     } else {
-      await revokeDevice(id, actor);
+      await revokeMobileDevice(id, actor);
     }
 
-    const currentDeviceId = await getCurrentDeviceId(request.headers);
-    const isCurrent = currentDeviceId === id;
-
-    return new NextResponse(JSON.stringify({ ok: true, revokedSelf: isCurrent }), {
-      status: 200,
-      headers: {
-        "Content-Type": "application/json",
-        ...(isCurrent ? { "Set-Cookie": buildClearDeviceCookie() } : {}),
-      },
-    });
+    return NextResponse.json({ ok: true }, { status: 200 });
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("Unauthorized")) {
       return NextResponse.json({ error: "Unauthorized." }, { status: 401 });

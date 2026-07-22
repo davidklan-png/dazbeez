@@ -1,4 +1,3 @@
-import { verifyDeviceCookie } from "@/lib/receipts/trusted-devices";
 import { auth, clerkClient } from "@clerk/nextjs/server";
 
 const RECEIPTS_REALM = "Dazbeez Receipts";
@@ -249,16 +248,12 @@ export function getReceiptsAuthChallengeHeaders(): Record<string, string> {
 export async function isReceiptsAuthorized(
   requestHeaders: Headers,
 ): Promise<boolean> {
-  // 1. Trusted-device cookie (HMAC + DB revocation check).
-  const device = await verifyDeviceCookie(requestHeaders).catch(() => null);
-  if (device) return true;
-
-  // 2. CF Access JWT — signature + issuer + audience verified.
+  // 1. CF Access JWT — signature + issuer + audience verified.
   const token = requestHeaders.get("Cf-Access-Jwt-Assertion");
   const { ok } = await isCfAccessTokenAcceptable(token);
   if (ok) return true;
 
-  // 3. Basic auth — local dev only.
+  // 2. Basic auth — local dev only.
   const configuredUsername = process.env.RECEIPTS_AUTH_USERNAME?.trim();
   const configuredPassword = process.env.RECEIPTS_AUTH_PASSWORD;
   if (configuredUsername && configuredPassword) {
@@ -275,14 +270,14 @@ export async function isReceiptsAuthorized(
   return false;
 }
 
-// Middleware-safe: no DB calls. Cookie via HMAC only; CF Access via decode.
+// Middleware-safe: no DB calls. Identity comes from the Clerk session.
 //
-// Phase 2 Clerk cutover: the entire CF-Access/cookie/Basic-auth chain above
-// is now bypassed — auth is enforced by `middleware.ts` via clerkMiddleware.
-// `auth()` here reads the Clerk session that the middleware already
-// established. The legacy helpers (isCfAccessTokenAcceptable,
-// decodeBasicAuthorization, verifyDeviceCookieLight) are kept as dead code,
-// deleted in Phase 4.
+// Phase 2 Clerk cutover: receipts web auth is enforced by `middleware.ts` via
+// clerkMiddleware, so the legacy CF-Access/Basic-auth chain in
+// isReceiptsAuthorized above is dead code (deleted in Phase 4). The old
+// "remember this browser" HMAC device cookie was retired in Phase 3 — it is
+// gone entirely (browser trust is now mobile-only in
+// lib/receipts/trusted-devices.ts).
 export async function isReceiptsAuthorizedLight(
   _requestHeaders: Headers,
 ): Promise<boolean> {
@@ -290,15 +285,11 @@ export async function isReceiptsAuthorizedLight(
   return !!session.userId;
 }
 
-// Single-pass: verifies auth and returns the actor. Replaces the previous
-// assertReceiptsAccessFromHeaders + getReceiptsActor pair that every receipts
-// route called, which performed verifyDeviceCookie (HMAC + D1 lookup for
-// revocation) twice per request.
+// Single-pass: verifies auth and returns the actor. Identity comes from Clerk.
 //
-// Phase 2 Clerk cutover: identity comes from Clerk. Clerk middleware
-// (`middleware.ts`) gates the route, so by the time we get here the session is
-// valid; the userId check is defense-in-depth. The legacy verification chain
-// above is dead code (Phase 4).
+// Phase 2 Clerk cutover: Clerk middleware (`middleware.ts`) gates the route,
+// so by the time we get here the session is valid; the userId check is
+// defense-in-depth. The legacy verification chain above is dead code (Phase 4).
 export async function requireReceiptsActor(
   _requestHeaders: Headers,
 ): Promise<string> {

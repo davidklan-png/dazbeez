@@ -12,7 +12,7 @@ This runbook is the source-of-truth for what that Application config should be. 
 4. Forward the original request to the Worker, with `Cf-Access-Jwt-Assertion` header attached.
 5. The Worker (`lib/receipts/auth.ts:isCfAccessTokenAcceptable`) verifies the JWT signature against `${CF_ACCESS_TEAM}/cdn-cgi/access/certs`, the issuer, the audience (`CF_ACCESS_AUD`), and the expiry.
 
-The receipts-level `receipts_device` cookie (HMAC-signed, 1 year) is set by `/api/receipts/devices/enroll` **after** the user has already passed Access. It is irrelevant to the Access OTP loop — it only matters once Access is satisfied.
+> Historical note: the receipts module previously also set a "remember this browser" `receipts_device` HMAC cookie via `/api/receipts/devices/enroll` after Access was satisfied. That web/browser trust path was **retired in the Clerk Phase 3 device-trust cleanup** — the `/api/receipts/devices/enroll` route, the `/receipts/enroll` page, and the cookie machinery are gone. Historical browser rows remain in `trusted_devices` (platform NULL) but are inert and hidden; device management is now mobile-only (iPhone/Android pairing + bearer auth). The cookie never affected the Access OTP loop, so this retirement changes nothing about the Access flow described here.
 
 ## Reference: what the dashboard config should be
 
@@ -68,7 +68,7 @@ These are the only CF Access values the Worker needs. They're set as Wrangler se
 | `CF_ACCESS_TEAM` | Team domain used to fetch the JWKS (e.g. `dazbeez.cloudflareaccess.com`). Must NOT include scheme or trailing slash. | `npx wrangler secret put CF_ACCESS_TEAM` |
 | `CF_ACCESS_AUD` | Audience tag from the Access Application's settings. The JWT `aud` claim must match this exactly. | `npx wrangler secret put CF_ACCESS_AUD` |
 
-If either is unset, `isCfAccessTokenAcceptable` returns `{ ok: false }` for every request and Access JWTs are effectively ignored — the module then falls back to the HMAC device cookie / Basic auth paths. Fail-closed if none of those are configured either.
+If either is unset, `isCfAccessTokenAcceptable` returns `{ ok: false }` for every request and Access JWTs are effectively ignored — `isReceiptsAuthorized` then only has the Basic-auth fallback (local dev). Fail-closed if that isn't configured either. (The old "remember this browser" HMAC device cookie fallback was removed in Phase 3; web sessions now come exclusively from Clerk.)
 
 ## How to read the live config
 

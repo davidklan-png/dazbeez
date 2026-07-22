@@ -39,10 +39,11 @@ export default async function ReceiptsSettingsPage() {
           >
             <div>
               <p className="text-sm font-semibold text-gray-900">
-                Trusted devices
+                Trusted mobile devices
               </p>
               <p className="mt-1 text-xs text-gray-500">
-                Skip the email login on devices you trust.
+                iPhone and Android capture devices paired with your receipts
+                account. Revoke a device to revoke its receipts API access.
               </p>
             </div>
             <span className="text-sm text-amber-700">Manage →</span>

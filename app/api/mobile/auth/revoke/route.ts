@@ -1,15 +1,17 @@
 import { NextResponse } from "next/server";
-import { revokeDevice, verifyBearerDevice } from "@/lib/receipts/trusted-devices";
+import { revokeMobileDevice, verifyBearerDevice } from "@/lib/receipts/trusted-devices";
 
-// iPhone-initiated revoke. Uses the bearer token itself to identify the
+// Mobile-initiated revoke. Uses the bearer token itself to identify the
 // device, so a stolen token cannot be used to revoke a different device.
+// verifyBearerDevice only accepts platform ios|android rows whose actor
+// matches the signed payload, so the device targeted here is always mobile.
 export async function POST(request: Request) {
   try {
     const device = await verifyBearerDevice(request.headers);
     if (!device) {
       return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
     }
-    await revokeDevice(device.deviceId, device.actor);
+    await revokeMobileDevice(device.deviceId, device.actor);
     return NextResponse.json({ ok: true }, { status: 200 });
   } catch (error) {
     console.error("[api/mobile/auth/revoke] failed", error);
