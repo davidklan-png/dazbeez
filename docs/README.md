@@ -31,8 +31,9 @@ Step-by-step operational procedures. Owner: operator (David) + architect.
 
 | Document | Description |
 |----------|-------------|
-| [runbooks/clerk-auth-migration.md](runbooks/clerk-auth-migration.md) | Clerk auth **migration history/status** (replaced Basic/CF Access). Not the current auth spec — for that see [architecture.md](architecture.md) and [receipt-module.md](receipt-module.md). |
-| [runbooks/cf-access-app.md](runbooks/cf-access-app.md) | Cloudflare Access setup for receipts. |
+| [runbooks/clerk-auth.md](runbooks/clerk-auth.md) | **Current authentication spec** — Clerk middleware matcher, `PUBLIC_ROUTES` processor exceptions, mobile bearer/pairing routes, owner/member roles, admin owner enforcement, secrets to keep. |
+| [runbooks/clerk-auth-migration.md](runbooks/clerk-auth-migration.md) | Clerk auth **migration history/status** (replaced Basic/CF Access), incl. Phase 4B/4C retirement state. Narrative — for the current spec see [clerk-auth.md](runbooks/clerk-auth.md). |
+| [runbooks/cf-access-app.md](runbooks/cf-access-app.md) | **Legacy/transitional** — Cloudflare Access app reference, retained only as rollback/control-plane reference until Phase 4C. Current auth is [clerk-auth.md](runbooks/clerk-auth.md). |
 | [runbooks/receipts-extraction-rollout.md](runbooks/receipts-extraction-rollout.md) | Mac-side rollout of the ADR 0001 store-and-forward extraction consumer. |
 | [runbooks/receipts-queue-control-plane.md](runbooks/receipts-queue-control-plane.md) | Cloudflare Queues HTTP-pull consumer policy, read-only drift verifier, and first-time provisioning. **Current.** |
 | [month-close-runbook.md](month-close-runbook.md) | Operator runbook for closing a receipts month (incl. finalize notification email). |

@@ -57,12 +57,6 @@ CF_QUEUE_ID = os.environ["CF_QUEUE_ID"]
 CF_API_TOKEN = os.environ["CF_API_TOKEN"]
 EXTRACT_BASE = os.environ["RECEIPTS_EXTRACT_URL"].rstrip("/")
 PROCESSOR_KEY = os.environ["RECEIPTS_PROCESSOR_KEY"]
-# Optional: if a Cloudflare Access *application* fronts /api/receipts/* at the
-# edge, the processor key alone won't get past it — Access blocks the request
-# before the Worker runs. Provide an Access service token (and add a service-
-# token policy on the Access app) so the consumer can reach the endpoint.
-CF_ACCESS_CLIENT_ID = os.environ.get("CF_ACCESS_CLIENT_ID", "")
-CF_ACCESS_CLIENT_SECRET = os.environ.get("CF_ACCESS_CLIENT_SECRET", "")
 # Validated on the M4 Max (128 GB): 32B-4bit ≈ 18 GB on disk, ~21.6 GB RAM
 # (17%), ~26 tok/s. Strong JA accuracy incl. T-invoice numbers + tax math.
 MLX_MODEL = os.environ.get("MLX_MODEL", "mlx-community/Qwen3-VL-32B-Instruct-4bit")
@@ -128,9 +122,6 @@ def fetch_image(receipt_id: str, r2_key: str) -> str:
     fd, path = tempfile.mkstemp(suffix=suffix)
     os.close(fd)
     headers = {"x-receipts-processor-key": PROCESSOR_KEY}
-    if CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET:
-        headers["CF-Access-Client-Id"] = CF_ACCESS_CLIENT_ID
-        headers["CF-Access-Client-Secret"] = CF_ACCESS_CLIENT_SECRET
     resp = requests.get(
         f"{EXTRACT_BASE}/{receipt_id}/file",
         headers=headers,
@@ -246,11 +237,6 @@ def apply_to_worker(receipt_id: str, payload: dict[str, Any]) -> None:
         "x-receipts-processor-key": PROCESSOR_KEY,
         "Content-Type": "application/json",
     }
-    # Pass the Access service token through if configured (gets past an edge
-    # Cloudflare Access application; harmless if Access isn't fronting the API).
-    if CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET:
-        headers["CF-Access-Client-Id"] = CF_ACCESS_CLIENT_ID
-        headers["CF-Access-Client-Secret"] = CF_ACCESS_CLIENT_SECRET
     resp = requests.post(
         f"{EXTRACT_BASE}/{receipt_id}/extract",
         headers=headers,
@@ -278,9 +264,6 @@ def post_extraction_failed(receipt_id: str, reason: str) -> None:
         "x-receipts-processor-key": PROCESSOR_KEY,
         "Content-Type": "application/json",
     }
-    if CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET:
-        headers["CF-Access-Client-Id"] = CF_ACCESS_CLIENT_ID
-        headers["CF-Access-Client-Secret"] = CF_ACCESS_CLIENT_SECRET
     try:
         requests.post(
             f"{EXTRACT_BASE}/{receipt_id}/extraction-failed",
@@ -371,9 +354,6 @@ def fetch_original_bytes(receipt_id: str) -> bytes | None:
     (caller skips the proof for this receipt).
     """
     headers = {"x-receipts-processor-key": PROCESSOR_KEY}
-    if CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET:
-        headers["CF-Access-Client-Id"] = CF_ACCESS_CLIENT_ID
-        headers["CF-Access-Client-Secret"] = CF_ACCESS_CLIENT_SECRET
     try:
         resp = requests.get(
             f"{EXTRACT_BASE}/{receipt_id}/file",
@@ -402,9 +382,6 @@ def post_proof(receipt_id: str, derivative: bytes, content_type: str) -> None:
         "x-receipts-processor-key": PROCESSOR_KEY,
         "Content-Type": content_type,
     }
-    if CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET:
-        headers["CF-Access-Client-Id"] = CF_ACCESS_CLIENT_ID
-        headers["CF-Access-Client-Secret"] = CF_ACCESS_CLIENT_SECRET
     resp = requests.post(
         f"{EXTRACT_BASE}/{receipt_id}/proof",
         headers=headers,
@@ -802,9 +779,6 @@ def post_promote(intake_id: str) -> None:
         "x-receipts-processor-key": PROCESSOR_KEY,
         "Content-Type": "application/json",
     }
-    if CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET:
-        headers["CF-Access-Client-Id"] = CF_ACCESS_CLIENT_ID
-        headers["CF-Access-Client-Secret"] = CF_ACCESS_CLIENT_SECRET
     resp = requests.post(
         f"{EXTRACT_BASE}/inbox/{intake_id}/promote",
         headers=headers,
@@ -821,9 +795,6 @@ def post_render(receipt_id: str, derivative: bytes, content_type: str) -> None:
         "x-receipts-processor-key": PROCESSOR_KEY,
         "Content-Type": content_type,
     }
-    if CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET:
-        headers["CF-Access-Client-Id"] = CF_ACCESS_CLIENT_ID
-        headers["CF-Access-Client-Secret"] = CF_ACCESS_CLIENT_SECRET
     resp = requests.post(
         f"{EXTRACT_BASE}/{receipt_id}/render",
         headers=headers,

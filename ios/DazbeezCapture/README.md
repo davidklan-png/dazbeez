@@ -67,7 +67,7 @@ TestFlight internal testing only for the MVP. See PRD §15 Decision 9.
 | `/api/mobile/receipts/upload` | POST multipart | Bearer (`receipt:create`) | `UploadQueue.uploadReceipt()` |
 | `/api/mobile/business-cards/upload` | POST multipart | Bearer (`business_card:create`) | `UploadQueue.uploadBusinessCard()` |
 
-Pairing is "code only": the iPhone shows `DAZ-XXXX`; an operator types it
-into `/receipts/pair` in a browser behind Cloudflare Access. The bearer
+Pairing is "code only": the iPhone shows `DAZ-XXXX`; a signed-in operator types
+it into `/receipts/pair` in a browser (Clerk-authenticated). The bearer
 token is delivered exclusively to the polling iPhone — it is never shown
 in the browser.

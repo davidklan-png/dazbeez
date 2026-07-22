@@ -97,14 +97,11 @@ Current runtime configuration (verified from `wrangler.jsonc` + code):
 
 - **Clerk** — `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` (checked-in var) + `CLERK_SECRET_KEY` (wrangler secret). The active auth gate (`middleware.ts`, `lib/receipts/auth.ts`).
 - **Receipts extraction — Worker auth** — `RECEIPTS_PROCESSOR_KEY` (wrangler secret); authenticates the Mac consumer's requests to the Worker (`/file`, `/extract`, `/extraction-failed`, `/proof`) via the `x-receipts-processor-key` header (ADR 0001). Does **not** authenticate queue operations.
-- **Receipts extraction — Queues API** — `CF_API_TOKEN` (Mac-side; scoped `queues_read` + `queues_write`); authenticates Cloudflare Queues `/messages/pull` and `/messages/ack`. (Optional Cloudflare Access service-token headers are a separate edge layer when an Access application is configured.)
+- **Receipts extraction — Queues API** — `CF_API_TOKEN` (Mac-side; scoped `queues_read` + `queues_write`); authenticates Cloudflare Queues `/messages/pull` and `/messages/ack`. (The consumer no longer sends Cloudflare Access service-token headers — that optional code was removed in Phase 4B. A residual Access application may still intercept `/api/mobile/auth/complete-pairing` at the edge until Phase 4C; it does not touch the consumer's `/api/receipts/*` calls.)
 - **Resend** — `RESEND_API_KEY` (wrangler secret); sends the finalize notification email. `NOTIFY_FROM_ADDRESS` and `ACCOUNTANT_EMAIL` are checked-in vars.
 - **Workers AI** — `AI` binding (remote); business-card detection and OCR field extraction in admin ingestion.
 
-Legacy / not active for human login — retained in `lib/receipts/auth.ts` as dead or local-only code (pending Phase 4 removal):
-
-- `CF_ACCESS_TEAM` / `CF_ACCESS_AUD` — Cloudflare Access JWT verification. **Legacy/dead** (no live callers; superseded by Clerk).
-- `RECEIPTS_AUTH_USERNAME` / `RECEIPTS_AUTH_PASSWORD` — HTTP Basic. **Local-dev only** (only advertised/accepted when set, e.g. in `.dev.vars`).
+Legacy human-login code (Cloudflare Access JWT verification, HTTP Basic) was **removed in Phase 4B**. The corresponding Wrangler secrets (`CF_ACCESS_TEAM`, `CF_ACCESS_AUD`, `RECEIPTS_AUTH_USERNAME`/`PASSWORD`, `ADMIN_PAGE_USERNAME`/`PASSWORD`, `RECEIPTS_OWNER_EMAILS`) are no longer read by any runtime code and are deleted in the Phase 4C control-plane step. Current auth spec: [runbooks/clerk-auth.md](runbooks/clerk-auth.md).
 
 ### `ollama` (profile: `llm`)
 - Image: `ollama/ollama:latest`

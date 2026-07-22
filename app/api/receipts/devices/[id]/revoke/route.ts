@@ -20,7 +20,7 @@ export async function POST(
     // Owners can revoke any paired mobile device; everyone else only their own.
     // Both revoke paths constrain platform to ios|android, so a guessed
     // historical browser row id is never revoked here.
-    if (await isReceiptsOwner(actor)) {
+    if (await isReceiptsOwner()) {
       await revokeMobileDeviceById(id);
     } else {
       await revokeMobileDevice(id, actor);

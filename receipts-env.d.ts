@@ -14,13 +14,7 @@ declare namespace Cloudflare {
 }
 declare namespace NodeJS {
   interface ProcessEnv {
-    CF_ACCESS_TEAM?: string;
-    CF_ACCESS_AUD?: string;
-    RECEIPTS_AUTH_USERNAME?: string;
-    RECEIPTS_AUTH_PASSWORD?: string;
     RECEIPTS_DEVICE_SECRET?: string;
     RECEIPTS_PROCESSOR_KEY?: string;
-    // Comma-separated owner emails; owners see/manage all trusted devices.
-    RECEIPTS_OWNER_EMAILS?: string;
   }
 }

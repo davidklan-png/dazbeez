@@ -15,7 +15,7 @@ export const metadata: Metadata = {
 
 export default async function DevicesPage() {
   const actor = await getReceiptsPageActor();
-  const isOwner = await isReceiptsOwner(actor);
+  const isOwner = await isReceiptsOwner();
   // Owners get the full mobile fleet across every user; everyone else sees
   // their own. Historical browser rows (platform NULL) never appear here.
   const devices = isOwner

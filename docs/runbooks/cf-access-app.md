@@ -1,5 +1,15 @@
 # Runbook — Cloudflare Access Application for the receipts module
 
+> ⚠️ **LEGACY / TRANSITIONAL — retained for rollback only.**
+> Receipts web authentication is now **Clerk** (`middleware.ts` +
+> `auth.protect()`). The current authentication spec is
+> [`clerk-auth.md`](clerk-auth.md).
+>
+> This document is kept solely as the control-plane/rollback reference for the
+> still-deployed Access application, which (as of the Phase 4A audit) intercepts
+> only `/api/mobile/auth/complete-pairing*` at the edge. It will be removed in
+> **Phase 4C**, after the Access application/policy snapshot is captured. Do not
+> treat the CF Access / Basic-auth flow below as a live login path.
 The receipts module relies on a Cloudflare Access application at the edge to gate every `/receipts/*` and `/api/receipts/*` request. The Worker only verifies the JWT after Access lets the request through — so when sign-in "doesn't persist", the bug is almost always in the **Application configuration in the dashboard**, not in the receipts code.
 
 This runbook is the source-of-truth for what that Application config should be. The repo cannot pin it (it lives entirely in Cloudflare's dashboard), so without this doc it drifts silently and breaks sessions in ways that look like receipts bugs.

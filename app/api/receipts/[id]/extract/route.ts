@@ -54,7 +54,7 @@ interface ApplyBody {
 export async function POST(request: Request, { params }: RouteContext) {
   try {
     // Auth: the Mac consumer authenticates with a shared processor key; humans
-    // go through CF Access / basic auth as before.
+    // are Clerk-authenticated operators (requireReceiptsActor).
     const processorKey = getReceiptsProcessorKey();
     const presentedKey = request.headers.get("x-receipts-processor-key");
     const isProcessor =

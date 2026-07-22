@@ -1,7 +1,7 @@
 // Mobile device pairing flow.
 //
 // 1. iPhone calls POST /api/mobile/auth/start-pairing → backend mints code DAZ-7K3M.
-// 2. Operator visits /receipts/pair?code=DAZ-7K3M behind Cloudflare Access
+// 2. A signed-in (Clerk-authenticated) operator visits /receipts/pair?code=DAZ-7K3M
 //    and clicks "Pair this iPhone" → POST /api/mobile/auth/complete-pairing
 //    consumes the code, enrolls the device, and stores the bearer token in the
 //    pairing-codes row so the polling iPhone can pick it up.

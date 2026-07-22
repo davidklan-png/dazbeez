@@ -2,8 +2,8 @@ import { NextResponse } from "next/server";
 import { checkPairingCode } from "@/lib/receipts/mobile-pairing";
 
 // Public endpoint polled by the iPhone with the pairing code it received from
-// /start-pairing. Returns the bearer token exactly once after an operator
-// completes pairing behind Cloudflare Access.
+// /start-pairing. Returns the bearer token exactly once after a signed-in
+// operator approves pairing at /receipts/pair (POST /complete-pairing).
 export async function GET(request: Request) {
   const url = new URL(request.url);
   const code = url.searchParams.get("code");
