@@ -11,8 +11,14 @@ reference until Phase 4C). For the migration narrative, see
 
 ## Identity provider
 
-- **Clerk** is the single auth gate. Production instance is linked to this repo
-  via its git remote; the application is "Dazbeez".
+- **Clerk** is the application-level human identity authority and the Worker
+  auth gate. Production instance is linked to this repo via its git remote; the
+  application is "Dazbeez".
+- **Transitional edge gate (Phase 4B → 4C):** a redundant Cloudflare Access
+  application still intercepts `/api/mobile/auth/complete-pairing*` at the edge
+  before the Worker runs. Access is **not** a runtime identity source for
+  application authorization — the Worker never reads the Access JWT; Clerk is
+  the authority. See the "Transitional note" section below.
 - **Custom domain:** `dazbeez.com`. Clerk Frontend API lives at
   `https://clerk.dazbeez.com`; the accounts portal at `https://accounts.dazbeez.com`.
   DNS/SSL/mail for the Clerk domain are verified. `www.dazbeez.com` 308-redirects
@@ -130,8 +136,8 @@ hostname is still fail-closed for signed-out requests via Clerk middleware.
 - `CLERK_SECRET_KEY` (Wrangler runtime secret) — Clerk backend calls.
 - `RECEIPTS_PROCESSOR_KEY` (Wrangler secret) — authenticates the Mac consumer
   to the processor routes; also held in the consumer `.env`.
-- `RECEIPTS_DEVICE_SECRET` (Wrangler secret) — HMAC key for trusted-device
-  cookies/tokens.
+- `RECEIPTS_DEVICE_SECRET` (Wrangler secret) — HMAC key for mobile-device
+  bearer tokens (browser-device cookies were removed in Phase 3).
 - `RESEND_API_KEY`, `NFC_ADMIN_API_KEY`, `NFC_ADMIN_API_URL` — email + NFC.
 - Consumer side: `CF_API_TOKEN` (Cloudflare **Queues** API, scoped
   `queues_read`+`queues_write` — not an Access token), `CF_ACCOUNT_ID`,
