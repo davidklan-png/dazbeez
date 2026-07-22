@@ -43,67 +43,65 @@ export interface BlockedIdentityResult {
  * Resolve whether EITHER the RFC From header mailbox OR the envelope MAIL FROM
  * is on the blocklist.
  *
- * Implementation:
- *   - Normalizes and deduplicates the non-null identities (header takes
- *     priority).
- *   - Issues a SINGLE D1 query for all identities.
- *   - Let a D1 failure PROPAGATE — the caller must catch it, log visibly,
- *     and continue to normal triage. This resolver never silently swallows
- *     a lookup error.
+ * Normalizes (trim + lowercase) and deduplicates both identities, then issues
+ * a SINGLE D1 query. Priority is applied in TypeScript after the query:
+ * RFC From wins when two distinct identities are both blocked.
+ *
+ * If the D1 query fails, the error PROPAGATES — the caller must catch it,
+ * log visibly, and continue to normal triage. This resolver never silently
+ * swallows a lookup error.
  */
 export async function resolveBlockedSenderIdentity(
   db: D1Database,
   headerFrom: string | null,
   envelopeFrom: string | null,
 ): Promise<BlockedIdentityResult> {
-  // Build a deduplicated, priority-ordered list: RFC From first, then envelope.
+  // Normalize each non-empty identity: trim + lowercase.
+  const norm = (s: string | null): string | null => {
+    if (!s) return null;
+    const v = s.trim().toLowerCase();
+    return v || null;
+  };
+
+  // Build deduplicated, priority-ordered list: RFC From first, then envelope.
   const ordered: Array<{ email: string; fromHeader: boolean }> = [];
   const seen = new Set<string>();
-  if (headerFrom) {
-    ordered.push({ email: headerFrom, fromHeader: true });
-    seen.add(headerFrom);
+
+  const hdr = norm(headerFrom);
+  const env = norm(envelopeFrom);
+
+  if (hdr) {
+    ordered.push({ email: hdr, fromHeader: true });
+    seen.add(hdr);
   }
-  if (envelopeFrom && !seen.has(envelopeFrom)) {
-    ordered.push({ email: envelopeFrom, fromHeader: false });
-    seen.add(envelopeFrom);
+  if (env && !seen.has(env)) {
+    ordered.push({ email: env, fromHeader: false });
+    seen.add(env);
   }
 
   if (ordered.length === 0) {
     return { matched: false, identity: null, fromHeader: false };
   }
 
-  // Single query for all identities. If this throws, the error propagates
-  // to the caller — never silently swallowed.
-  if (ordered.length === 1) {
-    const row = await db
-      .prepare(`SELECT 1 FROM blocked_intake_senders WHERE email = ? LIMIT 1`)
-      .bind(ordered[0]!.email)
-      .first();
-    if (row) {
-      return { matched: true, identity: ordered[0]!.email, fromHeader: ordered[0]!.fromHeader };
-    }
-    return { matched: false, identity: null, fromHeader: false };
-  }
-
-  // Two distinct identities: one query with IN (...).
+  // Single query for all identities using IN (?, ...). No ORDER BY —
+  // priority is applied in TypeScript after the query returns.
   const placeholders = ordered.map(() => "?").join(",");
-  const row = await db
+  const result = await db
     .prepare(
-      `SELECT email FROM blocked_intake_senders WHERE email IN (${placeholders}) ORDER BY CASE email`,
+      `SELECT email FROM blocked_intake_senders WHERE email IN (${placeholders})`,
     )
     .bind(...ordered.map((o) => o.email))
-    .first<{ email: string }>();
+    .all<{ email: string }>();
 
-  if (!row) {
-    return { matched: false, identity: null, fromHeader: false };
+  const blockedSet = new Set((result.results ?? []).map((r) => r.email));
+
+  // Select the first ordered identity present in the blocked set.
+  // RFC From is first in `ordered`, so it wins when both are blocked.
+  for (const { email, fromHeader } of ordered) {
+    if (blockedSet.has(email)) {
+      return { matched: true, identity: email, fromHeader };
+    }
   }
 
-  // Preserve header priority: if the header identity is the one that matched,
-  // return it with fromHeader=true.
-  const matchedEntry = ordered.find((o) => o.email === row.email);
-  return {
-    matched: true,
-    identity: row.email,
-    fromHeader: matchedEntry?.fromHeader ?? false,
-  };
+  return { matched: false, identity: null, fromHeader: false };
 }
