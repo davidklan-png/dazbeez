@@ -13,6 +13,10 @@ import { deleteAmexArtifact } from "@/lib/receipts/storage";
 import { PENDING_EXTRACTION_STATES } from "@/lib/receipts/types";
 import type { ReceiptAttendeeDirectoryEntry } from "@/lib/receipts/attendee-directory";
 import {
+  RECENT_CAPTURE_LIMIT,
+  type RecentCapture,
+} from "@/lib/receipts/recent-captures";
+import {
   computeTripStatusLineUpdates,
   findOverlappingTrip,
   decideWiden,
@@ -496,6 +500,69 @@ export async function listReceiptRecords(
     .all<ReceiptRecord>();
 
   return result.results ?? [];
+}
+
+/**
+ * Projected "recent captures" slice for the Capture-page rail: the latest
+ * non-deleted records by captured_at DESC, returning ONLY the small scalars the
+ * rail displays. Deliberately NOT `SELECT *` and excludes `extraction_json`
+ * (and every large column) so the rail stays cheap and never ships extraction
+ * payloads to the browser. The projected columns mirror {@link RecentCapture}
+ * one-for-one — add a field there only if the UI genuinely needs it.
+ */
+export async function listRecentCaptures(
+  limit: number = RECENT_CAPTURE_LIMIT,
+): Promise<RecentCapture[]> {
+  const db = getReceiptsDb();
+  const result = await db
+    .prepare(
+      `SELECT
+         id, captured_at, merchant, original_filename, status,
+         extraction_state, needs_render, amount_minor, currency
+       FROM receipt_records
+       WHERE deleted_at IS NULL
+       ORDER BY captured_at DESC
+       LIMIT ?`,
+    )
+    .bind(limit)
+    .all<
+      Omit<RecentCapture, "extraction_state" | "needs_render"> & {
+        extraction_state: RecentCapture["extraction_state"] | null;
+        needs_render: RecentCapture["needs_render"] | null;
+      }
+    >();
+
+  return (result.results ?? []).map((r) => ({
+    id: r.id,
+    captured_at: r.captured_at,
+    merchant: r.merchant,
+    original_filename: r.original_filename,
+    status: r.status,
+    extraction_state: r.extraction_state ?? null,
+    needs_render: r.needs_render ?? null,
+    amount_minor: r.amount_minor,
+    currency: r.currency,
+  }));
+}
+
+/**
+ * Exact `captured today` count from the start of the operator's JST day (the
+ * lower-bound ISO is computed by the caller via startOfJstDayIso()). Replaces
+ * the previous "load up to RECEIPT_VIEW_LIMIT rows and count in JavaScript",
+ * which was both an over-read and wrong on timezones (UTC day, not JST). This
+ * is a server COUNT(*) so it's exact and bounded by a single indexed scan.
+ */
+export async function countCapturedSince(startIso: string): Promise<number> {
+  const db = getReceiptsDb();
+  const result = await db
+    .prepare(
+      `SELECT COUNT(*) AS n
+       FROM receipt_records
+       WHERE deleted_at IS NULL AND captured_at >= ?`,
+    )
+    .bind(startIso)
+    .first<{ n: number }>();
+  return result?.n ?? 0;
 }
 
 /**

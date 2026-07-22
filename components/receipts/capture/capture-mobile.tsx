@@ -8,6 +8,9 @@ import { CameraIcon, CheckIcon, PlusIcon } from "@/components/ui/icons";
 import { BeeMark } from "@/components/receipts/ui/bee-mark";
 import { ReceiptThumb } from "@/components/receipts/ui/receipt-thumb";
 import type { PaymentPath } from "@/lib/receipts/types";
+import type { RecentCapture } from "@/lib/receipts/recent-captures";
+import { withWorkMonth } from "@/lib/receipts/work-month";
+import { RecentCaptures } from "@/components/receipts/capture/recent-captures";
 import type { CapturePhase } from "./use-receipt-upload";
 
 export interface CaptureMobileProps {
@@ -17,7 +20,9 @@ export interface CaptureMobileProps {
   paymentChip: PaymentPath | null;
   setPaymentChip: (p: PaymentPath | null) => void;
   rapidMode: boolean;
+  workMonth: string | null;
   todayCount: number | null;
+  recentCaptures: RecentCapture[];
   phase: CapturePhase;
   onPickFile: (file: File) => void;
   onCancel: () => void;
@@ -55,6 +60,7 @@ export function CaptureMobile(props: CaptureMobileProps) {
       ) : props.phase.kind === "saved" ? (
         <CaptureSavedMobile
           phase={props.phase}
+          workMonth={props.workMonth}
           onCaptureNext={pickFile}
           onDone={props.onReset}
         />
@@ -63,12 +69,14 @@ export function CaptureMobile(props: CaptureMobileProps) {
           todayCount={props.todayCount}
           paymentChip={props.paymentChip}
           setPaymentChip={props.setPaymentChip}
+          workMonth={props.workMonth}
+          recentCaptures={props.recentCaptures}
           onTapCapture={pickFile}
           error={props.phase.kind === "error" ? props.phase.message : null}
         />
       )}
 
-      <MobileBottomNav />
+      <MobileBottomNav workMonth={props.workMonth} />
     </div>
   );
 }
@@ -79,19 +87,28 @@ function CaptureIdleMobile({
   todayCount,
   paymentChip,
   setPaymentChip,
+  workMonth,
+  recentCaptures,
   onTapCapture,
   error,
 }: {
   todayCount: number | null;
   paymentChip: PaymentPath | null;
   setPaymentChip: (p: PaymentPath | null) => void;
+  workMonth: string | null;
+  recentCaptures: RecentCapture[];
   onTapCapture: () => void;
   error: string | null;
 }) {
   return (
     <>
       <MobileHeader queueCount={todayCount} label="Rapid capture" />
-      <div className="flex flex-1 flex-col px-5 pt-6">
+      {/*
+        overflow-y-auto so the recent list (and the rest of idle content) can
+        scroll instead of being clipped behind the fixed bottom nav. pb-28 keeps
+        the last item clear of the nav.
+      */}
+      <div className="flex flex-1 flex-col overflow-y-auto px-5 pt-6">
         <h2 className="text-[26px] font-bold leading-[1.15] tracking-[-0.4px] text-gray-900">
           What did you
           <br />
@@ -154,9 +171,9 @@ function CaptureIdleMobile({
           </div>
         )}
 
-        <div className="flex flex-col gap-2.5 pb-28">
+        <div className="flex flex-col gap-2.5">
           <Link
-            href="/receipts/review"
+            href={withWorkMonth("/receipts/review", workMonth)}
             className="flex items-center gap-3 rounded-xl border border-gray-200 bg-white px-3.5 py-3"
           >
             <span className="flex h-9 w-9 items-center justify-center rounded-[10px] bg-gray-100">
@@ -172,7 +189,7 @@ function CaptureIdleMobile({
             </span>
           </Link>
           <Link
-            href="/receipts/capture?payment=CASH"
+            href={withWorkMonth("/receipts/capture?payment=CASH", workMonth)}
             className="flex items-center gap-3 rounded-xl border border-gray-200 bg-white px-3.5 py-3"
           >
             <span className="flex h-9 w-9 items-center justify-center rounded-[10px] bg-amber-50 text-base">
@@ -188,6 +205,14 @@ function CaptureIdleMobile({
             </span>
           </Link>
         </div>
+
+        <RecentCaptures
+          items={recentCaptures}
+          workMonth={workMonth}
+          variant="inline"
+        />
+
+        <div className="pb-28" />
       </div>
     </>
   );
@@ -279,10 +304,12 @@ function CaptureUploadingMobile({
 
 function CaptureSavedMobile({
   phase,
+  workMonth,
   onCaptureNext,
   onDone,
 }: {
   phase: Extract<CapturePhase, { kind: "saved" }>;
+  workMonth: string | null;
   onCaptureNext: () => void;
   onDone: () => void;
 }) {
@@ -332,7 +359,7 @@ function CaptureSavedMobile({
               Done
             </Btn>
             <Link
-              href={phase.reviewUrl}
+              href={withWorkMonth(phase.reviewUrl, workMonth)}
               className="flex h-9 flex-1 items-center justify-center rounded-lg border border-gray-200 bg-white px-3.5 text-[13px] font-semibold text-gray-700 hover:bg-gray-50"
             >
               Open detail
@@ -400,11 +427,29 @@ function MobileHeader({
   );
 }
 
-function MobileBottomNav() {
+function MobileBottomNav({ workMonth }: { workMonth: string | null }) {
+  // Capture's fixed bottom nav also carries the work month, so a detour to
+  // Review/Dashboard from the capture screen preserves the month the operator
+  // was working in.
   const items = [
-    { href: "/receipts/capture?mode=rapid", label: "Capture", icon: "📷", active: true },
-    { href: "/receipts/review", label: "Review", icon: "📄", active: false },
-    { href: "/receipts", label: "Dashboard", icon: "🏠", active: false },
+    {
+      href: withWorkMonth("/receipts/capture?mode=rapid", workMonth),
+      label: "Capture",
+      icon: "📷",
+      active: true,
+    },
+    {
+      href: withWorkMonth("/receipts/review", workMonth),
+      label: "Review",
+      icon: "📄",
+      active: false,
+    },
+    {
+      href: withWorkMonth("/receipts", workMonth),
+      label: "Dashboard",
+      icon: "🏠",
+      active: false,
+    },
   ];
   return (
     <div className="pointer-events-auto absolute inset-x-4 bottom-6 z-10 flex gap-1 rounded-[18px] border border-gray-200 bg-white/95 p-1.5 shadow-[0_10px_30px_rgba(0,0,0,0.18)] backdrop-blur-xl">

@@ -17,15 +17,23 @@ import {
   applyUploadSuccess,
   type SessionUpload,
 } from "@/lib/receipts/session-upload";
+import { useRecentCaptures } from "@/lib/receipts/use-recent-captures";
+import type { RecentCapture } from "@/lib/receipts/recent-captures";
 
 export type PaymentChip = PaymentPath | null;
 
 export interface ReceiptCaptureFormProps {
   initialPayment?: PaymentChip;
   rapidMode?: boolean;
+  /** Active work month (exact YYYY-MM) carried across pages; threaded into the
+   *  Review deep-links so a detour to Capture preserves the month. null when
+   *  there is none. */
+  workMonth?: string | null;
   /** Today's captured-receipt count for the mobile header chip. null when
    *  the count query failed (audit B1) — UI renders "—" with a title. */
   todayCount?: number | null;
+  /** Server-seeded recent-captures list for the rail; kept live client-side. */
+  recentCaptures?: RecentCapture[];
 }
 
 const SESSION_QUEUE_KEY = "dazbeez.receipts.captureQueue.v1";
@@ -85,10 +93,16 @@ const subscribeNoop = () => () => {};
 export function ReceiptCaptureForm({
   initialPayment = null,
   rapidMode = false,
+  workMonth = null,
   todayCount = null,
+  recentCaptures = [],
 }: ReceiptCaptureFormProps) {
   const isMobile = useIsMobile();
   const { phase, upload, reset, cancel } = useReceiptUpload();
+  // DB-backed recent-captures rail: seeded from the server, refreshed after
+  // each successful upload and polled while anything is still processing.
+  const { items: recentItems, refresh: refreshRecent } =
+    useRecentCaptures(recentCaptures);
   // Seed the queue from sessionStorage on the very first client render
   // (server snapshot is always empty so hydration matches the empty SSR
   // markup; the client snapshot reads the persisted queue immediately,
@@ -129,7 +143,10 @@ export function ReceiptCaptureForm({
         // phase. The normal capture -> upload -> re-arm flow is unchanged.
         if (!mobileSingleFlightRef.current.start()) return;
         try {
-          await upload(file, paymentChip, source);
+          const result = await upload(file, paymentChip, source);
+          // New receipt is in D1 now — refresh the recent rail immediately so
+          // it appears (the 15s pending-poll is the backstop if D1 lags).
+          if (result.ok) void refreshRecent();
         } finally {
           mobileSingleFlightRef.current.finish();
         }
@@ -163,11 +180,12 @@ export function ReceiptCaptureForm({
               : u,
           ),
         );
+        if (result.ok) void refreshRecent();
       } finally {
         slot.release();
       }
     },
-    [isMobile, upload, paymentChip],
+    [isMobile, upload, paymentChip, refreshRecent],
   );
 
   if (isMobile) {
@@ -176,7 +194,9 @@ export function ReceiptCaptureForm({
         paymentChip={paymentChip}
         setPaymentChip={setPaymentChip}
         rapidMode={rapidMode}
+        workMonth={workMonth}
         todayCount={todayCount}
+        recentCaptures={recentItems}
         phase={phase}
         onPickFile={onPickFile}
         onCancel={cancel}
@@ -189,6 +209,8 @@ export function ReceiptCaptureForm({
     <CaptureDesktop
       onPickFile={onPickFile}
       sessionUploads={sessionUploads}
+      workMonth={workMonth}
+      recentCaptures={recentItems}
     />
   );
 }

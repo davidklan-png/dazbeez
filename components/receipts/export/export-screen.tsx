@@ -14,12 +14,6 @@ import {
 } from "@/components/ui/icons";
 import type { ReceiptExport, ReceiptRecord } from "@/lib/receipts/types";
 import type { Blocker } from "@/lib/receipts/blockers";
-import {
-  buildManifestPreviewCsv,
-  type ManifestSampleRow,
-} from "@/lib/receipts/manifest-preview";
-import type { StatementWindow } from "@/lib/receipts/statement-window";
-import { EXPENSE_CATEGORIES } from "@/lib/receipts/categories";
 
 export type { Blocker } from "@/lib/receipts/blockers";
 
@@ -47,9 +41,6 @@ export interface ExportScreenProps {
     eventCount: number;
   };
   breakdown: CategoryBreakdownRow[];
-  manifestSample: ManifestSampleRow[];
-  manifestSize: { rowsTotal: number; sizeBytes: number; sha256: string | null };
-  statementWindow: StatementWindow | null;
   /** ADR 0008: undated CASH/DIGITAL receipts — can never be assigned to a
    *  calendar month, need operator action. Needs-attention. (ADR 0006's separate
    *  "awaiting statement" bucket is retired — a dated receipt is always
@@ -211,20 +202,6 @@ export function ExportScreen(props: ExportScreenProps) {
           blockerCount={blockerCount}
         />
       </div>
-
-      {draftBuilt && (
-        <div className="px-8 pb-12">
-          <ReportFormat
-            month={props.month}
-            monthLabel={props.monthLabel}
-            statementWindow={props.statementWindow}
-            manifestSample={props.manifestSample}
-            manifestSize={props.manifestSize}
-            finalized={finalized}
-            sha256={props.currentExport?.archive_sha256 ?? null}
-          />
-        </div>
-      )}
     </div>
   );
 }
@@ -558,6 +535,11 @@ function DraftPreview({
           ))}
         </div>
       </div>
+
+      <div className="flex items-center gap-2 border-t border-gray-150 px-5 py-3">
+        <span className="text-sm leading-none">🐝</span>
+        <p className="text-[12px] text-gray-500">Format is locked at finalize.</p>
+      </div>
     </Card>
   );
 }
@@ -716,231 +698,6 @@ function ReviewLinkCard({
           </div>
         )}
       </Card>
-    </div>
-  );
-}
-
-// ─── Report format ────────────────────────────────────────────────
-
-function ReportFormat({
-  month,
-  manifestSample,
-  manifestSize,
-  finalized,
-  sha256,
-  monthLabel,
-  statementWindow,
-}: {
-  month: string;
-  manifestSample: ManifestSampleRow[];
-  manifestSize: { rowsTotal: number; sizeBytes: number; sha256: string | null };
-  finalized: boolean;
-  sha256: string | null;
-  monthLabel: string;
-  statementWindow: StatementWindow | null;
-}) {
-  const windowLabel =
-    statementWindow && statementWindow.start && statementWindow.end
-      ? `${statementWindow.start.slice(0, 10)} – ${statementWindow.end.slice(0, 10)}`
-      : null;
-  const [view, setView] = useState<"table" | "raw" | "json">("table");
-
-  return (
-    <Card pad={0}>
-      <div className="flex items-center gap-3 border-b border-gray-150 bg-gray-50 px-5 py-4">
-        <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gray-900 text-white">
-          <FileTextIcon size={16} className="text-white" />
-        </div>
-        <div className="flex-1">
-          <div className="text-[14px] font-bold text-gray-900">
-            Report format · what gets shipped
-          </div>
-          <div className="text-[12px] text-gray-500">
-            <span className="font-mono">receipts-{month}.csv</span> + companion
-            archive <span className="font-mono">receipts-{month}.zip</span>.
-            Format is snapshotted at finalize.
-          </div>
-        </div>
-        {finalized ? (
-          <Pill tone="green" size="sm" dot>
-            Sealed · v3
-          </Pill>
-        ) : (
-          <Pill tone="gray" size="sm">
-            v3 schema
-          </Pill>
-        )}
-        <Pill tone="green" size="sm" dot>
-          14 columns · stable
-        </Pill>
-      </div>
-
-      {/* Manifest preview */}
-      <div className="px-5 pt-4">
-        <div className="mb-2.5 flex items-center gap-2.5">
-          <span className="text-[11px] font-bold uppercase tracking-[0.05em] text-gray-500">
-            Manifest preview
-          </span>
-          <span className="text-[11px] text-gray-400">
-            {monthLabel} statement{windowLabel ? ` · ${windowLabel}` : ""} · {manifestSize.rowsTotal} rows · showing first {manifestSample.length}
-          </span>
-          <span className="flex-1" />
-          <div className="flex gap-1">
-            {(["table", "raw", "json"] as const).map((v) => (
-              <button
-                key={v}
-                onClick={() => setView(v)}
-                className={[
-                  "rounded-[6px] px-2.5 py-1 text-[11px] font-semibold capitalize",
-                  view === v
-                    ? "bg-gray-900 text-white"
-                    : "text-gray-500 hover:text-gray-900",
-                ].join(" ")}
-              >
-                {v === "raw" ? "Raw CSV" : v}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <div className="overflow-hidden rounded-[10px] border border-gray-200 text-[11.5px]">
-          {view === "table" ? (
-            <ManifestTable rows={manifestSample} />
-          ) : view === "raw" ? (
-            <pre className="overflow-auto bg-white px-3 py-2 font-mono text-[11.5px] text-gray-700">
-              {buildManifestPreviewCsv(manifestSample)}
-            </pre>
-          ) : (
-            <pre className="overflow-auto bg-white px-3 py-2 font-mono text-[11.5px] text-gray-700">
-              {JSON.stringify(manifestSample, null, 2)}
-            </pre>
-          )}
-          <div className="flex items-center justify-between border-t border-gray-150 bg-gray-50 px-3 py-2 text-[11px] text-gray-500">
-            <span>… {Math.max(0, manifestSize.rowsTotal - manifestSample.length)} more rows</span>
-            <span className="font-mono">
-              receipts-{month}.csv · {(manifestSize.sizeBytes / 1024).toFixed(1)} KB ·
-              SHA-256 {sha256 ? `${sha256.slice(0, 6)}…${sha256.slice(-4)}` : "—"}
-            </span>
-          </div>
-        </div>
-      </div>
-
-      {/* Schema docs */}
-      <div className="px-5 py-5">
-        <div className="mb-2.5 flex items-center gap-2.5">
-          <span className="text-[11px] font-bold uppercase tracking-[0.05em] text-gray-500">
-            Schema
-          </span>
-          <span className="text-[11px] text-gray-400">
-            14 columns · companion files: attendees.csv, audit.json, receipts/*.{`{jpg,pdf}`}
-          </span>
-        </div>
-        <SchemaTable />
-
-        <div className="mt-3.5 flex items-start gap-3 rounded-[10px] border border-gray-200 bg-gray-50 px-3.5 py-3">
-          <div className="text-lg">🐝</div>
-          <div className="flex-1 text-[12.5px] leading-[1.5] text-gray-700">
-            <b>Format is locked at finalize.</b> Schema version, column order,
-            and JST timezone handling become part of the immutable export
-            record. Changes to{" "}
-            <span className="font-mono">lib/receipts/export.ts</span> after
-            finalize don&rsquo;t mutate history — prior exports keep replaying
-            with their original v3 reader.
-          </div>
-        </div>
-      </div>
-    </Card>
-  );
-}
-
-const COL_TEMPLATE =
-  "95px 170px 80px 70px 110px 80px 70px 1fr";
-
-function ManifestTable({ rows }: { rows: ManifestSampleRow[] }) {
-  return (
-    <div>
-      <div
-        className="grid bg-gray-50 px-3 py-2 font-mono text-[10.5px] font-bold uppercase tracking-[0.05em] text-gray-500"
-        style={{ gridTemplateColumns: COL_TEMPLATE, gap: 10 }}
-      >
-        <span>receipt_id</span>
-        <span>merchant</span>
-        <span>txn_date</span>
-        <span className="text-right">amount</span>
-        <span>category</span>
-        <span>payment</span>
-        <span>alcohol</span>
-        <span>archive_path</span>
-      </div>
-      {rows.map((r) => (
-        <div
-          key={r.receiptId}
-          className="grid border-t border-gray-150 px-3 py-1.5 font-mono text-gray-800"
-          style={{ gridTemplateColumns: COL_TEMPLATE, gap: 10 }}
-        >
-          <span className="truncate">{r.receiptId}</span>
-          <span className="truncate">{r.merchant}</span>
-          <span className="truncate">{r.txnDate}</span>
-          <span className="text-right tabular-nums">{r.amountMinor}</span>
-          <span className="truncate">{r.categoryLabel}</span>
-          <span className="truncate">{r.payment}</span>
-          <span className="truncate">{r.alcohol ? "true" : "false"}</span>
-          <span className="truncate">{r.archivePath}</span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-const SCHEMA_COLS = [
-  { k: "receipt_id", t: "string", ex: "R-2026-04-0184", n: "PK from receipt_records" },
-  { k: "merchant", t: "string", ex: "Yakitori Taro", n: "normalized; AMEX merchant aliases applied" },
-  { k: "transaction_date", t: "date", ex: "2026-04-17", n: "JST, ISO 8601" },
-  { k: "amount", t: "integer", ex: "8850", n: "minor units in `currency`" },
-  { k: "currency", t: "string", ex: "JPY", n: "ISO 4217" },
-  { k: "category", t: "enum", ex: "接待交際費", n: `one of ${EXPENSE_CATEGORIES.length} JP catalog` },
-  { k: "expense_type", t: "enum", ex: "meeting-no-alcohol", n: "expense classification" },
-  { k: "payment_path", t: "enum", ex: "AMEX", n: "AMEX / CASH / DIGITAL / UNKNOWN" },
-  { k: "amex_reference", t: "string", ex: "20260417-0214", n: "links to amex_statement_lines" },
-  { k: "business_purpose", t: "string", ex: "Client dinner · Acme", n: "free text" },
-  { k: "attendees", t: "jsonl", ex: "[D Klan, T Sato]", n: "one per row in companion CSV" },
-  { k: "alcohol_present", t: "bool", ex: "true", n: "tax flag" },
-  { k: "archive_path", t: "string", ex: "r2://.../R-0184.jpg", n: "pointer into immutable bucket" },
-] as const;
-
-const SCHEMA_TPL = "180px 90px 1fr 1.4fr";
-
-function SchemaTable() {
-  return (
-    <div className="overflow-hidden rounded-[10px] border border-gray-200">
-      <div
-        className="grid bg-gray-50 px-3.5 py-2 text-[10.5px] font-bold uppercase tracking-[0.05em] text-gray-500"
-        style={{ gridTemplateColumns: SCHEMA_TPL }}
-      >
-        <span>Column</span>
-        <span>Type</span>
-        <span>Example</span>
-        <span>Notes</span>
-      </div>
-      {SCHEMA_COLS.map((c) => (
-        <div
-          key={c.k}
-          className="grid border-t border-gray-150 px-3.5 py-2 text-[12px] text-gray-800"
-          style={{ gridTemplateColumns: SCHEMA_TPL }}
-        >
-          <span className="font-mono font-semibold text-gray-900">{c.k}</span>
-          <span>
-            <Pill
-              tone={c.t === "enum" ? "amber" : c.t === "bool" ? "blue" : "gray"}
-              size="sm"
-            >
-              {c.t}
-            </Pill>
-          </span>
-          <span className="font-mono text-[11.5px] text-gray-600">{c.ex}</span>
-          <span className="text-gray-500">{c.n}</span>
-        </div>
-      ))}
     </div>
   );
 }

@@ -49,6 +49,30 @@ export function formatPaymentPath(path: string | null | undefined): string {
 }
 
 /**
+ * The epoch-ms of the start of the operator's current JST calendar day,
+ * expressed in UTC ms (so `new Date(result).toISOString()` is the correct bind
+ * for a `captured_at >= ?` comparison against UTC-stored timestamps). JST has no
+ * DST, so a constant +09:00 shift is exact: shift to JST wall-clock ms, floor to
+ * the day, shift back. Matches the +9h convention in currentCalendarMonth().
+ */
+export function jstDayStartUtcMs(nowMs: number): number {
+  const JST_OFFSET_MS = 9 * 60 * 60 * 1000;
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  return (
+    Math.floor((nowMs + JST_OFFSET_MS) / DAY_MS) * DAY_MS - JST_OFFSET_MS
+  );
+}
+
+/**
+ * The ISO (UTC) timestamp of the start of the operator's current JST day — the
+ * lower bound for "captured today" counts. Defaults to now; tests pass an
+ * explicit epoch to make the day boundary deterministic.
+ */
+export function startOfJstDayIso(now: Date = new Date()): string {
+  return new Date(jstDayStartUtcMs(now.getTime())).toISOString();
+}
+
+/**
  * Format a YYYY-MM-DD date as "Oct 12, 2026". Falls back to the raw input.
  */
 export function formatDate(iso: string | null | undefined): string {
