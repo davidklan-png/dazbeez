@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { withWorkMonth } from "@/lib/receipts/work-month";
 
 export interface MonthOption {
   month: string;
@@ -18,7 +19,10 @@ export function MonthSwitcher({ months, activeMonth, basePath }: MonthSwitcherPr
     return (
       <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
         No AMEX statements imported yet.{" "}
-        <Link href="/receipts/amex" className="font-medium underline hover:text-amber-900">
+        <Link
+          href={withWorkMonth("/receipts/amex", activeMonth)}
+          className="font-medium underline hover:text-amber-900"
+        >
           Upload one
         </Link>{" "}
         to start reconciling.

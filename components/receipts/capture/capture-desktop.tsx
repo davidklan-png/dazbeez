@@ -18,6 +18,9 @@ import {
   partitionBatch,
 } from "@/lib/receipts/upload-policy";
 import type { SessionUpload } from "@/lib/receipts/session-upload";
+import type { RecentCapture } from "@/lib/receipts/recent-captures";
+import { withWorkMonth } from "@/lib/receipts/work-month";
+import { RecentCaptures } from "@/components/receipts/capture/recent-captures";
 
 // SessionUpload lives in the client-safe session-upload module (shared with
 // ReceiptCaptureForm and its pure row transitions); re-exported for importers.
@@ -26,6 +29,14 @@ export type { SessionUpload };
 export interface CaptureDesktopProps {
   onPickFile: (file: File) => void;
   sessionUploads: SessionUpload[];
+  /** Active work month carried into Review deep-links. */
+  workMonth: string | null;
+  /** DB-backed recent captures, rendered below the session batch. */
+  recentCaptures: RecentCapture[];
+  /** True when the last recent-captures refresh failed (polling is retrying). */
+  recentRefreshUnavailable?: boolean;
+  /** Manual retry for the recent-captures refresh. */
+  onRecentRetry?: () => void;
 }
 
 export function CaptureDesktop(props: CaptureDesktopProps) {
@@ -74,7 +85,7 @@ export function CaptureDesktop(props: CaptureDesktopProps) {
         onChange={onFile}
       />
 
-      <DesktopSubHeader />
+      <DesktopSubHeader workMonth={props.workMonth} />
 
       <div className="grid min-h-[760px] grid-cols-[1fr_380px] bg-gray-50">
         <div className="flex flex-col gap-5 overflow-auto px-8 py-8">
@@ -177,7 +188,7 @@ export function CaptureDesktop(props: CaptureDesktopProps) {
               hint="Used last month: 7 times"
               cta="New manual receipt"
               emoji="💴"
-              href="/receipts/capture?payment=CASH"
+              href={withWorkMonth("/receipts/capture?payment=CASH", props.workMonth)}
             />
           </div>
 
@@ -200,7 +211,7 @@ export function CaptureDesktop(props: CaptureDesktopProps) {
               <span className="flex-1" />
               {props.sessionUploads.length > 0 && (
                 <Link
-                  href="/receipts/review"
+                  href={withWorkMonth("/receipts/review", props.workMonth)}
                   className="text-xs font-semibold text-amber-700 hover:text-amber-800"
                 >
                   Send all to review →
@@ -214,14 +225,28 @@ export function CaptureDesktop(props: CaptureDesktopProps) {
             ) : (
               <div className="grid grid-cols-4 gap-3">
                 {props.sessionUploads.map((u) => (
-                  <BatchTile key={u.id} upload={u} />
+                  <BatchTile key={u.id} upload={u} workMonth={props.workMonth} />
                 ))}
               </div>
             )}
           </div>
+
+          {/* Persistent DB-backed history — NOT the in-memory session batch
+              above. Lives in the scrollable main column so it never pushes the
+              drop zone off-screen. */}
+          <RecentCaptures
+            items={props.recentCaptures}
+            workMonth={props.workMonth}
+            variant="card"
+            refreshUnavailable={props.recentRefreshUnavailable}
+            onRetry={props.onRecentRetry}
+          />
         </div>
 
-        <DesktopSidebar uploads={props.sessionUploads} />
+        <DesktopSidebar
+          uploads={props.sessionUploads}
+          workMonth={props.workMonth}
+        />
       </div>
     </div>
   );
@@ -231,7 +256,7 @@ function countOf(arr: SessionUpload[], state: SessionUpload["state"]) {
   return arr.filter((u) => u.state === state).length;
 }
 
-function DesktopSubHeader() {
+function DesktopSubHeader({ workMonth }: { workMonth: string | null }) {
   return (
     <div className="flex items-center gap-3.5 border-b border-gray-200 bg-white px-8 py-2.5">
       <span className="text-[13.5px] font-semibold text-gray-900">
@@ -249,7 +274,7 @@ function DesktopSubHeader() {
       </div>
       <div className="hidden h-[18px] w-px bg-gray-200 sm:block" />
       <Link
-        href="/receipts/capture?mode=rapid"
+        href={withWorkMonth("/receipts/capture?mode=rapid", workMonth)}
         className="text-[12.5px] font-semibold text-amber-700 hover:text-amber-800"
       >
         Open phone capture →
@@ -338,7 +363,13 @@ function AltInputCard({
   return href ? <Link href={href}>{body}</Link> : body;
 }
 
-function BatchTile({ upload }: { upload: SessionUpload }) {
+function BatchTile({
+  upload,
+  workMonth,
+}: {
+  upload: SessionUpload;
+  workMonth: string | null;
+}) {
   const isReview = upload.state === "review";
   const isReady = upload.state === "ready";
   const isError = upload.state === "error";
@@ -401,7 +432,7 @@ function BatchTile({ upload }: { upload: SessionUpload }) {
         </div>
         {upload.receiptId ? (
           <Link
-            href={`/receipts/review/${upload.receiptId}`}
+            href={withWorkMonth(`/receipts/review/${upload.receiptId}`, workMonth)}
             className="mt-1 flex items-center gap-1 text-[11px] font-semibold text-green-700 hover:text-green-800"
           >
             <LinkIcon size={11} className="text-green-700" />
@@ -418,7 +449,13 @@ function BatchTile({ upload }: { upload: SessionUpload }) {
   );
 }
 
-function DesktopSidebar({ uploads }: { uploads: SessionUpload[] }) {
+function DesktopSidebar({
+  uploads,
+  workMonth,
+}: {
+  uploads: SessionUpload[];
+  workMonth: string | null;
+}) {
   const inFlight = uploads.filter((u) => u.state === "uploading").length;
   return (
     <aside className="flex flex-col overflow-hidden border-l border-gray-200 bg-white">
@@ -447,7 +484,9 @@ function DesktopSidebar({ uploads }: { uploads: SessionUpload[] }) {
             Files you add will appear here as they upload and parse.
           </div>
         ) : (
-          uploads.map((u) => <QueueFileRow key={u.id} upload={u} />)
+          uploads.map((u) => (
+            <QueueFileRow key={u.id} upload={u} workMonth={workMonth} />
+          ))
         )}
       </div>
 
@@ -467,7 +506,7 @@ function DesktopSidebar({ uploads }: { uploads: SessionUpload[] }) {
           <li className="flex justify-between">
             <span>Phone capture</span>
             <Link
-              href="/receipts/capture?mode=rapid"
+              href={withWorkMonth("/receipts/capture?mode=rapid", workMonth)}
               className="font-semibold text-amber-700 hover:text-amber-800"
             >
               Open →
@@ -479,7 +518,13 @@ function DesktopSidebar({ uploads }: { uploads: SessionUpload[] }) {
   );
 }
 
-function QueueFileRow({ upload }: { upload: SessionUpload }) {
+function QueueFileRow({
+  upload,
+  workMonth,
+}: {
+  upload: SessionUpload;
+  workMonth: string | null;
+}) {
   const stateLabel = {
     uploading: { color: "text-gray-600", dot: "bg-gray-400", text: "uploading" },
     ready: { color: "text-green-700", dot: "bg-green-500", text: "ready" },
@@ -521,7 +566,7 @@ function QueueFileRow({ upload }: { upload: SessionUpload }) {
       </div>
       {upload.receiptId && (
         <Link
-          href={`/receipts/review/${upload.receiptId}`}
+          href={withWorkMonth(`/receipts/review/${upload.receiptId}`, workMonth)}
           className="self-center text-amber-700 hover:text-amber-800"
         >
           <ArrowRightIcon size={14} />

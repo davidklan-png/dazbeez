@@ -30,6 +30,7 @@ import {
   canMarkReviewed,
   canPromoteToReviewed,
 } from "@/lib/receipts/receipt-status-policy";
+import { resolveWorkMonth, withWorkMonth } from "@/lib/receipts/work-month";
 import type {
   PaymentPath,
   ReceiptAttendee,
@@ -82,6 +83,13 @@ export function FormPane(props: FormPaneProps) {
   // server-computed values when the receipt is filtered out of `visible`
   // (e.g. the active receipt doesn't match the current text search).
   const { queryParams } = useQueueControls();
+  // Concrete work month derived from the queue's preserved query string — used
+  // ONLY to carry the month into Reconcile/Export from the locked banner, never
+  // the review scope/filter (those stay within review via `queryParams`).
+  const workMonth = useMemo(
+    () => resolveWorkMonth(new URLSearchParams(queryParams).get("month")),
+    [queryParams],
+  );
   const queuePos = useQueuePosition(receipt.id);
   const queueIndex = queuePos.index >= 0 ? queuePos.index : props.queueIndex;
   const queueTotal = queuePos.index >= 0 ? queuePos.total : props.queueTotal;
@@ -461,7 +469,10 @@ export function FormPane(props: FormPaneProps) {
       const res = await fetch(`/api/receipts/${receipt.id}`, {
         method: "DELETE",
       });
-      if (res.ok) router.push("/receipts/review");
+      // Return to the SAME review view (month/scope/filter preserved), not the
+      // bare queue — deleting one receipt shouldn't drop the operator out of
+      // the work month they were in.
+      if (res.ok) router.push(`/receipts/review${queryParams}`);
     } catch {
       // ignore
     }
@@ -524,7 +535,7 @@ export function FormPane(props: FormPaneProps) {
                 The {lockMonth} AMEX reconciliation is finalized. Reopen it — or
                 open a correction export draft for {lockMonth} — to edit.{" "}
                 <Link
-                  href="/receipts/reconcile"
+                  href={withWorkMonth("/receipts/reconcile", workMonth)}
                   className="font-semibold text-gray-900 underline"
                 >
                   Go to reconcile →
@@ -534,7 +545,7 @@ export function FormPane(props: FormPaneProps) {
               <>
                 The {lockMonth} export is finalized. Open a revision to edit.{" "}
                 <Link
-                  href="/receipts/export"
+                  href={withWorkMonth("/receipts/export", workMonth)}
                   className="font-semibold text-gray-900 underline"
                 >
                   Go to export →

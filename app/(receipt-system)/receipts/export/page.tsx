@@ -19,7 +19,6 @@ import {
   ExportScreen,
   type CategoryBreakdownRow,
 } from "@/components/receipts/export/export-screen";
-import type { ManifestSampleRow } from "@/lib/receipts/manifest-preview";
 import { MonthSwitcher, type MonthOption } from "@/components/receipts/month-switcher";
 import { formatMonth } from "@/lib/receipts/format";
 import {
@@ -33,8 +32,7 @@ import {
   ACCOUNTANT_DISCLAIMER_JA,
 } from "@/lib/receipts/settings";
 import { buildExportBundle } from "@/lib/receipts/month-closing";
-import { buildMonthlyExportCsv, BUNDLE_DOWNLOAD_LINK_DEFS } from "@/lib/receipts/export";
-import { deriveStatementWindow } from "@/lib/receipts/statement-window";
+import { BUNDLE_DOWNLOAD_LINK_DEFS } from "@/lib/receipts/export";
 import { CreateRevisionButton } from "@/components/receipts/export/create-revision-button";
 
 export const dynamic = "force-dynamic";
@@ -126,29 +124,9 @@ export default async function ExportPage({
     ...computeDuplicateReceiptWarnings(monthReceipts),
     ...computeIcCardTopUpWarnings(monthReceipts),
   ];
-  // Statement window (transaction-date range the statement covers) for the
-  // manifest-preview header — the operator conflated 2026-06 and 2026-07 rows
-  // partly because the preview didn't restate which month/dates it belongs to.
-  const statementWindow =
-    monthLines.length > 0 ? deriveStatementWindow(monthLines, month) : null;
 
   const draftStats = computeDraftStats(bundle.rows);
   const breakdown = computeBreakdown(bundle.rows);
-  const manifestSample = buildManifestSample(bundle.rows.slice(0, 6));
-  // Honest CSV size: build the pure CSV (same call the route makes before
-  // applying BOM/CRLF) and measure its UTF-8 byte length. BOM+CRLF add a
-  // small constant overhead we ignore — the operator only needs a ballpark.
-  const pureCsv = buildMonthlyExportCsv(
-    bundle.rows,
-    bundle.attendeeMap,
-    bundle.attendeeDirectory,
-    bundle.amexAttendees,
-  );
-  const manifestSize = {
-    rowsTotal: draftStats.rows,
-    sizeBytes: new TextEncoder().encode(pureCsv).byteLength,
-    sha256: currentExport?.archive_sha256 ?? null,
-  };
 
   return (
     <>
@@ -168,9 +146,6 @@ export default async function ExportPage({
         warnings={warnings}
         draftStats={draftStats}
         breakdown={breakdown}
-        manifestSample={manifestSample}
-        manifestSize={manifestSize}
-        statementWindow={statementWindow}
         unassignableReceipts={unassignable}
       />
       {/* Sealed bundle — latest FINALIZED revision. Served even while a
@@ -335,46 +310,14 @@ function computeBreakdown(rows: ExportRowLike[]): CategoryBreakdownRow[] {
     .slice(0, 7);
 }
 
-/**
- * Build the manifest preview rows from bundle rows. Audit A6: the previous
- * implementation fired a `listAttendees` call per receipt just to "keep the
- * query path warm" (its own comment) — pure N+1 waste. Attendees are now
- * batched once in buildExportBundle (listAttendeeNamesByReceiptIds).
- */
-function buildManifestSample(rows: ExportRowLike[]): ManifestSampleRow[] {
-  return rows.map((r) => {
-    const cat = r.expenseCategoryCode
-      ? getCategoryByCode(r.expenseCategoryCode)
-      : null;
-    return {
-      receiptId: r.receiptId ? `R-${r.receiptId.slice(0, 8)}` : "—",
-      merchant: r.merchant ?? "(unnamed)",
-      txnDate: r.transactionDate ?? "—",
-      amountMinor: r.amountMinor ?? 0,
-      categoryLabel: cat?.jaName ?? r.expenseCategoryCode ?? "—",
-      payment: r.paymentPath ?? "—",
-      alcohol: false,
-      archivePath: r.originalR2Key
-        ? `r2://.../${r.originalR2Key.slice(-12)}`
-        : "—",
-      invoiceRegistrationNumber: r.invoiceRegistrationNumber ?? "",
-    };
-  });
-}
-
 // Minimal structural shape of ExportRow that the helpers above read. We
 // import the full type via the bundle; this alias keeps the helper
 // signatures self-documenting without re-listing every field.
 type ExportRowLike = {
   rowType: "amex_line" | "receipt";
   receiptId: string | null;
-  transactionDate: string | null;
-  merchant: string | null;
-  amountMinor: number | null;
-  expenseCategoryCode: string | null;
-  paymentPath: string | null;
   matchStatus: string | null;
+  amountMinor: number | null;
   taxAmountMinor: number | null;
-  originalR2Key: string | null;
-  invoiceRegistrationNumber: string | null;
+  expenseCategoryCode: string | null;
 };
