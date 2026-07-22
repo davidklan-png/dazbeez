@@ -29,15 +29,16 @@ function makeCaptureDb() {
       return stmts.map((s) => s.run());
     },
     _batchCalls: batchCalls,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } as any;
 }
 
-function getRowBinds(db: any): unknown[] {
+function getRowBinds(db: { _batchCalls: { sql: string; binds: unknown[] }[] }): unknown[] {
   const call = db._batchCalls.find((c: { sql: string }) => c.sql.includes("INSERT INTO email_receipt_intake"));
   return call?.binds ?? [];
 }
 
-function getAuditBinds(db: any): unknown[] {
+function getAuditBinds(db: { _batchCalls: { sql: string; binds: unknown[] }[] }): unknown[] {
   const call = db._batchCalls.find((c: { sql: string }) => c.sql.includes("INSERT INTO receipt_audit_log"));
   return call?.binds ?? [];
 }

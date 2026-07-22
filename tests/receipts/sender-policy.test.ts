@@ -108,6 +108,7 @@ function makeFakeDb(opts: { failOnAuditAction?: string } = {}) {
     _trusted: trusted,
     _blocked: blocked,
     _audits: audits,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } as any;
 }
 

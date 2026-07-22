@@ -84,6 +84,7 @@ function makeFakeBlockedDb(blockedEmails: Set<string>) {
     },
     _lastSql: () => lastSql,
     _queryCount: () => queryCount,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } as any;
 }
 
@@ -166,6 +167,7 @@ test("D1 .all() failure propagates", async () => {
         },
       };
     },
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } as any;
   await assert.rejects(
     () => resolveBlockedSenderIdentity(db, "a@b.com", "c@d.com"),
