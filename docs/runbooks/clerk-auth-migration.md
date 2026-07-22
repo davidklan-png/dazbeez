@@ -237,16 +237,13 @@ cutover either. Four phases, each independently reversible.
 
 ### Phase 3 — Device trust cleanup
 
-- [ ] Decide whether to delete the web half of `lib/receipts/trusted-devices.ts` (the "remember this
-      browser" HMAC cookie) now that Clerk's own session cookie covers the same need. **Recommended: yes**
-      — one less custom crypto scheme — but confirm Clerk's session duration (set in Phase 1) actually
-      matches what you want before removing the old fallback.
-- [ ] Confirm the mobile-pairing "approve this device" step (`complete-pairing` route) now runs through
-      the Clerk-based `requireReceiptsActor` from Phase 2 — this should fall out automatically since that
-      route already calls `requireReceiptsActor`, but verify it explicitly with a real pairing test.
-- [ ] Add an actual expiry to the mobile bearer token (`lib/receipts/mobile-pairing.ts`) — it currently
-      has none, only revocation. Unrelated to Clerk itself, but worth bundling in since this code is
-      already being touched. Suggest 90 days to 1 year with a silent re-pair prompt.
+Status: the web/browser trust half is removed (draft PR `codex/receipts-mobile-devices-only`); device management is now mobile-only. Mobile bearer expiry is deliberately NOT in this change — it is a separate follow-up (see below).
+
+- [x] **Delete the web half of `lib/receipts/trusted-devices.ts`** (the "remember this browser" HMAC cookie). DONE. The browser-cookie path (`verifyDeviceCookie`/`verifyDeviceCookieLight`, `enrollDevice`, `buildClearDeviceCookie`, `getCurrentDeviceId`, `readRawDeviceCookie`, the `receipts_device` cookie, and the `/api/receipts/devices/enroll` route + `/receipts/enroll` page + `EnrollDeviceForm`) is removed. `lib/receipts/auth.ts` no longer consults a device cookie in `isReceiptsAuthorized`. The Clerk session (7-day max lifetime, Decision 3) is now the only web session; no web fallback remains.
+- [x] **Settings now manages mobile devices only.** `lib/receipts/trusted-devices.ts` exposes mobile-named management functions (`listMobileDevicesForActor`, `listAllMobileDevices`, `revokeMobileDevice`, `revokeMobileDeviceById`) whose SQL constrains `platform IN ('ios','android')`. The Settings → "Trusted mobile devices" page lists only paired iPhone/Android capture devices; historical browser rows (platform NULL) are inert, hidden, and never usable for authorization.
+- [x] **`complete-pairing` operator approval still reaches Clerk-based `requireReceiptsActor`.** Verified from the route call chain: `app/api/mobile/auth/complete-pairing/route.ts` calls `requireReceiptsActor(request.headers)`, which resolves identity via `auth()`/`clerkClient()`. (`/api/mobile/*` stays outside the Clerk `config.matcher`, but `auth()` reads the Clerk session cookie directly, so the operator-approval step is still Clerk-gated. A real-device end-to-end pairing test is **not** part of this code-only change — it must not manufacture a production pairing; deferred to the Mac/post-deploy smoke test.)
+- [x] **Security hardening of the shared HMAC secret.** Browser cookies and mobile bearer tokens historically shared the same HMAC secret and signed-value format. `verifyBearerDevice` now requires, for a mobile bearer to authorize: non-empty signed `id`+`actor`; a finite, positive `iat`; successful HMAC verification; an existing, non-revoked DB row; row `platform` exactly `ios`/`android`; and the DB row `actor` equal to the signed payload `actor`. The mobile token wire format (`{id, actor, iat}` + HMAC) is preserved byte-for-byte; `RECEIPTS_DEVICE_SECRET` is kept (mobile auth needs it). A historical browser-cookie row (platform NULL, payload `{id, actor, exp}`) therefore can never authorize as a mobile bearer. Covered by `tests/receipts/trusted-devices.test.ts`.
+- [ ] **Add an actual expiry to the mobile bearer token.** NOT DONE — intentionally deferred. Mobile bearer tokens still have no fixed expiry; revocation in `trusted_devices` is the only control. Expiry needs a separate client-renewal / re-pair UX decision and is tracked as an explicit follow-up, not bundled into this change.
 
 ### Phase 4 — Retire the old mechanisms (after a 2-day burn-in period on Clerk with no issues — decided)
 

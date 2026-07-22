@@ -19,7 +19,6 @@ import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
 
 const isPublicRoute = createRouteMatcher([
   "/receipts/sign-in(.*)",
-  "/receipts/enroll(.*)", // redirect shim → /receipts/sign-in; must not be gated
   // Processor-only routes — Mac MLX consumer (ADR 0001). These do layered
   // auth INSIDE the route handler: valid `x-receipts-processor-key` header
   // OR a Clerk-authenticated human actor (file: GET/HEAD at

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { useToast } from "@/components/ui/toaster";
 import { apiFetch } from "@/lib/use-api-error";
 
@@ -10,7 +11,6 @@ export interface DeviceListItem {
   userAgent: string | null;
   createdAt: string;
   lastSeenAt: string | null;
-  isCurrent: boolean;
   platform: string | null;
   appVersion: string | null;
   /** Owner email — set only in owner/admin view so each row shows whose it is. */
@@ -35,12 +35,10 @@ export function DeviceList({
   const [busyId, setBusyId] = useState<string | null>(null);
   const { toast } = useToast();
 
-  async function revoke(id: string, label: string, isCurrent: boolean) {
+  async function revoke(id: string, label: string) {
     if (
       !confirm(
-        isCurrent
-          ? "Revoke this device? You'll be signed out and need to re-trust it via Cloudflare Access."
-          : `Revoke "${label}"? That device will need to re-enroll.`,
+        `Revoke "${label}"? This mobile device will lose receipts API access and must be paired again.`,
       )
     ) {
       return;
@@ -58,20 +56,25 @@ export function DeviceList({
       });
       return;
     }
-    if (isCurrent) {
-      toast({ tone: "info", title: "Signing out…" });
-      window.location.assign("/receipts/enroll");
-      return;
-    }
     setItems((prev) => prev.filter((d) => d.id !== id));
     toast({ tone: "success", title: "Device revoked", body: label });
   }
 
   if (items.length === 0) {
     return (
-      <p className="rounded-xl border border-dashed border-gray-300 bg-white p-6 text-sm text-gray-500">
-        {isOwnerView ? "No enrolled devices." : "No trusted devices yet."}
-      </p>
+      <div className="rounded-xl border border-dashed border-gray-300 bg-white p-6 text-sm text-gray-500">
+        <p>No mobile devices are paired.</p>
+        <p className="mt-1">
+          Pair an iPhone or Android device from{" "}
+          <Link
+            href="/receipts/pair"
+            className="font-medium text-amber-700 hover:underline"
+          >
+            Pair a device
+          </Link>
+          .
+        </p>
+      </div>
     );
   }
 
@@ -88,18 +91,13 @@ export function DeviceList({
                 <p className="truncate text-sm font-semibold text-gray-900">
                   {d.label}
                 </p>
-                {d.isCurrent ? (
-                  <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-amber-800">
-                    This device
-                  </span>
-                ) : null}
                 {d.platform === "ios" || d.platform === "android" ? (
                   <span className="rounded-full bg-gray-900 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-white">
                     {d.platform === "ios" ? "iPhone" : "Android"}
                     {d.appVersion ? ` · ${d.appVersion}` : ""}
                   </span>
                 ) : null}
-                {d.owner ? (
+                {isOwnerView && d.owner ? (
                   <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-medium text-gray-600">
                     {d.owner}
                   </span>
@@ -111,13 +109,13 @@ export function DeviceList({
                 </p>
               ) : null}
               <p className="mt-1 text-xs text-gray-500">
-                Added {formatDate(d.createdAt)} · Last used{" "}
+                Paired {formatDate(d.createdAt)} · Last used{" "}
                 {formatDate(d.lastSeenAt)}
               </p>
             </div>
             <button
               type="button"
-              onClick={() => revoke(d.id, d.label, d.isCurrent)}
+              onClick={() => revoke(d.id, d.label)}
               disabled={busyId === d.id}
               className="self-start rounded-xl border border-red-200 bg-white px-3 py-1.5 text-sm font-medium text-red-700 transition-colors hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50 sm:self-auto"
             >
