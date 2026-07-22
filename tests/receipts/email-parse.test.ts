@@ -8,7 +8,6 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   withinMessageSizeCeiling,
-  extractMailboxFromHeader,
   mapPostalAttachments,
   extractAuthVerdicts,
   pickRawHeadersSubset,
@@ -482,28 +481,4 @@ test("isAutoPromoteEligible: null trustedCreatedAt → false (mandatory)", () =>
     }),
     false,
   );
-});
-
-// ─── extractMailboxFromHeader (pre-raw block identity) ──────────────────────
-
-test("extractMailboxFromHeader: display-name form → bare mailbox", () => {
-  assert.equal(extractMailboxFromHeader("Example Vendor <billing@example.com>"), "billing@example.com");
-});
-
-test("extractMailboxFromHeader: bare email → bare email", () => {
-  assert.equal(extractMailboxFromHeader("foo@bar.com"), "foo@bar.com");
-});
-
-test("extractMailboxFromHeader: lowercases", () => {
-  assert.equal(extractMailboxFromHeader("Name <FOO@BAR.COM>"), "foo@bar.com");
-});
-
-test("extractMailboxFromHeader: malformed → null", () => {
-  assert.equal(extractMailboxFromHeader("not an email"), null);
-});
-
-test("extractMailboxFromHeader: null/undefined → null", () => {
-  assert.equal(extractMailboxFromHeader(null), null);
-  assert.equal(extractMailboxFromHeader(undefined), null);
-  assert.equal(extractMailboxFromHeader(""), null);
 });

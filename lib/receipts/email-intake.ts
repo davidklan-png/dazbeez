@@ -332,6 +332,8 @@ export async function recordBlockedIntake(
     subject: string | null;
     spfPass: boolean;
     dkimPass: boolean;
+    /** The exact normalized blocklist key that matched (RFC From or envelope). */
+    blockedSenderEmail: string;
   },
 ): Promise<string> {
   const id = newUuid();
@@ -347,8 +349,8 @@ export async function recordBlockedIntake(
          attachment_r2_key, attachment_sha256, attachment_content_type,
          attachment_size_bytes, attachment_filename, status, reject_reason,
          promoted_receipt_id, raw_headers_json, created_at, to_address,
-         body_text, body_html, body_truncated)
-       VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, 'rejected', 'blocked_sender', NULL, NULL, ?, ?, NULL, NULL, 0)`,
+         body_text, body_html, body_truncated, blocked_sender_email)
+       VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, 'rejected', 'blocked_sender', NULL, NULL, ?, ?, NULL, NULL, 0, ?)`,
     )
     .bind(
       id,
@@ -359,6 +361,7 @@ export async function recordBlockedIntake(
       input.dkimPass ? 1 : 0,
       now,
       input.toAddress,
+      input.blockedSenderEmail,
     )
     .run();
 

@@ -92,27 +92,6 @@ export function extractAuthVerdicts(authResults: string | null | undefined): Aut
   };
 }
 
-// ─── RFC From header mailbox extraction (pre-raw block check) ────────────────
-
-/**
- * Extract the first valid mailbox address from an RFC 5322 `From` header value
- * WITHOUT reading/parsing the raw MIME body. Handles:
- *   - "Name <email@example.com>" → email@example.com
- *   - "email@example.com" → email@example.com
- *   - malformed/missing → null
- * Returns the LOWERCASED mailbox (matching the normalization used by the policy
- * tables). Pure — safe to call in the Worker's email() handler before message.raw.
- */
-export function extractMailboxFromHeader(fromHeader: string | null | undefined): string | null {
-  if (!fromHeader || typeof fromHeader !== "string") return null;
-  // Try angle-bracket form first: "Name <email@domain>"
-  const angleMatch = fromHeader.match(/<([^<>]+)>/);
-  const candidate = (angleMatch ? angleMatch[1] : fromHeader).trim().toLowerCase();
-  // Validate it looks like an email (same shape as policy tables).
-  if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(candidate)) return candidate;
-  return null;
-}
-
 // ─── Raw header subset (audit-friendly, bounded) ────────────────────────────
 
 /**

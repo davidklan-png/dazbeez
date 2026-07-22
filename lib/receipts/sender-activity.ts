@@ -1,8 +1,12 @@
-// ADR 0011 follow-up (2026-07-22): bounded aggregation of unrecognized sender
-// activity. Excludes trusted and blocked senders IN SQL (NOT EXISTS) before
-// ORDER BY + LIMIT, so the 50 newest unrecognized groups are always correct
-// regardless of how many recognized groups exist. Selects only counts and
-// timestamps — never bodies, raw headers, subjects, or attachment contents.
+// ADR 0011 follow-up (2026-07-22): sender activity aggregation + snapshot.
+// Uses NOT EXISTS (not NOT IN) for exclusion so NULL policy rows can't suppress
+// results. Selects only counts/timestamps — never bodies, headers, subjects,
+// or attachment contents.
+
+import type { TrustedIntakeSender } from "@/lib/receipts/trusted-senders";
+import type { BlockedIntakeSender } from "@/lib/receipts/blocked-senders";
+import { listTrustedSenders } from "@/lib/receipts/trusted-senders";
+import { listBlockedSenders } from "@/lib/receipts/blocked-senders";
 
 export interface SenderActivityGroup {
   from_address: string;
@@ -18,41 +22,21 @@ export interface SenderActivityGroup {
   dkim_fail_any: number;
 }
 
-import type { TrustedIntakeSender } from "@/lib/receipts/trusted-senders";
-import type { BlockedIntakeSender } from "@/lib/receipts/blocked-senders";
-import { listTrustedSenders } from "@/lib/receipts/trusted-senders";
-import { listBlockedSenders } from "@/lib/receipts/blocked-senders";
-
-/**
- * The authoritative sender-controls snapshot: all three lists in one response.
- * Returned after every Settings mutation so the client replaces all three
- * collections atomically (no stale local state drift).
- */
-export async function getSenderControlsSnapshot(db: D1Database): Promise<{
-  trusted: TrustedIntakeSender[];
-  blocked: BlockedIntakeSender[];
-  unrecognized: SenderActivityGroup[];
-}> {
-  const [trusted, blocked] = await Promise.all([
-    listTrustedSenders(db),
-    listBlockedSenders(db),
-  ]);
-  const unrecognized = await listUnrecognizedSenders(
-    db,
-    trusted.map((t) => t.email),
-    blocked.map((b) => b.email),
-  );
-  return { trusted, blocked, unrecognized };
+export interface BlockedSenderWithActivity extends BlockedIntakeSender {
+  blocked_delivery_count: number;
+  latest_blocked_delivery: string | null;
 }
 
+/**
+ * List unrecognized senders: groups from email_receipt_intake that are NOT in
+ * trusted_intake_senders AND NOT in blocked_intake_senders. Exclusion is in
+ * SQL via NOT EXISTS (not NOT IN) so NULL policy rows can't suppress results.
+ * Bounded to the 50 most recently active groups.
+ */
 export async function listUnrecognizedSenders(
   db: D1Database,
-  _trustedEmails: readonly string[],
-  _blockedEmails: readonly string[],
   limit = 50,
 ): Promise<SenderActivityGroup[]> {
-  // Exclusion is done IN SQL via NOT EXISTS (not application-level filtering)
-  // so the LIMIT 50 is applied AFTER excluding recognized senders.
   const result = await db
     .prepare(
       `SELECT
@@ -67,9 +51,9 @@ export async function listUnrecognizedSenders(
          SUM(CASE WHEN spf_pass = 0 THEN 1 ELSE 0 END)  AS spf_fail_any,
          SUM(CASE WHEN dkim_pass = 1 THEN 1 ELSE 0 END) AS dkim_pass_any,
          SUM(CASE WHEN dkim_pass = 0 THEN 1 ELSE 0 END) AS dkim_fail_any
-       FROM email_receipt_intake
-       WHERE LOWER(TRIM(from_address)) NOT IN (SELECT email FROM trusted_intake_senders)
-         AND LOWER(TRIM(from_address)) NOT IN (SELECT email FROM blocked_intake_senders)
+       FROM email_receipt_intake e
+       WHERE NOT EXISTS (SELECT 1 FROM trusted_intake_senders t WHERE t.email = LOWER(TRIM(e.from_address)))
+         AND NOT EXISTS (SELECT 1 FROM blocked_intake_senders b WHERE b.email = LOWER(TRIM(e.from_address)))
        GROUP BY LOWER(TRIM(from_address))
        ORDER BY latest_received DESC
        LIMIT ?`,
@@ -77,10 +61,7 @@ export async function listUnrecognizedSenders(
     .bind(limit)
     .all<SenderActivityGroup & { addr: string }>();
 
-  const rows = (result.results ?? []) as Array<
-    SenderActivityGroup & { addr: string }
-  >;
-  return rows.map((r) => ({
+  return (result.results ?? []).map((r) => ({
     from_address: r.addr,
     first_received: r.first_received,
     latest_received: r.latest_received,
@@ -93,4 +74,61 @@ export async function listUnrecognizedSenders(
     dkim_pass_any: r.dkim_pass_any,
     dkim_fail_any: r.dkim_fail_any,
   }));
+}
+
+/**
+ * Enrich blocked senders with delivery-attempt activity (count + latest) from
+ * email_receipt_intake.blocked_sender_email. Historical rows (NULL
+ * blocked_sender_email) do not count.
+ */
+async function enrichBlockedWithActivity(
+  db: D1Database,
+  blocked: BlockedIntakeSender[],
+): Promise<BlockedSenderWithActivity[]> {
+  if (blocked.length === 0) return [];
+  const emails = blocked.map((b) => b.email);
+  const placeholders = emails.map(() => "?").join(",");
+  const activityRows = await db
+    .prepare(
+      `SELECT blocked_sender_email AS email,
+              COUNT(*) AS cnt,
+              MAX(received_at) AS latest
+         FROM email_receipt_intake
+        WHERE blocked_sender_email IN (${placeholders})
+        GROUP BY blocked_sender_email`,
+    )
+    .bind(...emails)
+    .all<{ email: string; cnt: number; latest: string | null }>();
+
+  const activityMap = new Map(
+    (activityRows.results ?? []).map((r) => [r.email, { cnt: r.cnt, latest: r.latest }]),
+  );
+
+  return blocked.map((b) => {
+    const act = activityMap.get(b.email);
+    return {
+      ...b,
+      blocked_delivery_count: act?.cnt ?? 0,
+      latest_blocked_delivery: act?.latest ?? null,
+    };
+  });
+}
+
+/**
+ * The authoritative sender-controls snapshot: all three lists in one response.
+ * Returned after every Settings mutation so the client replaces all three
+ * collections atomically.
+ */
+export async function getSenderControlsSnapshot(db: D1Database): Promise<{
+  trusted: TrustedIntakeSender[];
+  blocked: BlockedSenderWithActivity[];
+  unrecognized: SenderActivityGroup[];
+}> {
+  const [trusted, blocked] = await Promise.all([
+    listTrustedSenders(db),
+    listBlockedSenders(db),
+  ]);
+  const blockedWithActivity = await enrichBlockedWithActivity(db, blocked);
+  const unrecognized = await listUnrecognizedSenders(db);
+  return { trusted, blocked: blockedWithActivity, unrecognized };
 }

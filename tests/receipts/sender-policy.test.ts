@@ -44,7 +44,17 @@ function makeFakeDb() {
       return { meta: { changes: 1 } };
     }
     if (s.includes("INTO RECEIPT_AUDIT_LOG")) {
-      // binds: [id, actor, action, objectType, objectId, oldJson, newJson, createdAt]
+      // Conditional audit: INSERT ... SELECT ... WHERE EXISTS (...)
+      if (s.includes("WHERE EXISTS")) {
+        const condEmail = binds[binds.length - 1] as string;
+        let met = false;
+        if (s.includes("NOT EXISTS (SELECT 1 FROM TRUSTED_INTAKE_SENDERS")) met = !trusted.has(condEmail);
+        else if (s.includes("NOT EXISTS (SELECT 1 FROM BLOCKED_INTAKE_SENDERS")) met = !blocked.has(condEmail);
+        else if (s.includes("FROM BLOCKED_INTAKE_SENDERS")) met = blocked.has(condEmail);
+        else if (s.includes("FROM TRUSTED_INTAKE_SENDERS")) met = trusted.has(condEmail);
+        if (met) { audits.push({ action: binds[2] as string, objectId: binds[4] as string }); return { meta: { changes: 1 } }; }
+        return { meta: { changes: 0 } };
+      }
       audits.push({ action: binds[2] as string, objectId: binds[4] as string });
       return { meta: { changes: 1 } };
     }

@@ -1,10 +1,6 @@
 // ADR 0011 Phase B: the email-body auto-promote allowlist (trusted_intake_senders
 // table). Read/list helpers + shared normalization. ALL mutations (trust/block/
-// untrust/unblock) live in sender-policy.ts to enforce mutual exclusion — do
-// not add add/remove helpers here (they would bypass the mutual-exclusion
-// guarantee).
-
-import { nowIso, stringifyJson } from "@/lib/receipts/db-utils";
+// untrust/unblock) live in sender-policy.ts to enforce mutual exclusion.
 
 export interface TrustedIntakeSender {
   email: string;

@@ -24,12 +24,12 @@ import {
   withinMessageSizeCeiling,
   mapPostalAttachments,
   extractAuthVerdicts,
-  extractMailboxFromHeader,
   pickRawHeadersSubset,
   staleCutoffIso,
   capBody,
 } from "../../../lib/receipts/email-parse";
 import { isBlockedSender } from "../../../lib/receipts/blocked-senders";
+import { parseRfcFromMailbox } from "./sender-identity";
 
 interface Env {
   RECEIPTS_DB: D1Database;
@@ -53,7 +53,7 @@ const worker = {
     // check so an oversized message from a blocked sender still creates its
     // minimal delivery-attempt record.
     const envelopeFrom = (message.from ?? "").trim().toLowerCase();
-    const headerFrom = extractMailboxFromHeader(message.headers.get("from"));
+    const headerFrom = parseRfcFromMailbox(message.headers.get("from"));
     const identitiesToCheck = [headerFrom, envelopeFrom].filter(
       (v): v is string => !!v,
     );
@@ -85,6 +85,7 @@ const worker = {
           subject,
           spfPass: spf,
           dkimPass: dkim,
+          blockedSenderEmail: matchedBlockedIdentity,
         });
         console.log("[receipts-email-intake] blocked delivery recorded (metadata only)", {
           identity: matchedBlockedIdentity,

@@ -19,7 +19,12 @@ CREATE TABLE IF NOT EXISTS blocked_intake_senders (
 );
 
 -- Bounded sender-activity queries (Recent unrecognized senders view +
--- latest-attempt-delivery for the blocked-senders list). Covers the common
--- WHERE from_address = ? ORDER BY received_at DESC pattern.
+-- latest-attempt-delivery for the blocked-senders list).
 CREATE INDEX IF NOT EXISTS idx_email_intake_from_received
   ON email_receipt_intake (from_address, received_at DESC);
+
+-- Record the exact normalized blocklist key that caused intake-time rejection.
+-- This is the matched policy identity (RFC From mailbox or envelope MAIL FROM),
+-- NOT necessarily the display from_address. NULL for non-blocked deliveries
+-- and historical rows. Used by the blocked-delivery activity count/latest query.
+ALTER TABLE email_receipt_intake ADD COLUMN blocked_sender_email TEXT;

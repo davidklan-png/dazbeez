@@ -1,9 +1,7 @@
 import type { Metadata } from "next";
 import { getReceiptsPageActor } from "@/lib/receipts/auth-request";
 import { getReceiptsDb } from "@/lib/cloudflare-runtime";
-import { listTrustedSenders } from "@/lib/receipts/trusted-senders";
-import { listBlockedSenders } from "@/lib/receipts/blocked-senders";
-import { listUnrecognizedSenders } from "@/lib/receipts/sender-activity";
+import { getSenderControlsSnapshot } from "@/lib/receipts/sender-activity";
 import { SenderControls } from "@/components/receipts/sender-controls";
 
 export const metadata: Metadata = {
@@ -13,23 +11,9 @@ export const metadata: Metadata = {
 
 export const dynamic = "force-dynamic";
 
-// ADR 0011 follow-up (2026-07-22): sender visibility, prospective trust, and
-// blocking. Three sections: trusted (auto-promote allowlist), blocked
-// (metadata-only delivery), unrecognized (recent activity derived from
-// email_receipt_intake, not yet trusted or blocked).
 export default async function TrustedSendersPage() {
   await getReceiptsPageActor();
-
-  const db = getReceiptsDb();
-  const [trusted, blocked] = await Promise.all([
-    listTrustedSenders(db),
-    listBlockedSenders(db),
-  ]);
-  const unrecognized = await listUnrecognizedSenders(
-    db,
-    trusted.map((t) => t.email),
-    blocked.map((b) => b.email),
-  );
+  const snapshot = await getSenderControlsSnapshot(getReceiptsDb());
 
   return (
     <div className="space-y-6 px-8 py-8">
@@ -48,9 +32,9 @@ export default async function TrustedSendersPage() {
       </div>
 
       <SenderControls
-        initialTrusted={trusted}
-        initialBlocked={blocked}
-        initialUnrecognized={unrecognized}
+        initialTrusted={snapshot.trusted}
+        initialBlocked={snapshot.blocked}
+        initialUnrecognized={snapshot.unrecognized}
       />
     </div>
   );
