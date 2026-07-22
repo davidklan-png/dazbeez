@@ -174,6 +174,10 @@ export type AuditAction =
   // for a zero-human-review auto-promotion path, so every add/remove is audited.
   | "trusted_sender.added"
   | "trusted_sender.removed"
+  // ADR 0011 follow-up 2026-07-22: operator-managed sender blocklist. Future
+  // mail from blocked senders is recorded as metadata-only rejected rows.
+  | "blocked_sender.added"
+  | "blocked_sender.removed"
   // Category pattern rules: the operator accepted a proposed rule, removed an
   // active one, or dismissed a proposal (so it won't re-surface). Rules never
   // auto-set expense_category_code — these audit the rule lifecycle only.

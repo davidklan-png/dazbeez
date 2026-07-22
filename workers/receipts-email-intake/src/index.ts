@@ -14,6 +14,7 @@
 import PostalMime from "postal-mime";
 import {
   recordIntake,
+  recordBlockedIntake,
   INTAKE_MAX_MESSAGE_BYTES,
   INTAKE_STALE_DAYS,
   INTAKE_BODY_TEXT_MAX_BYTES,
@@ -27,6 +28,7 @@ import {
   staleCutoffIso,
   capBody,
 } from "../../../lib/receipts/email-parse";
+import { isBlockedSender } from "../../../lib/receipts/blocked-senders";
 
 interface Env {
   RECEIPTS_DB: D1Database;
@@ -55,6 +57,48 @@ const worker = {
         ceiling: INTAKE_MAX_MESSAGE_BYTES,
       });
       return;
+    }
+
+    // ADR 0011 follow-up (2026-07-22): check the blocklist BEFORE reading or
+    // parsing message.raw. If the envelope sender is blocked, record one
+    // minimal rejected row (metadata only — no body/headers/attachment/R2)
+    // and return without processing. If the lookup fails, log visibly and
+    // continue into ordinary pending triage (the promote route's policy gate
+    // is the final safety net).
+    const envelopeFrom = (message.from ?? "").trim().toLowerCase();
+    if (envelopeFrom) {
+      let blocked = false;
+      try {
+        blocked = await isBlockedSender(env.RECEIPTS_DB, envelopeFrom);
+      } catch (err) {
+        console.error("[receipts-email-intake] blocked-sender lookup failed; continuing to normal triage", {
+          from: envelopeFrom,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      if (blocked) {
+        try {
+          const { spf, dkim } = extractAuthVerdicts(message.headers.get("authentication-results"));
+          const subject = message.headers.get("subject");
+          await recordBlockedIntake(env.RECEIPTS_DB, {
+            receivedAt: new Date().toISOString(),
+            fromAddress: envelopeFrom,
+            toAddress: message.to ?? null,
+            subject,
+            spfPass: spf,
+            dkimPass: dkim,
+          });
+          console.log("[receipts-email-intake] blocked delivery recorded (metadata only)", {
+            from: envelopeFrom,
+          });
+        } catch (err) {
+          console.error("[receipts-email-intake] blocked delivery recording failed; mail NOT processed", {
+            from: envelopeFrom,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+        return; // never read/parse the raw MIME for a blocked sender
+      }
     }
 
     let rawBytes: Uint8Array | null = null;

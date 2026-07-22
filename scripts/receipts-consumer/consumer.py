@@ -38,6 +38,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import datetime
 from typing import Any
 
 import requests
@@ -740,17 +741,20 @@ def process_backfill(dry_run: bool, only_id: str | None = None) -> None:
 # wrangler-per-call discovery is too heavy for the per-poll main loop. No MLX
 # model is loaded for either mode.
 
-def fetch_trusted_senders() -> list[str]:
-    """Read the auto-promote allowlist from D1. The Settings page
-    (trusted_intake_senders table) is authoritative — the TRUSTED_INTAKE_SENDERS
-    env var was removed. Uses the same _d1_query() path as
-    pull_pending_rows/pull_auto_promote_candidates (operator wrangler OAuth, a
-    separate auth path from the processor-key HTTP calls). Emails are stored
-    lowercase-normalized, so no case-folding here. Called once per launchd
-    invocation at the top of process_auto_promote (each run is short-lived; no
-    in-memory TTL needed)."""
-    rows = _d1_query("SELECT email FROM trusted_intake_senders;")
-    return [str(r["email"]) for r in rows if r.get("email")]
+def fetch_trusted_senders() -> dict[str, str]:
+    """Read the auto-promote allowlist from D1 as {email: created_at}. The
+    Settings page (trusted_intake_senders table) is authoritative. The
+    created_at is used for the prospective-trust gate (intake.received_at >=
+    trusted.created_at). Emails are stored lowercase-normalized."""
+    rows = _d1_query("SELECT email, created_at FROM trusted_intake_senders;")
+    return {str(r["email"]): str(r["created_at"]) for r in rows if r.get("email")}
+
+
+def fetch_blocked_senders() -> set[str]:
+    """Read the blocked-sender set from D1 (blocked_intake_senders table).
+    Blocked senders are never auto-promoted, even if also trusted."""
+    rows = _d1_query("SELECT email FROM blocked_intake_senders;")
+    return {str(r["email"]) for r in rows if r.get("email")}
 
 
 def is_auto_promote_eligible(
@@ -758,17 +762,35 @@ def is_auto_promote_eligible(
     spf_pass: int | bool | None,
     dkim_pass: int | bool | None,
     has_attachment: bool,
-    trusted_senders: list[str],
+    trusted_senders: dict[str, str],
+    blocked_senders: set[str],
+    received_at: str | None = None,
 ) -> bool:
-    """Mirror of lib/receipts/email-parse.ts isAutoPromoteEligible. Attachments
-    use the manual triage path regardless of sender; body-only + a trusted
-    sender + SPF and DKIM pass → eligible for auto-promotion. Pure: the caller
-    passes the allowlist fetched from D1 (fetch_trusted_senders)."""
+    """Mirror of lib/receipts/email-parse.ts isAutoPromoteEligible. Blocked
+    wins defensively. Attachments use the manual triage path regardless of
+    sender; body-only + a trusted sender + SPF and DKIM pass → eligible. ADR
+    0011 follow-up: prospective trust — received_at must be >= the trusted
+    sender's created_at. Malformed timestamps → ineligible (safe default)."""
+    normalized = (from_address or "").strip().lower()
+    if normalized in blocked_senders:
+        return False
     if has_attachment:
         return False
     if not (spf_pass and dkim_pass):
         return False
-    return (from_address or "").strip().lower() in trusted_senders
+    if normalized not in trusted_senders:
+        return False
+    # Prospective trust: received_at >= trusted.created_at
+    trusted_created = trusted_senders.get(normalized)
+    if received_at and trusted_created:
+        try:
+            recv_dt = datetime.fromisoformat(received_at.replace("Z", "+00:00"))
+            trust_dt = datetime.fromisoformat(trusted_created.replace("Z", "+00:00"))
+            if recv_dt < trust_dt:
+                return False
+        except (ValueError, TypeError):
+            return False  # malformed timestamp → ineligible
+    return True
 
 
 def post_promote(intake_id: str) -> None:
@@ -810,16 +832,16 @@ def post_render(receipt_id: str, derivative: bytes, content_type: str) -> None:
 
 
 def pull_auto_promote_candidates(
-    trusted_senders: list[str], only_id: str | None = None
+    trusted_senders: dict[str, str],
+    blocked_senders: set[str],
+    only_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """pending_triage body-only intakes (no attachment) with a captured body,
-    that pass the auto-promote gate. Fetches the pending_triage body-only rows
-    and filters by the allowlist in Python (the list is small). The caller
-    supplies the allowlist (fetched fresh from D1 via fetch_trusted_senders)."""
+    that pass the auto-promote gate (trusted + not blocked + prospective)."""
     where_id = f" AND id = {_sql_escape(only_id)}" if only_id else ""
     rows = _d1_query(
         "SELECT id, from_address, spf_pass, dkim_pass, "
-        "attachment_r2_key, body_text, body_html "
+        "attachment_r2_key, body_text, body_html, received_at "
         "FROM email_receipt_intake "
         "WHERE status = 'pending_triage'"
         + where_id + ";"
@@ -835,6 +857,8 @@ def pull_auto_promote_candidates(
             r.get("dkim_pass"),
             bool(r.get("attachment_r2_key")),
             trusted_senders,
+            blocked_senders,
+            r.get("received_at"),
         )
     ]
 
@@ -861,7 +885,8 @@ def process_auto_promote(dry_run: bool, only_id: str | None = None) -> None:
             "nothing to auto-promote."
         )
         return
-    rows = pull_auto_promote_candidates(trusted_senders, only_id)
+    blocked_senders = fetch_blocked_senders()
+    rows = pull_auto_promote_candidates(trusted_senders, blocked_senders, only_id)
     if not rows:
         print(
             f"No auto-promote candidates "

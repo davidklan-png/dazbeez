@@ -1,7 +1,10 @@
 import { NextResponse } from "next/server";
 import { requireReceiptsActor } from "@/lib/receipts/auth";
-import { promoteIntake } from "@/lib/receipts/email-intake";
-import { getReceiptsProcessorKey } from "@/lib/cloudflare-runtime";
+import { promoteIntake, getIntake } from "@/lib/receipts/email-intake";
+import { getReceiptsProcessorKey, getReceiptsDb } from "@/lib/cloudflare-runtime";
+import { listTrustedSenders } from "@/lib/receipts/trusted-senders";
+import { listBlockedSenders } from "@/lib/receipts/blocked-senders";
+import { isAutoPromoteEligible } from "@/lib/receipts/email-parse";
 
 const PROCESSOR_ACTOR = "mlx-consumer@mac";
 
@@ -36,6 +39,36 @@ export async function POST(
       ? PROCESSOR_ACTOR
       : await requireReceiptsActor(request.headers);
     const { id } = await params;
+
+    // Processor-key calls must pass the CURRENT prospective auto-promotion
+    // policy immediately before promotion (closes the race where a sender is
+    // blocked between the consumer's selection and this call). Human Clerk-
+    // authenticated Promote is an explicit override — NOT gated here.
+    if (isProcessor) {
+      const db = getReceiptsDb();
+      const intake = await getIntake(db, id);
+      if (!intake) throw new Error(`Intake ${id} not found.`);
+      const trusted = await listTrustedSenders(db);
+      const blocked = await listBlockedSenders(db);
+      const normalized = intake.from_address.trim().toLowerCase();
+      const trustedEntry = trusted.find((t) => t.email === normalized);
+      const eligible = isAutoPromoteEligible({
+        fromAddress: intake.from_address,
+        spfPass: intake.spf_pass === 1,
+        dkimPass: intake.dkim_pass === 1,
+        hasValidAttachment: !!intake.attachment_r2_key,
+        trustedSenders: trusted.map((t) => t.email),
+        blockedSenders: blocked.map((b) => b.email),
+        receivedAt: intake.received_at,
+        trustedCreatedAt: trustedEntry?.created_at ?? null,
+      });
+      if (!eligible) {
+        throw new Error(
+          `Intake ${id} failed auto-promotion policy: sender untrusted, blocked, or intake predates trust.`,
+        );
+      }
+    }
+
     const receiptId = await promoteIntake(id, actor);
     return NextResponse.json({ receiptId }, { status: 200 });
   } catch (error) {
@@ -65,7 +98,8 @@ function isIntakeStateConflict(error: unknown): boolean {
     (/already (promoted|rejected|pending_triage)/i.test(error.message) ||
       /nothing promotable|no promotable attachment|no body to promote/i.test(error.message) ||
       /only pending_triage may be/i.test(error.message) ||
-      /is missing from r2/i.test(error.message))
+      /is missing from r2/i.test(error.message) ||
+      /auto-promotion policy/i.test(error.message))
   );
 }
 function unauthorized() {

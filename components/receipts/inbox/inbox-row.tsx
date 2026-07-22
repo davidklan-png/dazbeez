@@ -19,7 +19,13 @@ const BODY_PREVIEW_CHARS = 200;
  * always visible when present — finding a verification link (e.g. the Gmail
  * forwarding confirmation) fast is the actual point of capturing the body.
  */
-export function InboxRow({ intake }: { intake: EmailReceiptIntake }) {
+export function InboxRow({
+  intake,
+  senderState = "unrecognized",
+}: {
+  intake: EmailReceiptIntake;
+  senderState?: "trusted" | "blocked" | "unrecognized";
+}) {
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
@@ -251,6 +257,65 @@ export function InboxRow({ intake }: { intake: EmailReceiptIntake }) {
       )}
 
       <div className="mt-3 flex flex-wrap items-center gap-2">
+        {/* Sender-state badge */}
+        {senderState === "trusted" && (
+          <span className="rounded-full bg-green-100 px-2 py-0.5 text-[10px] font-semibold text-green-800">Trusted</span>
+        )}
+        {senderState === "blocked" && (
+          <span className="rounded-full bg-red-100 px-2 py-0.5 text-[10px] font-semibold text-red-700">Blocked</span>
+        )}
+        {senderState === "unrecognized" && (
+          <>
+            <button
+              type="button"
+              onClick={async () => {
+                setError(null);
+                try {
+                  const res = await fetch("/api/receipts/settings/trusted-senders", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ email: intake.from_address }),
+                  });
+                  if (!res.ok) throw new Error(`Trust failed (HTTP ${res.status})`);
+                  refresh();
+                } catch (e) {
+                  setError(e instanceof Error ? e.message : "Trust sender failed.");
+                }
+              }}
+              disabled={isPending}
+              className="rounded-lg border border-green-200 bg-green-50 px-3 py-1.5 text-xs font-medium text-green-700 hover:bg-green-100 disabled:opacity-50"
+            >
+              Trust sender
+            </button>
+            <button
+              type="button"
+              onClick={async () => {
+                if (!confirm(
+                  `Block ${intake.from_address}?\n\nThis blocks the sender for future mail AND rejects this message. ` +
+                  `Future mail from this address will be recorded as metadata only (no body or attachments).`,
+                )) return;
+                setError(null);
+                try {
+                  const res = await fetch(
+                    `/api/receipts/inbox/${encodeURIComponent(intake.id)}/block-sender`,
+                    { method: "POST" },
+                  );
+                  if (!res.ok) {
+                    const body = (await res.json().catch(() => ({}))) as { error?: string };
+                    throw new Error(body.error ?? `Block failed (HTTP ${res.status})`);
+                  }
+                  refresh();
+                } catch (e) {
+                  setError(e instanceof Error ? e.message : "Block sender failed.");
+                }
+              }}
+              disabled={isPending}
+              className="rounded-lg border border-red-200 bg-red-50 px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-100 disabled:opacity-50"
+            >
+              Block sender
+            </button>
+          </>
+        )}
         <button
           type="button"
           onClick={handlePromote}

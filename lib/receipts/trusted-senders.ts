@@ -25,9 +25,10 @@ export interface TrustedIntakeSender {
 // notification_recipient check.
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-/** Trim + lowercase, the single normalization applied at write time so the
- * consumer's eligibility check is a plain set-membership test at read time. */
-function normalizeEmail(email: string): string {
+/** Trim + lowercase — the single normalization applied at write time so the
+ * consumer's eligibility check is a plain set-membership test at read time.
+ * Shared by trusted AND blocked sender policy code (ADR 0011 follow-up). */
+export function normalizeSenderEmail(email: string): string {
   return email.trim().toLowerCase();
 }
 
@@ -59,7 +60,7 @@ export async function addTrustedSender(
   email: string,
   actor: string,
 ): Promise<void> {
-  const normalized = normalizeEmail(email);
+  const normalized = normalizeSenderEmail(email);
   if (!isValidSenderEmail(normalized)) {
     throw new Error(
       `"${email.trim()}" is not a valid email address (expected local@domain.tld, no spaces).`,
@@ -104,7 +105,7 @@ export async function removeTrustedSender(
   email: string,
   actor: string,
 ): Promise<void> {
-  const normalized = normalizeEmail(email);
+  const normalized = normalizeSenderEmail(email);
 
   const existing = await db
     .prepare(`SELECT 1 FROM trusted_intake_senders WHERE email = ? LIMIT 1`)
