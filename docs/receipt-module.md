@@ -142,6 +142,12 @@ The application does not expose hard-delete flows for retained tax records. Soft
 
 Extraction is **store-and-forward**, not synchronous. Capture writes the image to R2, inserts the receipt at `status='captured'` (`extraction_state='captured'`), and enqueues a job on the `RECEIPTS_QUEUE` Cloudflare Queue. The **Mac MLX consumer** (`scripts/receipts-consumer/`) is the only processor: it pulls a batch, runs a local vision-language model, and POSTs the result to `POST /api/receipts/[id]/extract` (authenticated with `RECEIPTS_PROCESSOR_KEY`), which runs the deterministic regex parser as a **guardrail** over the model output, merges fields, and advances the receipt to `needs_review`.
 
+PDF receipts are rendered to one ordered image per page at approximately
+200 DPI. The MLX prompt receives every page in document order, scales its
+output-token budget for multi-page transcription, and records
+`sourcePageCount` in `extraction_json`. Single-page PDFs and raster uploads use
+the same path with a page count of one.
+
 Consequences enforced in code:
 
 - **Pending processing is a first-class state.** A captured-but-unprocessed receipt shows as "Receipts pending processing" (CTA: *Process queue*), never as a missing or unreviewed receipt.

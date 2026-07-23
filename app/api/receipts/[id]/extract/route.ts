@@ -3,6 +3,7 @@ import { requireReceiptsActor } from "@/lib/receipts/auth";
 import { getReceiptRecord, reconcileExtractionState, updateReceiptRecord } from "@/lib/receipts/db";
 import {
   buildGuardedExtraction,
+  coerceSourcePageCount,
   type ModelExtractionFields,
 } from "@/lib/receipts/extraction";
 import { createAuditEntry } from "@/lib/receipts/audit";
@@ -38,6 +39,9 @@ interface ApplyBody {
    * review UI can badge "Structured parse failed" instead of silently
    * rendering empty fields. */
   structuredParseFailed?: boolean;
+  /** Number of ordered source pages/images processed by the MLX consumer.
+   * Persisted as extraction provenance; one for ordinary image receipts. */
+  sourcePageCount?: number;
 }
 
 /**
@@ -105,10 +109,12 @@ export async function POST(request: Request, { params }: RouteContext) {
 
     // Resolve the OCR text: fresh from the model, else the text already stored.
     let rawText = body?.rawText?.trim() || "";
+    let priorSourcePageCount: number | undefined;
     if (!rawText && receipt.extraction_json) {
       try {
         const prior = JSON.parse(receipt.extraction_json) as Partial<ExtractionResult>;
         rawText = (prior.rawText ?? "").trim();
+        priorSourcePageCount = coerceSourcePageCount(prior.sourcePageCount);
       } catch {
         /* ignore malformed prior extraction */
       }
@@ -144,6 +150,8 @@ export async function POST(request: Request, { params }: RouteContext) {
     });
 
     const provider = body?.model || (isProcessor ? "mlx_local" : "regex_reprocess");
+    const sourcePageCount =
+      coerceSourcePageCount(body?.sourcePageCount) ?? priorSourcePageCount;
     const { result, discrepancies } = buildGuardedExtraction(
       rawText,
       body?.fields ?? {},
@@ -158,7 +166,11 @@ export async function POST(request: Request, { params }: RouteContext) {
       overwrite || current === null || current === undefined || current === "";
 
     const updates: Parameters<typeof updateReceiptRecord>[1] = {
-      extractionJson: JSON.stringify({ ...result, discrepancies }),
+      extractionJson: JSON.stringify({
+        ...result,
+        discrepancies,
+        ...(sourcePageCount ? { sourcePageCount } : {}),
+      }),
       extractionState: "processed",
       extractionProcessedAt: nowIso(),
       extractionProcessor: provider,
@@ -235,7 +247,11 @@ export async function POST(request: Request, { params }: RouteContext) {
       action: "receipt.extraction_completed",
       objectType: "receipt",
       objectId: id,
-      newValueJson: stringifyJson({ provider, discrepancies }),
+      newValueJson: stringifyJson({
+        provider,
+        discrepancies,
+        ...(sourcePageCount ? { sourcePageCount } : {}),
+      }),
     });
 
     return NextResponse.json(

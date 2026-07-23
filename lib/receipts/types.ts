@@ -783,6 +783,9 @@ export interface ExtractionResult {
   // JSON). Review UI uses this to badge "Structured parse failed — raw
   // text available" instead of silently rendering empty fields.
   structuredParseFailed?: boolean;
+  // Extraction provenance from the Mac consumer. Raster uploads report 1;
+  // multi-page PDFs report the number of ordered page images sent to MLX.
+  sourcePageCount?: number;
 }
 
 // ─── Reconciliation ────────────────────────────────────────────────────────
