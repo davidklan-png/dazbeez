@@ -60,6 +60,8 @@ PROCESSOR_KEY = os.environ["RECEIPTS_PROCESSOR_KEY"]
 # Validated on the M4 Max (128 GB): 32B-4bit ≈ 18 GB on disk, ~21.6 GB RAM
 # (17%), ~26 tok/s. Strong JA accuracy incl. T-invoice numbers + tax math.
 MLX_MODEL = os.environ.get("MLX_MODEL", "mlx-community/Qwen3-VL-32B-Instruct-4bit")
+MLX_MAX_TOKENS_PER_PAGE = 1500
+MLX_MAX_TOKENS_TOTAL = 6000
 
 QUEUES_API = (
     f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}"
@@ -74,6 +76,8 @@ CF_HEADERS = {"Authorization": f"Bearer {CF_API_TOKEN}", "Content-Type": "applic
 
 PROMPT = (
     "You are reading a receipt or tax invoice (Japanese or English). "
+    "When multiple images are provided, they are consecutive pages of the "
+    "same document in page order; read and transcribe every page. "
     "First transcribe ALL visible text exactly, preserving line breaks. "
     "Then output a single JSON object on the final line with keys: "
     "rawText (the full transcription), merchant, transactionDate (YYYY-MM-DD), "
@@ -106,16 +110,16 @@ def ack(lease_ids: list[str]) -> None:
     ).raise_for_status()
 
 
-def fetch_image(receipt_id: str, r2_key: str) -> str:
+def fetch_images(receipt_id: str, r2_key: str) -> list[str]:
     """Download the original image via the Worker's /file endpoint.
 
     The Worker proxies R2 with the same processor key the consumer uses to POST
     extraction results (ADR 0001) — so the consumer needs no R2 scope on its
     Cloudflare API token, and never shells out to wrangler per image.
 
-    PDFs are rasterized to PNG (page 0, ~200 DPI) before returning so the MLX
-    VLM (which expects a raster input) can read them. Multi-page PDFs warn to
-    stderr — receipts should be single-page; we want to know if they aren't.
+    PDFs are rasterized to one PNG per page (~200 DPI) and returned in page
+    order so the MLX VLM reads the complete document. Raster uploads return a
+    one-item list.
     Any fitz exception propagates to the caller's existing retry handling.
     """
     suffix = os.path.splitext(r2_key)[1] or ".bin"
@@ -134,60 +138,107 @@ def fetch_image(receipt_id: str, r2_key: str) -> str:
             if chunk:
                 fh.write(chunk)
 
-    # PDF → PNG (page 0 only). Lazy import so --help works without pymupdf.
+    # PDF → one PNG per page. Lazy import so --help works without pymupdf.
     if suffix.lower() == ".pdf":
-        return _rasterize_pdf(receipt_id, path)
+        return _rasterize_pdf_pages(receipt_id, path)
 
-    return path
+    return [path]
 
 
-def _rasterize_pdf(receipt_id: str, pdf_path: str) -> str:
-    """Render page 0 of a PDF to a ~200 DPI PNG. Returns the PNG path.
+def _unlink_paths(paths: list[str]) -> None:
+    """Best-effort cleanup for temporary extraction inputs."""
+    for path in paths:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
 
-    The .pdf temp file is unlinked before returning so the caller's normal
-    os.unlink cleanup runs on the PNG instead. Any fitz exception propagates.
+
+def _rasterize_pdf_pages(receipt_id: str, pdf_path: str) -> list[str]:
+    """Render every PDF page to an ordered list of ~200 DPI PNG paths.
+
+    The downloaded PDF is always unlinked. If any page fails, already-rendered
+    PNGs are also removed before the exception propagates to the existing
+    permanent/transient failure handling.
     """
     import fitz  # pymupdf — pure-Python wheel, no system deps
 
-    doc = fitz.open(pdf_path)
+    doc = None
+    png_paths: list[str] = []
     try:
+        doc = fitz.open(pdf_path)
         page_count = doc.page_count
+        if page_count < 1:
+            raise PermanentExtractionFailure("PDF has no pages")
         if page_count > 1:
             print(
-                f"[warn] {receipt_id}: PDF has {page_count} pages; "
-                "only rendering page 0 (receipts should be single-page).",
-                file=sys.stderr,
+                f"[info] {receipt_id}: PDF has {page_count} pages; "
+                "rendering all pages for extraction.",
             )
-        page = doc.load_page(0)
-        # 200 DPI: 72 DPI is PDF's native scale, so 200/72 ≈ 2.78×.
-        # Captures fine JA receipt text including small 領収書 numbers.
         matrix = fitz.Matrix(200 / 72, 200 / 72)
-        pixmap = page.get_pixmap(matrix=matrix, alpha=False)
-        fd, png_path = tempfile.mkstemp(suffix=".png")
-        os.close(fd)
-        pixmap.save(png_path)
+        for page_index in range(page_count):
+            page = doc.load_page(page_index)
+            # 200 DPI: 72 DPI is PDF's native scale, so 200/72 ≈ 2.78×.
+            # Captures fine JA receipt text including small 領収書 numbers.
+            pixmap = page.get_pixmap(matrix=matrix, alpha=False)
+            fd, png_path = tempfile.mkstemp(suffix=".png")
+            os.close(fd)
+            try:
+                pixmap.save(png_path)
+            except Exception:
+                _unlink_paths([png_path])
+                raise
+            png_paths.append(png_path)
+        return png_paths
+    except Exception:
+        _unlink_paths(png_paths)
+        raise
     finally:
-        doc.close()
+        if doc is not None:
+            doc.close()
+        _unlink_paths([pdf_path])
 
-    os.unlink(pdf_path)
-    return png_path
 
-
-def run_mlx(image_path: str) -> dict[str, Any]:
+def run_mlx(image_paths: list[str]) -> dict[str, Any]:
     """Run the local MLX VLM and return {rawText, fields}."""
+    if not image_paths:
+        raise PermanentExtractionFailure("no images available for extraction")
+
     from mlx_vlm import generate  # imported lazily so --help works without MLX
     from mlx_vlm.prompt_utils import apply_chat_template
     from mlx_vlm.utils import load_config
 
     model, processor = _load_model()
     config = load_config(MLX_MODEL)
-    formatted = apply_chat_template(processor, config, PROMPT, num_images=1)
-    result = generate(model, processor, formatted, [image_path], max_tokens=1500, verbose=False)
+    formatted = apply_chat_template(
+        processor,
+        config,
+        PROMPT,
+        num_images=len(image_paths),
+    )
+    result = generate(
+        model,
+        processor,
+        formatted,
+        image_paths,
+        # Preserve the existing single-page budget while giving multi-page
+        # documents enough room to transcribe every page plus the final JSON.
+        max_tokens=min(
+            MLX_MAX_TOKENS_PER_PAGE * len(image_paths),
+            MLX_MAX_TOKENS_TOTAL,
+        ),
+        verbose=False,
+    )
     # mlx-vlm >= 0.5 returns GenerationResult; older returned str. Handle both.
     output = result.text if hasattr(result, "text") else result
 
     raw_text, fields, parse_failed = _parse_model_output(output)
-    return {"rawText": raw_text, "fields": fields, "structuredParseFailed": parse_failed}
+    return {
+        "rawText": raw_text,
+        "fields": fields,
+        "structuredParseFailed": parse_failed,
+        "sourcePageCount": len(image_paths),
+    }
 
 
 _MODEL_CACHE: dict[str, Any] = {}
@@ -347,10 +398,10 @@ def make_proof_derivative(image_path: str) -> tuple[bytes, str] | None:
 def fetch_original_bytes(receipt_id: str) -> bytes | None:
     """Fetch the receipt's ORIGINAL file bytes via the Worker /file endpoint.
 
-    Same processor-key proxy as fetch_image, but WITHOUT PDF rasterization.
+    Same processor-key proxy as fetch_images, but WITHOUT PDF rasterization.
     Used for proof generation where PDFs must pass through uncompressed:
-    fetch_image rasterizes PDFs to PNG for MLX and discards the original, so the
-    PDF proof path re-fetches the raw bytes here. Returns None on failure
+    fetch_images rasterizes PDFs to PNGs for MLX and discards the original, so
+    the PDF proof path re-fetches the raw bytes here. Returns None on failure
     (caller skips the proof for this receipt).
     """
     headers = {"x-receipts-processor-key": PROCESSOR_KEY}
@@ -397,7 +448,7 @@ def generate_proof(
     """Build the proof derivative for a just-extracted receipt.
 
     For raster images, reuse the file already fetched for MLX (it IS the
-    original). For PDFs, fetch_image rasterized to PNG and discarded the
+    original). For PDFs, fetch_images rasterized to PNGs and discarded the
     original — re-fetch the raw PDF here so it passes through uncompressed.
     Returns (bytes, content_type) or None (skip).
     """
@@ -658,16 +709,13 @@ def process_backfill(dry_run: bool, only_id: str | None = None) -> None:
             continue
 
         try:
-            image_path = fetch_image(rid, r2_key)
+            image_paths = fetch_images(rid, r2_key)
             try:
-                if os.path.getsize(image_path) == 0:
+                if any(os.path.getsize(path) == 0 for path in image_paths):
                     raise PermanentExtractionFailure("downloaded file is zero bytes")
-                result = run_mlx(image_path)
+                result = run_mlx(image_paths)
             finally:
-                try:
-                    os.unlink(image_path)
-                except OSError:
-                    pass
+                _unlink_paths(image_paths)
             apply_to_worker(rid, result)
             stats["extract_ok"] += 1
             print(f"  [ok]          {label}")
@@ -921,31 +969,28 @@ def process_once() -> int:
         try:
             job = msg["body"] if isinstance(msg["body"], dict) else json.loads(msg["body"])
             receipt_id, r2_key = job["receiptId"], job["r2Key"]
-            image_path = fetch_image(receipt_id, r2_key)
+            image_paths = fetch_images(receipt_id, r2_key)
             # Zero-byte downloads are deterministic-permanent: a 200 OK with
             # an empty body means R2 has nothing for this key. MLX would
             # either crash or produce gibberish; either way retrying won't
             # help. Post failure + ack.
-            proof: tuple[bytes, str] | None = None  # built while image_path exists
+            proof: tuple[bytes, str] | None = None  # built while image_paths exist
             try:
-                if os.path.getsize(image_path) == 0:
+                if any(os.path.getsize(path) == 0 for path in image_paths):
                     raise PermanentExtractionFailure("downloaded file is zero bytes")
-                result = run_mlx(image_path)
+                result = run_mlx(image_paths)
                 # Proof derivative (advisory). Built inside the try so the
                 # raster image is still on disk; a build failure is swallowed
                 # — it must never block extraction.
                 try:
-                    proof = generate_proof(receipt_id, r2_key, image_path)
+                    proof = generate_proof(receipt_id, r2_key, image_paths[0])
                 except Exception as exc:  # noqa: BLE001
                     print(
                         f"[warn] {receipt_id}: proof build failed ({exc})",
                         file=sys.stderr,
                     )
             finally:
-                try:
-                    os.unlink(image_path)
-                except OSError:
-                    pass
+                _unlink_paths(image_paths)
             apply_to_worker(receipt_id, result)
             # Post the proof only after extraction is confirmed. Advisory: a
             # failure is logged and swallowed (backfill_proof_copies.py recovers

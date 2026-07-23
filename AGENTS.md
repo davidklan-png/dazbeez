@@ -302,14 +302,20 @@ starts. Design consequences:
     (PR #65 completed #9(a) consumer failed-state marking). Every failure
     path from the audit now surfaces or dies visibly. C-class accepted
     as documented.
-13. **Multi-page PDF handling.** Real-world case: 5608427143.pdf
-    (5c1ab53f…) has 2 pages; the consumer renders page 0 only and drops the
-    rest with a stderr-only warning — invisible to the operator. Design:
-    (a) render all pages and pass multiple images to the VLM (mlx-vlm
-    supports num_images > 1) or stack pages into one tall image; (b) record
-    page_count on the receipt and surface a "N pages, only p.1 extracted"
-    badge in the review UI until (a) ships. Feeds theme #12: warnings must
-    land where the operator works, not in a Mac log file.
+13. **Multi-page PDF handling.** IMPLEMENTED (code complete; Mac consumer
+    restart + surgical re-extraction still required). Real-world case:
+    5608427143.pdf (5c1ab53f…) has 2 pages; the old consumer rendered page 0
+    only. The consumer now renders every PDF page to an ordered ~200-DPI PNG
+    list, passes all images to mlx-vlm with `num_images` and a page-scaled
+    output budget, cleans up all page files on success/failure, and persists
+    `sourcePageCount` in extraction_json. Five focused regressions cover
+    single-page compatibility, multi-page order/completeness, partial-failure
+    cleanup, multi-image model input, and empty-input rejection; the complete
+    consumer suite is 84 passing. Automation/backfill scanning is deliberately
+    parked. Live follow-up: restart the launchd consumer from the committed
+    code, then re-extract only receipt 5c1ab53f… and verify
+    `sourcePageCount=2` plus page-2 text before considering this operationally
+    closed.
 14. **Extraction quality: 登録番号 recall.** Extractor missed a clearly
     printed T-number (receipt 92418c1a, T2810074043972 visible on image).
     Improve Mac-side extractor recall; consider a re-extract pass over

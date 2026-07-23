@@ -377,6 +377,15 @@ function coerceMinor(v: unknown): number | null {
   return null;
 }
 
+/** Validate untyped extraction provenance before persisting it. */
+export function coerceSourcePageCount(value: unknown): number | undefined {
+  return typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value > 0
+    ? value
+    : undefined;
+}
+
 /**
  * Build an ExtractionResult from OCR text produced off-Worker (MLX) plus any
  * structured fields the model emitted, running the deterministic regex parser
@@ -457,4 +466,3 @@ export function buildGuardedExtraction(
     },
   };
 }
-
