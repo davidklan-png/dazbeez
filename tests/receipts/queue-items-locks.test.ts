@@ -35,7 +35,7 @@ test("buildQueueItems: passes the locked flag + kind through from the locks map"
       receipt({ id: "sealed-export" }),
       receipt({ id: "sealed-recon" }),
     ],
-    new Set(),
+    new Map(),
     Date.UTC(2026, 6, 5),
     new Map([
       ["sealed-export", EXPORT_LOCK],

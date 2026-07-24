@@ -15,7 +15,7 @@ function item(partial: Partial<QueueItem> & Pick<QueueItem, "id">): QueueItem {
     dateLabel: "Jul 1",
     categoryLabel: "Transportation",
     status: "reviewed",
-    needs: null,
+    attentionCodes: [],
     stuck: false,
     extractionFailed: false,
     failureReason: null,
@@ -33,8 +33,8 @@ test("needsFirst: false for a clean reviewed row", () => {
   assert.equal(needsFirst(item({ id: "a" })), false);
 });
 
-test("needsFirst: true when needs is set, stuck, OR extractionFailed", () => {
-  assert.equal(needsFirst(item({ id: "a", needs: "attendees" })), true);
+test("needsFirst: true when attentionCodes is non-empty, stuck, OR extractionFailed", () => {
+  assert.equal(needsFirst(item({ id: "a", attentionCodes: ["unreviewed"] })), true);
   assert.equal(needsFirst(item({ id: "a", stuck: true })), true);
   assert.equal(needsFirst(item({ id: "a", extractionFailed: true })), true);
 });
@@ -79,8 +79,8 @@ test("sortQueueItems: merchant-az is case-insensitive alpha", () => {
 test("sortQueueItems: 'needs' surfaces needs/stuck/failed before reviewed, date-desc within each group", () => {
   const items = [
     item({ id: "rev-old", sortDateMs: 1 }),
-    item({ id: "need-new", needs: "attendees", sortDateMs: 100 }),
-    item({ id: "need-old", needs: "purpose", sortDateMs: 50 }),
+    item({ id: "need-new", attentionCodes: ["unreviewed"], sortDateMs: 100 }),
+    item({ id: "need-old", attentionCodes: ["missing_date"], sortDateMs: 50 }),
     item({ id: "rev-new", sortDateMs: 90 }),
   ];
   const out = sortQueueItems(items, "needs");

@@ -1,7 +1,6 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import {
-  getAmexMatchFlagsByReceiptIds,
   listAmexLineCountsByMonth,
   listDistinctTransactionMonths,
   listReceiptRecords,
@@ -11,7 +10,7 @@ import { assertReceiptsPageAccess } from "@/lib/receipts/auth-request";
 import { ReviewLayout } from "@/components/receipts/review/review-layout";
 import { buildQueueItems } from "@/lib/receipts/queue-items";
 import { getReceiptLocks } from "@/lib/receipts/receipt-locks";
-import { collectClosingAttentionReceiptIds } from "@/lib/receipts/review-attention";
+import { collectClosingAttentionReasons } from "@/lib/receipts/review-attention";
 import { loadClosingScopeWorkingSet } from "@/lib/receipts/review-scope";
 import { DEFAULT_SORT, sortQueueItems } from "@/lib/receipts/queue-sort";
 import { resolveWorkMonth, withWorkMonth } from "@/lib/receipts/work-month";
@@ -90,7 +89,8 @@ async function renderReviewPage(
   }
 
   const locks = await getReceiptLocks(workingReceipts);
-  const attentionIds = await collectClosingAttentionReceiptIds(workingReceipts);
+  const attentionReasons = await collectClosingAttentionReasons(workingReceipts);
+  const attentionIds = new Set(attentionReasons.keys());
   const queue = filterReviewQueue(workingReceipts, filter, {
     statusFilter,
     paymentPathFilter,
@@ -100,17 +100,11 @@ async function renderReviewPage(
     amexMatchedIds,
   });
 
-  const amexFlags = await getAmexMatchFlagsByReceiptIds(queue.map((r) => r.id));
-  const reReviewIds = new Set(
-    [...amexFlags.entries()]
-      .filter(([, f]) => f.reReviewNeeded)
-      .map(([rid]) => rid),
-  );
   // Server-side default sort matches the hydrated client (date-asc, undated
   // last) so the bare-URL redirect + next/prev fallback land on the same row
   // the sorted rail shows.
   const queueItems = sortQueueItems(
-    buildQueueItems(queue, reReviewIds, Date.now(), locks),
+    buildQueueItems(queue, attentionReasons, Date.now(), locks),
     DEFAULT_SORT,
   );
 

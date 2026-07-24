@@ -30,10 +30,11 @@ export const SORT_OPTIONS: ReadonlyArray<{ value: SortKey; label: string }> = [
   { value: "merchant-az", label: "Merchant A–Z" },
 ];
 
-/** True for "Needs first" partitioning: the row carries an attention badge,
- *  is stuck pending, or failed extraction. Shared by the comparator + tests. */
+/** True for "Needs first" partitioning: the row carries a closing-attention
+ *  reason (the same authority that drives the pill + "Needs review" tab), is
+ *  stuck pending, or failed extraction. Shared by the comparator + tests. */
 export function needsFirst(item: QueueItem): boolean {
-  return item.needs !== null || item.stuck || item.extractionFailed;
+  return item.attentionCodes.length > 0 || item.stuck || item.extractionFailed;
 }
 
 /** True when the row has no parseable date — sortDateMs is the 0 sentinel
@@ -59,7 +60,7 @@ function compareByDate(a: QueueItem, b: QueueItem, dir: 1 | -1): number {
  *  - date-asc / date-desc: by date, undated last in both orders.
  *  - amount-desc: by amount, unknown amounts (-1) last.
  *  - merchant-az: case-insensitive.
- *  - needs: needs/stuck/failed first, each group date-desc (undated last). */
+ *  - needs: attention/stuck/failed first, each group date-desc (undated last). */
 export function sortQueueItems(items: QueueItem[], sortKey: SortKey): QueueItem[] {
   const copy = items.slice();
   switch (sortKey) {

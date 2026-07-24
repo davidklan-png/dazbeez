@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { computeClosingAttentionReceiptIds } from "@/lib/receipts/review-attention";
+import {
+  computeClosingAttentionReasons,
+  computeClosingAttentionReceiptIds,
+} from "@/lib/receipts/review-attention";
 import type {
   AmexStatementLine,
   ReceiptRecord,
@@ -112,6 +115,10 @@ function input(
 
 function attentionFor(receipts: ReceiptRecord[], overrides?: Partial<Parameters<typeof computeClosingAttentionReceiptIds>[0]>) {
   return computeClosingAttentionReceiptIds(input(receipts, overrides));
+}
+
+function reasonsFor(receipts: ReceiptRecord[], overrides?: Partial<Parameters<typeof computeClosingAttentionReasons>[0]>) {
+  return computeClosingAttentionReasons(input(receipts, overrides));
 }
 
 // ─── clean receipt is excluded ──────────────────────────────────────────────
@@ -331,4 +338,50 @@ test("attention: only working-set ids are returned (a matched_receipt_id not in 
   const set = attentionFor([makeReceipt()], { amexLines: [line] });
   assert.equal(set.has("not-in-set"), false);
   assert.equal(set.size, 0);
+});
+
+// ─── reason codes (computeClosingAttentionReasons) ──────────────────────────
+
+test("reasons: a clean receipt is ABSENT from the reasons map (not present with [])", () => {
+  const map = reasonsFor([makeReceipt()]);
+  assert.equal(map.has("r-clean"), false);
+});
+
+test("reasons: a receipt failing two gates carries both codes in check order", () => {
+  // No date (gate 1) AND no proof-file row (gate 6) — both fire, in order.
+  const map = reasonsFor(
+    [makeReceipt({ id: "twogates", transaction_date: null })],
+    { receiptFileCounts: new Map() },
+  );
+  assert.deepEqual(map.get("twogates"), ["missing_date", "missing_proof_file"]);
+});
+
+test("reasons: a pending receipt carries exactly ['extraction_pending'] even when it would also fail gates", () => {
+  // Queued + every gate blank: the (1) skip must suppress the gate noise.
+  const map = reasonsFor(
+    [makeReceipt({
+      id: "pend",
+      extraction_state: "queued",
+      status: "captured",
+      transaction_date: null,
+      merchant: null,
+      amount_minor: null,
+      expense_category_code: null,
+    })],
+    { receiptFileCounts: new Map() },
+  );
+  assert.deepEqual(map.get("pend"), ["extraction_pending"]);
+});
+
+test("reasons: AMEX sign-off maps to an amex_ code; the same code from two lines is deduped", () => {
+  // Each confirmed line fires only re_review_needed → amex_re_review_needed;
+  // two lines collapse to one deduped entry. (Line amounts sum to the receipt
+  // total so no consolidated-mismatch code is also emitted.)
+  const lineA = makeLine({ id: "la", matched_receipt_id: "ax", match_status: "confirmed", re_review_needed: 1, amount_minor: 500, expense_category_code: "supplies" });
+  const lineB = makeLine({ id: "lb", matched_receipt_id: "ax", match_status: "confirmed", re_review_needed: 1, amount_minor: 500, expense_category_code: "supplies" });
+  const map = reasonsFor(
+    [makeReceipt({ id: "ax", payment_path: "AMEX" })],
+    { amexLines: [lineA, lineB], receiptFileCounts: new Map([["ax", 1]]) },
+  );
+  assert.deepEqual(map.get("ax"), ["amex_re_review_needed"]);
 });
