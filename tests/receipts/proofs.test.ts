@@ -32,12 +32,23 @@ test("sanitizeZipNameSegment caps length on code points (no surrogate slice)", (
   assert.equal(sanitizeZipNameSegment(long, 10).length, 10); // 10 CJK chars
 });
 
+test("sanitizeZipNameSegment: NFD input (Mac-originated) is NFC-normalized", () => {
+  // ブ (U+30D6) decomposes under NFD to フ (U+30D5) + combining dakuten (U+3099).
+  // Mac-originated merchant strings can arrive in this decomposed form; the
+  // entry name must be recomposed so it string-matches the NFC 照合CSV column.
+  const nfd = "セブン".normalize("NFD");
+  assert.notEqual(nfd, "セブン", "sanity: the NFD form is not the NFC form");
+  const out = sanitizeZipNameSegment(nfd);
+  assert.equal(out, "セブン", "output is NFC-composed");
+  assert.equal(out, out.normalize("NFC"), "output is stable under re-normalization");
+});
+
 // ─── formatYenAmount ────────────────────────────────────────────────────────
 
-test("formatYenAmount groups with commas, ¥ prefix, JPY only", () => {
-  assert.equal(formatYenAmount(108341, "JPY"), "¥108,341");
-  assert.equal(formatYenAmount(1900, "JPY"), "¥1,900");
-  assert.equal(formatYenAmount(-100, "JPY"), "¥-100");
+test("formatYenAmount groups with commas, ￥ prefix, JPY only", () => {
+  assert.equal(formatYenAmount(108341, "JPY"), "￥108,341");
+  assert.equal(formatYenAmount(1900, "JPY"), "￥1,900");
+  assert.equal(formatYenAmount(-100, "JPY"), "￥-100");
   assert.equal(formatYenAmount(1250, "USD"), "1250"); // non-JPY raw
 });
 
@@ -73,7 +84,7 @@ test("buildProofFilename: No padded, segments joined, ext", () => {
       currency: "JPY",
       ext: "pdf",
     }),
-    "No03_研究開発費_OpenAI_¥108,341.pdf",
+    "No03_研究開発費_OpenAI_￥108,341.pdf",
   );
 });
 
@@ -88,7 +99,7 @@ test("buildProofFilename: multi-file suffix (-2) before ext", () => {
       ext: "jpg",
       fileIndex: 2,
     }),
-    "No07_接待交際費_屋形舟_¥69,000-2.jpg",
+    "No07_接待交際費_屋形舟_￥69,000-2.jpg",
   );
 });
 
@@ -224,11 +235,11 @@ test("assembleProofsZip: UTF-8 names round-trip + 集計/参加者一覧/お知�
   assert.ok(names.some((n) => n.includes("現金分/")), "cash folder (per payment path)");
   // The two proof files, with their No-prefixed Japanese names intact.
   assert.ok(
-    names.some((n) => n.includes("No03_研究開発費_OpenAI_¥108,341.pdf")),
-    "AMEX proof filename (Japanese + ¥) round-trips",
+    names.some((n) => n.includes("No03_研究開発費_OpenAI_￥108,341.pdf")),
+    "AMEX proof filename (Japanese + ￥) round-trips",
   );
   assert.ok(
-    names.some((n) => n.includes("No33_旅費交通費_セブン-イレブン東中野末広橋店_¥10,000.jpg")),
+    names.some((n) => n.includes("No33_旅費交通費_セブン-イレブン東中野末広橋店_￥10,000.jpg")),
     "cash proof filename (whitespace-stripped merchant) round-trips",
   );
   // Index + summary + attendees + notice.
@@ -285,4 +296,47 @@ test("assembleProofsZip: reconciliation CSVs embedded at root when provided (rev
   );
   // Root placement (directly under the 領収書等証憑_<month>/ prefix).
   assert.equal(amexKey!.split("/").length, 2, "embedded at ZIP root");
+});
+
+// ─── CP932 filename safety (regression for the 2026-07-24 field failure) ────
+// The accountant's Japanese-Windows chain converts zip entry names to CP932.
+// Half-width ¥ (U+00A5) is absent from CP932 and maps to byte 0x5C (a Windows
+// path separator), corrupting extraction. Every emitted entry name must use
+// full-width ￥ (U+FFE5) and be NFC (decomposed kana also breaks matching
+// against the NFC 照合CSV 領収書ファイル名 column).
+
+test("assembleProofsZip: no entry name contains half-width ¥ (U+00A5); all names NFC", () => {
+  const entries = [
+    fakeEntry({ no: 3, paymentPath: "AMEX" }),
+    fakeEntry({
+      no: 33,
+      categoryJa: "旅費交通費",
+      merchant: "セブン-イレブン 東中野末広橋店",
+      amountMinor: 10000,
+      ext: "jpg",
+      paymentPath: "CASH",
+      bytes: new Uint8Array([0xff, 0xd8, 0xff, 0xe0]),
+    }),
+  ];
+  const zip = assembleProofsZip(
+    "2026-06",
+    entries,
+    { ...baseNotice, receiptCount: 2 },
+    SUMMARY_CSV,
+    ATTENDEES_CSV,
+    { amex: "﻿amex-bytes", cash: null, digital: null },
+  );
+  const names = Object.keys(unzipSync(zip));
+  assert.ok(names.length > 0, "sanity: zip has entries");
+  for (const name of names) {
+    assert.ok(
+      !name.includes("¥"),
+      `entry name must not contain half-width ¥ (U+00A5): ${name}`,
+    );
+    assert.equal(
+      name,
+      name.normalize("NFC"),
+      `entry name must be NFC-normalized: ${name}`,
+    );
+  }
 });

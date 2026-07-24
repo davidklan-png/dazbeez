@@ -10,7 +10,7 @@
 // Folder contract (review #2 + draft-round feedback 2026-07-18):
 //   領収書等証憑_<month>/
 //     AMEX明細分/  ← receipts matched to AMEX statement lines
-//       会議費Jun2026③小田原みなと食堂¥6,490.jpg   (科目＆No naming)
+//       会議費Jun2026③小田原みなと食堂￥6,490.jpg   (科目＆No naming)
 //     現金分/      ← CASH receipts (calendar-month membership)
 //     デジタル分/  ← DIGITAL receipts
 //     AMEX/CASH/DIGITAL{month}_Reconciliation.csv ← byte-copies of the 照合CSVs
@@ -28,20 +28,31 @@ import type { ExportRow, ReceiptRecord } from "@/lib/receipts/types";
 const ZIP_FORBIDDEN_RE = /[\/\\:*?"<>|\s]+/g;
 
 export function sanitizeZipNameSegment(s: string, maxLen = 30): string {
-  const cleaned = s.replace(ZIP_FORBIDDEN_RE, "").trim();
+  // NFC first: Mac-originated merchant strings can arrive NFD (decomposed
+  // dakuten kana), which extracts as decomposed on Windows and breaks
+  // string-matching against the NFC 照合CSV 領収書ファイル名 column.
+  const cleaned = s.normalize("NFC").replace(ZIP_FORBIDDEN_RE, "").trim();
   // capLen on code points, not UTF-16 units, so we don't slice a surrogate pair.
   const capped = Array.from(cleaned).slice(0, maxLen).join("");
   return capped.length > 0 ? capped : "unknown";
 }
 
-/** ¥-prefixed comma-grouped yen amount for filenames. JPY only (proofs
- *  are yen receipts); non-JPY falls back to the raw minor value. */
+/** Full-width ￥ (U+FFE5)-prefixed comma-grouped yen amount for FILENAMES.
+ *  JPY only (proofs are yen receipts); non-JPY falls back to the raw minor
+ *  value. WHY full-width and not half-width ¥ (U+00A5): U+00A5 does not exist
+ *  in CP932 (Shift-JIS as used by Japanese Windows). When a tool in the
+ *  accountant's chain converts the name to CP932, U+00A5 fails outright or
+ *  maps to byte 0x5C — which Windows treats as a path separator — corrupting
+ *  or aborting extraction. Full-width ￥ IS in CP932 and is the correct
+ *  character for Japanese-facing filenames. FILENAMES ONLY: notice text,
+ *  CSVs, and other content keep half-width ¥ (content bytes are never
+ *  charset-converted by zip tools). */
 export function formatYenAmount(amountMinor: number, currency: string): string {
   if (currency !== "JPY") return String(amountMinor);
   const grouped = Math.abs(amountMinor)
     .toString()
     .replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-  return `¥${amountMinor < 0 ? "-" : ""}${grouped}`;
+  return `￥${amountMinor < 0 ? "-" : ""}${grouped}`;
 }
 
 export interface ProofFilenameParts {
@@ -55,7 +66,7 @@ export interface ProofFilenameParts {
   fileIndex?: number;
 }
 
-/** `No{NN}_{勘定科目Ja}_{merchant}_¥{amount}.{ext}` — zero-padded No, sanitized
+/** `No{NN}_{勘定科目Ja}_{merchant}_￥{amount}.{ext}` — zero-padded No, sanitized
  *  merchant. fileIndex>1 appends `-N` before the extension. */
 export function buildProofFilename(p: ProofFilenameParts): string {
   const no = String(p.no).padStart(2, "0");

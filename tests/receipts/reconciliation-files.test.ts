@@ -56,7 +56,7 @@ test("buildEvidenceAssignments: per-category sequence in input order", () => {
   assert.equal(m.get("a")!.label, "会議費Jun2026①");
   assert.equal(m.get("b")!.label, "旅費交通費Jun2026①");
   assert.equal(m.get("c")!.label, "会議費Jun2026②");
-  assert.equal(m.get("a")!.filename, "会議費Jun2026①小田原みなと食堂¥6,490.jpg");
+  assert.equal(m.get("a")!.filename, "会議費Jun2026①小田原みなと食堂￥6,490.jpg");
 });
 
 test("buildEvidenceAssignments: shared receipt keeps first assignment", () => {
@@ -83,7 +83,7 @@ test("buildEvidenceAssignments: filename sanitizes merchant, keeps yen commas, p
   const f = m.get("x")!.filename;
   assert.ok(!f.includes("/"), "forbidden chars stripped");
   assert.ok(!f.includes(" "), "spaces stripped");
-  assert.ok(f.endsWith("¥16,300.pdf"), `amount + ext suffix: ${f}`);
+  assert.ok(f.endsWith("￥16,300.pdf"), `amount + ext suffix: ${f}`);
   assert.ok(f.startsWith("交際費Jun2026①"), `label prefix: ${f}`);
 });
 
@@ -110,7 +110,7 @@ test("buildAmexReconciliationCsv: frame rows verbatim, header + charge rows appe
       businessPurpose: "クライアント打ち合わせ",
       attendeeIds: "1; 2; 29",
       attendeeCount: "3",
-      receiptFileCell: "会議費Jun2026①小田原みなと食堂¥6,490.jpg",
+      receiptFileCell: "会議費Jun2026①小田原みなと食堂￥6,490.jpg",
     }],
   ]);
   const out = buildAmexReconciliationCsv(STATEMENT, appends).split("\n");
@@ -129,7 +129,7 @@ test("buildAmexReconciliationCsv: frame rows verbatim, header + charge rows appe
   // (¥6,490) so csvEscape wraps it.
   assert.equal(
     out[5],
-    '2026/04/17,小田原みなと食堂,,1回,,6490,,会議費Jun2026①,クライアント打ち合わせ,"1; 2; 29",3,"会議費Jun2026①小田原みなと食堂¥6,490.jpg"',
+    '2026/04/17,小田原みなと食堂,,1回,,6490,,会議費Jun2026①,クライアント打ち合わせ,"1; 2; 29",3,"会議費Jun2026①小田原みなと食堂￥6,490.jpg"',
   );
   // 小計/合計 rows verbatim.
   assert.equal(out[7], ",【小計】,,,,8195,");
@@ -143,7 +143,7 @@ test("buildAmexReconciliationCsv: comma-split amount rows normalize to 7 fields 
       businessPurpose: "",
       attendeeIds: "",
       attendeeCount: "",
-      receiptFileCell: "旅費交通費Jun2026①ENEOS¥1,705.jpg",
+      receiptFileCell: "旅費交通費Jun2026①ENEOS￥1,705.jpg",
     }],
   ]);
   const out = buildAmexReconciliationCsv(STATEMENT, appends).split("\n");
@@ -252,8 +252,8 @@ test("buildPaymentPathReconciliationCsv: lean header + attendees + evidence (dra
   assert.ok(lines[1]!.startsWith("1,2026-06-10,セブン-イレブン,1200,"), "No restarts at 1; lean columns");
   assert.ok(lines[1]!.includes("消耗品費Jun2026①"), "科目＆No appended");
   assert.ok(
-    lines[1]!.includes("消耗品費Jun2026①セブン-イレブン¥1,200.jpg") ||
-      lines[1]!.includes('"消耗品費Jun2026①セブン-イレブン¥1,200.jpg"'),
+    lines[1]!.includes("消耗品費Jun2026①セブン-イレブン￥1,200.jpg") ||
+      lines[1]!.includes('"消耗品費Jun2026①セブン-イレブン￥1,200.jpg"'),
     "領収書ファイル名 appended",
   );
 });

@@ -9,7 +9,7 @@
 //   DIGITAL{yyyy-mm}_Reconciliation.csv — likewise for DIGITAL.
 //
 // Evidence naming follows the manual-close contract (external/ March close):
-//   {勘定科目Ja}{MonYYYY}{①}{店舗}{¥金額}.{ext}   e.g. 会議費Jun2026③小田原みなと食堂¥6,490.jpg
+//   {勘定科目Ja}{MonYYYY}{①}{店舗}{￥金額}.{ext}   e.g. 会議費Jun2026③小田原みなと食堂￥6,490.jpg
 // One evidence file per receipt; a receipt paying multiple statement lines
 // gets ONE number and every line referencing it shows the same filename.
 // Numbering is assigned per 勘定科目, in statement order (raw_csv_line_number)
@@ -73,7 +73,7 @@ export interface EvidenceAssignment {
   /** 科目＆No label, e.g. `会議費Jun2026③`. */
   label: string;
   /** Evidence filename inside the proofs ZIP, e.g.
-   *  `会議費Jun2026③小田原みなと食堂¥6,490.jpg`. */
+   *  `会議費Jun2026③小田原みなと食堂￥6,490.jpg`. */
   filename: string;
   categoryJa: string;
   seq: number;
