@@ -755,7 +755,7 @@ export function buildExportReadme(opts: {
     "appended to each charge row. CASH/DIGITAL receipts ship in their own",
     "reconciliation CSVs with the same evidence columns appended.",
     "The proofs ZIP (<exportId>-proofs.zip) bundles one proof per receipt,",
-    "named <勘定科目><MonYYYY><①…><店舗><¥金額> — the 科目＆No. matches the",
+    "named <勘定科目><MonYYYY><①…><店舗><￥金額> — the 科目＆No. matches the",
     "reconciliation CSVs' 科目＆No. column; their 領収書ファイル名 column is",
     "the evidence index. Proofs are foldered per payment path (AMEX明細分/",
     "現金分/デジタル分).",
