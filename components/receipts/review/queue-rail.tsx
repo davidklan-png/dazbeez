@@ -6,6 +6,7 @@ import { useEffect, useMemo, useRef } from "react";
 import { Kbd } from "@/components/ui/kbd";
 import { ReceiptThumb } from "@/components/receipts/ui/receipt-thumb";
 import { useKeyboardShortcuts } from "@/lib/receipts/keyboard";
+import { CLOSING_ATTENTION_LABELS } from "@/lib/receipts/attention-codes";
 import { useQueueControls } from "@/components/receipts/review/queue-controls";
 
 export function QueueRail({
@@ -98,9 +99,17 @@ export function QueueRail({
                   <span className="h-[3px] w-[3px] rounded-full bg-gray-300" />
                   <span className="truncate">{item.categoryLabel}</span>
                 </div>
-                {item.needs && (
-                  <span className="mt-1 inline-block rounded bg-amber-100 px-1.5 py-px text-[10px] font-semibold text-amber-700">
-                    needs {item.needs}
+                {item.attentionCodes.length > 0 && !item.locked && (
+                  <span
+                    className="mt-1 inline-block rounded bg-amber-100 px-1.5 py-px text-[10px] font-semibold text-amber-700"
+                    title={item.attentionCodes
+                      .map((c) => CLOSING_ATTENTION_LABELS[c])
+                      .join(" · ")}
+                  >
+                    {CLOSING_ATTENTION_LABELS[item.attentionCodes[0]]}
+                    {item.attentionCodes.length > 1
+                      ? ` +${item.attentionCodes.length - 1}`
+                      : ""}
                   </span>
                 )}
                 {item.stuck && (

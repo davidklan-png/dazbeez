@@ -15,7 +15,7 @@ import { ImagePane } from "@/components/receipts/review/image-pane";
 import { FormPane } from "@/components/receipts/review/form-pane";
 import { listOpenExportMonths, naturalMonthForDate } from "@/lib/receipts/membership";
 import { getReceiptLocks, UNLOCKED_RECEIPT } from "@/lib/receipts/receipt-locks";
-import { collectClosingAttentionReceiptIds } from "@/lib/receipts/review-attention";
+import { collectClosingAttentionReasons } from "@/lib/receipts/review-attention";
 import { loadClosingScopeWorkingSet } from "@/lib/receipts/review-scope";
 import { DEFAULT_SORT, sortQueueItems } from "@/lib/receipts/queue-sort";
 import {
@@ -143,7 +143,8 @@ async function renderReceiptPage(
   const locks = await getReceiptLocks(dedupeReceipts([receipt, ...workingReceipts]));
   const activeLock = locks.get(receipt.id) ?? UNLOCKED_RECEIPT;
 
-  const attentionIds = await collectClosingAttentionReceiptIds(workingReceipts);
+  const attentionReasons = await collectClosingAttentionReasons(workingReceipts);
+  const attentionIds = new Set(attentionReasons.keys());
   const queue = filterReviewQueue(workingReceipts, filter, {
     statusFilter,
     paymentPathFilter,
@@ -156,17 +157,12 @@ async function renderReceiptPage(
   const amexFlags = await getAmexMatchFlagsByReceiptIds(
     queue.map((r) => r.id).concat(queue.some((r) => r.id === id) ? [] : [id]),
   );
-  const reReviewIds = new Set(
-    [...amexFlags.entries()]
-      .filter(([, f]) => f.reReviewNeeded)
-      .map(([rid]) => rid),
-  );
   const activeFlags = amexFlags.get(id);
 
   // Server-side default sort matches the hydrated client (date-asc, undated
   // last) so the next/prev fallback follows the same order as the sorted rail.
   const queueItems = sortQueueItems(
-    buildQueueItems(queue, reReviewIds, Date.now(), locks),
+    buildQueueItems(queue, attentionReasons, Date.now(), locks),
     DEFAULT_SORT,
   );
   const activeIndex = queueItems.findIndex((q) => q.id === id);

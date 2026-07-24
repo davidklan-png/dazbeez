@@ -1,10 +1,8 @@
-import {
-  requiresAttendees as categoryRequiresAttendees,
-  getCategoryByCode,
-} from "@/lib/receipts/categories";
+import { getCategoryByCode } from "@/lib/receipts/categories";
 import { isPendingProcessing } from "@/lib/receipts/extraction-state";
 import type { ReceiptLockInfo, ReceiptLockKind } from "@/lib/receipts/receipt-locks";
 import type { ReceiptRecord } from "@/lib/receipts/types";
+import type { ClosingAttentionCode } from "@/lib/receipts/attention-codes";
 
 /** Audit B6 / Task 4: per-receipt "stuck?" threshold for the review queue.
  *  Receipts pending extraction older than this get an amber badge in the
@@ -20,7 +18,10 @@ export type QueueItem = {
   dateLabel: string;
   categoryLabel: string;
   status: ReceiptRecord["status"];
-  needs: "attendees" | "purpose" | "re-review" | null;
+  /** Closing-attention reason codes for this receipt (empty when none). The
+   *  single authority is lib/receipts/review-attention.ts; the rail renders one
+   *  amber badge whose label is the first code and whose tooltip lists all. */
+  attentionCodes: ClosingAttentionCode[];
   /** True when this receipt is pending extraction and was enqueued/captured
    *  more than STUCK_PENDING_MS ago. The queue-rail renders an amber
    *  "stuck?" badge to flag a likely-stalled consumer. */
@@ -47,7 +48,7 @@ export type QueueItem = {
 
 export function buildQueueItems(
   receipts: ReceiptRecord[],
-  reReviewIds: ReadonlySet<string> = new Set(),
+  attentionReasons: ReadonlyMap<string, ClosingAttentionCode[]> = new Map(),
   now: number = Date.now(),
   locks: ReadonlyMap<string, ReceiptLockInfo> = new Map(),
 ): QueueItem[] {
@@ -64,7 +65,7 @@ export function buildQueueItems(
       dateLabel: formatDate(r.transaction_date ?? captured.slice(0, 10)),
       categoryLabel: cat ? cat.enName : code ? code : "Uncategorized",
       status: r.status,
-      needs: needsFlag(r, code, reReviewIds.has(r.id)),
+      attentionCodes: attentionReasons.get(r.id) ?? [],
       stuck: isStuckPending(r, now),
       extractionFailed: failure.failed,
       failureReason: failure.reason,
@@ -121,20 +122,6 @@ function isStuckPending(r: ReceiptRecord, now: number): boolean {
   const t = Date.parse(since);
   if (Number.isNaN(t)) return false;
   return now - t >= STUCK_PENDING_MS;
-}
-
-function needsFlag(
-  r: ReceiptRecord,
-  code: string,
-  reReviewNeeded: boolean,
-): "attendees" | "purpose" | "re-review" | null {
-  if (r.status === "exported" || r.status === "archived") return null;
-  if (reReviewNeeded) return "re-review";
-  if (categoryRequiresAttendees(code)) {
-    if (!r.business_purpose) return "attendees";
-  }
-  if (code === "meeting" && !r.business_purpose) return "purpose";
-  return null;
 }
 
 function formatAmount(amount: number | null, currency: string | null) {
