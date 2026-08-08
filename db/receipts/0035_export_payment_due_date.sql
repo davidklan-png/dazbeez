@@ -1,0 +1,20 @@
+-- 0035_export_payment_due_date.sql
+--
+-- Snapshot the AMEX statement payment-due date used to build each export's
+-- bundle onto the export row itself.
+--
+-- Why: the standalone AMEX 照合CSV download filename is dated by the statement
+-- payment-due date (20260604_AMEXカード利用明細.csv). Sourcing that date from
+-- the CURRENT amex_statement_artifacts row (a live lookup) means a later
+-- statement re-import with a different due date renames a sealed export's
+-- download differently from the file inside its sealed ZIP, and if the active
+-- artifact is replaced/removed the download of a sealed AMEX CSV that still
+-- exists in R2 can 404. Snapshotting the date at bundle-build time ties the
+-- filename to the immutable revision, not mutable month state (the same
+-- doctrine as ADR 0009 — don't live-lookup sealed months). Written by
+-- recordExportBundle() on every build; read by the download route.
+--
+-- Additive only — nullable, no backfill. Pre-existing rows read as NULL; the
+-- download route falls back to a legacy ASCII filename for those until the
+-- draft is rebuilt.
+ALTER TABLE receipt_exports ADD COLUMN payment_due_date TEXT;

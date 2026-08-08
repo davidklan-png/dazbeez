@@ -510,6 +510,40 @@ export function isExportDownloadFile(
   return (EXPORT_DOWNLOAD_FILES as readonly string[]).includes(value);
 }
 
+/**
+ * Build a `Content-Disposition: attachment` header value for a download
+ * filename, which may be non-ASCII (the reconciliation-CSV names:
+ * `202606_現金払いリスト.csv`). Fetch `Headers` values are ByteStrings
+ * (Latin-1), so a Japanese name in `filename="…"` throws a TypeError in the
+ * `Response` constructor and the endpoint returns 500 (Codex review #160, P1).
+ *
+ * ASCII names keep the plain `filename="…"` form (the proofs ZIP, receipts
+ * CSV, etc.). Non-ASCII names emit an ASCII fallback plus an RFC 5987
+ * `filename*=UTF-8''…` parameter, which modern clients prefer and render with
+ * the correct Unicode name.
+ */
+export function contentDispositionAttachment(filename: string): string {
+  if (/^[\x20-\x7E]+$/.test(filename)) {
+    return `attachment; filename="${filename}"`;
+  }
+  const asciiFallback = filename.replace(/[^\x20-\x7E]+/g, "_").replace(/"/g, "");
+  const utf8 = encodeURIComponent(filename).replace(
+    /['()*]/g,
+    (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase(),
+  );
+  return `attachment; filename="${asciiFallback}"; filename*=UTF-8''${utf8}`;
+}
+
+/** AMEX 照合CSV download filename for a revision: the pack name dated by the
+ *  revision's snapshotted payment-due date (matches the file inside the ZIP),
+ *  or a stable ASCII fallback for legacy rows predating the 0035 snapshot. */
+function amexReconDownloadName(month: string, paymentDueDate: string | null): string {
+  if (!paymentDueDate) {
+    return `AMEX${month}_Reconciliation.csv`;
+  }
+  return buildPackNames(month, paymentDueDate, true).amexReconciliationCsv;
+}
+
 export function resolveExportDownload(
   month: string,
   exportRecord: {
@@ -517,13 +551,13 @@ export function resolveExportDownload(
     archive_r2_key: string | null;
     manifest_r2_key: string | null;
     proofs_r2_key?: string | null;
+    /** AMEX payment-due date snapshotted when this revision's bundle was built
+     *  (0035). Names the AMEX 照合CSV download so it matches the file sealed
+     *  inside this revision's proofs ZIP — independent of the current statement
+     *  artifact (Codex review #160, P2). NULL on legacy rows. */
+    payment_due_date?: string | null;
   },
   file: ExportDownloadFile,
-  /** AMEX statement payment-due date (YYYY-MM-DD), used only to name the AMEX
-   *  照合CSV download via the single naming authority so it matches the file
-   *  inside the proofs ZIP (D15). Required for the `amex` file; ignored
-   *  otherwise. The download route fetches it from amex_statement_artifacts. */
-  paymentDueDate?: string | null,
 ): { r2Key: string | null; contentType: string; filename: string } {
   const csv = "text/csv; charset=utf-8";
   switch (file) {
@@ -578,15 +612,19 @@ export function resolveExportDownload(
     // by the statement month — so the downloaded file and the ZIP entry share a
     // name instead of the old divergent AMEX{month}_Reconciliation.csv labels.
     case "amex":
-      // The AMEX 照合CSV only ships when a statement is imported (→ a payment
-      // date). No date ⇒ no statement ⇒ no AMEX recon staged ⇒ 404 (null key).
-      return paymentDueDate
-        ? {
-            r2Key: buildAmexReconciliationKey(month, exportRecord.id),
-            contentType: csv,
-            filename: buildPackNames(month, paymentDueDate, true).amexReconciliationCsv,
-          }
-        : { r2Key: null, contentType: csv, filename: "" };
+      // The AMEX 照合CSV object is sealed at a derived, revision-stable key
+      // (buildAmexReconciliationKey), so it ALWAYS exists for a revision that
+      // staged one — return the key unconditionally; a 404 belongs at the R2
+      // layer (object absent), never gated on the date (Codex review #160, P2:
+      // gating on the current artifact 404'd sealed objects when the artifact
+      // was later replaced). The filename uses the revision's snapshotted date
+      // so it matches the file inside this revision's ZIP; legacy rows (NULL
+      // snapshot, pre-0035) fall back to a stable ASCII name.
+      return {
+        r2Key: buildAmexReconciliationKey(month, exportRecord.id),
+        contentType: csv,
+        filename: amexReconDownloadName(month, exportRecord.payment_due_date ?? null),
+      };
     case "cash":
       return {
         r2Key: buildCashReconciliationKey(month, exportRecord.id),
@@ -621,6 +659,9 @@ export type DownloadExportRecord = {
   proofs_r2_key?: string | null;
   /** NULL until the draft is rebuilt (recordExportBundle sets it). */
   bundle_built_at?: string | null;
+  /** AMEX payment-due date snapshotted at bundle-build (0035); names the AMEX
+   *  照合CSV download. NULL on rows predating 0035. */
+  payment_due_date?: string | null;
 };
 
 export type BundleDownloadResolution =
@@ -654,11 +695,8 @@ export function resolveBundleDownload(opts: {
   draft: boolean;
   draftRecord: DownloadExportRecord | null;
   finalizedRecord: DownloadExportRecord | null;
-  /** AMEX payment-due date, forwarded to resolveExportDownload to name the AMEX
-   *  照合CSV download (D15). Optional — only the `amex` file needs it. */
-  paymentDueDate?: string | null;
 }): BundleDownloadResolution {
-  const { month, file, draft, draftRecord, finalizedRecord, paymentDueDate } = opts;
+  const { month, file, draft, draftRecord, finalizedRecord } = opts;
 
   if (draft) {
     if (!draftRecord) {
@@ -675,7 +713,7 @@ export function resolveBundleDownload(opts: {
         message: "Draft not rebuilt yet — click Rebuild draft first.",
       };
     }
-    const target = resolveExportDownload(month, draftRecord, file, paymentDueDate);
+    const target = resolveExportDownload(month, draftRecord, file);
     if (!target.r2Key) {
       return {
         ok: false,
@@ -701,7 +739,7 @@ export function resolveBundleDownload(opts: {
       message: `No finalized export for ${month} yet.`,
     };
   }
-  const target = resolveExportDownload(month, finalizedRecord, file, paymentDueDate);
+  const target = resolveExportDownload(month, finalizedRecord, file);
   if (!target.r2Key) {
     // file-aware message (proofs was sealed before the proofs code shipped).
     const message =

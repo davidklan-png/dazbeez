@@ -10,7 +10,7 @@ import {
   validateMonthReadyForExport,
   computeEarlierOpenMonthWarnings,
 } from "@/lib/receipts/month-closing";
-import { composeFinalizeNoticeData, notifyAccountantOfFinalize } from "@/lib/receipts/notify";
+import { composeFinalizeNoticeData, notifyAccountantOfFinalize, type NotifyResult } from "@/lib/receipts/notify";
 import { createAuditEntry } from "@/lib/receipts/audit";
 import { stringifyJson } from "@/lib/receipts/db-utils";
 import { getReceiptsDb } from "@/lib/cloudflare-runtime";
@@ -117,6 +117,7 @@ export async function POST(request: Request, { params }: RouteContext) {
       exportRecord.manifest_sha256 ?? undefined,
       exportRecord.proofs_r2_key ?? null,
       exportRecord.proofs_sha256 ?? null,
+      exportRecord.payment_due_date ?? null,
     );
 
     // A7: non-blocking warning when finalizing month M while an earlier
@@ -126,9 +127,21 @@ export async function POST(request: Request, { params }: RouteContext) {
     const warnings = await computeEarlierOpenMonthWarnings(month);
 
     // Notification email (PR 3). Failure never fails finalize — it becomes a
-    // warning in the response + a notification_failed audit entry.
-    const notifyData = await composeFinalizeNoticeData(month, bundle, exportRecord);
-    const notifyResult = await notifyAccountantOfFinalize(notifyData);
+    // warning in the response + a notification_failed audit entry. Both the
+    // notice-data PREP and the send are non-blocking: a throw here (e.g. a
+    // transient D1 read in composeFinalizeNoticeData) must NOT surface as a
+    // finalize failure — the month is already sealed above, so a 500 would make
+    // a retry report a conflict (Codex review #160, P1).
+    let notifyResult: NotifyResult;
+    try {
+      const notifyData = await composeFinalizeNoticeData(month, bundle, exportRecord);
+      notifyResult = await notifyAccountantOfFinalize(notifyData);
+    } catch (err) {
+      notifyResult = {
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
     if (notifyResult.ok) {
       await createAuditEntry(getReceiptsDb(), {
         actor,

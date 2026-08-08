@@ -511,6 +511,11 @@ export interface ReceiptExport {
   // the rebuild builds the zip. The download route serves it via file=proofs.
   proofs_r2_key?: string | null;
   proofs_sha256?: string | null;
+  // AMEX payment-due date snapshotted at bundle-build time (0035). The download
+  // route names the AMEX 照合CSV from this, not a live lookup of the current
+  // statement artifact — so a sealed export's filename is tied to the immutable
+  // revision. NULL on rows predating 0035 (legacy ASCII filename fallback).
+  payment_due_date?: string | null;
 }
 
 /**

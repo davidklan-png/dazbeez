@@ -2985,6 +2985,10 @@ export async function recordExportBundle(
   manifestSha256?: string,
   proofsR2Key?: string | null,
   proofsSha256?: string | null,
+  /** AMEX payment-due date to snapshot onto this revision (0035). The build
+   *  path passes the just-fetched artifact date; finalizeExport passes the
+   *  draft row's existing snapshot (a no-op re-write of the same value). */
+  paymentDueDate?: string | null,
 ): Promise<void> {
   const db = getReceiptsDb();
   const now = nowIso();
@@ -2997,7 +3001,8 @@ export async function recordExportBundle(
            manifest_sha256 = ?,
            proofs_r2_key = ?,
            proofs_sha256 = ?,
-           bundle_built_at = ?
+           bundle_built_at = ?,
+           payment_due_date = ?
        WHERE id = ? AND status = 'draft'`,
     )
     .bind(
@@ -3008,6 +3013,7 @@ export async function recordExportBundle(
       proofsR2Key ?? null,
       proofsSha256 ?? null,
       now,
+      paymentDueDate ?? null,
       exportId,
     )
     .run();
@@ -3022,6 +3028,10 @@ export async function finalizeExport(
   manifestSha256?: string,
   proofsR2Key?: string | null,
   proofsSha256?: string | null,
+  /** AMEX payment-due date snapshot for this revision (0035); the caller passes
+   *  the draft row's existing value so the finalize re-stage writes the same
+   *  date the build captured. */
+  paymentDueDate?: string | null,
 ): Promise<void> {
   const db = getReceiptsDb();
   const now = nowIso();
@@ -3040,6 +3050,7 @@ export async function finalizeExport(
     manifestSha256,
     proofsR2Key,
     proofsSha256,
+    paymentDueDate,
   );
 
   const result = await db

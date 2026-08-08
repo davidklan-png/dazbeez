@@ -2,9 +2,10 @@ import { NextResponse } from "next/server";
 import { requireReceiptsActor } from "@/lib/receipts/auth";
 import { createAuditEntry } from "@/lib/receipts/audit";
 import { stringifyJson } from "@/lib/receipts/db-utils";
-import { getExport, getLatestFinalizedExport, getAmexArtifactByMonth } from "@/lib/receipts/db";
+import { getExport, getLatestFinalizedExport } from "@/lib/receipts/db";
 import {
   EXPORT_DOWNLOAD_FILES,
+  contentDispositionAttachment,
   isExportDownloadFile,
   resolveBundleDownload,
 } from "@/lib/receipts/export";
@@ -67,18 +68,17 @@ export async function GET(request: Request, { params }: RouteContext) {
     }
     const finalizedRecord = !draft ? await getLatestFinalizedExport(month) : null;
 
-    // The AMEX 照合CSV download is named by the statement payment-due date
-    // (D15) so the standalone download matches the file inside the proofs ZIP.
-    // Cheap read; null for a cash/digital-only month (the amex file then 404s).
-    const amexArtifact = await getAmexArtifactByMonth(month);
-
+    // The AMEX 照合CSV download is named from the payment-due date snapshotted
+    // onto the served revision at bundle-build time (0035) — carried on the
+    // record itself, so no live lookup of the current statement artifact (which
+    // could rename a sealed export's download away from its sealed ZIP, or 404
+    // a sealed object when the artifact was later replaced). Codex review #160.
     const resolution = resolveBundleDownload({
       month,
       file,
       draft,
       draftRecord,
       finalizedRecord,
-      paymentDueDate: amexArtifact?.payment_due_date ?? null,
     });
     if (!resolution.ok) {
       return NextResponse.json({ error: resolution.message }, { status: resolution.status });
@@ -107,7 +107,7 @@ export async function GET(request: Request, { params }: RouteContext) {
     return new Response(object.body, {
       headers: {
         "Content-Type": resolution.contentType,
-        "Content-Disposition": `attachment; filename="${resolution.filename}"`,
+        "Content-Disposition": contentDispositionAttachment(resolution.filename),
       },
     });
   } catch (error) {

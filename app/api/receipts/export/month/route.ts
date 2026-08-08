@@ -650,6 +650,7 @@ export async function POST(request: Request) {
         manifestSha256,
         proofsKey,
         proofsSha256,
+        amexArtifact?.payment_due_date ?? null,
       );
       // Audit the rebuild (finalize:false) — "export.generated" was defined
       // for this. The finalize:true path is audited by finalizeExport
