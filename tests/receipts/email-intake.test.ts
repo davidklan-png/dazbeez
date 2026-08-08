@@ -18,6 +18,7 @@ import {
   listPendingIntake,
   rejectIntake,
   buildPromoteReceiptInput,
+  buildPromoteExtractionJob,
   assertPromotable,
   isBodyOnlyIntake,
 } from "@/lib/receipts/email-intake";
@@ -525,6 +526,43 @@ test("buildPromoteReceiptInput: copies R2 metadata from the intake row", () => {
   assert.equal(input.originalContentType, "application/pdf");
   assert.equal(input.originalSizeBytes, 99);
   assert.equal(input.originalFilename, "f.pdf");
+});
+
+// ─── buildPromoteExtractionJob (pure half of the attachment enqueue) ────────
+
+test("buildPromoteExtractionJob: r2Key is the STANDARD key, NEVER the intake key", () => {
+  const standardKey = "receipts/2026/08/rcpt-1/abc-r.pdf";
+  const intakeKey = "receipts-intake/2026/08/intake-1/xyz-r.pdf";
+  const job = buildPromoteExtractionJob({
+    receiptId: "rcpt-1",
+    standardKey,
+    intakeContentType: "application/pdf",
+  });
+  assert.equal(job.r2Key, standardKey, "enqueues the standard key");
+  assert.notEqual(
+    job.r2Key,
+    intakeKey,
+    "never enqueues the intake key (deleted in step 5)",
+  );
+  assert.ok(
+    !job.r2Key.startsWith("receipts-intake/"),
+    "standard key uses the receipts/ prefix, not receipts-intake/",
+  );
+});
+
+test("buildPromoteExtractionJob: stamps receiptId + falls back contentType to octet-stream when null", () => {
+  const job = buildPromoteExtractionJob({
+    receiptId: "rcpt-2",
+    standardKey: "receipts/2026/08/rcpt-2/abc.png",
+    intakeContentType: null,
+  });
+  assert.equal(job.receiptId, "rcpt-2");
+  assert.equal(
+    job.contentType,
+    "application/octet-stream",
+    "null intake contentType falls back to a safe default",
+  );
+  assert.ok(job.enqueuedAt, "enqueuedAt is stamped on the job");
 });
 
 // ─── assertPromotable (pure half of promote) ────────────────────────────────

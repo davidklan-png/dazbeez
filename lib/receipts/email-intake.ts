@@ -20,7 +20,11 @@
 import { getReceiptsDb, getReceiptsBucket } from "@/lib/cloudflare-runtime";
 import { createReceiptRecord, updateReceiptRecord } from "@/lib/receipts/db";
 import { createAuditEntry } from "@/lib/receipts/audit";
-import { buildExtractionJob, enqueueExtractionJob } from "@/lib/receipts/queue";
+import {
+  buildExtractionJob,
+  enqueueExtractionJob,
+  type ExtractionJob,
+} from "@/lib/receipts/queue";
 import { nowIso, newUuid, stringifyJson } from "@/lib/receipts/db-utils";
 import {
   generateR2Key,
@@ -453,6 +457,28 @@ export function buildPromoteReceiptInput(intake: EmailReceiptIntake): CreateRece
 }
 
 /**
+ * Build the extraction job for a just-promoted attachment receipt — the pure
+ * half of promoteIntake's enqueue step, the way buildPromoteReceiptInput is the
+ * pure half of its createReceiptRecord step. r2Key is the STANDARD receipts/...
+ * key the object was copied to in step 2 — NEVER the intake key, which step 5
+ * deletes (the consumer would otherwise fetch a key about to vanish). Exported
+ * so that invariant is unit-testable without exercising the binding-coupled
+ * promoteIntake body, exactly as buildPromoteReceiptInput is tested while
+ * createReceiptRecord is not.
+ */
+export function buildPromoteExtractionJob(input: {
+  receiptId: string;
+  standardKey: string;
+  intakeContentType: string | null;
+}): ExtractionJob {
+  return buildExtractionJob({
+    receiptId: input.receiptId,
+    r2Key: input.standardKey,
+    contentType: input.intakeContentType ?? "application/octet-stream",
+  });
+}
+
+/**
  * Refuse promotion for rows that have nothing to promote or are no longer
  * pending. Throws a plain Error whose message is safe to surface as 409 body.
  * ADR 0011 Phase B: a body-only row (no attachment, but a captured text/html
@@ -690,25 +716,23 @@ export async function promoteIntake(
   //      best-effort contract as /api/receipts/upload: a missing/failing queue
   //      must NOT fail the promotion — the receipt stays at
   //      extraction_state='captured' for the /enqueue recovery endpoint to pick
-  //      up later. r2Key is the standard key set in step 3 (NEVER the intake
-  //      key, which step 5 deletes), and the enqueue happens AFTER the
-  //      original_r2_key patch so the consumer can never fetch a key that step
-  //      5 is about to delete. Before this step, every email_attachment receipt
-  //      sat at captured/never-enqueued forever (3 stranded on 2026-08-03).
-  const enqueuedAt = nowIso();
-  const enqueued = await enqueueExtractionJob(
-    buildExtractionJob({
-      receiptId,
-      r2Key: standardKey,
-      contentType: intake.attachment_content_type ?? "application/octet-stream",
-      enqueuedAt,
-    }),
-  );
+  //      up later. buildPromoteExtractionJob sets r2Key = the standard key from
+  //      step 3 (NEVER the intake key, which step 5 deletes — unit-tested), and
+  //      the enqueue happens AFTER the original_r2_key patch so the consumer
+  //      can never fetch a key that step 5 is about to delete. Before this
+  //      step, every email_attachment receipt sat at captured/never-enqueued
+  //      forever (3 stranded on 2026-08-03).
+  const job = buildPromoteExtractionJob({
+    receiptId,
+    standardKey,
+    intakeContentType: intake.attachment_content_type,
+  });
+  const enqueued = await enqueueExtractionJob(job);
   if (enqueued) {
     try {
       await updateReceiptRecord(
         receiptId,
-        { extractionState: "queued", extractionEnqueuedAt: enqueuedAt },
+        { extractionState: "queued", extractionEnqueuedAt: job.enqueuedAt },
         actor,
       );
     } catch (markError) {
