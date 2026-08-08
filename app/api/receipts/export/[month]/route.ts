@@ -109,7 +109,7 @@ export async function POST(request: Request, { params }: RouteContext) {
       exportRecord.manifest_r2_key,
       exportRecord.archive_sha256,
       actor,
-      exportRecord.manifest_sha256 ?? undefined,
+      exportRecord.manifest_sha256 ?? null,
       exportRecord.proofs_r2_key ?? null,
       exportRecord.proofs_sha256 ?? null,
       exportRecord.payment_due_date ?? null,
