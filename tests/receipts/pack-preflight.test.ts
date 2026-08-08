@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   runPackPreflight,
   PREFLIGHT_CHECK_KEYS,
+  stripOperatorMessageSection,
   type PackPreflightEntry,
   type PackPreflightInput,
 } from "@/lib/receipts/pack-preflight";
@@ -370,4 +371,42 @@ test("notice-policy: operator free text with 改訂情報/出席者/manifest doe
     true,
     "operator free text under 【今月のご連絡】 must not trip the policy check (改訂情報/出席者/manifest are the operator's words, not the generated notice)",
   );
+});
+
+// ─── stripOperatorMessageSection robustness ──────────────────────────────────
+
+test("stripOperatorMessageSection: operator text with a bracketed line does NOT prematurely end the strip", () => {
+  // The operator typed 【注意】 inside their note — a plausible bracketed line.
+  // The strip must anchor on 【この資料について】 (the generated heading), NOT on
+  // the operator's 【注意】. Otherwise the lines after 【注意】 would be
+  // under-stripped (kept in the generated-text scan).
+  const notice = buildPackNotice(
+    {
+      monthLabel: "2026年6月",
+      rowCount: 2,
+      receiptCount: 2,
+      missingReceiptLines: [],
+      operatorMessage:
+        "差替え版です。\n【注意】前回のパックは破棄してください。\nよろしくお願いします。",
+    },
+    names,
+  );
+  const stripped = stripOperatorMessageSection(notice);
+  // All operator text stripped (including the bracketed line + trailing text).
+  assert.ok(!stripped.includes("差替え版"), "text before 【注意】 stripped");
+  assert.ok(!stripped.includes("前回のパックは破棄"), "text after 【注意】 stripped");
+  assert.ok(!stripped.includes("【注意】"), "the operator's bracketed line stripped");
+  assert.ok(!stripped.includes("よろしくお願いします"), "trailing operator text stripped");
+  // Generated structure intact.
+  assert.ok(stripped.includes("【この資料について】"), "the generated heading is preserved");
+  assert.ok(stripped.includes("科目＆No"), "generated content preserved");
+});
+
+test("stripOperatorMessageSection: no-op when the operator message is absent", () => {
+  const notice = buildPackNotice(
+    { monthLabel: "2026年6月", rowCount: 2, receiptCount: 2, missingReceiptLines: [] },
+    names,
+  );
+  // No 【今月のご連絡】 heading ⇒ nothing to strip ⇒ identity.
+  assert.equal(stripOperatorMessageSection(notice), notice);
 });

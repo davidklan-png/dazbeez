@@ -219,13 +219,18 @@ function noticeFilenames(noticeText: string): string[] {
 }
 
 /** Remove the 【今月のご連絡】 section (operator free text) from a notice, so
- *  policy checks scan only the GENERATED structure — not the operator's own
- *  words. The operator may legitimately write 改訂/出席者/manifest references
- *  (e.g. a D17 re-delivery supersession note; or "出席者一覧は弊社で保管",
- *  per D9). Without this, preflight blocks the send on the operator's message.
- *  Strips from the 【今月のご連絡】 heading to the next 【 heading. No-op when
- *  the section is absent (operator message omitted). */
-function stripOperatorMessageSection(noticeText: string): string {
+ *  preflight checks scan only the GENERATED structure — not the operator's own
+ *  words. The operator may legitimately write anything (a D17 re-delivery
+ *  supersession note naming previous-pack files; a D9 attendee retention note;
+ *  改訂/出席者/manifest references). Without stripping, every notice check
+ *  operates on the operator's prose and blocks legitimate sends.
+ *
+ *  Anchors on 【この資料について】 — the generated heading that ALWAYS follows
+ *  the operator section (buildPackNotice emits it next) — NOT on any bracketed
+ *  token. This way an operator typing 【注意】 or 【重要】 inside their note does
+ *  NOT prematurely end the strip. No-op when the section is absent (operator
+ *  message omitted). */
+export function stripOperatorMessageSection(noticeText: string): string {
   const lines = noticeText.split(/\r?\n/);
   const out: string[] = [];
   let skipping = false;
@@ -234,7 +239,8 @@ function stripOperatorMessageSection(noticeText: string): string {
       skipping = true;
       continue;
     }
-    if (skipping && line.startsWith("【")) {
+    // End the skip at the KNOWN generated heading, not any 【 the operator typed.
+    if (skipping && line.startsWith("【この資料について】")) {
       skipping = false;
     }
     if (!skipping) out.push(line);
@@ -272,7 +278,7 @@ const checks: { key: string; run: Check }[] = [
       const basenames = new Set(
         entries.map((e) => e.name.split("/").pop()!),
       );
-      const missing = noticeFilenames(noticeText).filter(
+      const missing = noticeFilenames(stripOperatorMessageSection(noticeText)).filter(
         (f) => !basenames.has(f),
       );
       return missing.length === 0
@@ -292,7 +298,9 @@ const checks: { key: string; run: Check }[] = [
     // table, so it stays out of scope.
     key: "notice-mentions-shipped-reconciliation-csvs",
     run: ({ entries, noticeText }) => {
-      const mentioned = new Set(noticeFilenames(noticeText));
+      const mentioned = new Set(
+        noticeFilenames(stripOperatorMessageSection(noticeText)),
+      );
       const reconCsvs = [
         ...new Set(
           entries
