@@ -169,6 +169,65 @@ export async function sendViaResend(
   }
 }
 
+/** A Resend attachment — a filename plus the file content as base64 (Resend's
+ *  `attachments[].content` is base64). The filename MUST be ASCII (the pack
+ *  container name) — checked by the caller (B-4). */
+export interface ResendAttachment {
+  filename: string;
+  contentBase64: string;
+}
+
+/** Delivery send via Resend. Extends {@link sendViaResend} with the ZIP
+ *  attachment, a Cc recipient, and an `Idempotency-Key` header.
+ *
+ *  B-3: the key is derived from the attempt_id — stable across retries of one
+ *  attempt, new per operator send — so a response-timeout retry does not
+ *  double-send. On success the provider message id is returned so the caller
+ *  can record it on the delivery row. */
+export async function sendDeliveryViaResend(
+  fetchImpl: typeof fetch,
+  apiKey: string,
+  from: string,
+  to: string,
+  cc: string | null,
+  subject: string,
+  text: string,
+  html: string,
+  attachment: ResendAttachment,
+  idempotencyKey: string,
+): Promise<{ ok: true; messageId?: string } | { ok: false; error: string }> {
+  try {
+    const res = await fetchImpl("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+        "Idempotency-Key": idempotencyKey,
+      },
+      body: JSON.stringify({
+        from,
+        to: [to],
+        cc: cc ? [cc] : undefined,
+        subject,
+        text,
+        html,
+        attachments: [
+          { filename: attachment.filename, content: attachment.contentBase64 },
+        ],
+      }),
+    });
+    if (!res.ok) {
+      const errBody = (await res.json().catch(() => ({}))) as { message?: unknown };
+      const message = typeof errBody.message === "string" ? errBody.message : `Resend API returned ${res.status}`;
+      return { ok: false, error: message };
+    }
+    const body = (await res.json().catch(() => ({}))) as { id?: string };
+    return { ok: true, messageId: typeof body.id === "string" ? body.id : undefined };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 export async function sendFinalizeNotification(
   apiKey: string | null,
   from: string | null,
