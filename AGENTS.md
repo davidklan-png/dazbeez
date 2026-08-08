@@ -364,6 +364,32 @@ starts. Design consequences:
     booking, whether the system's derived deductible is authoritative or
     informational).
 
+17. **Review screen fakes queue position for out-of-view receipts.** NOT
+    DISPATCHED — spec ready at `prompts/WORKER-PROMPT-share-receipt-link.md`.
+    In `review/[id]/page.tsx`, `activeIndex = queueItems.findIndex(...)` is
+    `-1` when the active receipt isn't in the working set;
+    `Math.max(1, activeIndex + 1)` then renders a false **"1 of N"**, and
+    `nextReceiptId` resolves to `queueItems[0]` — so Skip and save-and-advance
+    jump into an unrelated queue. (`prevReceiptId` is harmless: `[-2]` →
+    undefined.) Live trigger is a **shared deep link crossing a month
+    boundary**: rail hrefs come from `buildReviewQueryParams`, which only emits
+    `month` when the operator used the month picker, so a link copied from the
+    default view carries none — after the calendar month rolls over the
+    recipient's rail is the new month and both bugs fire. Now reachable in
+    practice: receipt links are being shared with a second Clerk user
+    (2026-08-04 decision — Clerk account + existing protected deep link;
+    a signed capability-link design was assessed and rejected: third principal
+    class, scoped PATCH, unauthenticated R2 read path, seal-guard
+    reimplementation, and a weaker audit actor on 接待交際費 attendees).
+    Fix: extract a pure `resolveQueueNavigation` into `review-queue-filter.ts`
+    (absent id → `index: null`, `nextId: null`) + widen `FormPaneProps.queueIndex`
+    to `number | null` and render "not in this view". State it, don't fix it up —
+    do NOT widen the working set to make the receipt fit; that set is
+    export/closing-scope authority, not a display convenience. A Copy-link
+    button + share-URL builder were designed and CUT in the same pass: ordinary
+    right-click-copy covers the common cases and the button's only real value
+    was pinning the month, i.e. a workaround for this bug.
+
 ## Two-Agent Workflow: Sandbox (Architect) vs. CLI (Worker)
 
 This repo is developed across two separate Claude sessions that share the same

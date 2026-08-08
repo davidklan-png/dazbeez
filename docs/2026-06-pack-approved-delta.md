@@ -578,7 +578,7 @@ message area.** Approval screen shows the final assembled text.
     ├── 202606_現金払いリスト.csv
     ├── 202606_デジタル払いリスト.csv            ← only when non-empty (§9 UNCONFIRMED)
     ├── 202606_集計.csv
-    ├── 202606_新システムに関するご連絡.txt
+    ├── 202606_ご連絡事項.txt                    ← corrected 2026-08-07 per O5
     ├── 20260604_AMEXカード利用領収書/
     │     会議費Jun2026③小田原みなと食堂￥6,490.jpg    ← UNCHANGED
     ├── 202606_現金払い領収書/
