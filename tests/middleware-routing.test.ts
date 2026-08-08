@@ -77,3 +77,19 @@ test("matcher: the monthly-delivery send endpoint is Clerk-protected (auth.prote
     "the send route must NOT be exempted from auth.protect() (not in PUBLIC_ROUTES)",
   );
 });
+
+test("PUBLIC_ROUTES: the /enqueue recovery endpoint IS exempted (processor-key auth reaches the handler)", () => {
+  // POST /api/receipts/[id]/enqueue does layered processor-key OR Clerk auth
+  // inside the handler (mirroring /render, /promote). It MUST be in PUBLIC_ROUTES
+  // or Clerk's auth.protect() 404-rewrites the consumer's processor-key POST
+  // before the handler runs — the exact boundary bug cf:dev caught on this
+  // branch (unauth returned a 404 HTML page, not the handler's 401 JSON).
+  const enqueueRequest = new NextRequest(
+    "https://dazbeez.com/api/receipts/00000000-0000-0000-0000-000000000000/enqueue",
+    { method: "POST" },
+  );
+  assert.ok(
+    isPublicRoute(enqueueRequest),
+    "/enqueue must be exempted from auth.protect() so its handler's processor-key path runs",
+  );
+});

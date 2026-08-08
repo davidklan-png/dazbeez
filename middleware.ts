@@ -51,6 +51,14 @@ export const PUBLIC_ROUTES: string[] = [
   // 404-rewrites the consumer's processor-key POST before the handler runs.
   "/api/receipts/:id/render",
   "/api/receipts/inbox/:id/promote",
+  // Recovery endpoint for receipts captured but never enqueued (email-attachment
+  // promote before its enqueue fix; any future stranded capture path). Same
+  // layered processor-key OR Clerk auth inside the handler (mirrors
+  // render/promote), so it MUST be exempt from auth.protect() here — without
+  // this, Clerk 404-rewrites the consumer's processor-key POST before the
+  // handler runs. cf:dev caught this boundary on this branch: an unlisted route
+  // returns a 404 HTML page instead of the handler's own 401.
+  "/api/receipts/:id/enqueue",
 ];
 
 // Exported so the middleware-routing test can assert a route is actually
