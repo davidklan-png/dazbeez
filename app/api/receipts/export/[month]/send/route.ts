@@ -29,7 +29,9 @@ import {
   performDelivery,
   assertDeliverySize,
   buildDeliveryEmail,
+  MAX_DELIVERY_ZIP_BYTES,
 } from "@/lib/receipts/delivery-send";
+import { runPreflightOnSealedZip } from "@/lib/receipts/delivery-preflight";
 import { packZipName } from "@/lib/receipts/pack-naming";
 
 type RouteContext = { params: Promise<{ month: string }> };
@@ -191,14 +193,40 @@ export async function POST(request: Request, { params }: RouteContext) {
       zipBytes: zipBytes.byteLength,
     });
 
-    // ── [Change 3 insertion point] preflight runs HERE — after the delivery row
-    //    exists (so a failure marks it failed, never pending) and before the
-    //    send. Sketch:
-    //      const report = await runPreflightOnSealedZip(zipBytes, { month, ... });
-    //      if (!report.passed) {
-    //        await markDeliveryFailed(deliveryId, `preflight: ${report.results.filter(r=>!r.passed).map(r=>r.check).join(", ")}`);
-    //        return NextResponse.json({ error: "Pre-send preflight failed.", report }, { status: 422 });
-    //      }
+    // ── Change 3: preflight on the ACTUAL sealed bytes — a gate that checks a
+    //    different object than the one being sent is not a gate. Uses the SAME
+    //    zipBytes fetched once (no second R2 read). A failure is definitive (the
+    //    sealed pack is malformed) ⇒ mark the row failed (never pending — a
+    //    blocked send must not become the stuck-pending duplicate path) + 422
+    //    with the itemised report.
+    const preflight = await runPreflightOnSealedZip({
+      zipBytes,
+      month,
+      paymentDueDate: exportRecord.payment_due_date ?? null,
+      maxPackBytes: MAX_DELIVERY_ZIP_BYTES,
+    });
+    if (!preflight.passed) {
+      const failedChecks = preflight.results
+        .filter((r) => !r.passed)
+        .map((r) => r.check)
+        .join(", ");
+      await markDeliveryFailed(deliveryId, `preflight: ${failedChecks}`);
+      await createAuditEntry(getReceiptsDb(), {
+        actor,
+        action: "export.delivery_failed",
+        objectType: "export",
+        objectId: exportRecord.id,
+        newValueJson: stringifyJson({
+          month,
+          attemptId,
+          error: `preflight: ${failedChecks}`,
+        }),
+      });
+      return NextResponse.json(
+        { error: "Pre-send preflight failed.", deliveryId, report: preflight },
+        { status: 422 },
+      );
+    }
 
     // ── Send. performDelivery re-checks size on the in-memory bytes (CALL SITE
     //    2 — defence-in-depth, B-1) then base64-encodes and calls Resend with

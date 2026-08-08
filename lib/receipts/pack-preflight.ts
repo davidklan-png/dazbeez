@@ -176,6 +176,24 @@ function reconHeaderIndex(rows: string[][]): number {
   return rows.findIndex((r) => r.includes("科目＆No."));
 }
 
+/** Sum the 金額 of a reconciliation CSV's charge rows — used to derive the AMEX
+ *  statement total from the sealed AMEX 照合CSV (B-5: no live lookup). This is
+ *  the INDEPENDENT source for summary-payment-path-reconciles (which compares it
+ *  against the 集計's AMEX total); reading the total from 集計 itself would be
+ *  circular. Returns 0 if the CSV has no recognisable recon header. */
+export function sumReconChargeAmounts(csvText: string): number {
+  const rows = parseCsvRows(csvText);
+  const headerIdx = reconHeaderIndex(rows);
+  if (headerIdx === -1) return 0;
+  const amountIdx = rows[headerIdx]!.indexOf("金額");
+  if (amountIdx === -1) return 0;
+  let sum = 0;
+  for (const row of reconChargeRows(rows)) {
+    sum += parseAmountCell(row[amountIdx] ?? "") ?? 0;
+  }
+  return sum;
+}
+
 // Evidence filenames referenced by the 領収書ファイル名 (last) column of each
 // reconciliation CSV's charge rows, excluding 領収書なし markers and blanks.
 function referencedEvidence(
