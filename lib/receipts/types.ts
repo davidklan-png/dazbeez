@@ -141,6 +141,7 @@ export type AuditAction =
   | "export.delivery_sent"
   | "export.delivery_failed"
   | "export.delivery_override"
+  | "export.delivery_blocked"
   | "archive.created"
   | "settings.updated"
   | "settings.notification_recipient_changed"

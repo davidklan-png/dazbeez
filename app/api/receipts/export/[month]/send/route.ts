@@ -183,10 +183,10 @@ export async function POST(request: Request, { params }: RouteContext) {
         .join(", ");
       await createAuditEntry(getReceiptsDb(), {
         actor,
-        action: "export.delivery_failed",
+        action: "export.delivery_blocked",
         objectType: "export",
         objectId: exportRecord.id,
-        newValueJson: stringifyJson({ month, error: `preflight: ${failedChecks}` }),
+        newValueJson: stringifyJson({ month, blockedBy: "preflight", failedChecks }),
       });
       return NextResponse.json(
         { error: "Pre-send preflight failed.", report: preflight },
