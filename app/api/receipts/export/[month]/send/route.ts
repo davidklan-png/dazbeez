@@ -8,6 +8,7 @@ import {
   createDelivery,
   markDeliverySent,
   markDeliveryFailed,
+  markDeliveryAmbiguous,
 } from "@/lib/receipts/db";
 import {
   getReceiptsArchiveBucket,
@@ -237,18 +238,40 @@ export async function POST(request: Request, { params }: RouteContext) {
       });
     }
     // Resend failure is retryable: the seal stands and the month is
-    // sealed_undelivered (not 5xx — D2). The operator retries; decideSendAction
-    // treats a failed attempt as non-blocking, so the retry starts a new send.
-    await markDeliveryFailed(deliveryId, result.error);
+    // sealed_undelivered (not 5xx — D2; a 5xx risks infra auto-retry starting a
+    // new attempt with a new idempotency key). Classify so an ambiguous failure
+    // (timeout/5xx/network — mail may have been accepted) stays resumable: the
+    // operator's retry reuses this attempt_id and Resend deduplicates, rather
+    // than minting a new key and sending twice. A definitive 4xx rejection is
+    // terminal-failed — a retry is a clean new send.
+    const classification = result.classification;
+    if (classification === "definitive") {
+      await markDeliveryFailed(deliveryId, result.error);
+    } else {
+      await markDeliveryAmbiguous(deliveryId, result.error);
+    }
     await createAuditEntry(db, {
       actor,
       action: "export.delivery_failed",
       objectType: "export",
       objectId: exportRecord.id,
-      newValueJson: stringifyJson({ month, attemptId, error: result.error }),
+      newValueJson: stringifyJson({
+        month,
+        attemptId,
+        error: result.error,
+        classification,
+      }),
     });
     return NextResponse.json(
-      { state: "sealed_undelivered", deliveryId, error: result.error },
+      {
+        state: "sealed_undelivered",
+        deliveryId,
+        error: result.error,
+        classification,
+        // Phase C renders "resume" (reuse the attempt) vs "retry" (new attempt)
+        // from this — ambiguous within 24h is resumable.
+        resumable: classification === "ambiguous",
+      },
       { status: 200 },
     );
   } catch (error) {

@@ -18,13 +18,44 @@
 // This module is PURE (no D1/R2) so the state-machine + idempotency logic is
 // unit-testable without bindings. The DB wrappers live in db.ts.
 
-/** Per-attempt outcome — one HTTP send to Resend = one row in export_deliveries. */
+/** Per-attempt outcome — one HTTP send to Resend = one row in export_deliveries.
+ *
+ *  `ambiguous` is the false-negative counterpart to `pending`: the Worker got
+ *  neither a clear success nor a definitive rejection (timeout, network error,
+ *  Resend 5xx, no response) — the mail may have been accepted. Like `pending`
+ *  it is RESUMABLE (a retry reuses the attempt_id so Resend deduplicates),
+ *  never treated as "definitely not sent". */
 export const ATTEMPT_STATE = {
   PENDING: "pending",
   SENT: "sent",
   FAILED: "failed",
+  AMBIGUOUS: "ambiguous",
 } as const;
 export type AttemptState = (typeof ATTEMPT_STATE)[keyof typeof ATTEMPT_STATE];
+
+/** How a delivery failure should be treated. Definitive = Resend definitively
+ *  rejected it (4xx) — the mail was never accepted, a fresh attempt is safe.
+ *  Ambiguous = 5xx / network / timeout / no response — the mail may have been
+ *  accepted, so the attempt stays resumable. */
+export type DeliveryFailureClass = "definitive" | "ambiguous";
+
+/**
+ * Classify a delivery failure. Explicit allowlist of DEFINITIVE conditions —
+ * Resend returned a 4xx (the request was definitively rejected; the mail was
+ * never accepted) — defaulting to AMBIGUOUS (5xx, network error, timeout, no
+ * response: the mail may have been accepted). Never infer "definitely not sent"
+ * from the absence of a response. Same doctrine as the consumer's permanent-
+ * vs-transient classification (backlog #9).
+ *
+ * `status` is the Resend HTTP status when it responded; `undefined` for a
+ * transport error / timeout / no response.
+ */
+export function classifyDeliveryFailure(status: number | undefined): DeliveryFailureClass {
+  if (status !== undefined && status >= 400 && status < 500) {
+    return "definitive";
+  }
+  return "ambiguous";
+}
 
 /**
  * Denormalised per-month delivery state on receipt_exports (for list queries).
@@ -65,21 +96,32 @@ export function idempotencyKeyForAttempt(attemptId: string): string {
  */
 export function deliveryStateForResult(result: AttemptState): DeliveryState {
   if (result === ATTEMPT_STATE.SENT) return DELIVERY_STATE.DELIVERED;
-  if (result === ATTEMPT_STATE.FAILED) return DELIVERY_STATE.SEALED_UNDELIVERED;
+  // Both definitive-failed and ambiguous mean the month is not confirmed
+  // delivered → sealed_undelivered (retryable). The difference (resumable vs
+  // not) lives on the attempt row's state, not the month-level column.
+  if (result === ATTEMPT_STATE.FAILED || result === ATTEMPT_STATE.AMBIGUOUS) {
+    return DELIVERY_STATE.SEALED_UNDELIVERED;
+  }
   return DELIVERY_STATE.PENDING;
 }
 
 /**
- * Valid per-attempt state transitions. `pending → sent` and `pending → failed`
- * only; `sent` and `failed` are terminal. A retry is a NEW row sharing the
- * attempt_id (and idempotency key), not a transition out of a terminal state.
+ * Valid per-attempt state transitions. `pending` may resolve to `sent`,
+ * `failed` (definitive rejection), or `ambiguous` (timeout/5xx — the mail may
+ * have been accepted). `sent`, `failed`, and `ambiguous` are terminal for that
+ * row — a retry/resume is a NEW row sharing the attempt_id (and idempotency
+ * key), not a transition out of a terminal state.
  */
 export function isValidAttemptTransition(
   from: AttemptState,
   to: AttemptState,
 ): boolean {
   if (from === ATTEMPT_STATE.PENDING) {
-    return to === ATTEMPT_STATE.SENT || to === ATTEMPT_STATE.FAILED;
+    return (
+      to === ATTEMPT_STATE.SENT ||
+      to === ATTEMPT_STATE.FAILED ||
+      to === ATTEMPT_STATE.AMBIGUOUS
+    );
   }
   return false;
 }
@@ -112,7 +154,10 @@ export function deriveMonthDeliveryState(
   const latestRow = latestAttemptRows.reduce((a, b) =>
     b.createdAt > a.createdAt ? b : a,
   );
-  if (latestRow.state === ATTEMPT_STATE.FAILED) {
+  if (
+    latestRow.state === ATTEMPT_STATE.FAILED ||
+    latestRow.state === ATTEMPT_STATE.AMBIGUOUS
+  ) {
     return DELIVERY_STATE.SEALED_UNDELIVERED;
   }
   return DELIVERY_STATE.PENDING;
@@ -153,17 +198,21 @@ export interface DeliveryAttemptSummary {
 
 /** What the send endpoint should do for a month, given its delivery history.
  *  - `new`: no blocking delivery — start a fresh attempt (new attempt_id).
- *  - `resume`: a resumeable pending exists — reuse its attempt_id so Resend
- *    replays (no duplicate). Distinct from a new send; no override needed.
- *  - `blocked`: a `sent` delivery exists, OR a `pending` that is NOT resumeable
- *    (stale beyond the window, or for a different export). A new send needs the
- *    explicit override (forceNew) — audited by the caller. */
+ *  - `resume`: a resumeable attempt exists (pending, or an ambiguous failure
+ *    within the window) — reuse its attempt_id so Resend replays (no duplicate).
+ *    Distinct from a new send; no override needed.
+ *  - `blocked`: a `sent` delivery exists, OR a pending/ambiguous attempt that
+ *    is NOT resumeable (stale beyond the window, or for a different export) —
+ *    a new send risks a duplicate, so it needs the explicit override (forceNew).
+ *
+ *  A definitive-`failed` attempt is neither resumeable nor a blocker — Resend
+ *  definitively rejected it, so a retry is a clean new send. */
 export type SendAction =
   | { action: "new" }
   | { action: "resume"; attemptId: string; deliveryId: string }
   | {
       action: "blocked";
-      reason: "sent" | "pending_stale";
+      reason: "sent" | "stale";
       priorAttemptId: string;
     };
 
@@ -171,10 +220,13 @@ export type SendAction =
  * Decide new vs resume vs blocked for a send request. Pure — the send endpoint
  * supplies `now`, the latest export id, and the month's delivery rows.
  *
- * Precedence: a resumeable pending resumes (unless forceNew) even if an older
- * export was already sent (a corrected re-delivery in flight supersedes it —
- * D17). Otherwise any sent or non-resumeable pending blocks a new send unless
- * forceNew.
+ * Resume states are `pending` (in flight) and `ambiguous` (false-negative
+ * failure — the mail may have been accepted). A resumeable attempt (latest
+ * export, within the 24h idempotency window) resumes (unless forceNew) even if
+ * an older export was sent (a corrected re-delivery in flight supersedes it).
+ * A `sent` delivery or a stale/other-export pending-or-ambiguous blocks a new
+ * send (duplicate risk) unless forceNew. A definitive `failed` attempt blocks
+ * nothing — a retry is a fresh, safe send.
  */
 export function decideSendAction(opts: {
   latestExportId: string;
@@ -184,25 +236,31 @@ export function decideSendAction(opts: {
 }): SendAction {
   const { latestExportId, deliveries, now, forceNew } = opts;
 
-  const resumeable = deliveries.find(
-    (d) =>
-      d.exportId === latestExportId &&
-      d.state === ATTEMPT_STATE.PENDING &&
-      isWithinResumeWindow(d.createdAt, now),
-  );
+  const RESUMABLE = [ATTEMPT_STATE.PENDING, ATTEMPT_STATE.AMBIGUOUS] as const;
+  const isResumeable = (d: DeliveryAttemptSummary) =>
+    d.exportId === latestExportId &&
+    (RESUMABLE as readonly AttemptState[]).includes(d.state) &&
+    isWithinResumeWindow(d.createdAt, now);
+
+  const resumeable = deliveries.find(isResumeable);
   if (resumeable && !forceNew) {
     return { action: "resume", attemptId: resumeable.attemptId, deliveryId: resumeable.id };
   }
 
   const sent = deliveries.find((d) => d.state === ATTEMPT_STATE.SENT);
-  const anyPending = deliveries.find((d) => d.state === ATTEMPT_STATE.PENDING);
-  if ((sent || anyPending) && !forceNew) {
-    // anyPending here is non-resumeable (stale or other export) — resumeable
-    // ones are consumed above unless forceNew.
+  // A pending/ambiguous that is NOT resumeable (stale beyond 24h, or for a
+  // different export) blocks a new send — beyond the window Resend will not
+  // deduplicate, so a fresh key risks a duplicate if the first was accepted.
+  const stale = deliveries.find(
+    (d) =>
+      (RESUMABLE as readonly AttemptState[]).includes(d.state) && !isResumeable(d),
+  );
+  if ((sent || stale) && !forceNew) {
+    const blocker = sent ?? stale!;
     return {
       action: "blocked",
-      reason: sent ? "sent" : "pending_stale",
-      priorAttemptId: (sent ?? anyPending)!.attemptId,
+      reason: sent ? "sent" : "stale",
+      priorAttemptId: blocker.attemptId,
     };
   }
 

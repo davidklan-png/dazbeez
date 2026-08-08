@@ -195,7 +195,10 @@ export async function sendDeliveryViaResend(
   html: string,
   attachment: ResendAttachment,
   idempotencyKey: string,
-): Promise<{ ok: true; messageId?: string } | { ok: false; error: string }> {
+): Promise<
+  | { ok: true; messageId?: string }
+  | { ok: false; error: string; status?: number }
+> {
   try {
     const res = await fetchImpl("https://api.resend.com/emails", {
       method: "POST",
@@ -219,11 +222,15 @@ export async function sendDeliveryViaResend(
     if (!res.ok) {
       const errBody = (await res.json().catch(() => ({}))) as { message?: unknown };
       const message = typeof errBody.message === "string" ? errBody.message : `Resend API returned ${res.status}`;
-      return { ok: false, error: message };
+      // status lets the caller classify: 4xx = definitive (rejected); the caller
+      // defaults everything else (5xx, and the catch below) to ambiguous.
+      return { ok: false, error: message, status: res.status };
     }
     const body = (await res.json().catch(() => ({}))) as { id?: string };
     return { ok: true, messageId: typeof body.id === "string" ? body.id : undefined };
   } catch (err) {
+    // No response (timeout / network) — status undefined ⇒ caller classifies
+    // ambiguous. Never infer "definitely not sent" from the absence of a response.
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
 }

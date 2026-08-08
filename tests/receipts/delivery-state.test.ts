@@ -11,6 +11,7 @@ import {
   deriveMonthDeliveryState,
   isWithinResumeWindow,
   decideSendAction,
+  classifyDeliveryFailure,
   type AttemptRow,
   type DeliveryAttemptSummary,
 } from "@/lib/receipts/delivery-state";
@@ -27,22 +28,44 @@ test("idempotencyKeyForAttempt: stable per attempt, new per operator send, prefi
   assert.equal(idempotencyKeyForAttempt("att-1"), idempotencyKeyForAttempt("att-1"));
 });
 
+// ─── failure classification (false-negative duplicate-send guard) ───────────
+
+test("classifyDeliveryFailure: explicit definitive allowlist (Resend 4xx); everything else ambiguous", () => {
+  // Definitive: Resend responded 4xx — the request was rejected, mail never accepted.
+  for (const s of [400, 401, 403, 422, 413, 499]) {
+    assert.equal(classifyDeliveryFailure(s), "definitive", `${s} is definitive`);
+  }
+  // Ambiguous: 5xx (Resend server error), and any non-4xx response.
+  for (const s of [500, 502, 503, 504, 200, 301, 399]) {
+    assert.equal(classifyFailureAmbiguous(s), true, `${s} is ambiguous`);
+  }
+  // Ambiguous: no response at all (timeout / network error). Never infer "not sent".
+  assert.equal(classifyDeliveryFailure(undefined), "ambiguous", "no response ⇒ ambiguous, never definitive");
+});
+
+function classifyFailureAmbiguous(status: number): boolean {
+  return classifyDeliveryFailure(status) === "ambiguous";
+}
+
 // ─── result → month state ───────────────────────────────────────────────────
 
-test("deliveryStateForResult: sent⇒delivered, failed⇒sealed_undelivered, pending⇒pending", () => {
+test("deliveryStateForResult: sent⇒delivered; failed OR ambiguous⇒sealed_undelivered; pending⇒pending", () => {
   assert.equal(deliveryStateForResult(ATTEMPT_STATE.SENT), DELIVERY_STATE.DELIVERED);
   assert.equal(deliveryStateForResult(ATTEMPT_STATE.FAILED), DELIVERY_STATE.SEALED_UNDELIVERED);
+  assert.equal(deliveryStateForResult(ATTEMPT_STATE.AMBIGUOUS), DELIVERY_STATE.SEALED_UNDELIVERED);
   assert.equal(deliveryStateForResult(ATTEMPT_STATE.PENDING), DELIVERY_STATE.PENDING);
 });
 
 // ─── attempt state machine ──────────────────────────────────────────────────
 
-test("isValidAttemptTransition: only pending→sent / pending→failed; sent & failed are terminal", () => {
+test("isValidAttemptTransition: pending→sent/failed/ambiguous; sent/failed/ambiguous terminal", () => {
   assert.equal(isValidAttemptTransition(ATTEMPT_STATE.PENDING, ATTEMPT_STATE.SENT), true);
   assert.equal(isValidAttemptTransition(ATTEMPT_STATE.PENDING, ATTEMPT_STATE.FAILED), true);
-  // terminal states can't transition out — a retry is a NEW row sharing attempt_id
+  assert.equal(isValidAttemptTransition(ATTEMPT_STATE.PENDING, ATTEMPT_STATE.AMBIGUOUS), true);
+  // terminal states can't transition out — a retry/resume is a NEW row sharing attempt_id
   assert.equal(isValidAttemptTransition(ATTEMPT_STATE.SENT, ATTEMPT_STATE.FAILED), false);
   assert.equal(isValidAttemptTransition(ATTEMPT_STATE.FAILED, ATTEMPT_STATE.SENT), false);
+  assert.equal(isValidAttemptTransition(ATTEMPT_STATE.AMBIGUOUS, ATTEMPT_STATE.SENT), false);
   assert.equal(isValidAttemptTransition(ATTEMPT_STATE.SENT, ATTEMPT_STATE.SENT), false);
   assert.equal(isValidAttemptTransition(ATTEMPT_STATE.PENDING, ATTEMPT_STATE.PENDING), false);
 });
@@ -198,4 +221,59 @@ test("decideSendAction: a resumeable pending supersedes an older sent (corrected
   });
   assert.equal(res.action, "resume");
   if (res.action === "resume") assert.equal(res.attemptId, "att-new");
+});
+
+test("decideSendAction: an ambiguous failure within 24h ⇒ resume (the mail may have been accepted)", () => {
+  // sendViaResend timed out after Resend accepted ⇒ recorded ambiguous. A retry
+  // must reuse the attempt_id so Resend deduplicates — not mint a new key.
+  const res = decideSendAction({
+    latestExportId: "exp",
+    deliveries: [sum({ id: "d-amb", attemptId: "att-amb", state: ATTEMPT_STATE.AMBIGUOUS })],
+    now: NOW,
+    forceNew: false,
+  });
+  assert.equal(res.action, "resume");
+  if (res.action === "resume") assert.equal(res.attemptId, "att-amb");
+});
+
+test("decideSendAction: a definitive failure (Resend 4xx) is neither resumeable nor a blocker ⇒ clean new send", () => {
+  // Resend definitively rejected the request (4xx) ⇒ the mail was never accepted
+  // ⇒ a retry is a fresh, safe attempt (new attempt_id), no override needed.
+  const res = decideSendAction({
+    latestExportId: "exp",
+    deliveries: [sum({ attemptId: "att-rej", state: ATTEMPT_STATE.FAILED })],
+    now: NOW,
+    forceNew: false,
+  });
+  assert.equal(res.action, "new");
+});
+
+test("decideSendAction: a stale ambiguous failure (beyond 24h) blocks without override", () => {
+  // Beyond the window Resend won't dedupe, so a fresh key risks a duplicate if
+  // the first was accepted ⇒ override required.
+  const staleAmbiguous = sum({ attemptId: "att-amb-old", state: ATTEMPT_STATE.AMBIGUOUS, createdAt: beyondWindow });
+  assert.equal(
+    decideSendAction({ latestExportId: "exp", deliveries: [staleAmbiguous], now: NOW, forceNew: false }).action,
+    "blocked",
+  );
+  assert.equal(
+    decideSendAction({ latestExportId: "exp", deliveries: [staleAmbiguous], now: NOW, forceNew: true }).action,
+    "new",
+  );
+});
+
+test("decideSendAction: ambiguous resumeable wins over an older definitive failure", () => {
+  // First attempt rejected (4xx, failed); retry got an ambiguous result. Resume
+  // the ambiguous attempt (its key dedupes); the definitive failure is ignored.
+  const res = decideSendAction({
+    latestExportId: "exp",
+    deliveries: [
+      sum({ id: "d-rej", attemptId: "att-rej", state: ATTEMPT_STATE.FAILED, createdAt: "2026-08-07T00:00:00Z" }),
+      sum({ id: "d-amb", attemptId: "att-amb", state: ATTEMPT_STATE.AMBIGUOUS, createdAt: withinWindow }),
+    ],
+    now: NOW,
+    forceNew: false,
+  });
+  assert.equal(res.action, "resume");
+  if (res.action === "resume") assert.equal(res.attemptId, "att-amb");
 });

@@ -9,6 +9,10 @@
 // lives in Change 4.
 
 import { sendDeliveryViaResend } from "@/lib/receipts/notify";
+import {
+  classifyDeliveryFailure,
+  type DeliveryFailureClass,
+} from "@/lib/receipts/delivery-state";
 
 /**
  * Raw (pre-base64) byte ceiling for a delivered pack ZIP.
@@ -93,11 +97,14 @@ export async function performDelivery(opts: {
   zipFilename: string;
   zipBytes: Uint8Array;
   idempotencyKey: string;
-}): Promise<{ ok: true; messageId?: string } | { ok: false; error: string }> {
+}): Promise<
+  | { ok: true; messageId?: string }
+  | { ok: false; error: string; classification: DeliveryFailureClass }
+> {
   assertDeliveryZipNameAscii(opts.zipFilename);
   assertDeliverySize(opts.zipBytes.byteLength);
   const contentBase64 = bytesToBase64(opts.zipBytes);
-  return sendDeliveryViaResend(
+  const result = await sendDeliveryViaResend(
     opts.fetchImpl ?? fetch,
     opts.apiKey,
     opts.from,
@@ -109,6 +116,16 @@ export async function performDelivery(opts: {
     { filename: opts.zipFilename, contentBase64 },
     opts.idempotencyKey,
   );
+  if (result.ok) return result;
+  // Classify so the caller records a definitive rejection as terminal-failed
+  // and an ambiguous result (5xx / network / timeout — mail may be accepted) as
+  // resumable-ambiguous. Defaults to ambiguous: never infer "not sent" from no
+  // response.
+  return {
+    ok: false,
+    error: result.error,
+    classification: classifyDeliveryFailure(result.status),
+  };
 }
 
 // ─── Email body assembly (SINGLE path — Change 4 replaces this, not duplicates) ─

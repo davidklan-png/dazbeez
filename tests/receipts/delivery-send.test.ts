@@ -121,7 +121,7 @@ test("performDelivery: a non-ASCII attachment filename throws BEFORE any Resend 
   assert.equal(calls.length, 0);
 });
 
-test("performDelivery: a Resend failure returns {ok:false, error}, does not throw", async () => {
+test("performDelivery: a Resend 4xx failure classifies DEFINITIVE (terminal)", async () => {
   const { fetchImpl } = fakeResend({ ok: false, status: 422 });
   const r = await performDelivery({
     fetchImpl: fetchImpl as unknown as typeof fetch,
@@ -129,5 +129,36 @@ test("performDelivery: a Resend failure returns {ok:false, error}, does not thro
     zipFilename: "pack.zip", zipBytes: new Uint8Array(10), idempotencyKey: "k",
   });
   assert.equal(r.ok, false);
-  if (!r.ok) assert.equal(r.error, "boom");
+  if (!r.ok) {
+    assert.equal(r.error, "boom");
+    assert.equal(r.classification, "definitive", "4xx ⇒ definitive (mail never accepted; fresh attempt is safe)");
+  }
+});
+
+test("performDelivery: a Resend 5xx failure classifies AMBIGUOUS (resumable — mail may be accepted)", async () => {
+  const { fetchImpl } = fakeResend({ ok: false, status: 502 });
+  const r = await performDelivery({
+    fetchImpl: fetchImpl as unknown as typeof fetch,
+    apiKey: "key", from: "f", to: "t", cc: null, subject: "s", text: "t", html: "h",
+    zipFilename: "pack.zip", zipBytes: new Uint8Array(10), idempotencyKey: "k",
+  });
+  assert.equal(r.ok, false);
+  if (!r.ok) assert.equal(r.classification, "ambiguous", "5xx ⇒ ambiguous");
+});
+
+test("performDelivery: a transport error (no response) classifies AMBIGUOUS — never infer 'not sent'", async () => {
+  // fetch throws (timeout / network) ⇒ no status ⇒ ambiguous.
+  const throwingFetch = async () => {
+    throw new Error("Network connection lost");
+  };
+  const r = await performDelivery({
+    fetchImpl: throwingFetch as unknown as typeof fetch,
+    apiKey: "key", from: "f", to: "t", cc: null, subject: "s", text: "t", html: "h",
+    zipFilename: "pack.zip", zipBytes: new Uint8Array(10), idempotencyKey: "k",
+  });
+  assert.equal(r.ok, false);
+  if (!r.ok) {
+    assert.match(r.error, /Network connection lost/);
+    assert.equal(r.classification, "ambiguous", "no response ⇒ ambiguous, never definitive");
+  }
 });

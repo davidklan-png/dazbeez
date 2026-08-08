@@ -3300,6 +3300,34 @@ export async function markDeliveryFailed(id: string, error: string): Promise<voi
 }
 
 /**
+ * Mark an attempt ambiguously failed: a definitive result was NOT obtained
+ * (timeout / network / Resend 5xx — the mail may have been accepted). The
+ * attempt stays RESUMABLE (a retry reuses its attempt_id ⇒ same key ⇒ Resend
+ * deduplicates), and the month's delivery_state is sealed_undelivered (not
+ * closed). The seal is untouched. Counterpart to {@link markDeliveryFailed}
+ * (which is for definitive 4xx rejections, terminal). */
+export async function markDeliveryAmbiguous(id: string, error: string): Promise<void> {
+  const db = getReceiptsDb();
+  const now = nowIso();
+  await db.batch([
+    db
+      .prepare(
+        `UPDATE export_deliveries
+         SET state = 'ambiguous', error = ?, completed_at = ?
+         WHERE id = ? AND state = 'pending'`,
+      )
+      .bind(error, now, id),
+    db
+      .prepare(
+        `UPDATE receipt_exports
+         SET delivery_state = 'sealed_undelivered'
+         WHERE id = (SELECT export_id FROM export_deliveries WHERE id = ?)`,
+      )
+      .bind(id),
+  ]);
+}
+
+/**
  * Create a new revision of a previously-finalized export. The prior export
  * row and its R2 archive are untouched — preservation principle.
  */
