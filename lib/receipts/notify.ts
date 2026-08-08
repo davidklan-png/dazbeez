@@ -69,12 +69,18 @@ export async function composeFinalizeNoticeData(
     bundle.rows,
     { rowCount: bundle.rows.length, receiptCount: distinctReceiptIds.size },
   );
-  // The notice interpolates the AMEX/cash CSV filenames, so it needs the pack
-  // names — which need the AMEX payment-due date. A draft/finalized export can
-  // only exist if the bundle already built (assembleProofsZip throws on a null
-  // date), so the artifact + a parseable date are guaranteed present here.
+  // The notice interpolates the pack's 照合CSV filenames, so it needs the pack
+  // names. hasAmex mirrors the bundle-build path: only a pack with an AMEX
+  // statement needs the payment-due date. A cash/digital-only finalized month
+  // (no statement imported) passes hasAmex=false so a missing date does NOT
+  // throw here; the notice then omits the AMEX 照合CSV mention
+  // (derivePackNoticeInput sets hasAmex from the bundle rows).
   const artifact = await getAmexArtifactByMonth(month);
-  const names = buildPackNames(month, artifact?.payment_due_date ?? null);
+  const names = buildPackNames(
+    month,
+    artifact?.payment_due_date ?? null,
+    /* hasAmex */ artifact != null,
+  );
   return {
     month,
     monthLabel: noticeInput.monthLabel,

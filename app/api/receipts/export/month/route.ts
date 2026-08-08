@@ -287,6 +287,20 @@ export async function POST(request: Request) {
         ? (bundle.attendeeMap.get(row.receiptId) ?? row.attendees ?? []).join("; ")
         : "";
       const assignment = evidenceAssignments.get(row.receiptId);
+      const filename = assignment?.filename;
+      if (!filename) {
+        // Every proof-bearing receipt has a 科目＆No evidence assignment from
+        // buildEvidenceAssignments (built over the same row population — AMEX
+        // lines + CASH/DIGITAL receipt rows with a chosen file). A missing
+        // assignment means a row type the assignment builder doesn't cover
+        // (e.g. a future bank-debit line) reached the proofs loop — fail loudly
+        // rather than silently fall back to a second naming scheme (Gap 1).
+        throw new Error(
+          `Receipt ${row.receiptId}: no 科目＆No evidence assignment — cannot ` +
+            `name its proof file. Re-run evidence assignment, or extend ` +
+            `buildEvidenceAssignments to cover this row type explicitly.`,
+        );
+      }
       proofsEntries.push({
         no: i + 1,
         categoryJa: row.expenseCategoryJa ?? row.expenseCategoryCode ?? "",
@@ -302,7 +316,7 @@ export async function POST(request: Request) {
           : row.paymentPath === "CASH"
             ? "CASH"
             : "AMEX") as ProofPaymentPath,
-        filename: assignment?.filename,
+        filename,
       });
     }
 
@@ -316,13 +330,18 @@ export async function POST(request: Request) {
     const amexArtifact = await getAmexArtifactByMonth(month);
 
     // Pack names — the single naming authority for every human-facing name in
-    // the proofs ZIP (root folder, receipt folders, index files). Building them
-    // here validates the AMEX payment-due date EARLY: a null/unparseable date
-    // throws (pack-naming.dueDateCode) and blocks the export before any R2
-    // puts, so a pack is never named after the wrong date.
+    // the proofs ZIP (root folder, receipt folders, index files). hasAmex is
+    // true iff an AMEX statement is imported — only then does the pack carry
+    // AMEX-dated artifacts (the AMEX folder + 照合CSV) and require the
+    // payment-due date. A month with no statement yet (a cash/digital-only
+    // draft) passes hasAmex=false so a missing date does NOT block the draft.
+    // When hasAmex is true a null/unparseable date still throws
+    // (pack-naming.dueDateCode) before any R2 puts — a pack is never named
+    // after the wrong date.
     const packNames = buildPackNames(
       month,
       amexArtifact?.payment_due_date ?? null,
+      /* hasAmex */ amexArtifact != null,
     );
 
     let amexReconShipped: string | null = null;

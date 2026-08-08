@@ -152,6 +152,7 @@ test("draft=true prefixes DRAFT- on every file kind; default never does", () => 
         draft: true,
         draftRecord: draftRebuilt,
         finalizedRecord: finalized,
+        paymentDueDate: "2026-06-04",
       }),
     );
     assert.ok(
@@ -167,6 +168,7 @@ test("draft=true prefixes DRAFT- on every file kind; default never does", () => 
         draft: false,
         draftRecord: draftRebuilt,
         finalizedRecord: finalized,
+        paymentDueDate: "2026-06-04",
       }),
     );
     assert.ok(
@@ -175,6 +177,76 @@ test("draft=true prefixes DRAFT- on every file kind; default never does", () => 
     );
     assert.equal(f.draft, false);
   }
+});
+
+// ─── D15: reconciliation CSV downloads named by the single authority ────────
+
+test("D15: AMEX/CASH/DIGITAL reconciliation downloads share the pack names", () => {
+  // The standalone reconciliation CSV downloads must match the file names
+  // inside the proofs ZIP (one naming authority) — not the old divergent
+  // AMEX{month}_Reconciliation.csv labels.
+  const amex = ok(
+    resolveBundleDownload({
+      month,
+      file: "amex",
+      draft: false,
+      draftRecord: null,
+      finalizedRecord: finalized,
+      paymentDueDate: "2026-06-04",
+    }),
+  );
+  assert.equal(amex.filename, "20260604_AMEXカード利用明細.csv", "AMEX recon → pack name (dated)");
+
+  const cash = ok(
+    resolveBundleDownload({
+      month,
+      file: "cash",
+      draft: false,
+      draftRecord: null,
+      finalizedRecord: finalized,
+    }),
+  );
+  assert.equal(cash.filename, "202606_現金払いリスト.csv", "cash recon → pack name (month)");
+
+  const digital = ok(
+    resolveBundleDownload({
+      month,
+      file: "digital",
+      draft: false,
+      draftRecord: null,
+      finalizedRecord: finalized,
+    }),
+  );
+  assert.equal(digital.filename, "202606_デジタル払いリスト.csv", "digital recon → pack name (month)");
+
+  // Draft recon downloads are DRAFT- prefixed (same as every other file kind).
+  const amexDraft = ok(
+    resolveBundleDownload({
+      month,
+      file: "amex",
+      draft: true,
+      draftRecord: draftRebuilt,
+      finalizedRecord: finalized,
+      paymentDueDate: "2026-06-04",
+    }),
+  );
+  assert.equal(
+    amexDraft.filename,
+    "DRAFT-20260604_AMEXカード利用明細.csv",
+    "draft AMEX recon → DRAFT- + pack name",
+  );
+
+  // AMEX recon with no payment-due date (no statement imported) ⇒ 404, never a
+  // malformed name. Cash/digital are unaffected (month-only names, no date).
+  const noStatement = resolveBundleDownload({
+    month,
+    file: "amex",
+    draft: false,
+    draftRecord: null,
+    finalizedRecord: finalized,
+    paymentDueDate: null,
+  });
+  assert.equal(noStatement.ok, false, "no statement ⇒ AMEX recon download 404s");
 });
 
 // ─── Byte-identity: no draft/finalize-conditional content ───────────────────
@@ -283,6 +355,7 @@ test("byte-identity: the proofs ZIP builder takes no draft flag (draft⇄seal ca
       transactionDate: "2026-06-11",
       attendees: "",
       paymentPath: "AMEX" as const,
+      filename: "研究開発費Jun2026③OpenAI￥108,341.pdf",
     },
   ];
   const notice = {

@@ -89,15 +89,25 @@ export interface PackNames {
   noticeFile: string;
 }
 
-/** Every human-facing pack name for a month. Throws on null/unparseable
- *  `paymentDueDate` (see {@link dueDateCode}); callers building a pack are
- *  expected to have a valid AMEX statement on file. Pure. */
+/** Every human-facing pack name for a month. Pure.
+ *
+ *  `hasAmex` (default true): whether the pack contains AMEX content — an AMEX
+ *  receipt folder and/or the AMEX 照合CSV, both of which are dated by the
+ *  statement payment-due date. When true, a null/unparseable `paymentDueDate`
+ *  throws via {@link dueDateCode} (a pack must never be named after the wrong
+ *  date). When false, the pack is cash/digital only and the payment-due date is
+ *  NOT required — a month whose AMEX statement has not been imported yet can
+ *  still draft. In that case the AMEX-dated names carry an empty date code and
+ *  are unused; consumers must not read them when there is no AMEX content (the
+ *  proofs assembler skips the AMEX folder when there are no AMEX entries, and
+ *  the notice builder omits the AMEX 照合CSV mention — see proofs.ts). */
 export function buildPackNames(
   month: string,
   paymentDueDate: string | null | undefined,
+  hasAmex = true,
 ): PackNames {
   const yyyymm = monthCode(month);
-  const yyyymmdd = dueDateCode(paymentDueDate);
+  const yyyymmdd = hasAmex ? dueDateCode(paymentDueDate) : "";
   const base = packContainerBase(month);
   return {
     month,

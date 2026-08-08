@@ -219,6 +219,32 @@ const checks: { key: string; run: Check }[] = [
     },
   },
   {
+    // Inverse of notice-filenames-exist: every shipped reconciliation CSV must
+    // be NAMED in the notice. The forward check can't catch a 照合CSV that ships
+    // unmentioned (the DIGITAL-list gap, docs/2026-08-07-phase-a-verification.md
+    // §Minor). 照合CSVs ship at the ZIP root; 集計.csv is a summary, not a 照合
+    // table, so it stays out of scope.
+    key: "notice-mentions-shipped-reconciliation-csvs",
+    run: ({ entries, noticeText }) => {
+      const mentioned = new Set(noticeFilenames(noticeText));
+      const reconCsvs = [
+        ...new Set(
+          entries
+            .map((e) => e.name.split("/").pop()!)
+            .filter((b) => b.endsWith(".csv") && !b.includes("集計")),
+        ),
+      ];
+      const unmentioned = reconCsvs.filter((b) => !mentioned.has(b));
+      return unmentioned.length === 0
+        ? { check: "notice-mentions-shipped-reconciliation-csvs", passed: true }
+        : {
+            check: "notice-mentions-shipped-reconciliation-csvs",
+            passed: false,
+            detail: `reconciliation CSVs shipped but not named in the notice: ${unmentioned.join(", ")}`,
+          };
+    },
+  },
+  {
     key: "payment-due-date-parseable",
     run: ({ month, paymentDueDate }) => {
       try {

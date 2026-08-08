@@ -74,6 +74,23 @@ test("buildPackNames: throws on null payment date (blocks the export)", () => {
   assert.throws(() => buildPackNames("2026-06", "bad"), /not YYYY-MM-DD/);
 });
 
+test("buildPackNames: hasAmex=false does not require a payment date (cash/digital-only draft)", () => {
+  // A month whose AMEX statement has not been imported yet can still draft:
+  // no AMEX content ⇒ the payment-due date is not required. (The default
+  // hasAmex=true still throws on a null date — covered by the test above.)
+  const n = buildPackNames("2026-06", null, false);
+  assert.equal(n.yyyymm, "202606");
+  assert.equal(n.yyyymmdd, "", "no date code when there is no AMEX content");
+  // Month-dated names are still correct; AMEX-dated names carry an empty prefix
+  // and are unused (no AMEX folder/CSV in a cash/digital-only pack).
+  assert.equal(n.cashFolder, "202606_現金払い領収書");
+  assert.equal(n.cashReconciliationCsv, "202606_現金払いリスト.csv");
+  assert.equal(n.summaryCsv, "202606_集計.csv");
+  assert.equal(n.noticeFile, "202606_ご連絡事項.txt");
+  // The date is irrelevant when there is no AMEX content — never throws.
+  assert.doesNotThrow(() => buildPackNames("2026-06", "not-a-date", false));
+});
+
 test("buildPackNames: names are stable regardless of folder/index order", () => {
   // Same inputs always produce the same names (deterministic — the byte-identity
   // precondition for draft ⇄ seal).

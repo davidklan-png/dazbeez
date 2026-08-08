@@ -63,28 +63,6 @@ export function formatYenAmount(amountMinor: number, currency: string): string {
   return `￥${amountMinor < 0 ? "-" : ""}${grouped}`;
 }
 
-export interface ProofFilenameParts {
-  no: number;
-  categoryJa: string;
-  merchant: string;
-  amountMinor: number;
-  currency: string;
-  ext: "jpg" | "pdf";
-  /** Disambiguator for multi-file receipts (1 = first/only file, 2, 3, …). */
-  fileIndex?: number;
-}
-
-/** `No{NN}_{勘定科目Ja}_{merchant}_￥{amount}.{ext}` — zero-padded No, sanitized
- *  merchant. fileIndex>1 appends `-N` before the extension. */
-export function buildProofFilename(p: ProofFilenameParts): string {
-  const no = String(p.no).padStart(2, "0");
-  const cat = sanitizeZipNameSegment(p.categoryJa || p.merchant, 16);
-  const merchant = sanitizeZipNameSegment(p.merchant, 30);
-  const amount = formatYenAmount(p.amountMinor, p.currency);
-  const suffix = p.fileIndex && p.fileIndex > 1 ? `-${p.fileIndex}` : "";
-  return `No${no}_${cat}_${merchant}_${amount}${suffix}.${p.ext}`;
-}
-
 // ─── ご連絡事項.txt (standing monthly pack notice) ──────────────────────────
 
 export interface PackNoticeMissingLine {
@@ -98,6 +76,22 @@ export interface PackNoticeInput {
   monthLabel: string; // e.g. "2026年6月"
   rowCount: number; // 照合CSV rows (AMEX lines + cash/digital)
   receiptCount: number; // distinct receipts with a proof in the zip
+  /** Whether the pack contains AMEX content (an AMEX 照合CSV / AMEX receipt
+   *  folder). When false (a cash/digital-only pack — e.g. a draft before the
+   *  statement is imported) the notice omits the AMEX 照合CSV mention so it
+   *  never names a file that isn't in the pack. Defaults true (the normal case:
+   *  a finalized month has AMEX content). Derived from the bundle rows by
+   *  derivePackNoticeInput. */
+  hasAmex?: boolean;
+  /** Whether the pack ships a CASH 照合CSV. The notice names it only when true
+   *  so it never mentions a 照合CSV that isn't in the pack (and never omits one
+   *  that is). Defaults true. Derived from the bundle rows. */
+  hasCash?: boolean;
+  /** Whether the pack ships a DIGITAL 照合CSV. Defaults false (most months have
+   *  no digital rows). When true the notice names the DIGITAL list — the gap
+   *  that left a DIGITAL CSV shipping unmentioned (docs/2026-08-07-phase-a
+   *  -verification.md §Minor). Derived from the bundle rows. */
+  hasDigital?: boolean;
   /** AMEX statement lines shipped with no receipt, with the recorded reason.
    *  date/merchant/amount identify the line for the accountant — internal
    *  lineId UUIDs are NOT surfaced (draft-round feedback). */
@@ -124,6 +118,9 @@ export interface PackNoticeInput {
  *  SHA-256 manifest sentence (the manifest is internal-only — O1), no 改訂情報
  *  block (every delivery reads as a fresh first delivery — O2). */
 export function buildPackNotice(input: PackNoticeInput, names: PackNames): string {
+  const hasAmex = input.hasAmex ?? true;
+  const hasCash = input.hasCash ?? true;
+  const hasDigital = input.hasDigital ?? false;
   const lines: string[] = [];
   lines.push(`${input.monthLabel} の領収証憑一式をお送りします。`);
   lines.push("");
@@ -136,9 +133,27 @@ export function buildPackNotice(input: PackNoticeInput, names: PackNames): strin
   }
 
   lines.push("【この資料について】");
-  lines.push(
-    `・カード明細の照合表（${names.amexReconciliationCsv}）は、カード会社の明細CSVをそのまま再現し、右側に「科目＆No.」「事業目的」「人数」「領収書ファイル名」の列を追記したものです。現金決済分は ${names.cashReconciliationCsv} に分けて同封しています。`,
-  );
+  // Name EVERY 照合CSV that ships in this pack — AMEX, CASH, DIGITAL — each by
+  // its exact pack name, and none that doesn't. This keeps the notice and the
+  // ZIP entries in sync in BOTH directions: §7 (notice-mentioned ⇒ exists) and
+  // the inverse preflight check (shipped recon CSV ⇒ mentioned). A pack with no
+  // AMEX statement (cash/digital-only draft) omits the AMEX bullet; a month with
+  // digital rows names the DIGITAL list (the previously-unmentioned case).
+  if (hasAmex) {
+    lines.push(
+      `・カード明細の照合表（${names.amexReconciliationCsv}）は、カード会社の明細CSVをそのまま再現し、右側に「科目＆No.」「事業目的」「人数」「領収書ファイル名」の列を追記したものです。`,
+    );
+  }
+  if (hasCash) {
+    lines.push(
+      `・現金決済分の照合表（${names.cashReconciliationCsv}）は、右側に「科目＆No.」「事業目的」「人数」「領収書ファイル名」の列を追記したものです。`,
+    );
+  }
+  if (hasDigital) {
+    lines.push(
+      `・デジタル決済分の照合表（${names.digitalReconciliationCsv}）は、右側に「科目＆No.」「事業目的」「人数」「領収書ファイル名」の列を追記したものです。`,
+    );
+  }
   lines.push(
     "・各証憑のファイル名は「科目＆No.」（例：会議費Jun2026③）で始まり、丸数字方式です。照合表の「科目＆No.」「領収書ファイル名」列と対応しています。",
   );
@@ -225,6 +240,13 @@ export function derivePackNoticeInput(
     rowCount: counts.rowCount,
     receiptCount: counts.receiptCount,
     missingReceiptLines,
+    // Each 照合CSV mention follows the bundle: AMEX ⇔ AMEX statement lines
+    // (also drives buildPackNames' hasAmex — the pack needs the payment-due date
+    // only when there is AMEX content to date); CASH/DIGITAL ⇔ receipt rows of
+    // that payment path. So the notice names exactly the 照合CSVs that ship.
+    hasAmex: rows.some((r) => r.rowType === "amex_line"),
+    hasCash: rows.some((r) => r.rowType === "receipt" && r.paymentPath === "CASH"),
+    hasDigital: rows.some((r) => r.rowType === "receipt" && r.paymentPath === "DIGITAL"),
   };
 }
 
@@ -246,11 +268,14 @@ export interface ProofZipEntry {
    *  参加者一覧 were retired from the pack. */
   attendees: string;
   paymentPath: ProofPaymentPath;
-  /** Pre-assigned evidence filename (reconciliation-files.ts
-   *  buildEvidenceAssignments). When present it names the ZIP entry —
-   *  collisions still get a -2/-3 suffix before the extension. When absent
-   *  the legacy No{NN}_ naming applies. */
-  filename?: string;
+  /** Evidence filename from the single naming authority
+   *  (reconciliation-files.ts buildEvidenceAssignments — the 科目＆No pattern).
+   *  REQUIRED: every proof-bearing receipt gets an assignment, and the route
+   *  throws loudly if one is missing instead of silently falling back to a
+   *  second naming scheme (Gap 1 — a future row type without an assignment, e.g.
+   *  a bank-debit line, must fail rather than mis-name a delivered file).
+   *  Collisions still get a -2/-3 suffix before the extension. */
+  filename: string;
 }
 
 function folderForPath(
@@ -293,42 +318,17 @@ export function assembleProofsZip(
 
   for (const entry of entries) {
     const folder = folderForPath(entry.paymentPath, names);
-    let filename: string;
     const seen = seenPerFolder.get(folder) ?? new Set<string>();
-    if (entry.filename) {
-      // Pre-assigned evidence name (科目＆No convention). Collisions cannot
-      // happen for distinct receipts (per-category sequence is unique), but a
-      // defensive -2/-3 suffix keeps the ZIP writable if inputs ever repeat.
-      filename = entry.filename;
-      let fileIndex = 1;
-      while (seen.has(filename)) {
-        fileIndex += 1;
-        const dot = entry.filename.lastIndexOf(".");
-        filename = `${entry.filename.slice(0, dot)}-${fileIndex}${entry.filename.slice(dot)}`;
-      }
-    } else {
-      const base = buildProofFilename({
-        no: entry.no,
-        categoryJa: entry.categoryJa,
-        merchant: entry.merchant,
-        amountMinor: entry.amountMinor,
-        currency: entry.currency,
-        ext: entry.ext,
-      });
-      filename = base;
-      let fileIndex = 1;
-      while (seen.has(filename)) {
-        fileIndex += 1;
-        filename = buildProofFilename({
-          no: entry.no,
-          categoryJa: entry.categoryJa,
-          merchant: entry.merchant,
-          amountMinor: entry.amountMinor,
-          currency: entry.currency,
-          ext: entry.ext,
-          fileIndex,
-        });
-      }
+    // Evidence name from the single naming authority (科目＆No convention).
+    // Collisions cannot happen for distinct receipts (per-category sequence is
+    // unique), but a defensive -2/-3 suffix keeps the ZIP writable if inputs
+    // ever repeat.
+    let filename = entry.filename;
+    let fileIndex = 1;
+    while (seen.has(filename)) {
+      fileIndex += 1;
+      const dot = entry.filename.lastIndexOf(".");
+      filename = `${entry.filename.slice(0, dot)}-${fileIndex}${entry.filename.slice(dot)}`;
     }
     seen.add(filename);
     seenPerFolder.set(folder, seen);

@@ -97,8 +97,14 @@ function failsOnly(report: ReturnType<typeof runPackPreflight>, key: string): vo
 
 test("preflight: check keys are unique and cover the spec", () => {
   assert.equal(new Set(PREFLIGHT_CHECK_KEYS).size, PREFLIGHT_CHECK_KEYS.length, "no duplicate keys");
-  // The 17 checks from docs/2026-06-pack-approved-delta.md §16.
-  assert.equal(PREFLIGHT_CHECK_KEYS.length, 17);
+  // The 17 checks from docs/2026-06-pack-approved-delta.md §16, plus the inverse
+  // notice desync guard (notice-mentions-shipped-reconciliation-csvs) added to
+  // close the shipped-but-unmentioned 照合CSV gap (§Minor).
+  assert.equal(PREFLIGHT_CHECK_KEYS.length, 18);
+  assert.ok(
+    PREFLIGHT_CHECK_KEYS.includes("notice-mentions-shipped-reconciliation-csvs"),
+    "inverse notice guard registered",
+  );
 });
 
 // ─── Happy path: the consistent base pack passes every check ────────────────
@@ -126,6 +132,19 @@ test("notice-filenames-exist: notice naming a missing file fails", () => {
     "20260604_架空ファイル.csv",
   );
   failsOnly(runPackPreflight(input), "notice-filenames-exist");
+});
+
+test("notice-mentions-shipped-reconciliation-csvs: a shipped 照合CSV the notice omits fails (inverse guard)", () => {
+  // The forward check (notice-filenames-exist) cannot catch this: the notice
+  // names no absent file, yet a 照合CSV that ships goes unmentioned (the DIGITAL
+  // gap, §Minor). Mutate the notice to drop the cash 照合CSV name while the CSV
+  // still ships — only the inverse guard should fire.
+  const input = clone(baseInput());
+  input.noticeText = input.noticeText.replaceAll(
+    names.cashReconciliationCsv,
+    names.amexReconciliationCsv,
+  );
+  failsOnly(runPackPreflight(input), "notice-mentions-shipped-reconciliation-csvs");
 });
 
 test("payment-due-date-parseable: null payment date fails", () => {

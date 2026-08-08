@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { requireReceiptsActor } from "@/lib/receipts/auth";
 import { createAuditEntry } from "@/lib/receipts/audit";
 import { stringifyJson } from "@/lib/receipts/db-utils";
-import { getExport, getLatestFinalizedExport } from "@/lib/receipts/db";
+import { getExport, getLatestFinalizedExport, getAmexArtifactByMonth } from "@/lib/receipts/db";
 import {
   EXPORT_DOWNLOAD_FILES,
   isExportDownloadFile,
@@ -67,12 +67,18 @@ export async function GET(request: Request, { params }: RouteContext) {
     }
     const finalizedRecord = !draft ? await getLatestFinalizedExport(month) : null;
 
+    // The AMEX 照合CSV download is named by the statement payment-due date
+    // (D15) so the standalone download matches the file inside the proofs ZIP.
+    // Cheap read; null for a cash/digital-only month (the amex file then 404s).
+    const amexArtifact = await getAmexArtifactByMonth(month);
+
     const resolution = resolveBundleDownload({
       month,
       file,
       draft,
       draftRecord,
       finalizedRecord,
+      paymentDueDate: amexArtifact?.payment_due_date ?? null,
     });
     if (!resolution.ok) {
       return NextResponse.json({ error: resolution.message }, { status: resolution.status });

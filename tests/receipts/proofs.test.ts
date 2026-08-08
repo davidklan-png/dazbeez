@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import { unzipSync } from "fflate";
 import {
   assembleProofsZip,
-  buildProofFilename,
   buildPackNotice,
   derivePackNoticeInput,
   formatYenAmount,
@@ -14,6 +13,7 @@ import {
 } from "@/lib/receipts/proofs";
 import { buildPackNames } from "@/lib/receipts/pack-naming";
 import { computeSha256Hex } from "@/lib/receipts/storage";
+import type { ExportRow } from "@/lib/receipts/types";
 
 const enc = new TextEncoder();
 
@@ -72,52 +72,6 @@ test("verifyProofFileSha256: throws on mismatch (review fix for #102)", async ()
     () => verifyProofFileSha256(bytes, wrongSha, 'Receipt r-1: proof file "k"'),
     /SHA-256 mismatch/,
   );
-});
-
-// ─── buildProofFilename (UNCHANGED evidence naming — regression guard) ──────
-
-test("buildProofFilename: No padded, segments joined, ext", () => {
-  assert.equal(
-    buildProofFilename({
-      no: 3,
-      categoryJa: "研究開発費",
-      merchant: "OpenAI",
-      amountMinor: 108341,
-      currency: "JPY",
-      ext: "pdf",
-    }),
-    "No03_研究開発費_OpenAI_￥108,341.pdf",
-  );
-});
-
-test("buildProofFilename: multi-file suffix (-2) before ext", () => {
-  assert.equal(
-    buildProofFilename({
-      no: 7,
-      categoryJa: "接待交際費",
-      merchant: "屋形舟",
-      amountMinor: 69000,
-      currency: "JPY",
-      ext: "jpg",
-      fileIndex: 2,
-    }),
-    "No07_接待交際費_屋形舟_￥69,000-2.jpg",
-  );
-});
-
-test("buildProofFilename: No zero-pads to 2, 3 digits naturally", () => {
-  const f = (n: number) =>
-    buildProofFilename({
-      no: n,
-      categoryJa: "交通費",
-      merchant: "TaxiGO",
-      amountMinor: 1900,
-      currency: "JPY",
-      ext: "pdf",
-    });
-  assert.ok(f(1).startsWith("No01_"));
-  assert.ok(f(33).startsWith("No33_"));
-  assert.ok(f(120).startsWith("No120_"));
 });
 
 // ─── buildPackNotice (ご連絡事項 — standing monthly notice) ─────────────────
@@ -194,12 +148,28 @@ test("buildPackNotice: 【今月のご連絡】 omitted when operatorMessage emp
   );
 });
 
+test("buildPackNotice: cash/digital-only pack (hasAmex=false) names the cash list, never the AMEX CSV", () => {
+  // A draft built before the AMEX statement lands (or a finalized cash-only
+  // month): no AMEX 照合CSV ships, so the notice must not name one — the §7
+  // desync guard requires every mentioned file to exist in the ZIP. Note
+  // buildPackNames with hasAmex=false does NOT require a payment-due date.
+  const cashNames = buildPackNames("2026-06", null, false);
+  const txt = buildPackNotice({ ...baseNotice, hasAmex: false }, cashNames);
+  assert.ok(txt.includes(cashNames.cashReconciliationCsv), "names the cash list");
+  assert.ok(
+    !txt.includes(cashNames.amexReconciliationCsv),
+    "does not name the (absent) AMEX CSV",
+  );
+  assert.ok(!txt.includes("カード明細の照合表"), "no AMEX reconciliation framing");
+});
+
 test("derivePackNoticeInput: month label + missing-receipt lines, no IC/revision plumbing", () => {
   const input = derivePackNoticeInput("2026-06", [], { rowCount: 5, receiptCount: 4 });
   assert.equal(input.monthLabel, "2026年6月");
   assert.equal(input.rowCount, 5);
   assert.equal(input.receiptCount, 4);
   assert.deepEqual(input.missingReceiptLines, []);
+  assert.equal(input.hasAmex, false, "empty rows ⇒ no AMEX content");
   // The IC-advisory + revision fields are gone from the input shape.
   assert.equal(
     "icAdvisories" in input,
@@ -211,6 +181,21 @@ test("derivePackNoticeInput: month label + missing-receipt lines, no IC/revision
     false,
     "exportRevision removed from the notice input",
   );
+});
+
+test("derivePackNoticeInput: hasAmex derived from amex_line rows", () => {
+  const withAmex = derivePackNoticeInput(
+    "2026-06",
+    [{ rowType: "amex_line", receiptId: "r-1" } as ExportRow],
+    { rowCount: 1, receiptCount: 1 },
+  );
+  assert.equal(withAmex.hasAmex, true, "an amex_line row ⇒ AMEX content");
+  const cashOnly = derivePackNoticeInput(
+    "2026-06",
+    [{ rowType: "receipt", receiptId: "r-2", paymentPath: "CASH" } as ExportRow],
+    { rowCount: 1, receiptCount: 1 },
+  );
+  assert.equal(cashOnly.hasAmex, false, "receipt rows only ⇒ no AMEX content");
 });
 
 // ─── assembleProofsZip round-trip ───────────────────────────────────────────
@@ -229,6 +214,7 @@ function fakeEntry(over: Partial<ProofZipEntry>): ProofZipEntry {
     transactionDate: "2026-03-04",
     attendees: "",
     paymentPath: "AMEX",
+    filename: "研究開発費Jun2026①OpenAI￥108,341.pdf",
     ...over,
   };
 }
@@ -329,10 +315,10 @@ test("assembleProofsZip: new naming + no 参加者一覧 + evidence filenames UN
   );
 });
 
-test("assembleProofsZip: notice-mentioned filenames equal actual ZIP entries (§7 desync guard)", () => {
-  // The notice's first bullet names the AMEX + cash CSV filenames. Those names
-  // come from the SAME PackNames object the assembler uses, so they must appear
-  // verbatim as ZIP entries. This is the structural fix for §7.
+test("assembleProofsZip: notice ⇄ ZIP reconciliation CSVs match both ways (§7 desync guard)", () => {
+  // The notice names the AMEX + cash 照合CSV filenames; those names come from
+  // the SAME PackNames object the assembler uses, so they must appear verbatim
+  // as ZIP entries AND every shipped 照合CSV must be named. Both directions:
   const zip = assembleProofsZip(
     names,
     [fakeEntry({ no: 1, filename: "会議費Jun2026①小田原みなと食堂￥6,490.jpg" })],
@@ -342,17 +328,51 @@ test("assembleProofsZip: notice-mentioned filenames equal actual ZIP entries (§
   );
   const files = unzipSync(zip);
   const entryBasenames = new Set(Object.keys(files).map((p) => p.split("/").pop()!));
-  // Extract filenames mentioned in the shipped notice and assert each exists.
   const noticeText = new TextDecoder("utf-8", { ignoreBOM: true }).decode(
     files[Object.keys(files).find((k) => k.endsWith("202606_ご連絡事項.txt"))!]!,
   );
-  const mentioned = noticeText.match(/[^\s（）「」、。]+\.csv/g) ?? [];
-  assert.ok(mentioned.length > 0, "notice mentions at least one .csv filename");
+  const mentioned = new Set(noticeText.match(/[^\s（）「」、。]+\.csv/g) ?? []);
+  assert.ok(mentioned.size > 0, "notice mentions at least one .csv filename");
+  // Forward §7: every notice-mentioned .csv exists as a ZIP entry.
   for (const name of mentioned) {
-    assert.ok(
-      entryBasenames.has(name),
-      `notice-mentioned file is a real ZIP entry: ${name}`,
-    );
+    assert.ok(entryBasenames.has(name), `notice-mentioned file is a real ZIP entry: ${name}`);
+  }
+  // Inverse: every shipped 照合CSV (root .csv, not 集計) is named in the notice.
+  const shippedRecon = [...entryBasenames].filter((b) => b.endsWith(".csv") && !b.includes("集計"));
+  assert.ok(shippedRecon.length > 0, "sanity: pack shipped reconciliation CSVs");
+  for (const name of shippedRecon) {
+    assert.ok(mentioned.has(name), `shipped 照合CSV is named in the notice: ${name}`);
+  }
+});
+
+test("assembleProofsZip: a DIGITAL 照合CSV is named in the notice when digital rows ship", () => {
+  // The previously-unmentioned case (docs/2026-08-07-phase-a-verification.md
+  // §Minor): a month with digital rows ships a DIGITAL 照合CSV, and the notice
+  // must name it — else it ships unmentioned (the gap the inverse guard closes).
+  const zip = assembleProofsZip(
+    names,
+    [fakeEntry({ no: 1, paymentPath: "DIGITAL", filename: "消耗品費Jun2026①DAISO￥764.jpg" })],
+    { ...baseNotice, hasCash: false, hasDigital: true },
+    SUMMARY_CSV,
+    { amex: AMEX_RECON_CSV, cash: null, digital: "﻿No,利用日,...,digital-bytes\r\n" },
+  );
+  const files = unzipSync(zip);
+  const entryBasenames = new Set(Object.keys(files).map((p) => p.split("/").pop()!));
+  const noticeText = new TextDecoder("utf-8", { ignoreBOM: true }).decode(
+    files[Object.keys(files).find((k) => k.endsWith("202606_ご連絡事項.txt"))!]!,
+  );
+  // The DIGITAL 照合CSV ships …
+  assert.ok(entryBasenames.has(names.digitalReconciliationCsv), "DIGITAL 照合CSV is a ZIP entry");
+  // … and is named in the notice (the regression this test guards).
+  assert.ok(
+    noticeText.includes(names.digitalReconciliationCsv),
+    `notice names the DIGITAL 照合CSV: ${names.digitalReconciliationCsv}`,
+  );
+  // Inverse holds for every shipped 照合CSV (here: AMEX + DIGITAL; cash null).
+  const mentioned = new Set(noticeText.match(/[^\s（）「」、。]+\.csv/g) ?? []);
+  const shippedRecon = [...entryBasenames].filter((b) => b.endsWith(".csv") && !b.includes("集計"));
+  for (const name of shippedRecon) {
+    assert.ok(mentioned.has(name), `shipped 照合CSV is named: ${name}`);
   }
 });
 
