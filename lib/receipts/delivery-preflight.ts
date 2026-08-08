@@ -10,12 +10,21 @@ import { unzipSync } from "fflate";
 import {
   runPackPreflight,
   sumReconChargeAmounts,
+  parseSummaryTotals,
   type PackPreflightEntry,
   type PackPreflightInput,
   type PackPreflightReport,
   type PreflightCsvInput,
 } from "@/lib/receipts/pack-preflight";
 import { buildPackNames } from "@/lib/receipts/pack-naming";
+
+/** Per-category totals parsed from the sealed 集計.csv (D4: summary regenerated
+ *  at send from the sealed pack, not a stale snapshot). Used by the delivery
+ *  email body. */
+export interface SealedSummary {
+  monthLabel: string;
+  categoryTotals: { ja: string; count: number; totalMinor: number }[];
+}
 
 /** Decode ZIP-entry bytes as UTF-8 and strip a leading BOM. The pack CSVs are
  *  UTF-8-BOM by design; PreflightCsvInput documents text as "BOM stripped by the
@@ -45,7 +54,7 @@ export async function runPreflightOnSealedZip(opts: {
   /** The stored operator_message (0037) — checked against the notice's
    *  【今月のご連絡】 content for the O7 invariant (one message, two surfaces). */
   operatorMessage?: string | null;
-}): Promise<PackPreflightReport> {
+}): Promise<{ report: PackPreflightReport; summary: SealedSummary | null }> {
   const names = buildPackNames(opts.month, opts.paymentDueDate, opts.paymentDueDate != null);
   const files = unzipSync(opts.zipBytes);
   const root = names.rootFolder;
@@ -87,5 +96,16 @@ export async function runPreflightOnSealedZip(opts: {
     maxPackBytes: opts.maxPackBytes,
     operatorMessage: opts.operatorMessage ?? null,
   };
-  return runPackPreflight(input);
+  const report = runPackPreflight(input);
+  // D4: parse the category totals from the sealed 集計 for the delivery email
+  // body — from the same text decodeText already decoded (no second unzip, no
+  // second BOM stripper). NULL when the 集計 is absent.
+  const y = opts.month.slice(0, 4);
+  const m = Number(opts.month.slice(5, 7));
+  const monthLabel = `${y}年${m}月`;
+  const sumText = rootText(names.summaryCsv);
+  const summary: SealedSummary | null = sumText
+    ? { monthLabel, categoryTotals: parseSummaryTotals(sumText) }
+    : null;
+  return { report, summary };
 }

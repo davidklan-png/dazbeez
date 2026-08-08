@@ -198,6 +198,35 @@ export function sumReconChargeAmounts(csvText: string): number {
   return sum;
 }
 
+/** Parse the 勘定科目 section of a 集計 CSV → per-category {ja, count, totalMinor}.
+ *  Single-sourced: used by summary-category-reconciles AND by the delivery email
+ *  summary regeneration (D4). Rows between the 勘定科目,件数,合計金額 header and
+ *  the next blank/支払方法 line. */
+export function parseSummaryTotals(
+  csvText: string,
+): { ja: string; count: number; totalMinor: number }[] {
+  const rows = parseCsvRows(csvText);
+  const out: { ja: string; count: number; totalMinor: number }[] = [];
+  let inCats = false;
+  for (const row of rows) {
+    if (row[0] === "勘定科目" && row[1] === "件数") {
+      inCats = true;
+      continue;
+    }
+    if (row[0] === "支払方法" || row[0] === "") {
+      inCats = false;
+      continue;
+    }
+    if (!inCats || row.length < 3) continue;
+    out.push({
+      ja: row[0]!,
+      count: parseInt(row[1] ?? "0", 10),
+      totalMinor: parseInt(row[2] ?? "0", 10),
+    });
+  }
+  return out;
+}
+
 // Evidence filenames referenced by the 領収書ファイル名 (last) column of each
 // reconciliation CSV's charge rows, excluding 領収書なし markers and blanks.
 function referencedEvidence(

@@ -82,7 +82,7 @@ function buildPack(amex = AMEX_REALISTIC, summary = SUMMARY): Uint8Array {
 }
 
 test("runPreflightOnSealedZip: a real built pack (BOM, metadata, totals) passes the gate", async () => {
-  const report = await runPreflightOnSealedZip({
+  const { report } = await runPreflightOnSealedZip({
     zipBytes: buildPack(),
     month: "2026-06",
     paymentDueDate: "2026-06-04",
@@ -95,7 +95,7 @@ test("runPreflightOnSealedZip: a real built pack (BOM, metadata, totals) passes 
 test("runPreflightOnSealedZip: a pack whose 集計 total drifts from the AMEX charges fails", async () => {
   // The AMEX charges sum to 114831; lie in 集計 → summary-payment-path-reconciles fails.
   const lyingSummary = SUMMARY.replace("AMEX,2,114831", "AMEX,2,999999");
-  const report = await runPreflightOnSealedZip({
+  const { report } = await runPreflightOnSealedZip({
     zipBytes: buildPack(AMEX_REALISTIC, lyingSummary),
     month: "2026-06",
     paymentDueDate: "2026-06-04",

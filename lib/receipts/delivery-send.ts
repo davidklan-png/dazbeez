@@ -149,13 +149,12 @@ function escapeHtml(s: string): string {
 
 export function buildDeliveryEmail(opts: {
   month: string;
-  /** The operator's free-text message. Change 4 sources this from the export
-   *  record (one stored value, two surfaces); Change 2 passes null. */
   operatorMessage: string | null;
+  /** Category totals from the sealed 集計.csv (D4 — regenerated at send from
+   *  the sealed pack, not a stale snapshot). NULL when the 集計 is absent. */
+  summary: { monthLabel: string; categoryTotals: { ja: string; count: number; totalMinor: number }[] } | null;
 }): DeliveryEmail {
-  const y = opts.month.slice(0, 4);
-  const m = Number(opts.month.slice(5, 7));
-  const monthLabel = `${y}年${m}月`;
+  const monthLabel = opts.summary?.monthLabel ?? `${opts.month.slice(0, 4)}年${Number(opts.month.slice(5, 7))}月`;
   const lines: string[] = [];
   lines.push(`${monthLabel} の領収証憑一式を添付にてお送りします。`);
   lines.push("");
@@ -165,7 +164,13 @@ export function buildDeliveryEmail(opts: {
     lines.push(msg);
     lines.push("");
   }
-  // Change 4: regenerate the 勘定科目別集計 here from the sealed 集計.csv (B-5).
+  if (opts.summary && opts.summary.categoryTotals.length > 0) {
+    lines.push("【勘定科目別集計】");
+    for (const t of opts.summary.categoryTotals) {
+      lines.push(`・${t.ja}: ${t.count}件 / ￥${t.totalMinor.toLocaleString("ja-JP")}`);
+    }
+    lines.push("");
+  }
   lines.push("ご不明な点があればお知らせください。");
   const text = lines.join("\r\n");
   return {

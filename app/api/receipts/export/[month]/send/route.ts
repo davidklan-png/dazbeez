@@ -162,9 +162,43 @@ export async function POST(request: Request, { params }: RouteContext) {
     const zipSha256 = await computeSha256Hex(zipBytes);
     const zipFilename = packZipName(month); // ASCII container name (B-4, asserted in performDelivery)
 
-    // ── Email body — sealed values only (B-5). SINGLE path (Change 4 replaces). ──
-    const operatorMessage = exportRecord.operator_message ?? null; // 0037: same stored value the pack notice carries (O7 — one message, two surfaces)
-    const email = buildDeliveryEmail({ month, operatorMessage });
+    // ── Change 3: preflight on the ACTUAL sealed bytes — a gate that checks a
+    //    different object than the one being sent is not a gate. Uses the SAME
+    //    zipBytes fetched once (no second R2 read). Runs BEFORE createDelivery:
+    //    a failing check rejects the pack at the gate — no delivery row is
+    //    created, so there is no pending row to get stuck (the duplicate-send
+    //    path the stuck-pending guard prevents). The report is returned to the
+    //    caller so Phase C can render it.
+    const { report: preflight, summary } = await runPreflightOnSealedZip({
+      zipBytes,
+      month,
+      paymentDueDate: exportRecord.payment_due_date ?? null,
+      maxPackBytes: MAX_DELIVERY_ZIP_BYTES,
+      operatorMessage: exportRecord.operator_message ?? null,
+    });
+    if (!preflight.passed) {
+      const failedChecks = preflight.results
+        .filter((r) => !r.passed)
+        .map((r) => r.check)
+        .join(", ");
+      await createAuditEntry(getReceiptsDb(), {
+        actor,
+        action: "export.delivery_failed",
+        objectType: "export",
+        objectId: exportRecord.id,
+        newValueJson: stringifyJson({ month, error: `preflight: ${failedChecks}` }),
+      });
+      return NextResponse.json(
+        { error: "Pre-send preflight failed.", report: preflight },
+        { status: 422 },
+      );
+    }
+
+    // ── Email body — sealed values only (B-5). SINGLE path. The summary comes
+    //    from the preflight's parse of the sealed 集計 (D4 — regenerated at
+    //    send, not a stale snapshot). ──
+    const operatorMessage = exportRecord.operator_message ?? null; // 0037: same stored value the pack notice carries (O7)
+    const email = buildDeliveryEmail({ month, operatorMessage, summary });
 
     // ── attempt_id: resume reuses the pending one; a new send mints one ──────
     const attemptId = action.action === "resume" ? action.attemptId : newUuid();
@@ -192,42 +226,6 @@ export async function POST(request: Request, { params }: RouteContext) {
       zipSha256,
       zipBytes: zipBytes.byteLength,
     });
-
-    // ── Change 3: preflight on the ACTUAL sealed bytes — a gate that checks a
-    //    different object than the one being sent is not a gate. Uses the SAME
-    //    zipBytes fetched once (no second R2 read). A failure is definitive (the
-    //    sealed pack is malformed) ⇒ mark the row failed (never pending — a
-    //    blocked send must not become the stuck-pending duplicate path) + 422
-    //    with the itemised report.
-    const preflight = await runPreflightOnSealedZip({
-      zipBytes,
-      month,
-      paymentDueDate: exportRecord.payment_due_date ?? null,
-      maxPackBytes: MAX_DELIVERY_ZIP_BYTES,
-      operatorMessage: exportRecord.operator_message ?? null,
-    });
-    if (!preflight.passed) {
-      const failedChecks = preflight.results
-        .filter((r) => !r.passed)
-        .map((r) => r.check)
-        .join(", ");
-      await markDeliveryFailed(deliveryId, `preflight: ${failedChecks}`);
-      await createAuditEntry(getReceiptsDb(), {
-        actor,
-        action: "export.delivery_failed",
-        objectType: "export",
-        objectId: exportRecord.id,
-        newValueJson: stringifyJson({
-          month,
-          attemptId,
-          error: `preflight: ${failedChecks}`,
-        }),
-      });
-      return NextResponse.json(
-        { error: "Pre-send preflight failed.", deliveryId, report: preflight },
-        { status: 422 },
-      );
-    }
 
     // ── Send. performDelivery re-checks size on the in-memory bytes (CALL SITE
     //    2 — defence-in-depth, B-1) then base64-encodes and calls Resend with
