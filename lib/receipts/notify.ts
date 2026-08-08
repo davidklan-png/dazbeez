@@ -1,148 +1,39 @@
-// Finalize notification email.
+// Email transport + recipient resolution for the receipts module.
 //
-// On successful finalize, email the notification recipient a Japanese summary
-// (month, revision, counts, per-category totals, transition notice, download
-// link). Transport: Resend REST API (POST api.resend.com/emails) — replaces the
-// former Cloudflare Email Routing send_email binding.
+// Transport: Resend REST API (POST api.resend.com/emails) — replaces the former
+// Cloudflare Email Routing send_email binding.
+//
+// After Phase B decoupled finalize from delivery (D1/D2), finalize sends NO
+// email. Two callers remain:
+//  - Delivery (POST /api/receipts/export/{month}/send): sendDeliveryViaResend
+//    attaches the sealed ZIP, sends To: accountant / Cc: business manager, and
+//    carries an Idempotency-Key. A delivery FAILURE is a real event — the month
+//    lands in sealed_undelivered (the seal stands; reporting-close waits), NOT
+//    a swallowed warning. See delivery-state.ts + delivery-send.ts.
+//  - Channel probe (POST /api/receipts/notify/test): sendViaResend sends a
+//    small, clearly-labelled test email to the configured recipients to verify
+//    the Resend config + addresses — WITHOUT finalizing or delivering a pack.
+//
+// This module is PURE (no D1/R2 bindings): every function takes its transport
+// (fetch) and config (apiKey, addresses) as arguments, so the logic is unit-
+// testable without bindings. The finalize-notification machinery that used to
+// live here (composeFinalizeNoticeData / notifyAccountantOfFinalize / the email
+// body builders / summarizeByCategory) was deleted when finalize stopped
+// notifying — it had no caller but the test route, and its "ファイナライズが完了
+// しました" framing described a model that no longer exists. The channel probe
+// composes its own minimal body inline.
 //
 // Recipient resolution: Settings → Compliance (notification_recipient) →
-// ACCOUNTANT_EMAIL var fallback → unconfigured {ok:false}.
-//
-// HARD RULE: email failure must never fail finalize. sendFinalizeNotification
-// never throws — it returns {ok, error?}; callers fold the result into the
-// finalize response warnings + an audit entry (notification_sent /
-// notification_failed), and finalize returns 200 regardless.
-
-import {
-  getAccountantEmail,
-  getNotifyFromAddress,
-  getResendApiKeyOrNull,
-} from "@/lib/cloudflare-runtime";
-import { getComplianceSettings } from "@/lib/receipts/settings";
-import { buildPackNotice, derivePackNoticeInput } from "@/lib/receipts/proofs";
-import { buildPackNames } from "@/lib/receipts/pack-naming";
-import { getAmexArtifactByMonth } from "@/lib/receipts/db";
-import type { ExportBundle } from "@/lib/receipts/month-closing";
-import type { ExportRow, ReceiptExport } from "@/lib/receipts/types";
-
-export interface CategoryTotal {
-  code: string;
-  ja: string;
-  count: number;
-  totalMinor: number;
-}
-
-export function summarizeByCategory(rows: ExportRow[]): CategoryTotal[] {
-  const map = new Map<string, CategoryTotal>();
-  for (const row of rows) {
-    const code = row.expenseCategoryCode ?? "uncategorized";
-    const cat = map.get(code) ?? { code, ja: row.expenseCategoryJa ?? code, count: 0, totalMinor: 0 };
-    cat.count += 1;
-    cat.totalMinor += row.amountMinor ?? 0;
-    map.set(code, cat);
-  }
-  return [...map.values()].sort((a, b) => b.totalMinor - a.totalMinor);
-}
-
-export interface FinalizeNoticeData {
-  month: string;
-  monthLabel: string;
-  exportId: string;
-  revision: number;
-  rowCount: number;
-  receiptCount: number;
-  categoryTotals: CategoryTotal[];
-  noticeText: string;
-}
-
-export async function composeFinalizeNoticeData(
-  month: string,
-  bundle: ExportBundle,
-  exportRecord: Pick<ReceiptExport, "id" | "export_revision">,
-): Promise<FinalizeNoticeData> {
-  const distinctReceiptIds = new Set<string>();
-  for (const row of bundle.rows) {
-    if (row.receiptId) distinctReceiptIds.add(row.receiptId);
-  }
-  const noticeInput = derivePackNoticeInput(
-    month,
-    bundle.rows,
-    { rowCount: bundle.rows.length, receiptCount: distinctReceiptIds.size },
-  );
-  // The notice interpolates the pack's 照合CSV filenames, so it needs the pack
-  // names. hasAmex mirrors the bundle-build path: only a pack with an AMEX
-  // statement needs the payment-due date. A cash/digital-only finalized month
-  // (no statement imported) passes hasAmex=false so a missing date does NOT
-  // throw here; the notice then omits the AMEX 照合CSV mention
-  // (derivePackNoticeInput sets hasAmex from the bundle rows).
-  const artifact = await getAmexArtifactByMonth(month);
-  const names = buildPackNames(
-    month,
-    artifact?.payment_due_date ?? null,
-    /* hasAmex */ artifact != null,
-  );
-  return {
-    month,
-    monthLabel: noticeInput.monthLabel,
-    exportId: exportRecord.id,
-    revision: exportRecord.export_revision ?? 1,
-    rowCount: bundle.rows.length,
-    receiptCount: distinctReceiptIds.size,
-    categoryTotals: summarizeByCategory(bundle.rows),
-    noticeText: buildPackNotice(noticeInput, names),
-  };
-}
-
-function formatYen(minor: number): string {
-  return `¥${minor.toLocaleString("ja-JP")}`;
-}
-
-export function buildFinalizeEmailBody(d: FinalizeNoticeData, opts?: { test?: boolean }): string {
-  const lines: string[] = [];
-  lines.push("毎月の領収証憑一式の確定（ファイナライズ）が完了しましたのでお知らせします。");
-  lines.push("");
-  lines.push(`対象月: ${d.monthLabel}`);
-  lines.push(`改訹: ${d.revision > 1 ? `${d.revision}（差替え）` : "新規"}`);
-  lines.push(`明細行数: ${d.rowCount}`);
-  lines.push(`証憑ファイル数: ${d.receiptCount}`);
-  lines.push("");
-  lines.push("【勘定科目別集計】");
-  for (const c of d.categoryTotals) lines.push(`・${c.ja}: ${c.count}件 / ${formatYen(c.totalMinor)}`);
-  lines.push("");
-  lines.push("【変更点・留意事項のお知らせ】");
-  lines.push(d.noticeText);
-  lines.push("");
-  lines.push("【ダウンロード】");
-  lines.push("以下のURL（要ログイン）から、明細CSV・マニフェスト・サマリー・README・領収書ZIPをダウンロードできます。");
-  lines.push(`https://dazbeez.com/receipts/export?month=${d.month}`);
-  lines.push("");
-  lines.push("本メールは自動送信されています。ご不明な点があれば別途ご連絡ください。");
-  const body = lines.join("\r\n");
-  if (opts?.test) {
-    return "※これは通知チャネルのテスト送信です。月次確定の通知ではありません。\r\n\r\n" + body;
-  }
-  return body;
-}
-
-export function buildFinalizeEmailSubject(d: FinalizeNoticeData, opts?: { test?: boolean }): string {
-  const base = d.revision > 1
-    ? `【領収証憑】${d.monthLabel}分 確定通知（改訂${d.revision}）`
-    : `【領収証憑】${d.monthLabel}分 確定通知`;
-  return opts?.test ? `【テスト送信】${base}` : base;
-}
-
-/** Minimal HTML wrapper around the text body. Escapes + preserves line breaks
- *  via white-space:pre-wrap. No template framework. */
-export function buildFinalizeEmailHtml(d: FinalizeNoticeData, opts?: { test?: boolean }): string {
-  const escaped = buildFinalizeEmailBody(d, opts)
-    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  return `<!DOCTYPE html><html><body><div style="white-space:pre-wrap;font-family:sans-serif;font-size:14px;line-height:1.6;color:#1a1a1a">${escaped}</div></body></html>`;
-}
+// ACCOUNTANT_EMAIL var fallback → unconfigured {email:null}.
 
 export type NotifyResult = { ok: true } | { ok: false; error: string };
 
 // ─── Resend transport (isolated, mockable seam) ─────────────────────────────
 
+/** Plain email send (no attachment). Used by the channel-probe route. `cc` is
+ *  optional — null/omitted drops the field from the payload entirely (mirrors
+ *  sendDeliveryViaResend; never cc:null/cc:""). Never throws across the
+ *  boundary — returns {ok, error?}. */
 export async function sendViaResend(
   fetchImpl: typeof fetch,
   apiKey: string,
@@ -151,12 +42,13 @@ export async function sendViaResend(
   subject: string,
   text: string,
   html: string,
+  cc: string | null = null,
 ): Promise<NotifyResult> {
   try {
     const res = await fetchImpl("https://api.resend.com/emails", {
       method: "POST",
       headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ from, to: [to], subject, text, html }),
+      body: JSON.stringify({ from, to: [to], cc: cc ? [cc] : undefined, subject, text, html }),
     });
     if (!res.ok) {
       const errBody = (await res.json().catch(() => ({}))) as { message?: unknown };
@@ -169,23 +61,70 @@ export async function sendViaResend(
   }
 }
 
-export async function sendFinalizeNotification(
-  apiKey: string | null,
-  from: string | null,
-  to: string | null,
-  data: FinalizeNoticeData,
-  opts?: { test?: boolean },
-  fetchImpl: typeof fetch = fetch,
-): Promise<NotifyResult> {
-  if (!apiKey) return { ok: false, error: "RESEND_API_KEY not configured" };
-  if (!from) return { ok: false, error: "NOTIFY_FROM_ADDRESS not configured" };
-  if (!to) return { ok: false, error: "Notification recipient not configured (set it in Settings → Compliance)" };
-  return sendViaResend(
-    fetchImpl, apiKey, from, to,
-    buildFinalizeEmailSubject(data, opts),
-    buildFinalizeEmailBody(data, opts),
-    buildFinalizeEmailHtml(data, opts),
-  );
+/** A Resend attachment — a filename plus the file content as base64 (Resend's
+ *  `attachments[].content` is base64). The filename MUST be ASCII (the pack
+ *  container name) — checked by the caller (B-4). */
+export interface ResendAttachment {
+  filename: string;
+  contentBase64: string;
+}
+
+/** Delivery send via Resend. Extends {@link sendViaResend} with the ZIP
+ *  attachment, a Cc recipient, and an `Idempotency-Key` header.
+ *
+ *  B-3: the key is derived from the attempt_id — stable across retries of one
+ *  attempt, new per operator send — so a response-timeout retry does not
+ *  double-send. On success the provider message id is returned so the caller
+ *  can record it on the delivery row. */
+export async function sendDeliveryViaResend(
+  fetchImpl: typeof fetch,
+  apiKey: string,
+  from: string,
+  to: string,
+  cc: string | null,
+  subject: string,
+  text: string,
+  html: string,
+  attachment: ResendAttachment,
+  idempotencyKey: string,
+): Promise<
+  | { ok: true; messageId?: string }
+  | { ok: false; error: string; status?: number }
+> {
+  try {
+    const res = await fetchImpl("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+        "Idempotency-Key": idempotencyKey,
+      },
+      body: JSON.stringify({
+        from,
+        to: [to],
+        cc: cc ? [cc] : undefined,
+        subject,
+        text,
+        html,
+        attachments: [
+          { filename: attachment.filename, content: attachment.contentBase64 },
+        ],
+      }),
+    });
+    if (!res.ok) {
+      const errBody = (await res.json().catch(() => ({}))) as { message?: unknown };
+      const message = typeof errBody.message === "string" ? errBody.message : `Resend API returned ${res.status}`;
+      // status lets the caller classify: 4xx = definitive (rejected); the caller
+      // defaults everything else (5xx, and the catch below) to ambiguous.
+      return { ok: false, error: message, status: res.status };
+    }
+    const body = (await res.json().catch(() => ({}))) as { id?: string };
+    return { ok: true, messageId: typeof body.id === "string" ? body.id : undefined };
+  } catch (err) {
+    // No response (timeout / network) — status undefined ⇒ caller classifies
+    // ambiguous. Never infer "definitely not sent" from the absence of a response.
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
 }
 
 export function authorizeNotifyTest(clerkActor: string | null): string {
@@ -193,7 +132,37 @@ export function authorizeNotifyTest(clerkActor: string | null): string {
   return clerkActor;
 }
 
-// ─── Recipient resolution (settings → var fallback → null) ──────────────────
+// ─── Recipient validation + resolution + D7 message ─────────────────────────
+
+/** The email-address shape every delivery recipient must match. Same regex as
+ *  the compliance-settings PATCH validation (`settings/compliance/route.ts`)
+ *  and the contact route. A delivery address is checked at SEND time too
+ *  (Change 5) because the To may come from the unvalidated ACCOUNTANT_EMAIL
+ *  fallback — a malformed address is a definitive Resend 4xx, correct but a
+ *  wasted attempt and a confusing audit entry. Catch it first as a clear 422. */
+const DELIVERY_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+export function isValidDeliveryAddress(email: string): boolean {
+  return DELIVERY_EMAIL_RE.test(email.trim());
+}
+
+/**
+ * D7 — the message returned when a delivery-recipient setting is edited.
+ * Describes ACTUAL behaviour after finalize was decoupled from delivery (Phase
+ * B): the address receives the monthly pack when the OPERATOR sends it — NOT
+ * automatically on finalize — and the field is audited. The pre-decoupling D7
+ * wording ("receives the pack automatically on finalize", §15) is now FALSE and
+ * must not be reproduced.
+ */
+export function recipientSettingMessage(
+  field: "notification_recipient" | "notification_cc_recipient",
+): string {
+  const role = field === "notification_cc_recipient" ? "CC（写先行）" : "送信先（To）";
+  return (
+    `このアドレスは、毎月の領収証憑一式がオペレーターによって送信される際の${role}として使用されます。` +
+    `確定（ファイナライズ）時の自動送信は行われません。配信は明示的な送信操作によって行われます。` +
+    `この項目の変更は監査ログに記録されます。`
+  );
+}
 
 export function resolveNotificationRecipient(
   settingsValue: string | null | undefined,
@@ -202,15 +171,4 @@ export function resolveNotificationRecipient(
   if (settingsValue) return { email: settingsValue, source: "settings" };
   if (fallback) return { email: fallback, source: "fallback" };
   return { email: null, source: null };
-}
-
-export async function notifyAccountantOfFinalize(
-  data: FinalizeNoticeData,
-  opts?: { test?: boolean },
-): Promise<NotifyResult> {
-  const settings = await getComplianceSettings();
-  const resolved = resolveNotificationRecipient(settings.notification_recipient, getAccountantEmail());
-  return sendFinalizeNotification(
-    getResendApiKeyOrNull(), getNotifyFromAddress(), resolved.email, data, opts,
-  );
 }

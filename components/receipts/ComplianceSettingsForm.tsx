@@ -29,6 +29,7 @@ const LABELS: Record<keyof ComplianceSettings, string> = {
   statement_expected_day: "AMEX statement expected day",
   track_tax_breakdown: "Track tax rate / amount breakdown",
   notification_recipient: "通知先 (Notification recipient)",
+  notification_cc_recipient: "CC (Business manager / Cc recipient)",
   homebase_signals: "Homebase signals (ADR 0010)",
 };
 

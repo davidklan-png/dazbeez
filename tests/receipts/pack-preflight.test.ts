@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   runPackPreflight,
   PREFLIGHT_CHECK_KEYS,
+  stripOperatorMessageSection,
   type PackPreflightEntry,
   type PackPreflightInput,
 } from "@/lib/receipts/pack-preflight";
@@ -100,10 +101,10 @@ test("preflight: check keys are unique and cover the spec", () => {
   // The 17 checks from docs/2026-06-pack-approved-delta.md §16, plus the inverse
   // notice desync guard (notice-mentions-shipped-reconciliation-csvs) added to
   // close the shipped-but-unmentioned 照合CSV gap (§Minor).
-  assert.equal(PREFLIGHT_CHECK_KEYS.length, 18);
+  assert.equal(PREFLIGHT_CHECK_KEYS.length, 19);
   assert.ok(
-    PREFLIGHT_CHECK_KEYS.includes("notice-mentions-shipped-reconciliation-csvs"),
-    "inverse notice guard registered",
+    PREFLIGHT_CHECK_KEYS.includes("operator-message-matches-notice"),
+    "O7 invariant check registered",
   );
 });
 
@@ -285,4 +286,163 @@ test("csv-no-attendee-id-column: a 会議-出席者ID column in a CSV fails", ()
   const cash = input.csvs.find((c) => c.label === "CASH")!;
   cash.text = cash.text.replace("事業目的,人数", "事業目的,会議-出席者ID,人数");
   failsOnly(runPackPreflight(input), "csv-no-attendee-id-column");
+});
+
+// ─── P2 #2: a real Netアンサー AMEX CSV has metadata before the 利用日 header
+//    and 小計/合計 totals after the charges. The flat-fixture assumption (row 0
+//    = header, every later row a charge) mis-counts both and fails a valid pack.
+test("preflight: a realistic AMEX statement (metadata + header + charges + totals) passes", () => {
+  const AMEX_REALISTIC = [
+    "カード名称,セゾンプラチナビジネス・アメリカンエキスプレス・カード",
+    "ご利用者名,DAVID KLAN",
+    "お支払日,2026/07/06",
+    "利用日,ご利用店名及び商品名,会員区分,支払区分名称,分割区分,金額,備考,科目＆No.,事業目的,人数,領収書ファイル名",
+    '2026/04/17,小田原みなと食堂,,1回,,6490,,会議費Jun2026①,打ち合わせ,1,"会議費Jun2026①小田原みなと食堂￥6,490.jpg"',
+    '2026/05/02,OpenAI,,1回,,108341,,研究開発費Jun2026①,API,1,"研究開発費Jun2026①OpenAI￥108,341.pdf"',
+    "小計,,,,,114831", // total row — narrower than the 11-col charge rows
+    "合計,,,,,114831",
+  ].join("\r\n");
+  const SUMMARY_2 = [
+    "Field,Value", "Month,2026-06", "GeneratedAt,t", "",
+    "勘定科目,件数,合計金額", "会議費,1,6490", "研究開発費,1,108341", "",
+    "支払方法,件数,合計金額", "AMEX,2,114831", "現金,0,0", "デジタル,0,0", "",
+    "総合計,2,114831",
+  ].join("\r\n");
+  const notice = buildPackNotice(
+    { monthLabel: "2026年6月", rowCount: 2, receiptCount: 2, missingReceiptLines: [], hasAmex: true, hasCash: false, hasDigital: false },
+    names,
+  );
+  const root = names.rootFolder;
+  const input: PackPreflightInput = {
+    month: "2026-06",
+    paymentDueDate: "2026-06-04",
+    containerNames: { zipName: names.zipName, rootFolder: names.rootFolder },
+    noticeText: notice,
+    csvs: [
+      { label: "集計", text: SUMMARY_2 },
+      { label: "AMEX", text: AMEX_REALISTIC },
+    ],
+    entries: [
+      entry(`${root}/${names.summaryCsv}`, SUMMARY_2),
+      entry(`${root}/${names.noticeFile}`, notice),
+      entry(`${root}/${names.amexReconciliationCsv}`, AMEX_REALISTIC),
+      entry(`${root}/${names.amexFolder}/会議費Jun2026①小田原みなと食堂￥6,490.jpg`, "img1"),
+      entry(`${root}/${names.amexFolder}/研究開発費Jun2026①OpenAI￥108,341.pdf`, "img2"),
+    ],
+    amexStatementTotalCents: 114831,
+    maxPackBytes: 100_000_000,
+  };
+  const report = runPackPreflight(input);
+  const failed = report.results.filter((r) => !r.passed);
+  assert.equal(
+    report.passed,
+    true,
+    `a realistic AMEX pack must pass; failures: ${JSON.stringify(failed)}`,
+  );
+  // Specifically: the charge-row count is 2 (the two charges), NOT 6
+  // (metadata+header+charges+totals-1) — the pre-fix length-1 assumption.
+  const counts = report.results.find((r) => r.check === "notice-counts-match-pack")!;
+  assert.equal(counts.passed, true, "notice-counts-match-pack passes (2 charge rows, not the metadata/header/totals)");
+});
+
+// ─── Change 4 interaction: operator free text vs the notice-policy check ────
+// The operator message is injected into 【今月のご連絡】 — the SAME file the
+// policy check scans for 改訂情報 / attendee / manifest. The operator may
+// legitimately write all three (D17 supersession note, D9 attendee retention,
+// etc.). The policy check strips the operator section before scanning.
+test("notice-policy: operator free text with 改訂情報/出席者/manifest does NOT trip the check (stripped)", () => {
+  const notice = buildPackNotice(
+    {
+      monthLabel: "2026年6月",
+      rowCount: 2,
+      receiptCount: 2,
+      missingReceiptLines: [],
+      operatorMessage:
+        "本パックは改訂情報として前回の6月分を差し替えます。出席者一覧は弊社で保管しております。マニフェストで検証できます。",
+    },
+    names,
+  );
+  const input = clone(baseInput());
+  input.noticeText = notice;
+  const report = runPackPreflight(input);
+  const policy = report.results.find((r) => r.check === "notice-policy")!;
+  assert.equal(
+    policy.passed,
+    true,
+    "operator free text under 【今月のご連絡】 must not trip the policy check (改訂情報/出席者/manifest are the operator's words, not the generated notice)",
+  );
+});
+
+// ─── stripOperatorMessageSection robustness ──────────────────────────────────
+
+test("stripOperatorMessageSection: operator text with a bracketed line does NOT prematurely end the strip", () => {
+  // The operator typed 【注意】 inside their note — a plausible bracketed line.
+  // The strip must anchor on 【この資料について】 (the generated heading), NOT on
+  // the operator's 【注意】. Otherwise the lines after 【注意】 would be
+  // under-stripped (kept in the generated-text scan).
+  const notice = buildPackNotice(
+    {
+      monthLabel: "2026年6月",
+      rowCount: 2,
+      receiptCount: 2,
+      missingReceiptLines: [],
+      operatorMessage:
+        "差替え版です。\n【注意】前回のパックは破棄してください。\nよろしくお願いします。",
+    },
+    names,
+  );
+  const stripped = stripOperatorMessageSection(notice);
+  // All operator text stripped (including the bracketed line + trailing text).
+  assert.ok(!stripped.includes("差替え版"), "text before 【注意】 stripped");
+  assert.ok(!stripped.includes("前回のパックは破棄"), "text after 【注意】 stripped");
+  assert.ok(!stripped.includes("【注意】"), "the operator's bracketed line stripped");
+  assert.ok(!stripped.includes("よろしくお願いします"), "trailing operator text stripped");
+  // Generated structure intact.
+  assert.ok(stripped.includes("【この資料について】"), "the generated heading is preserved");
+  assert.ok(stripped.includes("科目＆No"), "generated content preserved");
+});
+
+test("stripOperatorMessageSection: no-op when the operator message is absent", () => {
+  const notice = buildPackNotice(
+    { monthLabel: "2026年6月", rowCount: 2, receiptCount: 2, missingReceiptLines: [] },
+    names,
+  );
+  // No 【今月のご連絡】 heading ⇒ nothing to strip ⇒ identity.
+  assert.equal(stripOperatorMessageSection(notice), notice);
+});
+
+// ─── O7 invariant: operator-message-matches-notice (19th check) ─────────────
+
+test("operator-message-matches-notice: matching notice + stored value passes", () => {
+  const input = clone(baseInput());
+  input.noticeText = buildPackNotice(
+    { monthLabel: "2026年6月", rowCount: 2, receiptCount: 2, missingReceiptLines: [], operatorMessage: "差替え版です。前回のパックは破棄してください。" },
+    names,
+  );
+  input.operatorMessage = "差替え版です。前回のパックは破棄してください。";
+  const check = runPackPreflight(input).results.find((r) => r.check === "operator-message-matches-notice")!;
+  assert.equal(check.passed, true, "matching notice + stored value ⇒ pass");
+});
+
+test("operator-message-matches-notice: a deliberately desynced notice vs stored value fails (O7 drift)", () => {
+  // The pack was sealed with "差替え版です" in the notice, but the stored
+  // operator_message drifted to "別のメッセージ" (e.g. edited post-seal without
+  // a rebuild). The ZIP says one thing; the email would say another.
+  const input = clone(baseInput());
+  input.noticeText = buildPackNotice(
+    { monthLabel: "2026年6月", rowCount: 2, receiptCount: 2, missingReceiptLines: [], operatorMessage: "差替え版です。" },
+    names,
+  );
+  input.operatorMessage = "別のメッセージ。";
+  const check = runPackPreflight(input).results.find((r) => r.check === "operator-message-matches-notice")!;
+  assert.equal(check.passed, false, "desync must be caught");
+  if (!check.passed) assert.match(check.detail!, /does not match/);
+});
+
+test("operator-message-matches-notice: both empty (no operator message) passes", () => {
+  const input = clone(baseInput());
+  // baseInput's notice has no 【今月のご連絡】; operatorMessage undefined ⇒ null ⇒ "".
+  input.operatorMessage = null;
+  const check = runPackPreflight(input).results.find((r) => r.check === "operator-message-matches-notice")!;
+  assert.equal(check.passed, true);
 });

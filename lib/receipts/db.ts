@@ -47,6 +47,7 @@ import type {
   ReceiptRecord,
   UpdateAmexLineCategoryInput,
   UpdateReceiptInput,
+  ExportDelivery,
 } from "@/lib/receipts/types";
 
 // ─── Receipt records ─────────────────────────────────────────────────────────
@@ -2982,13 +2983,35 @@ export async function recordExportBundle(
   archiveR2Key: string,
   manifestR2Key: string,
   archiveSha256: string,
-  manifestSha256?: string,
-  proofsR2Key?: string | null,
-  proofsSha256?: string | null,
+  // The sealed-bundle params are REQUIRED (nullable, not optional). TS forbids
+  // a required param after an optional one, so making paymentDueDate +
+  // operatorMessage required (the Phase B P1 fix) promotes these too. More
+  // importantly it is correct: this UPDATE re-writes sealed columns, so an
+  // omitted value would bind `?? null` and overwrite a correct one — requiring
+  // the value (null is still allowed) makes omission a compile error.
+  manifestSha256: string | null,
+  proofsR2Key: string | null,
+  proofsSha256: string | null,
   /** AMEX payment-due date to snapshot onto this revision (0035). The build
    *  path passes the just-fetched artifact date; finalizeExport passes the
-   *  draft row's existing snapshot (a no-op re-write of the same value). */
-  paymentDueDate?: string | null,
+   *  draft row's existing snapshot (a no-op re-write of the same value).
+   *
+   *  REQUIRED (nullable, not optional): this UPDATE re-writes the sealed bundle
+   *  columns, so an omitted value binds as `?? null` and OVERWRITES a correct
+   *  value written moments earlier in the same request. Making the param
+   *  required turns omission into a compile error rather than a silent null —
+   *  the Phase B P1 fix (the one-shot finalize path was nulling both columns). */
+  paymentDueDate: string | null,
+  /** Operator free-text message for the month (0037). One stored value, two
+   *  surfaces (O7): the build passes it so the pack notice carries it inside
+   *  the sealed ZIP; finalizeExport re-writes the draft's existing value.
+   *  Sealed with the row by the WHERE status='draft' guard below — mutating it
+   *  post-seal requires a rebuild (new revision), same doctrine as every other
+   *  sealed value (ADR 0009). The O7 preflight check (19th) verifies the
+   *  notice's 【今月のご連絡】 matches this stored value at send time.
+   *
+   *  REQUIRED (nullable) for the same reason as paymentDueDate. */
+  operatorMessage: string | null,
 ): Promise<void> {
   const db = getReceiptsDb();
   const now = nowIso();
@@ -3002,7 +3025,8 @@ export async function recordExportBundle(
            proofs_r2_key = ?,
            proofs_sha256 = ?,
            bundle_built_at = ?,
-           payment_due_date = ?
+           payment_due_date = ?,
+           operator_message = ?
        WHERE id = ? AND status = 'draft'`,
     )
     .bind(
@@ -3014,6 +3038,7 @@ export async function recordExportBundle(
       proofsSha256 ?? null,
       now,
       paymentDueDate ?? null,
+      operatorMessage ?? null,
       exportId,
     )
     .run();
@@ -3025,13 +3050,22 @@ export async function finalizeExport(
   manifestR2Key: string,
   archiveSha256: string,
   actor: string,
-  manifestSha256?: string,
-  proofsR2Key?: string | null,
-  proofsSha256?: string | null,
+  // Sealed-bundle params REQUIRED (nullable) — see recordExportBundle. The
+  // one-shot finalize path passes the just-fetched values; the two-step path
+  // passes the draft row's stored snapshots.
+  manifestSha256: string | null,
+  proofsR2Key: string | null,
+  proofsSha256: string | null,
   /** AMEX payment-due date snapshot for this revision (0035); the caller passes
    *  the draft row's existing value so the finalize re-stage writes the same
-   *  date the build captured. */
-  paymentDueDate?: string | null,
+   *  date the build captured. REQUIRED (nullable, not optional) — see
+   *  recordExportBundle. The one-shot finalize path (export/month/route.ts)
+   *  passes the just-fetched artifact date; the two-step path
+   *  (export/[month]/route.ts) passes the draft row's stored snapshot. */
+  paymentDueDate: string | null,
+  /** Operator message re-written from the draft row's stored value (0037).
+   *  REQUIRED (nullable) — see recordExportBundle. */
+  operatorMessage: string | null,
 ): Promise<void> {
   const db = getReceiptsDb();
   const now = nowIso();
@@ -3051,6 +3085,7 @@ export async function finalizeExport(
     proofsR2Key,
     proofsSha256,
     paymentDueDate,
+    operatorMessage,
   );
 
   const result = await db
@@ -3134,6 +3169,196 @@ export async function finalizeExport(
       }
     }
   }
+}
+
+// ─── Delivery records (Phase B; 0036_export_deliveries) ──────────────────────
+// One row per HTTP send attempt to Resend. State transitions and idempotency
+// logic live in lib/receipts/delivery-state.ts (pure, unit-tested); these are
+// the thin D1 wrappers. Every write that changes an attempt's state updates
+// the denormalised receipt_exports.delivery_state IN THE SAME D1 batch
+// (transaction), so list queries never disagree with the attempt history.
+// A failed send never touches the seal — only the month's delivery_state.
+
+/** Input for a new delivery attempt row (state starts 'pending'). */
+export interface CreateDeliveryInput {
+  exportId: string;
+  attemptId: string;
+  idempotencyKey: string;
+  toAddress: string;
+  ccAddress: string | null;
+  subject: string;
+  body: string;
+  operatorMessage: string | null;
+  zipFilename: string;
+  zipSha256: string;
+  zipBytes: number;
+}
+
+/**
+ * Record a new send attempt (state 'pending') and set the export's
+ * delivery_state='pending' in one transaction. Returns the new delivery id.
+ */
+export async function createDelivery(input: CreateDeliveryInput): Promise<string> {
+  const db = getReceiptsDb();
+  const id = newUuid();
+  const now = nowIso();
+  await db.batch([
+    db
+      .prepare(
+        `INSERT INTO export_deliveries
+          (id, export_id, attempt_id, idempotency_key, state,
+           to_address, cc_address, subject, body, operator_message,
+           zip_filename, zip_sha256, zip_bytes, created_at)
+         VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        id,
+        input.exportId,
+        input.attemptId,
+        input.idempotencyKey,
+        input.toAddress,
+        input.ccAddress,
+        input.subject,
+        input.body,
+        input.operatorMessage,
+        input.zipFilename,
+        input.zipSha256,
+        input.zipBytes,
+        now,
+      ),
+    db
+      .prepare(`UPDATE receipt_exports SET delivery_state = 'pending' WHERE id = ?`)
+      .bind(input.exportId),
+  ]);
+  return id;
+}
+
+/** One delivery attempt by id. */
+export async function getDelivery(id: string): Promise<ExportDelivery | null> {
+  const db = getReceiptsDb();
+  return db
+    .prepare(`SELECT * FROM export_deliveries WHERE id = ?`)
+    .bind(id)
+    .first<ExportDelivery>();
+}
+
+/** All delivery attempts for an export, oldest-first (attempt history). */
+export async function listDeliveriesForExport(
+  exportId: string,
+): Promise<ExportDelivery[]> {
+  const db = getReceiptsDb();
+  const result = await db
+    .prepare(
+      `SELECT * FROM export_deliveries WHERE export_id = ? ORDER BY created_at ASC`,
+    )
+    .bind(exportId)
+    .all<ExportDelivery>();
+  return result.results ?? [];
+}
+
+/**
+ * All delivery attempts for a month (across its export revisions), oldest-
+ * first. Used to derive the month's delivery state and to check the double-
+ * send guard (D6) — keyed on the month (yyyymm), not the revision.
+ */
+export async function listDeliveriesForMonth(
+  month: string,
+): Promise<ExportDelivery[]> {
+  const db = getReceiptsDb();
+  const result = await db
+    .prepare(
+      `SELECT d.*
+       FROM export_deliveries d
+       JOIN receipt_exports e ON e.id = d.export_id
+       WHERE e.export_month = ?
+       ORDER BY d.created_at ASC`,
+    )
+    .bind(month)
+    .all<ExportDelivery>();
+  return result.results ?? [];
+}
+
+/**
+ * Mark an attempt sent: record the provider message id + completion time, and
+ * set the export's delivery_state='delivered' in one transaction. A sent
+ * attempt closes the month for reporting.
+ */
+export async function markDeliverySent(
+  id: string,
+  providerMessageId: string,
+): Promise<void> {
+  const db = getReceiptsDb();
+  const now = nowIso();
+  await db.batch([
+    db
+      .prepare(
+        `UPDATE export_deliveries
+         SET state = 'sent', provider_message_id = ?, completed_at = ?
+         WHERE id = ? AND state = 'pending'`,
+      )
+      .bind(providerMessageId, now, id),
+    db
+      .prepare(
+        `UPDATE receipt_exports
+         SET delivery_state = 'delivered'
+         WHERE id = (SELECT export_id FROM export_deliveries WHERE id = ?)`,
+      )
+      .bind(id),
+  ]);
+}
+
+/**
+ * Mark an attempt failed: record the error + completion time, and set the
+ * export's delivery_state='sealed_undelivered' (retryable; month NOT closed)
+ * in one transaction. The seal is untouched — only the reporting state moves.
+ */
+export async function markDeliveryFailed(id: string, error: string): Promise<void> {
+  const db = getReceiptsDb();
+  const now = nowIso();
+  await db.batch([
+    db
+      .prepare(
+        `UPDATE export_deliveries
+         SET state = 'failed', error = ?, completed_at = ?
+         WHERE id = ? AND state = 'pending'`,
+      )
+      .bind(error, now, id),
+    db
+      .prepare(
+        `UPDATE receipt_exports
+         SET delivery_state = 'sealed_undelivered'
+         WHERE id = (SELECT export_id FROM export_deliveries WHERE id = ?)`,
+      )
+      .bind(id),
+  ]);
+}
+
+/**
+ * Mark an attempt ambiguously failed: a definitive result was NOT obtained
+ * (timeout / network / Resend 5xx — the mail may have been accepted). The
+ * attempt stays RESUMABLE (a retry reuses its attempt_id ⇒ same key ⇒ Resend
+ * deduplicates), and the month's delivery_state is sealed_undelivered (not
+ * closed). The seal is untouched. Counterpart to {@link markDeliveryFailed}
+ * (which is for definitive 4xx rejections, terminal). */
+export async function markDeliveryAmbiguous(id: string, error: string): Promise<void> {
+  const db = getReceiptsDb();
+  const now = nowIso();
+  await db.batch([
+    db
+      .prepare(
+        `UPDATE export_deliveries
+         SET state = 'ambiguous', error = ?, completed_at = ?
+         WHERE id = ? AND state = 'pending'`,
+      )
+      .bind(error, now, id),
+    db
+      .prepare(
+        `UPDATE receipt_exports
+         SET delivery_state = 'sealed_undelivered'
+         WHERE id = (SELECT export_id FROM export_deliveries WHERE id = ?)`,
+      )
+      .bind(id),
+  ]);
 }
 
 /**

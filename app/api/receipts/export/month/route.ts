@@ -50,7 +50,6 @@ import {
 import { buildPackNames } from "@/lib/receipts/pack-naming";
 import { listFilesForObject } from "@/lib/receipts/files";
 import { requiresAttendees } from "@/lib/receipts/categories";
-import { composeFinalizeNoticeData, notifyAccountantOfFinalize } from "@/lib/receipts/notify";
 import {
   buildExportBundle,
   validateMonthReadyForExport,
@@ -65,7 +64,7 @@ export async function POST(request: Request) {
   try {
     const actor = await requireReceiptsActor(request.headers);
 
-    const body = (await request.json()) as { month?: string; finalize?: boolean };
+    const body = (await request.json()) as { month?: string; finalize?: boolean; operatorMessage?: string };
     const month = body.month?.trim();
 
     if (!month || !/^\d{4}-\d{2}$/.test(month)) {
@@ -449,11 +448,14 @@ export async function POST(request: Request) {
     // the shared builder (also used by the finalize email, so the notice text
     // cannot drift between the ZIP and the notification). All names come from
     // `packNames` (single naming authority).
-    const proofsNoticeInput = derivePackNoticeInput(
-      month,
-      bundle.rows,
-      { rowCount: bundle.rows.length, receiptCount: proofsEntries.length },
-    );
+    const proofsNoticeInput = {
+      ...derivePackNoticeInput(
+        month,
+        bundle.rows,
+        { rowCount: bundle.rows.length, receiptCount: proofsEntries.length },
+      ),
+      operatorMessage: body.operatorMessage ?? undefined,
+    };
 
     const proofsKey = buildProofsKey(month, exportId);
     const proofsZipBytes = assembleProofsZip(
@@ -611,36 +613,26 @@ export async function POST(request: Request) {
         manifestSha256,
         proofsKey,
         proofsSha256,
+        // Phase B P1 fix: the one-shot finalize path previously omitted these,
+        // so the required (since this fix) finalizeExport params bound undefined
+        // → recordExportBundle nulled them, overwriting the values the build
+        // captured. Pass the same in-scope values the rebuild path uses so a
+        // month finalized in one shot is deliverable (payment_due_date drives
+        // the preflight date check + pack naming; operator_message drives the
+        // O7 one-message-two-surfaces check #19).
+        amexArtifact?.payment_due_date ?? null,
+        body.operatorMessage ?? null,
       );
       // A7: non-blocking warning when an earlier statement month is still
       // open. Surfaced in the finalize response so the operator's toast on
       // "Finalize succeeded" can also say "but March is still open."
       finalizeWarnings.push(...(await computeEarlierOpenMonthWarnings(month)));
 
-      // Notification email (PR 3). Failure never fails finalize — it becomes a
-      // warning in the response + a notification_failed audit entry.
-      if (exportRecord) {
-        const notifyData = await composeFinalizeNoticeData(month, bundle, exportRecord);
-        const notifyResult = await notifyAccountantOfFinalize(notifyData);
-        if (notifyResult.ok) {
-          await createAuditEntry(getReceiptsDb(), {
-            actor,
-            action: "export.notification_sent",
-            objectType: "export",
-            objectId: exportId,
-            newValueJson: stringifyJson({ month }),
-          });
-        } else {
-          finalizeWarnings.push(`Finalize notification email not sent: ${notifyResult.error}`);
-          await createAuditEntry(getReceiptsDb(), {
-            actor,
-            action: "export.notification_failed",
-            objectType: "export",
-            objectId: exportId,
-            newValueJson: stringifyJson({ month, error: notifyResult.error }),
-          });
-        }
-      }
+      // Phase B (D1/D2): finalize SEALS — it no longer sends any email.
+      // Delivery is the operator's explicit POST /api/receipts/export/{month}/send
+      // (see lib/receipts/delivery-state.ts + the send route). A freshly
+      // finalized month has delivery_state NULL (never attempted), not
+      // sealed_undelivered; reporting-close waits on a successful delivery.
     } else {
       await recordExportBundle(
         exportId,
@@ -651,6 +643,7 @@ export async function POST(request: Request) {
         proofsKey,
         proofsSha256,
         amexArtifact?.payment_due_date ?? null,
+        body.operatorMessage ?? null,
       );
       // Audit the rebuild (finalize:false) — "export.generated" was defined
       // for this. The finalize:true path is audited by finalizeExport

@@ -46,6 +46,10 @@ export interface PackPreflightInput {
   amexStatementTotalCents: number | null;
   /** Configured attachment-size ceiling (bytes) for the transport check. */
   maxPackBytes: number;
+  /** The stored operator_message from the export record (0037). Checked against
+   *  the 【今月のご連絡】 content in the sealed notice — O7 invariant: one stored
+   *  value, two surfaces, must match. */
+  operatorMessage?: string | null;
 }
 
 export interface PreflightResult {
@@ -150,16 +154,87 @@ function evidenceByFolder(entries: PackPreflightEntry[]): Map<string, string[]> 
   return out;
 }
 
+// The charge rows of a reconciliation CSV: rows AFTER the header (the row
+// containing 科目＆No. — present in both the AMEX and CASH/DIGITAL recon
+// headers), excluding total/blank rows. The AMEX statement's Netアンサー layout
+// puts metadata (カード名称 / ご利用者名 / お支払日) BEFORE the 利用日 header and
+// 小計/合計 totals AFTER the charges; CASH/DIGITAL CSVs have the header at row 0.
+// Charge rows carry the appended columns (≥ the header's width); total/metadata
+// rows do not, so a width check excludes them. (P2 #2 — the gate must pass a
+// real pack, not just the flat test fixture.)
+function reconChargeRows(rows: string[][]): string[][] {
+  const headerIdx = rows.findIndex((r) => r.includes("科目＆No."));
+  if (headerIdx === -1) return [];
+  const width = rows[headerIdx]!.length;
+  const out: string[][] = [];
+  for (let i = headerIdx + 1; i < rows.length; i++) {
+    const row = rows[i]!;
+    if (row.length < width) continue; // total / blank / metadata row (narrower)
+    out.push(row);
+  }
+  return out;
+}
+
+/** The index of the recon header row (contains 科目＆No.), or -1 if none. */
+function reconHeaderIndex(rows: string[][]): number {
+  return rows.findIndex((r) => r.includes("科目＆No."));
+}
+
+/** Sum the 金額 of a reconciliation CSV's charge rows — used to derive the AMEX
+ *  statement total from the sealed AMEX 照合CSV (B-5: no live lookup). This is
+ *  the INDEPENDENT source for summary-payment-path-reconciles (which compares it
+ *  against the 集計's AMEX total); reading the total from 集計 itself would be
+ *  circular. Returns 0 if the CSV has no recognisable recon header. */
+export function sumReconChargeAmounts(csvText: string): number {
+  const rows = parseCsvRows(csvText);
+  const headerIdx = reconHeaderIndex(rows);
+  if (headerIdx === -1) return 0;
+  const amountIdx = rows[headerIdx]!.indexOf("金額");
+  if (amountIdx === -1) return 0;
+  let sum = 0;
+  for (const row of reconChargeRows(rows)) {
+    sum += parseAmountCell(row[amountIdx] ?? "") ?? 0;
+  }
+  return sum;
+}
+
+/** Parse the 勘定科目 section of a 集計 CSV → per-category {ja, count, totalMinor}.
+ *  Single-sourced: used by summary-category-reconciles AND by the delivery email
+ *  summary regeneration (D4). Rows between the 勘定科目,件数,合計金額 header and
+ *  the next blank/支払方法 line. */
+export function parseSummaryTotals(
+  csvText: string,
+): { ja: string; count: number; totalMinor: number }[] {
+  const rows = parseCsvRows(csvText);
+  const out: { ja: string; count: number; totalMinor: number }[] = [];
+  let inCats = false;
+  for (const row of rows) {
+    if (row[0] === "勘定科目" && row[1] === "件数") {
+      inCats = true;
+      continue;
+    }
+    if (row[0] === "支払方法" || row[0] === "") {
+      inCats = false;
+      continue;
+    }
+    if (!inCats || row.length < 3) continue;
+    out.push({
+      ja: row[0]!,
+      count: parseInt(row[1] ?? "0", 10),
+      totalMinor: parseInt(row[2] ?? "0", 10),
+    });
+  }
+  return out;
+}
+
 // Evidence filenames referenced by the 領収書ファイル名 (last) column of each
-// reconciliation CSV, excluding the header row, 領収書なし markers, and blanks.
+// reconciliation CSV's charge rows, excluding 領収書なし markers and blanks.
 function referencedEvidence(
   reconCsvs: PreflightCsvInput[],
 ): Set<string> {
   const out = new Set<string>();
   for (const csv of reconCsvs) {
-    const rows = parseCsvRows(csv.text);
-    for (let i = 1; i < rows.length; i++) {
-      const row = rows[i]!;
+    for (const row of reconChargeRows(parseCsvRows(csv.text))) {
       if (row.length < 2) continue;
       const cell = row[row.length - 1]!.trim();
       if (!cell || cell.startsWith("領収書なし")) continue;
@@ -174,6 +249,58 @@ function referencedEvidence(
 function noticeFilenames(noticeText: string): string[] {
   const re = /[^\s（）「」、。]+(?:\.csv|\.txt|\.zip)/g;
   return (noticeText.match(re) ?? []).map((t) => t);
+}
+
+/** Remove the 【今月のご連絡】 section (operator free text) from a notice, so
+ *  preflight checks scan only the GENERATED structure — not the operator's own
+ *  words. The operator may legitimately write anything (a D17 re-delivery
+ *  supersession note naming previous-pack files; a D9 attendee retention note;
+ *  改訂/出席者/manifest references). Without stripping, every notice check
+ *  operates on the operator's prose and blocks legitimate sends.
+ *
+ *  Anchors on 【この資料について】 — the generated heading that ALWAYS follows
+ *  the operator section (buildPackNotice emits it next) — NOT on any bracketed
+ *  token. This way an operator typing 【注意】 or 【重要】 inside their note does
+ *  NOT prematurely end the strip. No-op when the section is absent (operator
+ *  message omitted). */
+export function stripOperatorMessageSection(noticeText: string): string {
+  const lines = noticeText.split(/\r?\n/);
+  const out: string[] = [];
+  let skipping = false;
+  for (const line of lines) {
+    if (line.startsWith("【今月のご連絡】")) {
+      skipping = true;
+      continue;
+    }
+    // End the skip at the KNOWN generated heading, not any 【 the operator typed.
+    if (skipping && line.startsWith("【この資料について】")) {
+      skipping = false;
+    }
+    if (!skipping) out.push(line);
+  }
+  return out.join("\r\n");
+}
+
+/** Extract the operator's free text from a notice's 【今月のご連絡】 section —
+ *  the lines between 【今月のご連絡】 and 【この資料について】, trimmed. Returns ""
+ *  when the section is absent (no operator message). Used by the O7 invariant
+ *  check to compare the sealed notice's content against the stored
+ *  operator_message. Anchors on 【この資料について】 (the generated heading),
+ *  not any bracketed token, for the same robustness reason as
+ *  {@link stripOperatorMessageSection}. */
+export function extractOperatorMessageFromNotice(noticeText: string): string {
+  const lines = noticeText.split(/\r?\n/);
+  let capturing = false;
+  const out: string[] = [];
+  for (const line of lines) {
+    if (line.startsWith("【今月のご連絡】")) {
+      capturing = true;
+      continue;
+    }
+    if (capturing && line.startsWith("【この資料について】")) break;
+    if (capturing) out.push(line);
+  }
+  return out.join("\n").trim();
 }
 
 // ─── Checks ─────────────────────────────────────────────────────────────────
@@ -206,7 +333,7 @@ const checks: { key: string; run: Check }[] = [
       const basenames = new Set(
         entries.map((e) => e.name.split("/").pop()!),
       );
-      const missing = noticeFilenames(noticeText).filter(
+      const missing = noticeFilenames(stripOperatorMessageSection(noticeText)).filter(
         (f) => !basenames.has(f),
       );
       return missing.length === 0
@@ -226,7 +353,9 @@ const checks: { key: string; run: Check }[] = [
     // table, so it stays out of scope.
     key: "notice-mentions-shipped-reconciliation-csvs",
     run: ({ entries, noticeText }) => {
-      const mentioned = new Set(noticeFilenames(noticeText));
+      const mentioned = new Set(
+        noticeFilenames(stripOperatorMessageSection(noticeText)),
+      );
       const reconCsvs = [
         ...new Set(
           entries
@@ -401,12 +530,12 @@ const checks: { key: string; run: Check }[] = [
       const reconByCat = new Map<string, { count: number; total: number }>();
       for (const csv of reconCsvs) {
         const rows = parseCsvRows(csv.text);
-        const header = rows[0] ?? [];
+        const headerIdx = reconHeaderIndex(rows);
+        if (headerIdx === -1) continue; // 集計-like (no 科目＆No.), skip
+        const header = rows[headerIdx]!;
         const kamokuIdx = header.indexOf("科目＆No.");
         const amountIdx = header.indexOf("金額");
-        if (kamokuIdx === -1) continue; // 集計-like, skip
-        for (let r = 1; r < rows.length; r++) {
-          const row = rows[r]!;
+        for (const row of reconChargeRows(rows)) {
           const label = row[kamokuIdx] ?? "";
           const amount = parseAmountCell(row[amountIdx] ?? "") ?? 0;
           // Category = label with the MonYYYY+circled suffix removed.
@@ -484,7 +613,7 @@ const checks: { key: string; run: Check }[] = [
     run: ({ entries, csvs, noticeText }) => {
       const reconCsvs = csvs.filter((c) => c.label !== "集計");
       const rowCount = reconCsvs.reduce(
-        (n, csv) => n + Math.max(0, parseCsvRows(csv.text).length - 1),
+        (n, csv) => n + reconChargeRows(parseCsvRows(csv.text)).length,
         0,
       );
       const evidenceCount = [...evidenceByFolder(entries).values()].reduce(
@@ -610,10 +739,16 @@ const checks: { key: string; run: Check }[] = [
   {
     key: "notice-policy",
     run: ({ noticeText }) => {
+      // Scan only the GENERATED notice structure, not the operator's free text
+      // under 【今月のご連絡】 — the operator may legitimately write 改訂/出席者/
+      // manifest references (D17 re-delivery supersession note, D9 attendee
+      // retention note). Without stripping, preflight blocks on the operator's
+      // own words.
+      const generated = stripOperatorMessageSection(noticeText);
       const violations: string[] = [];
-      if (noticeText.includes("改訂情報")) violations.push("改訂情報 block present");
-      if (/manifest|マニフェスト/.test(noticeText)) violations.push("manifest sentence present");
-      if (/出席者|参加者一覧|attendee/i.test(noticeText)) violations.push("attendee reference present");
+      if (generated.includes("改訂情報")) violations.push("改訂情報 block present");
+      if (/manifest|マニフェスト/.test(generated)) violations.push("manifest sentence present");
+      if (/出席者|参加者一覧|attendee/i.test(generated)) violations.push("attendee reference present");
       return violations.length === 0
         ? { check: "notice-policy", passed: true }
         : {
@@ -637,6 +772,29 @@ const checks: { key: string; run: Check }[] = [
             check: "csv-no-attendee-id-column",
             passed: false,
             detail: `CSVs still carrying a 会議-出席者ID column: ${offenders.join(", ")}`,
+          };
+    },
+  },
+  {
+    // O7 invariant (one message, two surfaces): the operator_message stored on
+    // receipt_exports (0037) must equal the 【今月のご連絡】 content in the sealed
+    // notice. If they disagree, the ZIP and the email would say different things
+    // — verified against the REAL sealed bytes, not a comment. operator_message
+    // is sealed with the row (recordExportBundle's WHERE status='draft' guard);
+    // changing it requires a rebuild.
+    key: "operator-message-matches-notice",
+    run: ({ noticeText, operatorMessage }) => {
+      const norm = (s: string) => s.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
+      const fromNotice = norm(extractOperatorMessageFromNotice(noticeText));
+      const fromRecord = norm(operatorMessage ?? "");
+      return fromNotice === fromRecord
+        ? { check: "operator-message-matches-notice", passed: true }
+        : {
+            check: "operator-message-matches-notice",
+            passed: false,
+            detail:
+              "the notice's 【今月のご連絡】 does not match the stored operator_message " +
+              "— the pack was sealed with a different message (O7 invariant; rebuild to change it)",
           };
     },
   },

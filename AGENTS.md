@@ -58,6 +58,15 @@ app/
 4. **Preserve bee theme** - Keep amber/yellow + charcoal color scheme
 5. **Run dev server** - `npm run dev` to test changes
 
+### Boundary checks are the writer's job, not the reviewer's
+
+Three P1/P2 defects in PR #160 shared one shape: a value was correct in its
+module and invalid where it crossed a boundary — non-ASCII in an HTTP header
+ByteString, an `await` outside an error boundary after a seal, a live read
+against mutable state for a sealed artifact. Whoever writes a value that
+crosses a boundary checks that boundary's constraints. Verification that only
+diffs outputs will not catch these.
+
 ## Deployment
 
 - Cloudflare build: `npm run build:cf`

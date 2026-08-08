@@ -10,10 +10,6 @@ import {
   validateMonthReadyForExport,
   computeEarlierOpenMonthWarnings,
 } from "@/lib/receipts/month-closing";
-import { composeFinalizeNoticeData, notifyAccountantOfFinalize, type NotifyResult } from "@/lib/receipts/notify";
-import { createAuditEntry } from "@/lib/receipts/audit";
-import { stringifyJson } from "@/lib/receipts/db-utils";
-import { getReceiptsDb } from "@/lib/cloudflare-runtime";
 
 type RouteContext = { params: Promise<{ month: string }> };
 
@@ -97,8 +93,7 @@ export async function POST(request: Request, { params }: RouteContext) {
     // validateMonthReadyForExport is the single authority — it includes the
     // finalized-reconciliation precondition. The redundant pre-check that
     // used to live here was dropped to keep both finalize paths identical.
-    // Build the bundle once: the gate consumes it (avoids an internal rebuild)
-    // and the finalize notification email reuses it.
+    // Build the bundle once so the gate consumes it (avoids an internal rebuild).
     const bundle = await buildExportBundle(month);
     const blockers = await validateMonthReadyForExport(month, bundle);
     if (blockers.length > 0) {
@@ -114,10 +109,11 @@ export async function POST(request: Request, { params }: RouteContext) {
       exportRecord.manifest_r2_key,
       exportRecord.archive_sha256,
       actor,
-      exportRecord.manifest_sha256 ?? undefined,
+      exportRecord.manifest_sha256 ?? null,
       exportRecord.proofs_r2_key ?? null,
       exportRecord.proofs_sha256 ?? null,
       exportRecord.payment_due_date ?? null,
+      exportRecord.operator_message ?? null,
     );
 
     // A7: non-blocking warning when finalizing month M while an earlier
@@ -126,41 +122,12 @@ export async function POST(request: Request, { params }: RouteContext) {
     // should know that before they walk away thinking the month is "done."
     const warnings = await computeEarlierOpenMonthWarnings(month);
 
-    // Notification email (PR 3). Failure never fails finalize — it becomes a
-    // warning in the response + a notification_failed audit entry. Both the
-    // notice-data PREP and the send are non-blocking: a throw here (e.g. a
-    // transient D1 read in composeFinalizeNoticeData) must NOT surface as a
-    // finalize failure — the month is already sealed above, so a 500 would make
-    // a retry report a conflict (Codex review #160, P1).
-    let notifyResult: NotifyResult;
-    try {
-      const notifyData = await composeFinalizeNoticeData(month, bundle, exportRecord);
-      notifyResult = await notifyAccountantOfFinalize(notifyData);
-    } catch (err) {
-      notifyResult = {
-        ok: false,
-        error: err instanceof Error ? err.message : String(err),
-      };
-    }
-    if (notifyResult.ok) {
-      await createAuditEntry(getReceiptsDb(), {
-        actor,
-        action: "export.notification_sent",
-        objectType: "export",
-        objectId: exportRecord.id,
-        newValueJson: stringifyJson({ month }),
-      });
-    } else {
-      warnings.push(`Finalize notification email not sent: ${notifyResult.error}`);
-      await createAuditEntry(getReceiptsDb(), {
-        actor,
-        action: "export.notification_failed",
-        objectType: "export",
-        objectId: exportRecord.id,
-        newValueJson: stringifyJson({ month, error: notifyResult.error }),
-      });
-    }
-
+    // Phase B (D1/D2): finalize SEALS. It no longer sends any email — delivery
+    // is the operator's explicit POST /api/receipts/export/{month}/send (see
+    // lib/receipts/delivery-state.ts + the send route). A freshly finalized
+    // month therefore has delivery_state NULL (never attempted), distinct from
+    // sealed_undelivered (attempted + failed). Nothing here closes the month
+    // for reporting; that waits on a successful delivery.
     return NextResponse.json(
       { ok: true, month, finalized: true, warnings },
       { status: 200 },

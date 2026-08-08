@@ -19,6 +19,11 @@ export const COMPLIANCE_DEFAULTS: ComplianceSettings = {
   statement_expected_day: 18,
   track_tax_breakdown: false,
   notification_recipient: "",
+  // Change 5 (D15/§15): Cc (business-manager) recipient for the monthly pack.
+  // Same pattern as notification_recipient — empty string default, no env
+  // fallback (there is no BUSINESS_MANAGER_EMAIL var). Read at send; empty →
+  // the Cc field is omitted from the Resend payload entirely (not cc:"").
+  notification_cc_recipient: "",
   // ADR 0010 D3: verbatim former TOKYO_SIGNALS. Behavior unchanged until the
   // operator edits Settings → Compliance.
   homebase_signals: DEFAULT_HOMEBASE_SIGNALS,
@@ -112,6 +117,9 @@ export function parseComplianceSettings(
     notification_recipient:
       map.get("notification_recipient") ??
       COMPLIANCE_DEFAULTS.notification_recipient,
+    notification_cc_recipient:
+      map.get("notification_cc_recipient") ??
+      COMPLIANCE_DEFAULTS.notification_cc_recipient,
     homebase_signals: parseHomebaseSignals(map.get("homebase_signals")),
   };
 }

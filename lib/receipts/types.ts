@@ -138,9 +138,14 @@ export type AuditAction =
   | "export.notification_sent"
   | "export.notification_failed"
   | "export.notification_test"
+  | "export.delivery_sent"
+  | "export.delivery_failed"
+  | "export.delivery_override"
+  | "export.delivery_blocked"
   | "archive.created"
   | "settings.updated"
   | "settings.notification_recipient_changed"
+  | "settings.notification_cc_recipient_changed"
   | "receipt.export_statement_month_assigned"
   | "receipt.export_statement_month_overridden"
   | "receipt.export_statement_month_rolled_forward"
@@ -516,6 +521,42 @@ export interface ReceiptExport {
   // statement artifact — so a sealed export's filename is tied to the immutable
   // revision. NULL on rows predating 0035 (legacy ASCII filename fallback).
   payment_due_date?: string | null;
+  // Denormalised delivery state for list queries (0036). NULL on rows
+  // predating 0036 and on sealed-but-never-sent exports. The send path writes
+  // it in the same D1 transaction as the export_deliveries row.
+  delivery_state?: "delivered" | "sealed_undelivered" | "pending" | null;
+  // Operator free-text message for the month's pack (0037). One stored value,
+  // two surfaces (O7): injected into 【今月のご連絡】 inside the sealed ZIP at
+  // build time, and into the delivery email body at send time. NULL when no
+  // message.
+  operator_message?: string | null;
+}
+
+/**
+ * One monthly-pack delivery attempt (Phase B; 0036_export_deliveries). One row
+ * per HTTP send to Resend; `attempt_id` groups the automatic retries of a
+ * single operator-initiated send (shared idempotency key). The sealed artifact
+ * is immutable — a failed attempt never touches the seal, only the month's
+ * delivery_state (retryable sealed_undelivered). See lib/receipts/delivery-state.ts.
+ */
+export interface ExportDelivery {
+  id: string;
+  export_id: string;
+  attempt_id: string;
+  idempotency_key: string;
+  state: "pending" | "sent" | "failed";
+  to_address: string;
+  cc_address: string | null;
+  subject: string;
+  body: string;
+  operator_message: string | null;
+  zip_filename: string;
+  zip_sha256: string;
+  zip_bytes: number;
+  provider_message_id: string | null;
+  error: string | null;
+  created_at: string;
+  completed_at: string | null;
 }
 
 /**
@@ -598,6 +639,10 @@ export interface ComplianceSettings {
   /** Notification recipient email (Settings → Compliance). Empty = use the
    *  ACCOUNTANT_EMAIL var fallback. */
   notification_recipient: string;
+  /** Cc (business-manager) recipient for the monthly pack delivery (Change 5;
+   *  D15/§15). Empty = the Cc field is omitted from the Resend payload. No env
+   *  fallback. */
+  notification_cc_recipient: string;
   /**
    * Homebase location signals (ADR 0010 D3). A merchant whose string carries
    * one of these is treated as an at-homebase charge (not a trip anchor).
