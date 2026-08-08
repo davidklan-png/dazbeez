@@ -1,4 +1,16 @@
-@import "tailwindcss";
+/* Scope Tailwind v4 source detection to the code dirs only (app/, components/,
+   lib/). `source(none)` turns OFF auto-detection — without it, Tailwind walks
+   the whole project tree and crashes (String.fromCodePoint on an out-of-range
+   code point) when it hits non-UTF-8 bytes in local artifact directories:
+   external/, receipts/, accountant-encoding-probe/, DazbeezCapture/ (Shift-JIS
+   CSVs, mojibake entry names, binary proof images). Those are gitignored too;
+   this directive is the durable fix so a future non-UTF-8 file can't crash the
+   build. All className usage lives under app/ and components/ (lib/ is logic).
+   See B1, docs/2026-08-07-phase-a-verification.md. */
+@import "tailwindcss" source(none);
+@source ".";
+@source "../components";
+@source "../lib";
 
 :root {
   --background: #ffffff;

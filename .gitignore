@@ -58,3 +58,15 @@ venv/
 
 # D1 database backups (local only — never commit prod financial data)
 d1-backup-*.sql
+
+# Local-only artifact directories — binary receipts, encoding probe kits, the
+# capture workspace, the approved-pack mirror. Never commit. These must also
+# stay out of Tailwind v4 source auto-detection: globals.css declares no
+# @source, so the scanner walks the project tree and chokes on the non-UTF-8
+# bytes here (cp932 CSVs, mojibake names, binary proof images) — the
+# String.fromCodePoint crash in build:cf. See B1, docs/2026-08-07-phase-a-
+# verification.md.
+/external/
+/accountant-encoding-probe/
+/receipts/
+/DazbeezCapture/
