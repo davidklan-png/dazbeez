@@ -127,7 +127,7 @@ export async function POST(request: Request, { params }: RouteContext) {
 
     // Notification email (PR 3). Failure never fails finalize — it becomes a
     // warning in the response + a notification_failed audit entry.
-    const notifyData = composeFinalizeNoticeData(month, bundle, exportRecord);
+    const notifyData = await composeFinalizeNoticeData(month, bundle, exportRecord);
     const notifyResult = await notifyAccountantOfFinalize(notifyData);
     if (notifyResult.ok) {
       await createAuditEntry(getReceiptsDb(), {

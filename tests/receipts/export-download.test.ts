@@ -77,7 +77,7 @@ test("proofs resolves to the stored proofs zip key as application/zip", () => {
   const target = resolveExportDownload(month, withProofs, "proofs");
   assert.equal(target.r2Key, "exports/2026-06/exp-123-proofs.zip");
   assert.equal(target.contentType, "application/zip");
-  assert.equal(target.filename, "export-2026-06-proofs.zip");
+  assert.equal(target.filename, "202606_Dazbeez_Monthly_Expense_Report.zip");
 });
 
 test("proofs surfaces a null key (route 404s) when the record predates the artifact", () => {

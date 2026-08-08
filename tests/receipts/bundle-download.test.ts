@@ -9,6 +9,7 @@ import {
   buildExportReadme,
 } from "@/lib/receipts/export";
 import { assembleProofsZip } from "@/lib/receipts/proofs";
+import { buildPackNames } from "@/lib/receipts/pack-naming";
 import { computeSha256Hex } from "@/lib/receipts/storage";
 import type { DownloadExportRecord } from "@/lib/receipts/export";
 import type { ExportRow } from "@/lib/receipts/types";
@@ -105,8 +106,8 @@ test("draft=true serves the rebuilt draft's artifact with DRAFT- prefix", () => 
   assert.equal(r.r2Key, draftRebuilt.proofs_r2_key);
   assert.equal(
     r.filename,
-    "DRAFT-export-2026-06-proofs.zip",
-    "draft filenames are prefixed DRAFT-",
+    "DRAFT-202606_Dazbeez_Monthly_Expense_Report.zip",
+    "draft proofs filename is the pack container name, DRAFT- prefixed",
   );
 });
 
@@ -264,10 +265,11 @@ test("byte-identity: text artifacts are deterministic (no draft-conditional cont
 });
 
 test("byte-identity: the proofs ZIP builder takes no draft flag (draft⇄seal can't diverge at build time)", async () => {
-  // assembleProofsZip(month, entries, noticeInput) — no draft/finalize param.
-  // A draft and a finalize that stage the same entries produce the same zip;
-  // finalize re-uses the staged object rather than rebuilding, so the operator's
-  // downloaded draft zip and the sealed zip are the same bytes.
+  // assembleProofsZip(names, entries, noticeInput, summaryCsv) — no
+  // draft/finalize param. A draft and a finalize that stage the same entries
+  // produce the same zip; finalize re-uses the staged object rather than
+  // rebuilding, so the operator's downloaded draft zip and the sealed zip are
+  // the same bytes.
   const enc = new TextEncoder();
   const entries = [
     {
@@ -288,10 +290,9 @@ test("byte-identity: the proofs ZIP builder takes no draft flag (draft⇄seal ca
     rowCount: 1,
     receiptCount: 1,
     missingReceiptLines: [],
-    icAdvisories: [],
-    exportRevision: 1,
   };
-  const a = assembleProofsZip(month, entries, notice, "﻿Field,Value\r\nMonth,2026-06\r\n", "﻿AttendeeId,Name,Company,Title\r\n");
+  const names = buildPackNames(month, "2026-06-04");
+  const a = assembleProofsZip(names, entries, notice, "﻿Field,Value\r\nMonth,2026-06\r\n");
   assert.ok(a instanceof Uint8Array && a.length > 0);
   // The builder has no draft parameter to branch on — draft and finalize share
   // it. (Cross-call byte equality is not asserted because the zip's own

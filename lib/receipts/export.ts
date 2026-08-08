@@ -5,6 +5,7 @@ import {
   ACCOUNTANT_DISCLAIMER_EN,
   ACCOUNTANT_DISCLAIMER_JA,
 } from "@/lib/receipts/settings";
+import { packZipName } from "@/lib/receipts/pack-naming";
 
 /**
  * CSV cell escaper.
@@ -557,10 +558,14 @@ export function resolveExportDownload(
       };
     case "proofs":
       // Stored key — the sealed proofs ZIP (built at rebuild, SHA in manifest).
+      // The download filename matches the pack container name from the single
+      // naming authority (pack-naming.ts) so the downloaded file and the root
+      // folder inside it share a name (D10). Month-only — no payment date
+      // needed. The draft path (resolveBundleDownload) prefixes `DRAFT-`.
       return {
         r2Key: exportRecord.proofs_r2_key ?? null,
         contentType: "application/zip",
-        filename: `export-${month}-proofs.zip`,
+        filename: packZipName(month),
       };
     // Reconciliation files (review #2). Derived keys like summary/attendees.
     // Download filenames follow the operator-specified convention
@@ -751,13 +756,13 @@ export function buildExportReadme(opts: {
     "The attendees CSV (<exportId>-attendees.csv) maps the AttendeeIds",
     "column to each attendee's name, company, and title.",
     "The AMEX reconciliation CSV reproduces the original card statement",
-    "line-for-line with 科目＆No., 会議-出席者ID, 人数, and 領収書ファイル名",
+    "line-for-line with 科目＆No., 事業目的, 人数, and 領収書ファイル名",
     "appended to each charge row. CASH/DIGITAL receipts ship in their own",
     "reconciliation CSVs with the same evidence columns appended.",
     "The proofs ZIP (<exportId>-proofs.zip) bundles one proof per receipt,",
     "named <勘定科目><MonYYYY><①…><店舗><￥金額> — the 科目＆No. matches the",
     "reconciliation CSVs' 科目＆No. column; their 領収書ファイル名 column is",
-    "the evidence index. Proofs are foldered per payment path (AMEX明細分/",
-    "現金分/デジタル分).",
+    "the evidence index. Proofs are foldered per payment path (AMEX / 現金 /",
+    "デジタル); folder + index-file names carry a yyyymm_/yyyymmdd_ date prefix",
   ].join("\n");
 }

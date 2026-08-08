@@ -4,13 +4,15 @@ import { unzipSync } from "fflate";
 import {
   assembleProofsZip,
   buildProofFilename,
-  buildTransitionNotice,
+  buildPackNotice,
+  derivePackNoticeInput,
   formatYenAmount,
   sanitizeZipNameSegment,
   verifyProofFileSha256,
   type ProofZipEntry,
-  type TransitionNoticeInput,
+  type PackNoticeInput,
 } from "@/lib/receipts/proofs";
+import { buildPackNames } from "@/lib/receipts/pack-naming";
 import { computeSha256Hex } from "@/lib/receipts/storage";
 
 const enc = new TextEncoder();
@@ -72,7 +74,7 @@ test("verifyProofFileSha256: throws on mismatch (review fix for #102)", async ()
   );
 });
 
-// ─── buildProofFilename ─────────────────────────────────────────────────────
+// ─── buildProofFilename (UNCHANGED evidence naming — regression guard) ──────
 
 test("buildProofFilename: No padded, segments joined, ext", () => {
   assert.equal(
@@ -118,67 +120,102 @@ test("buildProofFilename: No zero-pads to 2, 3 digits naturally", () => {
   assert.ok(f(120).startsWith("No120_"));
 });
 
-// ─── buildTransitionNotice (お知らせ) ───────────────────────────────────────
+// ─── buildPackNotice (ご連絡事項 — standing monthly notice) ─────────────────
 
-const baseNotice: TransitionNoticeInput = {
+const names = buildPackNames("2026-06", "2026-06-04");
+
+const baseNotice: PackNoticeInput = {
   monthLabel: "2026年6月",
   rowCount: 43,
   receiptCount: 40,
   missingReceiptLines: [],
-  icAdvisories: [],
-  exportRevision: 1,
 };
 
-test("buildTransitionNotice: static + dynamic sections, honest about gaps", () => {
-  const txt = buildTransitionNotice(baseNotice);
+test("buildPackNotice: standing sections + interpolated filenames", () => {
+  const txt = buildPackNotice(baseNotice, names);
   assert.ok(txt.includes("2026年6月"), "month label");
   assert.ok(txt.includes("科目＆No."), "explains the 科目＆No join key");
-  assert.ok(txt.includes("Reconciliation.csv"), "explains the AMEX passthrough file");
-  assert.ok(!txt.includes("NoXX"), "retired NoXX naming no longer described");
-  assert.ok(txt.includes("参加者一覧.csv"), "attendee IDs resolve via 参加者一覧");
-  assert.ok(txt.includes("出席者"), "attendees now a CSV column");
-  assert.ok(txt.includes("SHA-256"), "integrity hashing mentioned");
+  // Filenames interpolated from the SAME names that name the ZIP entries —
+  // never literals (the §7 desync guard).
+  assert.ok(
+    txt.includes(names.amexReconciliationCsv),
+    `notice names the AMEX CSV: ${names.amexReconciliationCsv}`,
+  );
+  assert.ok(
+    txt.includes(names.cashReconciliationCsv),
+    `notice names the cash CSV: ${names.cashReconciliationCsv}`,
+  );
   assert.ok(txt.includes("再圧縮"), "honest about recompression");
   assert.ok(txt.includes("原本は当方で保管"), "originals retained on request");
   assert.ok(txt.includes("明細行数: 43"), "dynamic row count");
   assert.ok(txt.includes("証憑ファイル数: 40"), "dynamic receipt count");
 });
 
-test("buildTransitionNotice: missing-receipt reasons + IC advisories surface", () => {
-  const txt = buildTransitionNotice({
-    ...baseNotice,
-    missingReceiptLines: [
-      { transactionDate: "2026-04-30", merchant: "ソフトバンクM", amountMinor: 14975, reason: "紛失" },
-    ],
-    icAdvisories: [
-      { no: 33, transactionDate: "2026-06-02", merchant: "セブン-イレブン", amountMinor: 10000 },
-    ],
-  });
+test("buildPackNotice: retire transition framing — no attendee/manifest/IC/revision", () => {
+  const txt = buildPackNotice(baseNotice, names);
+  assert.ok(!txt.includes("参加者一覧"), "no attendee roster reference (D9)");
+  assert.ok(!txt.includes("出席者"), "no attendee reference (D9)");
+  assert.ok(!/manifest|マニフェスト/.test(txt), "no manifest sentence (O1)");
+  assert.ok(!txt.includes("ICカードチャージ"), "no IC advisory block (D13)");
+  assert.ok(!txt.includes("改訂情報"), "no revision block (O2)");
+  assert.ok(
+    !txt.includes("従来の手作業納品"),
+    "transition framing retired",
+  );
+});
+
+test("buildPackNotice: missing-receipt section surfaces recorded reasons", () => {
+  const txt = buildPackNotice(
+    {
+      ...baseNotice,
+      missingReceiptLines: [
+        { transactionDate: "2026-04-30", merchant: "ソフトバンクM", amountMinor: 14975, reason: "紛失" },
+      ],
+    },
+    names,
+  );
   assert.ok(txt.includes("領収書なしの明細"), "missing-receipt section header");
   assert.ok(txt.includes("紛失"), "recorded reason");
   assert.ok(txt.includes("2026-04-30 ソフトバンクM ¥14,975"), "line identified by date/merchant/amount");
   assert.ok(!/[0-9a-f]{8}-[0-9a-f]{4}/.test(txt), "no UUIDs surfaced to the accountant");
-  assert.ok(txt.includes("ICカードチャージ"), "IC advisory section");
-  assert.ok(txt.includes("2026-06-02 セブン-イレブン ¥10,000"), "IC advisory identified by date, not No");
-  assert.ok(!txt.includes("No33"), "internal No not surfaced");
 });
 
-test("buildTransitionNotice: revision context only when revision > 1", () => {
-  const r1 = buildTransitionNotice(baseNotice);
-  assert.ok(!r1.includes("改訂情報"), "no revision section for rev 1");
-  const r2 = buildTransitionNotice({
-    ...baseNotice,
-    exportRevision: 2,
-    supersedesExportId: "exp-old",
-    correctionReason: "様式移行",
-  });
-  assert.ok(r2.includes("改訂情報"), "revision section for rev > 1");
-  assert.ok(r2.includes("様式移行"), "correction reason present");
+test("buildPackNotice: 【今月のご連絡】 omitted when operatorMessage empty, present when set", () => {
+  const empty = buildPackNotice(baseNotice, names);
+  assert.ok(!empty.includes("【今月のご連絡】"), "section omitted when message empty");
+  const withMsg = buildPackNotice(
+    { ...baseNotice, operatorMessage: "今月はリモートワーク関連経費が増加しています。" },
+    names,
+  );
+  assert.ok(withMsg.includes("【今月のご連絡】"), "section present when message set");
+  assert.ok(
+    withMsg.includes("リモートワーク関連経費"),
+    "operator message text included verbatim",
+  );
+});
+
+test("derivePackNoticeInput: month label + missing-receipt lines, no IC/revision plumbing", () => {
+  const input = derivePackNoticeInput("2026-06", [], { rowCount: 5, receiptCount: 4 });
+  assert.equal(input.monthLabel, "2026年6月");
+  assert.equal(input.rowCount, 5);
+  assert.equal(input.receiptCount, 4);
+  assert.deepEqual(input.missingReceiptLines, []);
+  // The IC-advisory + revision fields are gone from the input shape.
+  assert.equal(
+    "icAdvisories" in input,
+    false,
+    "icAdvisories removed from the notice input",
+  );
+  assert.equal(
+    "exportRevision" in input,
+    false,
+    "exportRevision removed from the notice input",
+  );
 });
 
 // ─── assembleProofsZip round-trip ───────────────────────────────────────────
-// Build a zip and re-read it with fflate to confirm UTF-8 Japanese entry names
-// survive (Windows Explorer safety) and the index/notice files are present.
+// Build a zip and re-read it with fflate to confirm the new naming, the absence
+// of the attendee roster, and that evidence filenames are UNCHANGED.
 
 function fakeEntry(over: Partial<ProofZipEntry>): ProofZipEntry {
   return {
@@ -197,117 +234,154 @@ function fakeEntry(over: Partial<ProofZipEntry>): ProofZipEntry {
 }
 
 // The summaryCsv passed to assembleProofsZip == the standalone summary artifact
-// bytes (BOM+CRLF). Embedded as 集計.csv so a ZIP-only accountant gets the
-// breakdown too.
+// bytes (BOM+CRLF). Embedded as {yyyymm}_集計.csv so a ZIP-only accountant gets
+// the breakdown too.
 const SUMMARY_CSV =
   "﻿Field,Value\r\nMonth,2026-06\r\n\r\n勘定科目,件数,合計金額\r\n研究開発費,1,108341\r\n\r\n総合計,1,108341\r\n";
-// 参加者一覧 (attendees) — same shape as the standalone attendees artifact
-// (BOM+CRLF), embedded byte-identical into the ZIP next to 集計.csv.
-const ATTENDEES_CSV =
-  "﻿AttendeeId,Name,Company,Title\r\n5,Alice Nakamura,Acme,Director\r\n";
+const AMEX_RECON_CSV = "﻿利用日,...,20260604_AMEX-bytes\r\n";
+const CASH_RECON_CSV = "﻿No,利用日,...,202606-cash-bytes\r\n";
 
-test("assembleProofsZip: UTF-8 names round-trip + 集計/参加者一覧/お知らせ present, 目次 retired", () => {
+test("assembleProofsZip: new naming + no 参加者一覧 + evidence filenames UNCHANGED", () => {
   const entries = [
-    fakeEntry({ no: 3, ext: "pdf", paymentPath: "AMEX" }),
+    fakeEntry({
+      no: 3,
+      ext: "pdf",
+      paymentPath: "AMEX",
+      filename: "会議費Jun2026③小田原みなと食堂￥6,490.jpg",
+    }),
     fakeEntry({
       no: 33,
-      categoryJa: "旅費交通費",
-      merchant: "セブン-イレブン 東中野末広橋店",
-      amountMinor: 10000,
+      categoryJa: "交際費",
+      merchant: "こぶちさわ",
+      amountMinor: 6967,
       ext: "jpg",
       paymentPath: "CASH",
       bytes: new Uint8Array([0xff, 0xd8, 0xff, 0xe0]),
+      filename: "交際費Jun2026①こぶちさわ￥6,967.jpg",
     }),
   ];
   const zip = assembleProofsZip(
-    "2026-06",
+    names,
     entries,
     { ...baseNotice, receiptCount: 2 },
     SUMMARY_CSV,
-    ATTENDEES_CSV,
+    { amex: AMEX_RECON_CSV, cash: CASH_RECON_CSV, digital: null },
   );
-  const files = unzipSync(zip);
-  const names = Object.keys(files);
+  const entryNames = Object.keys(unzipSync(zip));
 
-  // Root + two folders with Japanese names.
-  assert.ok(names.some((n) => n.startsWith("領収書等証憑_2026-06/")), "Japanese root folder");
-  assert.ok(names.some((n) => n.includes("AMEX明細分/")), "AMEX folder");
-  assert.ok(names.some((n) => n.includes("現金分/")), "cash folder (per payment path)");
-  // The two proof files, with their No-prefixed Japanese names intact.
+  // New container + folder naming.
   assert.ok(
-    names.some((n) => n.includes("No03_研究開発費_OpenAI_￥108,341.pdf")),
-    "AMEX proof filename (Japanese + ￥) round-trips",
+    entryNames.some((n) => n.startsWith("202606_Dazbeez_Monthly_Expense_Report/")),
+    "ASCII root folder",
   );
   assert.ok(
-    names.some((n) => n.includes("No33_旅費交通費_セブン-イレブン東中野末広橋店_￥10,000.jpg")),
-    "cash proof filename (whitespace-stripped merchant) round-trips",
+    entryNames.some((n) => n.includes("20260604_AMEXカード利用領収書/")),
+    "AMEX folder named by payment-due date",
   );
-  // Index + summary + attendees + notice.
-  assert.ok(!names.some((n) => n.endsWith("目次.csv")), "目次.csv retired (照合CSVs are the index)");
-  assert.ok(names.some((n) => n.endsWith("集計.csv")), "集計.csv present");
-  assert.ok(names.some((n) => n.endsWith("参加者一覧.csv")), "参加者一覧.csv present");
-  assert.ok(names.some((n) => n.endsWith("お知らせ.txt")), "お知らせ.txt present");
+  assert.ok(
+    entryNames.some((n) => n.includes("202606_現金払い領収書/")),
+    "cash folder named by statement month",
+  );
+
+  // Evidence filenames UNCHANGED (科目＆No pattern, full-width ￥, no prefix).
+  assert.ok(
+    entryNames.some((n) => n.includes("会議費Jun2026③小田原みなと食堂￥6,490.jpg")),
+    "AMEX evidence filename byte-identical to the approved pack",
+  );
+  assert.ok(
+    entryNames.some((n) => n.includes("交際費Jun2026①こぶちさわ￥6,967.jpg")),
+    "cash evidence filename unchanged",
+  );
+
+  // Index files under new names.
+  assert.ok(entryNames.some((n) => n.endsWith("202606_集計.csv")), "集計 → {yyyymm}_集計.csv");
+  assert.ok(entryNames.some((n) => n.endsWith("202606_ご連絡事項.txt")), "お知らせ → {yyyymm}_ご連絡事項.txt");
+  assert.ok(entryNames.some((n) => n.endsWith("20260604_AMEXカード利用明細.csv")), "AMEX recon → dated name");
+  assert.ok(entryNames.some((n) => n.endsWith("202606_現金払いリスト.csv")), "cash recon → month name");
+  assert.ok(
+    !entryNames.some((n) => n.includes("DIGITAL")),
+    "no DIGITAL entry when null",
+  );
+
+  // The attendee roster is NOT delivered (D9) — retained only.
+  assert.ok(
+    !entryNames.some((n) => n.includes("参加者一覧")),
+    "参加者一覧 removed from the pack (D9)",
+  );
+
+  // Retired names are gone.
+  assert.ok(!entryNames.some((n) => n.includes("AMEX明細分")), "old AMEX folder name gone");
+  assert.ok(!entryNames.some((n) => n.includes("現金分/")), "old cash folder name gone");
+  assert.ok(!entryNames.some((n) => n.endsWith("お知らせ.txt")), "old notice name gone");
+  assert.ok(
+    !entryNames.some((n) => n.split("/").pop() === "集計.csv"),
+    "集計 gained a month prefix",
+  );
+
   // 集計.csv bytes == the standalone summary artifact (same bytes passed in).
-  // Compare raw bytes — TextDecoder would strip the leading BOM and skew the
-  // comparison.
-  const shukeiKey = names.find((n) => n.endsWith("集計.csv"))!;
-  const shukeiBytes = files[shukeiKey];
+  const shukeiKey = entryNames.find((n) => n.endsWith("202606_集計.csv"))!;
+  const shukeiBytes = unzipSync(zip)[shukeiKey];
   const expectedShukei = enc.encode(SUMMARY_CSV);
   assert.equal(shukeiBytes.length, expectedShukei.length, "集計.csv byte length");
   assert.ok(
     shukeiBytes.every((b, i) => b === expectedShukei[i]),
     "集計.csv bytes identical to the standalone summary artifact",
   );
-  // 参加者一覧.csv bytes == the standalone attendees artifact (same bytes in).
-  const sankashaKey = names.find((n) => n.endsWith("参加者一覧.csv"))!;
-  const sankashaBytes = files[sankashaKey];
-  const expectedSankasha = enc.encode(ATTENDEES_CSV);
-  assert.equal(sankashaBytes.length, expectedSankasha.length, "参加者一覧.csv byte length");
-  assert.ok(
-    sankashaBytes.every((b, i) => b === expectedSankasha[i]),
-    "参加者一覧.csv bytes identical to the standalone attendees artifact",
-  );
 });
 
-test("assembleProofsZip: reconciliation CSVs embedded at root when provided (review #2)", () => {
+test("assembleProofsZip: notice-mentioned filenames equal actual ZIP entries (§7 desync guard)", () => {
+  // The notice's first bullet names the AMEX + cash CSV filenames. Those names
+  // come from the SAME PackNames object the assembler uses, so they must appear
+  // verbatim as ZIP entries. This is the structural fix for §7.
   const zip = assembleProofsZip(
-    "2026-06",
-    [fakeEntry({ no: 1 })],
+    names,
+    [fakeEntry({ no: 1, filename: "会議費Jun2026①小田原みなと食堂￥6,490.jpg" })],
     baseNotice,
     SUMMARY_CSV,
-    ATTENDEES_CSV,
-    { amex: "﻿amex-bytes", cash: "﻿cash-bytes", digital: null },
+    { amex: AMEX_RECON_CSV, cash: CASH_RECON_CSV, digital: null },
   );
   const files = unzipSync(zip);
-  const keys = Object.keys(files);
-  const amexKey = keys.find((k) => k.endsWith("AMEX2026-06_Reconciliation.csv"));
-  const cashKey = keys.find((k) => k.endsWith("CASH2026-06_Reconciliation.csv"));
-  assert.ok(amexKey, "AMEX reconciliation embedded");
-  assert.ok(cashKey, "CASH reconciliation embedded");
-  // Byte-identity with the standalone artifact (same doctrine as 集計.csv).
-  assert.equal(
-    new TextDecoder("utf-8", { ignoreBOM: true }).decode(files[amexKey!]),
-    "﻿amex-bytes",
+  const entryBasenames = new Set(Object.keys(files).map((p) => p.split("/").pop()!));
+  // Extract filenames mentioned in the shipped notice and assert each exists.
+  const noticeText = new TextDecoder("utf-8", { ignoreBOM: true }).decode(
+    files[Object.keys(files).find((k) => k.endsWith("202606_ご連絡事項.txt"))!]!,
   );
-  // Absent path → no entry.
-  assert.ok(
-    !keys.some((k) => k.includes("DIGITAL2026-06_Reconciliation")),
-    "no DIGITAL entry when null",
-  );
-  // Root placement (directly under the 領収書等証憑_<month>/ prefix).
-  assert.equal(amexKey!.split("/").length, 2, "embedded at ZIP root");
+  const mentioned = noticeText.match(/[^\s（）「」、。]+\.csv/g) ?? [];
+  assert.ok(mentioned.length > 0, "notice mentions at least one .csv filename");
+  for (const name of mentioned) {
+    assert.ok(
+      entryBasenames.has(name),
+      `notice-mentioned file is a real ZIP entry: ${name}`,
+    );
+  }
 });
 
-// ─── CP932 filename safety (regression for the 2026-07-24 field failure) ────
+// ─── CP932/encoding safety (regression for the 2026-07-24 field failure) ─────
 // The accountant's Japanese-Windows chain converts zip entry names to CP932.
 // Half-width ¥ (U+00A5) is absent from CP932 and maps to byte 0x5C (a Windows
 // path separator), corrupting extraction. Every emitted entry name must use
-// full-width ￥ (U+FFE5) and be NFC (decomposed kana also breaks matching
-// against the NFC 照合CSV 領収書ファイル名 column).
+// full-width ￥ (U+FFE5) and be NFC; fflate must set the UTF-8 general-purpose
+// bit on non-ASCII names.
 
-test("assembleProofsZip: no entry name contains half-width ¥ (U+00A5); all names NFC", () => {
+// Parse the ZIP central directory to read each entry's general-purpose flag.
+function centralDirFlags(zip: Uint8Array): Map<string, number> {
+  const dv = new DataView(zip.buffer, zip.byteOffset, zip.byteLength);
+  const out = new Map<string, number>();
+  for (let i = 0; i < zip.length - 4; i++) {
+    // Central directory file header signature: PK\x01\x02 (0x02014b50 LE).
+    if (zip[i] === 0x50 && zip[i + 1] === 0x4b && zip[i + 2] === 0x01 && zip[i + 3] === 0x02) {
+      const flags = dv.getUint16(i + 8, true);
+      const nameLen = dv.getUint16(i + 28, true);
+      const name = new TextDecoder().decode(zip.subarray(i + 46, i + 46 + nameLen));
+      out.set(name, flags);
+    }
+  }
+  return out;
+}
+
+test("assembleProofsZip: no half-width ¥, all names NFC, UTF-8 flag set on non-ASCII", () => {
   const entries = [
-    fakeEntry({ no: 3, paymentPath: "AMEX" }),
+    fakeEntry({ no: 3, paymentPath: "AMEX", filename: "会議費Jun2026③小田原みなと食堂￥6,490.jpg" }),
     fakeEntry({
       no: 33,
       categoryJa: "旅費交通費",
@@ -316,19 +390,19 @@ test("assembleProofsZip: no entry name contains half-width ¥ (U+00A5); all name
       ext: "jpg",
       paymentPath: "CASH",
       bytes: new Uint8Array([0xff, 0xd8, 0xff, 0xe0]),
+      filename: "旅費交通費Jun2026①セブン-イレブン東中野末広橋店￥10,000.jpg",
     }),
   ];
   const zip = assembleProofsZip(
-    "2026-06",
+    names,
     entries,
     { ...baseNotice, receiptCount: 2 },
     SUMMARY_CSV,
-    ATTENDEES_CSV,
-    { amex: "﻿amex-bytes", cash: null, digital: null },
+    { amex: AMEX_RECON_CSV, cash: CASH_RECON_CSV, digital: null },
   );
-  const names = Object.keys(unzipSync(zip));
-  assert.ok(names.length > 0, "sanity: zip has entries");
-  for (const name of names) {
+  const entryNames = Object.keys(unzipSync(zip));
+  assert.ok(entryNames.length > 0, "sanity: zip has entries");
+  for (const name of entryNames) {
     assert.ok(
       !name.includes("¥"),
       `entry name must not contain half-width ¥ (U+00A5): ${name}`,
@@ -339,4 +413,20 @@ test("assembleProofsZip: no entry name contains half-width ¥ (U+00A5); all name
       `entry name must be NFC-normalized: ${name}`,
     );
   }
+  // UTF-8 general-purpose bit (bit 11, 0x0800) must be set on every non-ASCII
+  // entry name — the property that makes Windows Explorer/7-Zip decode the
+  // Japanese names correctly (D-UTF8: keep current fflate behaviour).
+  const flags = centralDirFlags(zip);
+  let checkedNonAscii = false;
+  for (const [name, flag] of flags) {
+    if (/[^\x00-\x7f]/.test(name)) {
+      checkedNonAscii = true;
+      assert.equal(
+        flag & 0x0800,
+        0x0800,
+        `UTF-8 flag not set on non-ASCII entry: ${name} (flags=0x${flag.toString(16)})`,
+      );
+    }
+  }
+  assert.ok(checkedNonAscii, "sanity: at least one non-ASCII entry was flag-checked");
 });
