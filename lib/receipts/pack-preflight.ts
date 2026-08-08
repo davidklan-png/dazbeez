@@ -46,6 +46,10 @@ export interface PackPreflightInput {
   amexStatementTotalCents: number | null;
   /** Configured attachment-size ceiling (bytes) for the transport check. */
   maxPackBytes: number;
+  /** The stored operator_message from the export record (0037). Checked against
+   *  the 【今月のご連絡】 content in the sealed notice — O7 invariant: one stored
+   *  value, two surfaces, must match. */
+  operatorMessage?: string | null;
 }
 
 export interface PreflightResult {
@@ -246,6 +250,28 @@ export function stripOperatorMessageSection(noticeText: string): string {
     if (!skipping) out.push(line);
   }
   return out.join("\r\n");
+}
+
+/** Extract the operator's free text from a notice's 【今月のご連絡】 section —
+ *  the lines between 【今月のご連絡】 and 【この資料について】, trimmed. Returns ""
+ *  when the section is absent (no operator message). Used by the O7 invariant
+ *  check to compare the sealed notice's content against the stored
+ *  operator_message. Anchors on 【この資料について】 (the generated heading),
+ *  not any bracketed token, for the same robustness reason as
+ *  {@link stripOperatorMessageSection}. */
+export function extractOperatorMessageFromNotice(noticeText: string): string {
+  const lines = noticeText.split(/\r?\n/);
+  let capturing = false;
+  const out: string[] = [];
+  for (const line of lines) {
+    if (line.startsWith("【今月のご連絡】")) {
+      capturing = true;
+      continue;
+    }
+    if (capturing && line.startsWith("【この資料について】")) break;
+    if (capturing) out.push(line);
+  }
+  return out.join("\n").trim();
 }
 
 // ─── Checks ─────────────────────────────────────────────────────────────────
@@ -717,6 +743,29 @@ const checks: { key: string; run: Check }[] = [
             check: "csv-no-attendee-id-column",
             passed: false,
             detail: `CSVs still carrying a 会議-出席者ID column: ${offenders.join(", ")}`,
+          };
+    },
+  },
+  {
+    // O7 invariant (one message, two surfaces): the operator_message stored on
+    // receipt_exports (0037) must equal the 【今月のご連絡】 content in the sealed
+    // notice. If they disagree, the ZIP and the email would say different things
+    // — verified against the REAL sealed bytes, not a comment. operator_message
+    // is sealed with the row (recordExportBundle's WHERE status='draft' guard);
+    // changing it requires a rebuild.
+    key: "operator-message-matches-notice",
+    run: ({ noticeText, operatorMessage }) => {
+      const norm = (s: string) => s.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
+      const fromNotice = norm(extractOperatorMessageFromNotice(noticeText));
+      const fromRecord = norm(operatorMessage ?? "");
+      return fromNotice === fromRecord
+        ? { check: "operator-message-matches-notice", passed: true }
+        : {
+            check: "operator-message-matches-notice",
+            passed: false,
+            detail:
+              "the notice's 【今月のご連絡】 does not match the stored operator_message " +
+              "— the pack was sealed with a different message (O7 invariant; rebuild to change it)",
           };
     },
   },

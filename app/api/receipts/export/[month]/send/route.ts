@@ -204,6 +204,7 @@ export async function POST(request: Request, { params }: RouteContext) {
       month,
       paymentDueDate: exportRecord.payment_due_date ?? null,
       maxPackBytes: MAX_DELIVERY_ZIP_BYTES,
+      operatorMessage: exportRecord.operator_message ?? null,
     });
     if (!preflight.passed) {
       const failedChecks = preflight.results

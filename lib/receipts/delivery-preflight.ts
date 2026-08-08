@@ -42,6 +42,9 @@ export async function runPreflightOnSealedZip(opts: {
    *  lookup of the current statement artifact. */
   paymentDueDate: string | null;
   maxPackBytes: number;
+  /** The stored operator_message (0037) — checked against the notice's
+   *  【今月のご連絡】 content for the O7 invariant (one message, two surfaces). */
+  operatorMessage?: string | null;
 }): Promise<PackPreflightReport> {
   const names = buildPackNames(opts.month, opts.paymentDueDate, opts.paymentDueDate != null);
   const files = unzipSync(opts.zipBytes);
@@ -82,6 +85,7 @@ export async function runPreflightOnSealedZip(opts: {
     csvs,
     amexStatementTotalCents,
     maxPackBytes: opts.maxPackBytes,
+    operatorMessage: opts.operatorMessage ?? null,
   };
   return runPackPreflight(input);
 }

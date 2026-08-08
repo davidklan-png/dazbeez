@@ -101,10 +101,10 @@ test("preflight: check keys are unique and cover the spec", () => {
   // The 17 checks from docs/2026-06-pack-approved-delta.md §16, plus the inverse
   // notice desync guard (notice-mentions-shipped-reconciliation-csvs) added to
   // close the shipped-but-unmentioned 照合CSV gap (§Minor).
-  assert.equal(PREFLIGHT_CHECK_KEYS.length, 18);
+  assert.equal(PREFLIGHT_CHECK_KEYS.length, 19);
   assert.ok(
-    PREFLIGHT_CHECK_KEYS.includes("notice-mentions-shipped-reconciliation-csvs"),
-    "inverse notice guard registered",
+    PREFLIGHT_CHECK_KEYS.includes("operator-message-matches-notice"),
+    "O7 invariant check registered",
   );
 });
 
@@ -409,4 +409,40 @@ test("stripOperatorMessageSection: no-op when the operator message is absent", (
   );
   // No 【今月のご連絡】 heading ⇒ nothing to strip ⇒ identity.
   assert.equal(stripOperatorMessageSection(notice), notice);
+});
+
+// ─── O7 invariant: operator-message-matches-notice (19th check) ─────────────
+
+test("operator-message-matches-notice: matching notice + stored value passes", () => {
+  const input = clone(baseInput());
+  input.noticeText = buildPackNotice(
+    { monthLabel: "2026年6月", rowCount: 2, receiptCount: 2, missingReceiptLines: [], operatorMessage: "差替え版です。前回のパックは破棄してください。" },
+    names,
+  );
+  input.operatorMessage = "差替え版です。前回のパックは破棄してください。";
+  const check = runPackPreflight(input).results.find((r) => r.check === "operator-message-matches-notice")!;
+  assert.equal(check.passed, true, "matching notice + stored value ⇒ pass");
+});
+
+test("operator-message-matches-notice: a deliberately desynced notice vs stored value fails (O7 drift)", () => {
+  // The pack was sealed with "差替え版です" in the notice, but the stored
+  // operator_message drifted to "別のメッセージ" (e.g. edited post-seal without
+  // a rebuild). The ZIP says one thing; the email would say another.
+  const input = clone(baseInput());
+  input.noticeText = buildPackNotice(
+    { monthLabel: "2026年6月", rowCount: 2, receiptCount: 2, missingReceiptLines: [], operatorMessage: "差替え版です。" },
+    names,
+  );
+  input.operatorMessage = "別のメッセージ。";
+  const check = runPackPreflight(input).results.find((r) => r.check === "operator-message-matches-notice")!;
+  assert.equal(check.passed, false, "desync must be caught");
+  if (!check.passed) assert.match(check.detail!, /does not match/);
+});
+
+test("operator-message-matches-notice: both empty (no operator message) passes", () => {
+  const input = clone(baseInput());
+  // baseInput's notice has no 【今月のご連絡】; operatorMessage undefined ⇒ null ⇒ "".
+  input.operatorMessage = null;
+  const check = runPackPreflight(input).results.find((r) => r.check === "operator-message-matches-notice")!;
+  assert.equal(check.passed, true);
 });

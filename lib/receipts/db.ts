@@ -2992,7 +2992,11 @@ export async function recordExportBundle(
   paymentDueDate?: string | null,
   /** Operator free-text message for the month (0037). One stored value, two
    *  surfaces (O7): the build passes it so the pack notice carries it inside
-   *  the sealed ZIP; finalizeExport re-writes the draft's existing value. */
+   *  the sealed ZIP; finalizeExport re-writes the draft's existing value.
+   *  Sealed with the row by the WHERE status='draft' guard below — mutating it
+   *  post-seal requires a rebuild (new revision), same doctrine as every other
+   *  sealed value (ADR 0009). The O7 preflight check (19th) verifies the
+   *  notice's 【今月のご連絡】 matches this stored value at send time. */
   operatorMessage?: string | null,
 ): Promise<void> {
   const db = getReceiptsDb();
