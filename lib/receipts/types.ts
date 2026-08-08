@@ -106,6 +106,7 @@ export type AuditAction =
   | "receipt.extraction_denied"
   | "receipt.extraction_date_deferred"
   | "receipt.extraction_failed"
+  | "receipt.extraction_enqueued"
   | "receipt.reviewed"
   | "receipt.reconciled"
   | "receipt.exported"

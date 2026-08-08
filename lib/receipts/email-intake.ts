@@ -18,8 +18,9 @@
 // existing insert path. Do not add a second insert path into receipt_records.
 
 import { getReceiptsDb, getReceiptsBucket } from "@/lib/cloudflare-runtime";
-import { createReceiptRecord } from "@/lib/receipts/db";
+import { createReceiptRecord, updateReceiptRecord } from "@/lib/receipts/db";
 import { createAuditEntry } from "@/lib/receipts/audit";
+import { buildExtractionJob, enqueueExtractionJob } from "@/lib/receipts/queue";
 import { nowIso, newUuid, stringifyJson } from "@/lib/receipts/db-utils";
 import {
   generateR2Key,
@@ -684,6 +685,36 @@ export async function promoteIntake(
     )
     .bind(standardKey, now, receiptId)
     .run();
+
+  // 3.5. Enqueue the extraction job for the Mac MLX consumer (ADR 0001). Same
+  //      best-effort contract as /api/receipts/upload: a missing/failing queue
+  //      must NOT fail the promotion — the receipt stays at
+  //      extraction_state='captured' for the /enqueue recovery endpoint to pick
+  //      up later. r2Key is the standard key set in step 3 (NEVER the intake
+  //      key, which step 5 deletes), and the enqueue happens AFTER the
+  //      original_r2_key patch so the consumer can never fetch a key that step
+  //      5 is about to delete. Before this step, every email_attachment receipt
+  //      sat at captured/never-enqueued forever (3 stranded on 2026-08-03).
+  const enqueuedAt = nowIso();
+  const enqueued = await enqueueExtractionJob(
+    buildExtractionJob({
+      receiptId,
+      r2Key: standardKey,
+      contentType: intake.attachment_content_type ?? "application/octet-stream",
+      enqueuedAt,
+    }),
+  );
+  if (enqueued) {
+    try {
+      await updateReceiptRecord(
+        receiptId,
+        { extractionState: "queued", extractionEnqueuedAt: enqueuedAt },
+        actor,
+      );
+    } catch (markError) {
+      console.error("[promoteIntake] mark-queued failed", markError);
+    }
+  }
 
   // 4. Flip the intake row (idempotent guard on status). Null the intake key —
   //    the object was moved to the standard key.
