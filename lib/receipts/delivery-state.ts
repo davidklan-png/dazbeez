@@ -117,3 +117,94 @@ export function deriveMonthDeliveryState(
   }
   return DELIVERY_STATE.PENDING;
 }
+
+// ─── Resume vs new send (the stuck-pending duplicate-send guard) ─────────────
+//
+// If the Worker dies after Resend accepts but before markDeliverySent, the
+// attempt row stays `pending`. A naive retry that created a NEW attempt_id +
+// key would double-send (the guard can't tell the first was accepted). So a
+// `pending` attempt is RESUMED — the next send reuses its attempt_id, hence
+// the same idempotency key, and Resend replays the original result. This is
+// distinct from starting a fresh send (new attempt_id), which the double-send
+// guard blocks unless the caller passes an explicit override.
+//
+// Resend's idempotency window is ~24h. Within it a resume replays; beyond it
+// Resend will not recognise the key, so a "resume" is a genuine second send —
+// the pending is then stale and a new send requires the override.
+
+/** Resend's idempotency window. A resume is only safe within it. */
+export const RESEND_IDEMPOTENCY_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/** Is a pending attempt still within Resend's idempotency window (resumeable)?
+ *  Both args are ISO strings; `now` is passed in so the check is deterministic
+ *  and unit-testable. */
+export function isWithinResumeWindow(pendingCreatedAt: string, now: string): boolean {
+  return Date.parse(now) - Date.parse(pendingCreatedAt) <= RESEND_IDEMPOTENCY_WINDOW_MS;
+}
+
+/** A delivery-row view for {@link decideSendAction}. */
+export interface DeliveryAttemptSummary {
+  id: string;
+  exportId: string;
+  attemptId: string;
+  state: AttemptState;
+  createdAt: string;
+}
+
+/** What the send endpoint should do for a month, given its delivery history.
+ *  - `new`: no blocking delivery — start a fresh attempt (new attempt_id).
+ *  - `resume`: a resumeable pending exists — reuse its attempt_id so Resend
+ *    replays (no duplicate). Distinct from a new send; no override needed.
+ *  - `blocked`: a `sent` delivery exists, OR a `pending` that is NOT resumeable
+ *    (stale beyond the window, or for a different export). A new send needs the
+ *    explicit override (forceNew) — audited by the caller. */
+export type SendAction =
+  | { action: "new" }
+  | { action: "resume"; attemptId: string; deliveryId: string }
+  | {
+      action: "blocked";
+      reason: "sent" | "pending_stale";
+      priorAttemptId: string;
+    };
+
+/**
+ * Decide new vs resume vs blocked for a send request. Pure — the send endpoint
+ * supplies `now`, the latest export id, and the month's delivery rows.
+ *
+ * Precedence: a resumeable pending resumes (unless forceNew) even if an older
+ * export was already sent (a corrected re-delivery in flight supersedes it —
+ * D17). Otherwise any sent or non-resumeable pending blocks a new send unless
+ * forceNew.
+ */
+export function decideSendAction(opts: {
+  latestExportId: string;
+  deliveries: DeliveryAttemptSummary[];
+  now: string;
+  forceNew: boolean;
+}): SendAction {
+  const { latestExportId, deliveries, now, forceNew } = opts;
+
+  const resumeable = deliveries.find(
+    (d) =>
+      d.exportId === latestExportId &&
+      d.state === ATTEMPT_STATE.PENDING &&
+      isWithinResumeWindow(d.createdAt, now),
+  );
+  if (resumeable && !forceNew) {
+    return { action: "resume", attemptId: resumeable.attemptId, deliveryId: resumeable.id };
+  }
+
+  const sent = deliveries.find((d) => d.state === ATTEMPT_STATE.SENT);
+  const anyPending = deliveries.find((d) => d.state === ATTEMPT_STATE.PENDING);
+  if ((sent || anyPending) && !forceNew) {
+    // anyPending here is non-resumeable (stale or other export) — resumeable
+    // ones are consumed above unless forceNew.
+    return {
+      action: "blocked",
+      reason: sent ? "sent" : "pending_stale",
+      priorAttemptId: (sent ?? anyPending)!.attemptId,
+    };
+  }
+
+  return { action: "new" };
+}
