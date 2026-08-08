@@ -218,6 +218,30 @@ function noticeFilenames(noticeText: string): string[] {
   return (noticeText.match(re) ?? []).map((t) => t);
 }
 
+/** Remove the 【今月のご連絡】 section (operator free text) from a notice, so
+ *  policy checks scan only the GENERATED structure — not the operator's own
+ *  words. The operator may legitimately write 改訂/出席者/manifest references
+ *  (e.g. a D17 re-delivery supersession note; or "出席者一覧は弊社で保管",
+ *  per D9). Without this, preflight blocks the send on the operator's message.
+ *  Strips from the 【今月のご連絡】 heading to the next 【 heading. No-op when
+ *  the section is absent (operator message omitted). */
+function stripOperatorMessageSection(noticeText: string): string {
+  const lines = noticeText.split(/\r?\n/);
+  const out: string[] = [];
+  let skipping = false;
+  for (const line of lines) {
+    if (line.startsWith("【今月のご連絡】")) {
+      skipping = true;
+      continue;
+    }
+    if (skipping && line.startsWith("【")) {
+      skipping = false;
+    }
+    if (!skipping) out.push(line);
+  }
+  return out.join("\r\n");
+}
+
 // ─── Checks ─────────────────────────────────────────────────────────────────
 
 const ASCII_RE = /^[\x20-\x7E]+$/;
@@ -652,10 +676,16 @@ const checks: { key: string; run: Check }[] = [
   {
     key: "notice-policy",
     run: ({ noticeText }) => {
+      // Scan only the GENERATED notice structure, not the operator's free text
+      // under 【今月のご連絡】 — the operator may legitimately write 改訂/出席者/
+      // manifest references (D17 re-delivery supersession note, D9 attendee
+      // retention note). Without stripping, preflight blocks on the operator's
+      // own words.
+      const generated = stripOperatorMessageSection(noticeText);
       const violations: string[] = [];
-      if (noticeText.includes("改訂情報")) violations.push("改訂情報 block present");
-      if (/manifest|マニフェスト/.test(noticeText)) violations.push("manifest sentence present");
-      if (/出席者|参加者一覧|attendee/i.test(noticeText)) violations.push("attendee reference present");
+      if (generated.includes("改訂情報")) violations.push("改訂情報 block present");
+      if (/manifest|マニフェスト/.test(generated)) violations.push("manifest sentence present");
+      if (/出席者|参加者一覧|attendee/i.test(generated)) violations.push("attendee reference present");
       return violations.length === 0
         ? { check: "notice-policy", passed: true }
         : {

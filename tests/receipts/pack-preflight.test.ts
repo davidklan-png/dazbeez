@@ -343,3 +343,31 @@ test("preflight: a realistic AMEX statement (metadata + header + charges + total
   const counts = report.results.find((r) => r.check === "notice-counts-match-pack")!;
   assert.equal(counts.passed, true, "notice-counts-match-pack passes (2 charge rows, not the metadata/header/totals)");
 });
+
+// ─── Change 4 interaction: operator free text vs the notice-policy check ────
+// The operator message is injected into 【今月のご連絡】 — the SAME file the
+// policy check scans for 改訂情報 / attendee / manifest. The operator may
+// legitimately write all three (D17 supersession note, D9 attendee retention,
+// etc.). The policy check strips the operator section before scanning.
+test("notice-policy: operator free text with 改訂情報/出席者/manifest does NOT trip the check (stripped)", () => {
+  const notice = buildPackNotice(
+    {
+      monthLabel: "2026年6月",
+      rowCount: 2,
+      receiptCount: 2,
+      missingReceiptLines: [],
+      operatorMessage:
+        "本パックは改訂情報として前回の6月分を差し替えます。出席者一覧は弊社で保管しております。マニフェストで検証できます。",
+    },
+    names,
+  );
+  const input = clone(baseInput());
+  input.noticeText = notice;
+  const report = runPackPreflight(input);
+  const policy = report.results.find((r) => r.check === "notice-policy")!;
+  assert.equal(
+    policy.passed,
+    true,
+    "operator free text under 【今月のご連絡】 must not trip the policy check (改訂情報/出席者/manifest are the operator's words, not the generated notice)",
+  );
+});
