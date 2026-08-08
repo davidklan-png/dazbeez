@@ -47,6 +47,7 @@ import type {
   ReceiptRecord,
   UpdateAmexLineCategoryInput,
   UpdateReceiptInput,
+  ExportDelivery,
 } from "@/lib/receipts/types";
 
 // ─── Receipt records ─────────────────────────────────────────────────────────
@@ -3134,6 +3135,168 @@ export async function finalizeExport(
       }
     }
   }
+}
+
+// ─── Delivery records (Phase B; 0036_export_deliveries) ──────────────────────
+// One row per HTTP send attempt to Resend. State transitions and idempotency
+// logic live in lib/receipts/delivery-state.ts (pure, unit-tested); these are
+// the thin D1 wrappers. Every write that changes an attempt's state updates
+// the denormalised receipt_exports.delivery_state IN THE SAME D1 batch
+// (transaction), so list queries never disagree with the attempt history.
+// A failed send never touches the seal — only the month's delivery_state.
+
+/** Input for a new delivery attempt row (state starts 'pending'). */
+export interface CreateDeliveryInput {
+  exportId: string;
+  attemptId: string;
+  idempotencyKey: string;
+  toAddress: string;
+  ccAddress: string | null;
+  subject: string;
+  body: string;
+  operatorMessage: string | null;
+  zipFilename: string;
+  zipSha256: string;
+  zipBytes: number;
+}
+
+/**
+ * Record a new send attempt (state 'pending') and set the export's
+ * delivery_state='pending' in one transaction. Returns the new delivery id.
+ */
+export async function createDelivery(input: CreateDeliveryInput): Promise<string> {
+  const db = getReceiptsDb();
+  const id = newUuid();
+  const now = nowIso();
+  await db.batch([
+    db
+      .prepare(
+        `INSERT INTO export_deliveries
+          (id, export_id, attempt_id, idempotency_key, state,
+           to_address, cc_address, subject, body, operator_message,
+           zip_filename, zip_sha256, zip_bytes, created_at)
+         VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        id,
+        input.exportId,
+        input.attemptId,
+        input.idempotencyKey,
+        input.toAddress,
+        input.ccAddress,
+        input.subject,
+        input.body,
+        input.operatorMessage,
+        input.zipFilename,
+        input.zipSha256,
+        input.zipBytes,
+        now,
+      ),
+    db
+      .prepare(`UPDATE receipt_exports SET delivery_state = 'pending' WHERE id = ?`)
+      .bind(input.exportId),
+  ]);
+  return id;
+}
+
+/** One delivery attempt by id. */
+export async function getDelivery(id: string): Promise<ExportDelivery | null> {
+  const db = getReceiptsDb();
+  return db
+    .prepare(`SELECT * FROM export_deliveries WHERE id = ?`)
+    .bind(id)
+    .first<ExportDelivery>();
+}
+
+/** All delivery attempts for an export, oldest-first (attempt history). */
+export async function listDeliveriesForExport(
+  exportId: string,
+): Promise<ExportDelivery[]> {
+  const db = getReceiptsDb();
+  const result = await db
+    .prepare(
+      `SELECT * FROM export_deliveries WHERE export_id = ? ORDER BY created_at ASC`,
+    )
+    .bind(exportId)
+    .all<ExportDelivery>();
+  return result.results ?? [];
+}
+
+/**
+ * All delivery attempts for a month (across its export revisions), oldest-
+ * first. Used to derive the month's delivery state and to check the double-
+ * send guard (D6) — keyed on the month (yyyymm), not the revision.
+ */
+export async function listDeliveriesForMonth(
+  month: string,
+): Promise<ExportDelivery[]> {
+  const db = getReceiptsDb();
+  const result = await db
+    .prepare(
+      `SELECT d.*
+       FROM export_deliveries d
+       JOIN receipt_exports e ON e.id = d.export_id
+       WHERE e.export_month = ?
+       ORDER BY d.created_at ASC`,
+    )
+    .bind(month)
+    .all<ExportDelivery>();
+  return result.results ?? [];
+}
+
+/**
+ * Mark an attempt sent: record the provider message id + completion time, and
+ * set the export's delivery_state='delivered' in one transaction. A sent
+ * attempt closes the month for reporting.
+ */
+export async function markDeliverySent(
+  id: string,
+  providerMessageId: string,
+): Promise<void> {
+  const db = getReceiptsDb();
+  const now = nowIso();
+  await db.batch([
+    db
+      .prepare(
+        `UPDATE export_deliveries
+         SET state = 'sent', provider_message_id = ?, completed_at = ?
+         WHERE id = ? AND state = 'pending'`,
+      )
+      .bind(providerMessageId, now, id),
+    db
+      .prepare(
+        `UPDATE receipt_exports
+         SET delivery_state = 'delivered'
+         WHERE id = (SELECT export_id FROM export_deliveries WHERE id = ?)`,
+      )
+      .bind(id),
+  ]);
+}
+
+/**
+ * Mark an attempt failed: record the error + completion time, and set the
+ * export's delivery_state='sealed_undelivered' (retryable; month NOT closed)
+ * in one transaction. The seal is untouched — only the reporting state moves.
+ */
+export async function markDeliveryFailed(id: string, error: string): Promise<void> {
+  const db = getReceiptsDb();
+  const now = nowIso();
+  await db.batch([
+    db
+      .prepare(
+        `UPDATE export_deliveries
+         SET state = 'failed', error = ?, completed_at = ?
+         WHERE id = ? AND state = 'pending'`,
+      )
+      .bind(error, now, id),
+    db
+      .prepare(
+        `UPDATE receipt_exports
+         SET delivery_state = 'sealed_undelivered'
+         WHERE id = (SELECT export_id FROM export_deliveries WHERE id = ?)`,
+      )
+      .bind(id),
+  ]);
 }
 
 /**

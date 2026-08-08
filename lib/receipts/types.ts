@@ -516,6 +516,37 @@ export interface ReceiptExport {
   // statement artifact — so a sealed export's filename is tied to the immutable
   // revision. NULL on rows predating 0035 (legacy ASCII filename fallback).
   payment_due_date?: string | null;
+  // Denormalised delivery state for list queries (0036). NULL on rows
+  // predating 0036 and on sealed-but-never-sent exports. The send path writes
+  // it in the same D1 transaction as the export_deliveries row.
+  delivery_state?: "delivered" | "sealed_undelivered" | "pending" | null;
+}
+
+/**
+ * One monthly-pack delivery attempt (Phase B; 0036_export_deliveries). One row
+ * per HTTP send to Resend; `attempt_id` groups the automatic retries of a
+ * single operator-initiated send (shared idempotency key). The sealed artifact
+ * is immutable — a failed attempt never touches the seal, only the month's
+ * delivery_state (retryable sealed_undelivered). See lib/receipts/delivery-state.ts.
+ */
+export interface ExportDelivery {
+  id: string;
+  export_id: string;
+  attempt_id: string;
+  idempotency_key: string;
+  state: "pending" | "sent" | "failed";
+  to_address: string;
+  cc_address: string | null;
+  subject: string;
+  body: string;
+  operator_message: string | null;
+  zip_filename: string;
+  zip_sha256: string;
+  zip_bytes: number;
+  provider_message_id: string | null;
+  error: string | null;
+  created_at: string;
+  completed_at: string | null;
 }
 
 /**
