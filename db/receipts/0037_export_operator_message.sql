@@ -1,0 +1,11 @@
+-- 0037_export_operator_message.sql
+--
+-- The operator's free-text message for a month's pack — the one value that
+-- feeds BOTH 【今月のご連絡】 inside the sealed ZIP (written by buildPackNotice
+-- at pack-build time) AND the delivery email body (read at send time). One
+-- stored value, two surfaces (O7). Without this column the two would be
+-- authored separately and drift — the exact failure mode of §7.
+--
+-- Captured at approval/build time (before the pack is sealed, because the
+-- notice lives inside the sealed ZIP). Additive only; NULL when no message.
+ALTER TABLE receipt_exports ADD COLUMN operator_message TEXT;

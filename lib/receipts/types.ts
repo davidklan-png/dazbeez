@@ -523,6 +523,11 @@ export interface ReceiptExport {
   // predating 0036 and on sealed-but-never-sent exports. The send path writes
   // it in the same D1 transaction as the export_deliveries row.
   delivery_state?: "delivered" | "sealed_undelivered" | "pending" | null;
+  // Operator free-text message for the month's pack (0037). One stored value,
+  // two surfaces (O7): injected into 【今月のご連絡】 inside the sealed ZIP at
+  // build time, and into the delivery email body at send time. NULL when no
+  // message.
+  operator_message?: string | null;
 }
 
 /**

@@ -163,7 +163,7 @@ export async function POST(request: Request, { params }: RouteContext) {
     const zipFilename = packZipName(month); // ASCII container name (B-4, asserted in performDelivery)
 
     // ── Email body — sealed values only (B-5). SINGLE path (Change 4 replaces). ──
-    const operatorMessage = null; // Change 4: from receipt_exports.operator_message
+    const operatorMessage = exportRecord.operator_message ?? null; // 0037: same stored value the pack notice carries (O7 — one message, two surfaces)
     const email = buildDeliveryEmail({ month, operatorMessage });
 
     // ── attempt_id: resume reuses the pending one; a new send mints one ──────

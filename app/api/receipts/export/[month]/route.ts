@@ -118,6 +118,7 @@ export async function POST(request: Request, { params }: RouteContext) {
       exportRecord.proofs_r2_key ?? null,
       exportRecord.proofs_sha256 ?? null,
       exportRecord.payment_due_date ?? null,
+      exportRecord.operator_message ?? null,
     );
 
     // A7: non-blocking warning when finalizing month M while an earlier

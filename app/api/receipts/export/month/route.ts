@@ -65,7 +65,7 @@ export async function POST(request: Request) {
   try {
     const actor = await requireReceiptsActor(request.headers);
 
-    const body = (await request.json()) as { month?: string; finalize?: boolean };
+    const body = (await request.json()) as { month?: string; finalize?: boolean; operatorMessage?: string };
     const month = body.month?.trim();
 
     if (!month || !/^\d{4}-\d{2}$/.test(month)) {
@@ -449,11 +449,14 @@ export async function POST(request: Request) {
     // the shared builder (also used by the finalize email, so the notice text
     // cannot drift between the ZIP and the notification). All names come from
     // `packNames` (single naming authority).
-    const proofsNoticeInput = derivePackNoticeInput(
-      month,
-      bundle.rows,
-      { rowCount: bundle.rows.length, receiptCount: proofsEntries.length },
-    );
+    const proofsNoticeInput = {
+      ...derivePackNoticeInput(
+        month,
+        bundle.rows,
+        { rowCount: bundle.rows.length, receiptCount: proofsEntries.length },
+      ),
+      operatorMessage: body.operatorMessage ?? undefined,
+    };
 
     const proofsKey = buildProofsKey(month, exportId);
     const proofsZipBytes = assembleProofsZip(
@@ -651,6 +654,7 @@ export async function POST(request: Request) {
         proofsKey,
         proofsSha256,
         amexArtifact?.payment_due_date ?? null,
+        body.operatorMessage ?? null,
       );
       // Audit the rebuild (finalize:false) — "export.generated" was defined
       // for this. The finalize:true path is audited by finalizeExport

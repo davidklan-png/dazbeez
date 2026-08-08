@@ -2990,6 +2990,10 @@ export async function recordExportBundle(
    *  path passes the just-fetched artifact date; finalizeExport passes the
    *  draft row's existing snapshot (a no-op re-write of the same value). */
   paymentDueDate?: string | null,
+  /** Operator free-text message for the month (0037). One stored value, two
+   *  surfaces (O7): the build passes it so the pack notice carries it inside
+   *  the sealed ZIP; finalizeExport re-writes the draft's existing value. */
+  operatorMessage?: string | null,
 ): Promise<void> {
   const db = getReceiptsDb();
   const now = nowIso();
@@ -3003,7 +3007,8 @@ export async function recordExportBundle(
            proofs_r2_key = ?,
            proofs_sha256 = ?,
            bundle_built_at = ?,
-           payment_due_date = ?
+           payment_due_date = ?,
+           operator_message = ?
        WHERE id = ? AND status = 'draft'`,
     )
     .bind(
@@ -3015,6 +3020,7 @@ export async function recordExportBundle(
       proofsSha256 ?? null,
       now,
       paymentDueDate ?? null,
+      operatorMessage ?? null,
       exportId,
     )
     .run();
@@ -3033,6 +3039,8 @@ export async function finalizeExport(
    *  the draft row's existing value so the finalize re-stage writes the same
    *  date the build captured. */
   paymentDueDate?: string | null,
+  /** Operator message re-written from the draft row's stored value (0037). */
+  operatorMessage?: string | null,
 ): Promise<void> {
   const db = getReceiptsDb();
   const now = nowIso();
@@ -3052,6 +3060,7 @@ export async function finalizeExport(
     proofsR2Key,
     proofsSha256,
     paymentDueDate,
+    operatorMessage,
   );
 
   const result = await db
