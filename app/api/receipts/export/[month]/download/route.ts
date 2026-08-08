@@ -5,6 +5,7 @@ import { stringifyJson } from "@/lib/receipts/db-utils";
 import { getExport, getLatestFinalizedExport } from "@/lib/receipts/db";
 import {
   EXPORT_DOWNLOAD_FILES,
+  contentDispositionAttachment,
   isExportDownloadFile,
   resolveBundleDownload,
 } from "@/lib/receipts/export";
@@ -67,6 +68,11 @@ export async function GET(request: Request, { params }: RouteContext) {
     }
     const finalizedRecord = !draft ? await getLatestFinalizedExport(month) : null;
 
+    // The AMEX 照合CSV download is named from the payment-due date snapshotted
+    // onto the served revision at bundle-build time (0035) — carried on the
+    // record itself, so no live lookup of the current statement artifact (which
+    // could rename a sealed export's download away from its sealed ZIP, or 404
+    // a sealed object when the artifact was later replaced). Codex review #160.
     const resolution = resolveBundleDownload({
       month,
       file,
@@ -101,7 +107,7 @@ export async function GET(request: Request, { params }: RouteContext) {
     return new Response(object.body, {
       headers: {
         "Content-Type": resolution.contentType,
-        "Content-Disposition": `attachment; filename="${resolution.filename}"`,
+        "Content-Disposition": contentDispositionAttachment(resolution.filename),
       },
     });
   } catch (error) {

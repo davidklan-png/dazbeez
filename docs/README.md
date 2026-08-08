@@ -20,6 +20,7 @@ Authoritative descriptions of the system as deployed. Owner: architect + David.
 | [architecture.md](architecture.md) | System of Cloudflare units (main Worker, networking-card Pages, email-reply Worker, Mac MLX consumer); D1/R2/Queue bindings; auth; detailed receipts export pipeline. **Current.** |
 | [README.md](../README.md) | One-page root overview: tech stack, deployable units, routes, deploy commands. **Current.** |
 | [receipt-module.md](receipt-module.md) | Receipts subsystem route map. **Current (route map).** |
+| [receipts-capacity-planning.md](receipts-capacity-planning.md) | Measured June–August capacity baseline, growth forecast, operational thresholds, and receipts archival construction. **Current.** |
 | [business-card-crm-architecture.md](business-card-crm-architecture.md) | `/admin` CRM + paper business-card ingestion architecture. **Current.** |
 | [nfc-module.md](nfc-module.md) | `/nfc` page + networking-card system. *Reference; currentness not revalidated.* |
 | [ui-ux.md](ui-ux.md) | Design system: palette, typography, component inventory, layouts. *Reference; currentness not revalidated.* |

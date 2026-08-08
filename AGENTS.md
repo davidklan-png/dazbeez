@@ -337,6 +337,59 @@ starts. Design consequences:
     delivers the user value now (June-2 pair clusters; IC count 7→8) and is the
     single match authority until then.
 
+16. **Bank-debit utility lines + 家事按分 proration.** PARKED — design only, no
+    code. Water/electricity/gas are paid by 口座振替, have no AMEX line and no
+    receipt, and are currently invisible to the module; only a business fraction
+    (~50%, rate TBC by the accountant) is deductible. Design captured in
+    [ADR 0013](docs/adr/0013-bank-debit-lines-and-household-proration.md):
+    operator-uploaded bank CSV (no stored credentials, no automated login, no
+    aggregator); a bank debit modelled as a **statement line, not a receipt** —
+    new `bank_statement_lines` table + third `ExportRow.rowType` `"bank_line"`,
+    NOT a fourth `PaymentPath` (measured blast radius: 34 files touch
+    `PaymentPath`, 25 hardcode `"DIGITAL"`, and every existing value presumes a
+    captured image + extraction + review, none of which a bank debit has);
+    gross amount + **snapshotted** `business_ratio_bp` stored, deductible
+    derived (a live-lookup ratio would silently rewrite sealed months — breaks
+    ADR 0009); inside the finalize/seal gate, not stapled on at delivery.
+    TWO HARD GATES before any design decision is locked or code written:
+    (G1) **current application stabilized** — this sits behind the open items
+    above; (G2) **a real bank statement export inspected first** (operator
+    instruction 2026-08-03). G2 exists because D3 (descriptor-matching rules)
+    and D4 (per-utility gross) rest on assumptions about a file nobody has
+    looked at — if the 口座振替 descriptor is truncated katakana, unstable, or
+    names only the collection agent rather than the utility, the rules approach
+    collapses and the fallback is operator-tagged lines. See ADR 0013 §Gate G2
+    for the six questions one month's export would settle. Also open: three
+    questions for the accountant (rate + basis, debit-date vs. service-period
+    booking, whether the system's derived deductible is authoritative or
+    informational).
+
+17. **Review screen fakes queue position for out-of-view receipts.** NOT
+    DISPATCHED — spec ready at `prompts/WORKER-PROMPT-share-receipt-link.md`.
+    In `review/[id]/page.tsx`, `activeIndex = queueItems.findIndex(...)` is
+    `-1` when the active receipt isn't in the working set;
+    `Math.max(1, activeIndex + 1)` then renders a false **"1 of N"**, and
+    `nextReceiptId` resolves to `queueItems[0]` — so Skip and save-and-advance
+    jump into an unrelated queue. (`prevReceiptId` is harmless: `[-2]` →
+    undefined.) Live trigger is a **shared deep link crossing a month
+    boundary**: rail hrefs come from `buildReviewQueryParams`, which only emits
+    `month` when the operator used the month picker, so a link copied from the
+    default view carries none — after the calendar month rolls over the
+    recipient's rail is the new month and both bugs fire. Now reachable in
+    practice: receipt links are being shared with a second Clerk user
+    (2026-08-04 decision — Clerk account + existing protected deep link;
+    a signed capability-link design was assessed and rejected: third principal
+    class, scoped PATCH, unauthenticated R2 read path, seal-guard
+    reimplementation, and a weaker audit actor on 接待交際費 attendees).
+    Fix: extract a pure `resolveQueueNavigation` into `review-queue-filter.ts`
+    (absent id → `index: null`, `nextId: null`) + widen `FormPaneProps.queueIndex`
+    to `number | null` and render "not in this view". State it, don't fix it up —
+    do NOT widen the working set to make the receipt fit; that set is
+    export/closing-scope authority, not a display convenience. A Copy-link
+    button + share-URL builder were designed and CUT in the same pass: ordinary
+    right-click-copy covers the common cases and the button's only real value
+    was pinning the month, i.e. a workaround for this bug.
+
 ## Two-Agent Workflow: Sandbox (Architect) vs. CLI (Worker)
 
 This repo is developed across two separate Claude sessions that share the same

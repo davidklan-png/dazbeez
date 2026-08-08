@@ -19,10 +19,9 @@ import {
   getResendApiKeyOrNull,
 } from "@/lib/cloudflare-runtime";
 import { getComplianceSettings } from "@/lib/receipts/settings";
-import {
-  buildTransitionNotice,
-  deriveTransitionNoticeInput,
-} from "@/lib/receipts/proofs";
+import { buildPackNotice, derivePackNoticeInput } from "@/lib/receipts/proofs";
+import { buildPackNames } from "@/lib/receipts/pack-naming";
+import { getAmexArtifactByMonth } from "@/lib/receipts/db";
 import type { ExportBundle } from "@/lib/receipts/month-closing";
 import type { ExportRow, ReceiptExport } from "@/lib/receipts/types";
 
@@ -56,30 +55,41 @@ export interface FinalizeNoticeData {
   noticeText: string;
 }
 
-export function composeFinalizeNoticeData(
+export async function composeFinalizeNoticeData(
   month: string,
   bundle: ExportBundle,
-  exportRecord: Pick<ReceiptExport, "id" | "export_revision" | "supersedes_export_id" | "correction_reason">,
-): FinalizeNoticeData {
+  exportRecord: Pick<ReceiptExport, "id" | "export_revision">,
+): Promise<FinalizeNoticeData> {
   const distinctReceiptIds = new Set<string>();
   for (const row of bundle.rows) {
     if (row.receiptId) distinctReceiptIds.add(row.receiptId);
   }
-  const noticeInput = deriveTransitionNoticeInput(
-    month, bundle.rows, bundle.receipts,
+  const noticeInput = derivePackNoticeInput(
+    month,
+    bundle.rows,
     { rowCount: bundle.rows.length, receiptCount: distinctReceiptIds.size },
-    {
-      exportRevision: exportRecord.export_revision ?? 1,
-      supersedesExportId: exportRecord.supersedes_export_id ?? null,
-      correctionReason: exportRecord.correction_reason ?? null,
-    },
+  );
+  // The notice interpolates the pack's 照合CSV filenames, so it needs the pack
+  // names. hasAmex mirrors the bundle-build path: only a pack with an AMEX
+  // statement needs the payment-due date. A cash/digital-only finalized month
+  // (no statement imported) passes hasAmex=false so a missing date does NOT
+  // throw here; the notice then omits the AMEX 照合CSV mention
+  // (derivePackNoticeInput sets hasAmex from the bundle rows).
+  const artifact = await getAmexArtifactByMonth(month);
+  const names = buildPackNames(
+    month,
+    artifact?.payment_due_date ?? null,
+    /* hasAmex */ artifact != null,
   );
   return {
-    month, monthLabel: noticeInput.monthLabel, exportId: exportRecord.id,
-    revision: noticeInput.exportRevision, rowCount: bundle.rows.length,
+    month,
+    monthLabel: noticeInput.monthLabel,
+    exportId: exportRecord.id,
+    revision: exportRecord.export_revision ?? 1,
+    rowCount: bundle.rows.length,
     receiptCount: distinctReceiptIds.size,
     categoryTotals: summarizeByCategory(bundle.rows),
-    noticeText: buildTransitionNotice(noticeInput),
+    noticeText: buildPackNotice(noticeInput, names),
   };
 }
 

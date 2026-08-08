@@ -5,6 +5,7 @@ import {
   ACCOUNTANT_DISCLAIMER_EN,
   ACCOUNTANT_DISCLAIMER_JA,
 } from "@/lib/receipts/settings";
+import { packZipName, buildPackNames } from "@/lib/receipts/pack-naming";
 
 /**
  * CSV cell escaper.
@@ -509,6 +510,40 @@ export function isExportDownloadFile(
   return (EXPORT_DOWNLOAD_FILES as readonly string[]).includes(value);
 }
 
+/**
+ * Build a `Content-Disposition: attachment` header value for a download
+ * filename, which may be non-ASCII (the reconciliation-CSV names:
+ * `202606_現金払いリスト.csv`). Fetch `Headers` values are ByteStrings
+ * (Latin-1), so a Japanese name in `filename="…"` throws a TypeError in the
+ * `Response` constructor and the endpoint returns 500 (Codex review #160, P1).
+ *
+ * ASCII names keep the plain `filename="…"` form (the proofs ZIP, receipts
+ * CSV, etc.). Non-ASCII names emit an ASCII fallback plus an RFC 5987
+ * `filename*=UTF-8''…` parameter, which modern clients prefer and render with
+ * the correct Unicode name.
+ */
+export function contentDispositionAttachment(filename: string): string {
+  if (/^[\x20-\x7E]+$/.test(filename)) {
+    return `attachment; filename="${filename}"`;
+  }
+  const asciiFallback = filename.replace(/[^\x20-\x7E]+/g, "_").replace(/"/g, "");
+  const utf8 = encodeURIComponent(filename).replace(
+    /['()*]/g,
+    (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase(),
+  );
+  return `attachment; filename="${asciiFallback}"; filename*=UTF-8''${utf8}`;
+}
+
+/** AMEX 照合CSV download filename for a revision: the pack name dated by the
+ *  revision's snapshotted payment-due date (matches the file inside the ZIP),
+ *  or a stable ASCII fallback for legacy rows predating the 0035 snapshot. */
+function amexReconDownloadName(month: string, paymentDueDate: string | null): string {
+  if (!paymentDueDate) {
+    return `AMEX${month}_Reconciliation.csv`;
+  }
+  return buildPackNames(month, paymentDueDate, true).amexReconciliationCsv;
+}
+
 export function resolveExportDownload(
   month: string,
   exportRecord: {
@@ -516,6 +551,11 @@ export function resolveExportDownload(
     archive_r2_key: string | null;
     manifest_r2_key: string | null;
     proofs_r2_key?: string | null;
+    /** AMEX payment-due date snapshotted when this revision's bundle was built
+     *  (0035). Names the AMEX 照合CSV download so it matches the file sealed
+     *  inside this revision's proofs ZIP — independent of the current statement
+     *  artifact (Codex review #160, P2). NULL on legacy rows. */
+    payment_due_date?: string | null;
   },
   file: ExportDownloadFile,
 ): { r2Key: string | null; contentType: string; filename: string } {
@@ -557,32 +597,45 @@ export function resolveExportDownload(
       };
     case "proofs":
       // Stored key — the sealed proofs ZIP (built at rebuild, SHA in manifest).
+      // The download filename matches the pack container name from the single
+      // naming authority (pack-naming.ts) so the downloaded file and the root
+      // folder inside it share a name (D10). Month-only — no payment date
+      // needed. The draft path (resolveBundleDownload) prefixes `DRAFT-`.
       return {
         r2Key: exportRecord.proofs_r2_key ?? null,
         contentType: "application/zip",
-        filename: `export-${month}-proofs.zip`,
+        filename: packZipName(month),
       };
     // Reconciliation files (review #2). Derived keys like summary/attendees.
-    // Download filenames follow the operator-specified convention
-    // AMEX{yyyy-mm}_Reconciliation.csv (not the export-… pattern) because
-    // these are the accountant's primary documents.
+    // Download filenames come from the SAME naming authority as the file inside
+    // the proofs ZIP (D15) — AMEX dated by the payment-due date, CASH/DIGITAL
+    // by the statement month — so the downloaded file and the ZIP entry share a
+    // name instead of the old divergent AMEX{month}_Reconciliation.csv labels.
     case "amex":
+      // The AMEX 照合CSV object is sealed at a derived, revision-stable key
+      // (buildAmexReconciliationKey), so it ALWAYS exists for a revision that
+      // staged one — return the key unconditionally; a 404 belongs at the R2
+      // layer (object absent), never gated on the date (Codex review #160, P2:
+      // gating on the current artifact 404'd sealed objects when the artifact
+      // was later replaced). The filename uses the revision's snapshotted date
+      // so it matches the file inside this revision's ZIP; legacy rows (NULL
+      // snapshot, pre-0035) fall back to a stable ASCII name.
       return {
         r2Key: buildAmexReconciliationKey(month, exportRecord.id),
         contentType: csv,
-        filename: `AMEX${month}_Reconciliation.csv`,
+        filename: amexReconDownloadName(month, exportRecord.payment_due_date ?? null),
       };
     case "cash":
       return {
         r2Key: buildCashReconciliationKey(month, exportRecord.id),
         contentType: csv,
-        filename: `CASH${month}_Reconciliation.csv`,
+        filename: buildPackNames(month, null, false).cashReconciliationCsv,
       };
     case "digital":
       return {
         r2Key: buildDigitalReconciliationKey(month, exportRecord.id),
         contentType: csv,
-        filename: `DIGITAL${month}_Reconciliation.csv`,
+        filename: buildPackNames(month, null, false).digitalReconciliationCsv,
       };
   }
 }
@@ -606,6 +659,9 @@ export type DownloadExportRecord = {
   proofs_r2_key?: string | null;
   /** NULL until the draft is rebuilt (recordExportBundle sets it). */
   bundle_built_at?: string | null;
+  /** AMEX payment-due date snapshotted at bundle-build (0035); names the AMEX
+   *  照合CSV download. NULL on rows predating 0035. */
+  payment_due_date?: string | null;
 };
 
 export type BundleDownloadResolution =
@@ -751,13 +807,13 @@ export function buildExportReadme(opts: {
     "The attendees CSV (<exportId>-attendees.csv) maps the AttendeeIds",
     "column to each attendee's name, company, and title.",
     "The AMEX reconciliation CSV reproduces the original card statement",
-    "line-for-line with 科目＆No., 会議-出席者ID, 人数, and 領収書ファイル名",
+    "line-for-line with 科目＆No., 事業目的, 人数, and 領収書ファイル名",
     "appended to each charge row. CASH/DIGITAL receipts ship in their own",
     "reconciliation CSVs with the same evidence columns appended.",
     "The proofs ZIP (<exportId>-proofs.zip) bundles one proof per receipt,",
     "named <勘定科目><MonYYYY><①…><店舗><￥金額> — the 科目＆No. matches the",
     "reconciliation CSVs' 科目＆No. column; their 領収書ファイル名 column is",
-    "the evidence index. Proofs are foldered per payment path (AMEX明細分/",
-    "現金分/デジタル分).",
+    "the evidence index. Proofs are foldered per payment path (AMEX / 現金 /",
+    "デジタル); folder + index-file names carry a yyyymm_/yyyymmdd_ date prefix",
   ].join("\n");
 }

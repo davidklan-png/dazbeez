@@ -30,7 +30,7 @@ export async function POST(request: Request) {
     const exportRecord = await getLatestFinalizedExport(month);
     if (!exportRecord) return NextResponse.json({ ok: false, error: `No finalized export for ${month}.` }, { status: 404 });
     const bundle = await buildExportBundle(month);
-    const data = composeFinalizeNoticeData(month, bundle, exportRecord);
+    const data = await composeFinalizeNoticeData(month, bundle, exportRecord);
     const result = await notifyAccountantOfFinalize(data, { test: true });
 
     await createAuditEntry(getReceiptsDb(), {

@@ -1,12 +1,21 @@
 // Reconciliation files — monthly closing review #2 (2026-07-18).
 //
-// The accountant-facing deliverable set is split by payment path:
-//   AMEX{yyyy-mm}_Reconciliation.csv    — the ORIGINAL statement CSV, passed
+// The accountant-facing deliverable set is split by payment path. Each ships as
+// a standalone artifact (R2 key + download) AND is embedded byte-identically in
+// the proofs ZIP under its pack name (lib/receipts/pack-naming.ts):
+//   {yyyymmdd}_AMEXカード利用明細.csv  — the ORIGINAL statement CSV, passed
 //     through line-for-line, with four appended columns on charge rows:
-//     科目＆No. / 会議-出席者ID / 人数 / 領収書ファイル名.
-//   CASH{yyyy-mm}_Reconciliation.csv    — CASH receipt rows in the existing
-//     receipts-CSV format + the same two evidence columns appended.
-//   DIGITAL{yyyy-mm}_Reconciliation.csv — likewise for DIGITAL.
+//     科目＆No. / 事業目的 / 人数 / 領収書ファイル名.
+//   {yyyymm}_現金払いリスト.csv        — CASH receipt rows, lean columns +
+//     the same four appended columns.
+//   {yyyymm}_デジタル払いリスト.csv     — likewise for DIGITAL (only when non-empty).
+//
+// Attendee roster (D9, 2026-08-07): the 会議-出席者ID column was REMOVED from
+// these delivered files at the accountant's written request — the names are not
+// shared, only retained. 人数 STAYS: the participant count feeds the per-head
+// 交際費 test. The standalone 参加者一覧 artifact + the finalize attendee gate +
+// the attendee directory are untouched (retention now matters MORE — we are the
+// only copy). This is an export-layer change only.
 //
 // Evidence naming follows the manual-close contract (external/ March close):
 //   {勘定科目Ja}{MonYYYY}{①}{店舗}{￥金額}.{ext}   e.g. 会議費Jun2026③小田原みなと食堂￥6,490.jpg
@@ -20,13 +29,7 @@
 // layer, same doctrine as 目次 vs manifest.
 
 import type { ExportRow } from "@/lib/receipts/types";
-import type { ReceiptAttendeeDirectoryEntry } from "@/lib/receipts/attendee-directory";
-import { resolveAttendeeNames } from "@/lib/receipts/attendee-directory";
-import {
-  csvEscape,
-  csvQuoteAlways,
-  resolveRowAttendees,
-} from "@/lib/receipts/export";
+import { csvEscape, resolveRowAttendees } from "@/lib/receipts/export";
 import { sanitizeZipNameSegment, formatYenAmount } from "@/lib/receipts/proofs";
 
 // ─── 科目＆No numbering ──────────────────────────────────────────────────────
@@ -109,10 +112,12 @@ export function buildEvidenceAssignments(
 
 // ─── AMEX statement passthrough ─────────────────────────────────────────────
 
+// 会議-出席者ID was removed (D9); 人数 stays (per-head 交際費 test). The
+// accountant resolves no attendee IDs from the delivered files — the roster is
+// retained internally only.
 export const AMEX_RECONCILIATION_APPEND_HEADERS = [
   "科目＆No.",
   "事業目的",
-  "会議-出席者ID",
   "人数",
   "領収書ファイル名",
 ] as const;
@@ -124,10 +129,8 @@ export interface AmexLineAppend {
   /** 事業目的 (business purpose), read next to the category label; blank when
    *  the matched receipt has no business_purpose (csvEscape("") → ""). */
   businessPurpose: string;
-  /** "; "-joined directory ids ("1; 2; 29"). "; " (not spaces) is a HARD rule:
-   *  Excel date-coerces space-separated ids ("2 3 4" → 2-Mar-2004). */
-  attendeeIds: string;
-  /** Attendee count as a string; "" when no attendees. */
+  /** Attendee count as a string; "" when no attendees. (Names/IDs no longer
+   *  shipped — D9.) */
   attendeeCount: string;
   /** Evidence filename, or `領収書なし：{reason}` when no receipt applies. */
   receiptFileCell: string;
@@ -179,7 +182,7 @@ function splitCsvLine(line: string): string[] {
  * Row rules:
  * - Charge rows (raw line number present in `appends`): fields are normalized
  *   to the canonical 7-column layout (comma-split amounts rejoined, exactly as
- *   the importer parses them) and the 4 appended cells follow. Normalization
+ *   the importer parses them) and the appended cells follow. Normalization
  *   guarantees the appended columns align in Excel even when the statement
  *   emits unquoted comma-grouped amounts (8+ raw fields).
  * - The header row (first field 利用日) gets the appended header names.
@@ -216,7 +219,6 @@ export function buildAmexReconciliationCsv(
           ...normalized.map((f) => csvEscape(f)),
           csvEscape(append.kamokuNo),
           csvEscape(append.businessPurpose),
-          csvQuoteAlways(append.attendeeIds),
           csvEscape(append.attendeeCount),
           csvEscape(append.receiptFileCell),
         ].join(","),
@@ -240,22 +242,12 @@ export function missingReceiptCell(reason: string | null | undefined): string {
   return r.length > 0 ? `領収書なし：${r}` : "領収書なし";
 }
 
-/** "; "-joined sorted directory ids for a row's attendees; unresolved names
- *  render "?" (drafts only — the finalize gate blocks unresolved names). */
-export function attendeeIdCells(
-  attendees: string[],
-  directory: ReceiptAttendeeDirectoryEntry[],
-): { ids: string; count: string } {
-  if (attendees.length === 0) return { ids: "", count: "" };
-  const { entries } = resolveAttendeeNames(attendees, directory);
-  const resolved = entries
-    .map((e) => (e ? e.id : null))
-    .filter((id): id is number => id !== null)
-    .sort((a, b) => a - b)
-    .map(String);
-  const unresolvedCount = entries.filter((e) => !e).length;
-  const ids = [...resolved, ...Array(unresolvedCount).fill("?")].join("; ");
-  return { ids, count: String(attendees.length) };
+/** Attendee COUNT cell for a reconciliation row. The names/IDs are no longer
+ *  shipped (D9) — only the count, which feeds the per-head 交際費 test. ""
+ *  when there are no attendees. No directory lookup: the count is just
+ *  `attendees.length`. */
+export function attendeeCountCell(attendees: string[]): string {
+  return attendees.length === 0 ? "" : String(attendees.length);
 }
 
 // ─── CASH / DIGITAL reconciliation CSVs ─────────────────────────────────────
@@ -263,8 +255,7 @@ export function attendeeIdCells(
 /** Lean accountant-facing columns (draft-round feedback 2026-07-18: the full
  *  receipts-CSV column set is "too many columns" — the machine layer already
  *  ships those). Mirrors the AMEX file's appended block so both 照合CSVs read
- *  the same way; attendees carried as IDs + count, resolvable via
- *  参加者一覧.csv. */
+ *  the same way. 会議-出席者ID removed (D9); 人数 kept. */
 export const PAYMENT_PATH_CSV_HEADERS = [
   "No",
   "利用日",
@@ -272,27 +263,24 @@ export const PAYMENT_PATH_CSV_HEADERS = [
   "金額",
   "科目＆No.",
   "事業目的",
-  "会議-出席者ID",
   "人数",
   "領収書ファイル名",
 ] as const;
 
 /**
  * CASH/DIGITAL reconciliation CSV — lean rows (No restarts at 1 within the
- * file), one file per payment path. 会議-出席者ID keeps the "; " separator
- * (Excel date-coerces space-separated ids).
+ * file), one file per payment path.
  */
 export function buildPaymentPathReconciliationCsv(
   rows: ExportRow[],
   attendeeMap: Map<string, string[]>,
-  attendeeDirectory: ReceiptAttendeeDirectoryEntry[],
   amexAttendees: Record<string, string[]>,
   assignments: Map<string, EvidenceAssignment>,
 ): string {
   const lines: string[] = [PAYMENT_PATH_CSV_HEADERS.join(",")];
   rows.forEach((row, index) => {
     const attendees = resolveRowAttendees(row, attendeeMap, amexAttendees);
-    const { ids, count } = attendeeIdCells(attendees, attendeeDirectory);
+    const count = attendeeCountCell(attendees);
     const assignment = row.receiptId ? assignments.get(row.receiptId) : undefined;
     lines.push(
       [
@@ -308,7 +296,6 @@ export function buildPaymentPathReconciliationCsv(
         ),
         csvEscape(assignment?.label ?? row.expenseCategoryJa ?? ""),
         csvEscape(row.businessPurpose ?? ""),
-        csvQuoteAlways(ids),
         csvEscape(count),
         csvEscape(
           assignment?.filename ?? missingReceiptCell(row.missingReceiptReason),

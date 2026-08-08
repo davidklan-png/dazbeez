@@ -2,25 +2,33 @@
 //
 // Pure helpers that turn a month's shipped receipts + their resolved proof
 // bytes into the sealed `exports/<month>/<exportId>-proofs.zip` artifact. All
-// naming is Japanese (the accountant's working language) and ties each proof to
-// a statement line via the `No` join column (the first column of the receipts
-// CSV — see buildMonthlyExportCsv). The route does the R2 fetches and passes the
-// bytes here; these helpers are unit-testable without R2/D1.
+// container/folder/index naming is owned by lib/receipts/pack-naming.ts (the
+// single naming authority) so the ZIP assembler, the notice builder, and the
+// download resolver can never desync — the failure that prompted this module
+// (docs/2026-06-pack-approved-delta.md §7). Evidence filenames inside the
+// folders keep the accountant-approved 科目＆No pattern (reconciliation-files.ts
+// buildEvidenceAssignments) and are NOT date-prefixed. The route does the R2
+// fetches and passes the bytes here; these helpers are unit-testable without
+// R2/D1.
 //
-// Folder contract (review #2 + draft-round feedback 2026-07-18):
-//   領収書等証憑_<month>/
-//     AMEX明細分/  ← receipts matched to AMEX statement lines
-//       会議費Jun2026③小田原みなと食堂￥6,490.jpg   (科目＆No naming)
-//     現金分/      ← CASH receipts (calendar-month membership)
-//     デジタル分/  ← DIGITAL receipts
-//     AMEX/CASH/DIGITAL{month}_Reconciliation.csv ← byte-copies of the 照合CSVs
-//     集計.csv / 参加者一覧.csv / お知らせ.txt
-//   (目次.csv retired — the 照合CSVs' 領収書ファイル名 column is the index.)
+// Folder contract (2026-08 rename, decisions D10–D12):
+//   202606_Dazbeez_Monthly_Expense_Report/
+//     20260604_AMEXカード利用領収書/   ← receipts matched to AMEX lines (payment-due date)
+//       会議費Jun2026③小田原みなと食堂￥6,490.jpg   (科目＆No naming, UNCHANGED)
+//     202606_現金払い領収書/           ← CASH receipts (statement month)
+//     202606_デジタル払い領収書/       ← DIGITAL receipts (only when non-empty)
+//     20260604_AMEXカード利用明細.csv  ← byte-copy of the AMEX 照合CSV (payment-due date)
+//     202606_現金払いリスト.csv        ← CASH 照合CSV (statement month)
+//     202606_デジタル払いリスト.csv    ← DIGITAL 照合CSV (only when non-empty)
+//     202606_集計.csv
+//     202606_ご連絡事項.txt
+//   (参加者一覧.csv is no longer delivered — generated + retained, not shipped.
+//    目次.csv retired earlier: the 照合CSVs' 領収書ファイル名 column is the index.)
 
 import { zipSync } from "fflate";
 import { computeSha256Hex } from "@/lib/receipts/storage";
-import { isIcCardTopUpCandidate } from "@/lib/receipts/blockers";
-import type { ExportRow, ReceiptRecord } from "@/lib/receipts/types";
+import type { ExportRow } from "@/lib/receipts/types";
+import type { PackNames } from "@/lib/receipts/pack-naming";
 
 // Characters forbidden in zip filenames on Windows (Explorer refuses them).
 // Whitespace is also stripped so the merchant segment stays compact and matches
@@ -55,80 +63,102 @@ export function formatYenAmount(amountMinor: number, currency: string): string {
   return `￥${amountMinor < 0 ? "-" : ""}${grouped}`;
 }
 
-export interface ProofFilenameParts {
-  no: number;
-  categoryJa: string;
+// ─── ご連絡事項.txt (standing monthly pack notice) ──────────────────────────
+
+export interface PackNoticeMissingLine {
+  transactionDate: string | null;
   merchant: string;
   amountMinor: number;
-  currency: string;
-  ext: "jpg" | "pdf";
-  /** Disambiguator for multi-file receipts (1 = first/only file, 2, 3, …). */
-  fileIndex?: number;
+  reason: string;
 }
 
-/** `No{NN}_{勘定科目Ja}_{merchant}_￥{amount}.{ext}` — zero-padded No, sanitized
- *  merchant. fileIndex>1 appends `-N` before the extension. */
-export function buildProofFilename(p: ProofFilenameParts): string {
-  const no = String(p.no).padStart(2, "0");
-  const cat = sanitizeZipNameSegment(p.categoryJa || p.merchant, 16);
-  const merchant = sanitizeZipNameSegment(p.merchant, 30);
-  const amount = formatYenAmount(p.amountMinor, p.currency);
-  const suffix = p.fileIndex && p.fileIndex > 1 ? `-${p.fileIndex}` : "";
-  return `No${no}_${cat}_${merchant}_${amount}${suffix}.${p.ext}`;
-}
-
-// ─── お知らせ.txt (transition notice) ────────────────────────────────────────
-
-export interface TransitionNoticeInput {
+export interface PackNoticeInput {
   monthLabel: string; // e.g. "2026年6月"
-  rowCount: number; // receipts CSV rows (AMEX lines + cash/digital)
+  rowCount: number; // 照合CSV rows (AMEX lines + cash/digital)
   receiptCount: number; // distinct receipts with a proof in the zip
+  /** Whether the pack contains AMEX content (an AMEX 照合CSV / AMEX receipt
+   *  folder). When false (a cash/digital-only pack — e.g. a draft before the
+   *  statement is imported) the notice omits the AMEX 照合CSV mention so it
+   *  never names a file that isn't in the pack. Defaults true (the normal case:
+   *  a finalized month has AMEX content). Derived from the bundle rows by
+   *  derivePackNoticeInput. */
+  hasAmex?: boolean;
+  /** Whether the pack ships a CASH 照合CSV. The notice names it only when true
+   *  so it never mentions a 照合CSV that isn't in the pack (and never omits one
+   *  that is). Defaults true. Derived from the bundle rows. */
+  hasCash?: boolean;
+  /** Whether the pack ships a DIGITAL 照合CSV. Defaults false (most months have
+   *  no digital rows). When true the notice names the DIGITAL list — the gap
+   *  that left a DIGITAL CSV shipping unmentioned (docs/2026-08-07-phase-a
+   *  -verification.md §Minor). Derived from the bundle rows. */
+  hasDigital?: boolean;
   /** AMEX statement lines shipped with no receipt, with the recorded reason.
    *  date/merchant/amount identify the line for the accountant — internal
    *  lineId UUIDs are NOT surfaced (draft-round feedback). */
-  missingReceiptLines: {
-    transactionDate: string | null;
-    merchant: string;
-    amountMinor: number;
-    reason: string;
-  }[];
-  /** IC-card top-up advisories (non-blocking) among the proofs, if any.
-   *  Identified by date/merchant/amount (目次 retired, so No means nothing
-   *  to the accountant anymore). */
-  icAdvisories: {
-    no: number;
-    transactionDate: string | null;
-    merchant: string;
-    amountMinor: number;
-  }[];
-  exportRevision: number;
-  supersedesExportId?: string | null;
-  correctionReason?: string | null;
+  missingReceiptLines: PackNoticeMissingLine[];
+  /** Operator free-text message for 【今月のご連絡】 (Phase B wires a UI to it).
+   *  When empty/whitespace the whole section is omitted; do not emit an empty
+   *  heading. NOT the email body (O7 — Phase B will feed one message into both
+   *  this surface and the email). */
+  operatorMessage?: string;
 }
 
-/** お知らせ.txt — honest notice of where this bundle differs from the prior
- *  hand-assembled delivery. Static "what changed" + dynamic month/counts +
- *  missing-receipt reasons + IC advisories + revision context. Not promotional:
- *  gaps and fallbacks are stated plainly. */
-export function buildTransitionNotice(input: TransitionNoticeInput): string {
+/** ご連絡事項.txt — a STANDING monthly communications channel between Dazbeez
+ *  business admin and the accountant (O5). Retired the one-time "transition
+ *  notice" framing: this no longer contrasts against the old hand-assembled
+ *  delivery; it restates the durable "how to read this pack" content every
+ *  month. Structure:
+ *    【今月のご連絡】      operator free text (omitted when empty)
+ *    【この資料について】  how to read the pack (filenames interpolated from the
+ *                          same PackNames that name the ZIP entries — never
+ *                          literals, so a rename can't desync the notice)
+ *    【今月の内容】        counts
+ *    【領収書なしの明細】  missing-receipt reasons (only when present)
+ *  No attendee reference (the roster is retained, not delivered — D9), no
+ *  SHA-256 manifest sentence (the manifest is internal-only — O1), no 改訂情報
+ *  block (every delivery reads as a fresh first delivery — O2). */
+export function buildPackNotice(input: PackNoticeInput, names: PackNames): string {
+  const hasAmex = input.hasAmex ?? true;
+  const hasCash = input.hasCash ?? true;
+  const hasDigital = input.hasDigital ?? false;
   const lines: string[] = [];
   lines.push(`${input.monthLabel} の領収証憑一式をお送りします。`);
   lines.push("");
-  lines.push("【お知りいただきたい変更点（従来の手作業納品との違い）】");
+
+  const operatorMessage = input.operatorMessage?.trim() ?? "";
+  if (operatorMessage.length > 0) {
+    lines.push("【今月のご連絡】");
+    lines.push(operatorMessage);
+    lines.push("");
+  }
+
+  lines.push("【この資料について】");
+  // Name EVERY 照合CSV that ships in this pack — AMEX, CASH, DIGITAL — each by
+  // its exact pack name, and none that doesn't. This keeps the notice and the
+  // ZIP entries in sync in BOTH directions: §7 (notice-mentioned ⇒ exists) and
+  // the inverse preflight check (shipped recon CSV ⇒ mentioned). A pack with no
+  // AMEX statement (cash/digital-only draft) omits the AMEX bullet; a month with
+  // digital rows names the DIGITAL list (the previously-unmentioned case).
+  if (hasAmex) {
+    lines.push(
+      `・カード明細の照合表（${names.amexReconciliationCsv}）は、カード会社の明細CSVをそのまま再現し、右側に「科目＆No.」「事業目的」「人数」「領収書ファイル名」の列を追記したものです。`,
+    );
+  }
+  if (hasCash) {
+    lines.push(
+      `・現金決済分の照合表（${names.cashReconciliationCsv}）は、右側に「科目＆No.」「事業目的」「人数」「領収書ファイル名」の列を追記したものです。`,
+    );
+  }
+  if (hasDigital) {
+    lines.push(
+      `・デジタル決済分の照合表（${names.digitalReconciliationCsv}）は、右側に「科目＆No.」「事業目的」「人数」「領収書ファイル名」の列を追記したものです。`,
+    );
+  }
   lines.push(
-    "・カード明細の照合表（AMEX＜年月＞_Reconciliation.csv）は、カード会社の明細CSVをそのまま再現し、右側に「科目＆No.」「会議-出席者ID」「人数」「領収書ファイル名」の列を追記したものです。現金・デジタル決済分は CASH／DIGITAL の照合CSVに分けて同封しています。",
-  );
-  lines.push(
-    "・各証憑のファイル名は「科目＆No.」（例：会議費Jun2026③）で始まり、従来の手作業納品と同じ丸数字方式です。照合CSVの「科目＆No.」「領収書ファイル名」列と対応しています。",
-  );
-  lines.push(
-    "・接待・会議の出席者は別紙PDFではなく、照合CSVの出席者ID列に記載しています。IDと氏名・会社・役職の対応は 参加者一覧.csv をご参照ください。",
+    "・各証憑のファイル名は「科目＆No.」（例：会議費Jun2026③）で始まり、丸数字方式です。照合表の「科目＆No.」「領収書ファイル名」列と対応しています。",
   );
   lines.push(
     "・紙の領収書は一つにまとめたPDFではなく、1件ずつの画像ファイルとして同封しています。",
-  );
-  lines.push(
-    "・全ファイルの SHA-256 ハッシュをマニフェスト(manifest)に記録し、改ざんがないことを検証できます。",
   );
   lines.push(
     "・証憑画像は容量削減のため再圧縮しています（長辺1600px・JPEG品質75）。原本は当方で保管しており、ご要望があれば原本データをご提供します。",
@@ -149,23 +179,6 @@ export function buildTransitionNotice(input: TransitionNoticeInput): string {
         `・${date} ${m.merchant} ¥${m.amountMinor.toLocaleString("ja-JP")}: ${m.reason || "（理由記録なし）"}`,
       );
     }
-  }
-  if (input.icAdvisories.length > 0) {
-    lines.push("");
-    lines.push(
-      "【ICカードチャージの可能性がある取引（参考・確定ではありません）】",
-    );
-    for (const ic of input.icAdvisories) {
-      lines.push(
-        `・${ic.transactionDate ?? "日付不明"} ${ic.merchant} ¥${ic.amountMinor.toLocaleString("ja-JP")} — 交通系ICカードのチャージの可能性があります。業務利用の確定・精算方法は会計判断をお願いします。`,
-      );
-    }
-  }
-  if (input.exportRevision > 1) {
-    lines.push("");
-    lines.push("【改訂情報】");
-    lines.push(`・改訂: ${input.exportRevision}（差替元: ${input.supersedesExportId ?? "不明"}）`);
-    lines.push(`・改訂理由: ${input.correctionReason ?? "（記録なし）"}`);
   }
   lines.push("");
   lines.push("ご不明な点があればお知らせください。");
@@ -202,22 +215,18 @@ export async function verifyProofFileSha256(
 }
 
 /**
- * Derive the transition-notice input from a month's bundle + revision context.
- * Shared by the proofs-zip build (rebuild path) and the finalize notification
- * email so the notice text cannot drift between the two surfaces. Pure.
+ * Derive the pack-notice input from a month's bundle. Shared by the proofs-zip
+ * build (rebuild path) and the finalize notification email (notify.ts) so the
+ * notice text cannot drift between the two surfaces. Pure. The PackNames
+ * (which carry the interpolated filenames) are supplied by the caller alongside
+ * buildPackNotice — month + payment-due date resolve to names once, upstream.
  */
-export function deriveTransitionNoticeInput(
+export function derivePackNoticeInput(
   month: string,
   rows: ExportRow[],
-  receipts: ReceiptRecord[],
   counts: { rowCount: number; receiptCount: number },
-  revCtx: {
-    exportRevision: number;
-    supersedesExportId?: string | null;
-    correctionReason?: string | null;
-  },
-): TransitionNoticeInput {
-  const missingReceiptLines = rows
+): PackNoticeInput {
+  const missingReceiptLines: PackNoticeMissingLine[] = rows
     .filter((r) => r.rowType === "amex_line" && r.missingReceiptReason)
     .map((r) => ({
       transactionDate: r.transactionDate,
@@ -225,30 +234,19 @@ export function deriveTransitionNoticeInput(
       amountMinor: r.amountMinor ?? 0,
       reason: r.missingReceiptReason ?? "",
     }));
-  const icAdvisories: TransitionNoticeInput["icAdvisories"] = [];
-  const icSeen = new Set<string>();
-  const receiptById = new Map(receipts.map((r) => [r.id, r]));
-  rows.forEach((row, i) => {
-    if (!row.receiptId || icSeen.has(row.receiptId)) return;
-    const receipt = receiptById.get(row.receiptId);
-    if (receipt && isIcCardTopUpCandidate(receipt)) {
-      icSeen.add(row.receiptId);
-      icAdvisories.push({
-        no: i + 1,
-        transactionDate: row.transactionDate,
-        merchant: row.merchant ?? "",
-        amountMinor: row.amountMinor ?? 0,
-      });
-    }
-  });
   const monthLabel = `${month.slice(0, 4)}年${Number(month.slice(5, 7))}月`;
   return {
     monthLabel,
     rowCount: counts.rowCount,
     receiptCount: counts.receiptCount,
     missingReceiptLines,
-    icAdvisories,
-    ...revCtx,
+    // Each 照合CSV mention follows the bundle: AMEX ⇔ AMEX statement lines
+    // (also drives buildPackNames' hasAmex — the pack needs the payment-due date
+    // only when there is AMEX content to date); CASH/DIGITAL ⇔ receipt rows of
+    // that payment path. So the notice names exactly the 照合CSVs that ship.
+    hasAmex: rows.some((r) => r.rowType === "amex_line"),
+    hasCash: rows.some((r) => r.rowType === "receipt" && r.paymentPath === "CASH"),
+    hasDigital: rows.some((r) => r.rowType === "receipt" && r.paymentPath === "DIGITAL"),
   };
 }
 
@@ -265,55 +263,53 @@ export interface ProofZipEntry {
   ext: "jpg" | "pdf";
   bytes: Uint8Array;
   transactionDate: string | null;
-  /** 出席者 for the 目次 (会議費/接待交際費 only); blank otherwise. */
+  /** 出席者 for the (retired) 目次 (会議費/接待交際費 only); blank otherwise.
+   *  Carried for completeness — no delivered artifact reads it since 目次 and
+   *  参加者一覧 were retired from the pack. */
   attendees: string;
   paymentPath: ProofPaymentPath;
-  /** Pre-assigned evidence filename (reconciliation-files.ts
-   *  buildEvidenceAssignments). When present it names the ZIP entry —
-   *  collisions still get a -2/-3 suffix before the extension. When absent
-   *  the legacy No{NN}_ naming applies. */
-  filename?: string;
+  /** Evidence filename from the single naming authority
+   *  (reconciliation-files.ts buildEvidenceAssignments — the 科目＆No pattern).
+   *  REQUIRED: every proof-bearing receipt gets an assignment, and the route
+   *  throws loudly if one is missing instead of silently falling back to a
+   *  second naming scheme (Gap 1 — a future row type without an assignment, e.g.
+   *  a bank-debit line, must fail rather than mis-name a delivered file).
+   *  Collisions still get a -2/-3 suffix before the extension. */
+  filename: string;
 }
 
-const ROOT_PREFIX = (month: string) => `領収書等証憑_${month}/`;
-const AMEX_FOLDER = "AMEX明細分/";
-// Draft-round feedback 2026-07-18: one folder per payment path, mirroring the
-// per-path 照合CSVs (the shared 追加経費_現金デジタル分 folder made the CASH
-// receipts hard to find).
-const CASH_FOLDER = "現金分/";
-const DIGITAL_FOLDER = "デジタル分/";
-
-function folderFor(paymentPath: ProofPaymentPath): string {
-  if (paymentPath === "AMEX") return AMEX_FOLDER;
-  return paymentPath === "DIGITAL" ? DIGITAL_FOLDER : CASH_FOLDER;
+function folderForPath(
+  paymentPath: ProofPaymentPath,
+  names: PackNames,
+): string {
+  if (paymentPath === "AMEX") return names.amexFolder;
+  return paymentPath === "DIGITAL" ? names.digitalFolder : names.cashFolder;
 }
 
 /** Build the sealed proofs ZIP. fflate uses a single compression level; we use
  *  level 0 (store) so the bulk JPEG/PDF bytes aren't recompressed (wasted CPU,
  *  ~0 size gain). The index files are tiny, so storing them uncompressed is
  *  negligible. UTF-8 entry names: fflate sets the UTF-8 general-purpose bit for
- *  non-ASCII paths, so the Japanese names open correctly in Windows Explorer.
+ *  non-ASCII paths, so the Japanese names open correctly in Windows Explorer
+ *  (encoding decision D-UTF8: keep current fflate behaviour; no CP932).
  *
- *  `summaryCsv` is the SAME bytes as the standalone summary artifact (BOM+CRLF),
- *  embedded as 集計.csv so the accountant who only opens the ZIP still gets the
- *  cost breakdown. `attendeesCsv` is likewise the same bytes as the standalone
- *  attendees artifact, embedded as 参加者一覧.csv next to 集計.csv so the
- *  AttendeeIds column can be decoded into name/company/title without a second
- *  download. */
+ *  All folder/index names come from the single naming authority (`names`). The
+ *  参加者一覧 roster is intentionally NOT embedded — retained internally, not
+ *  delivered (D9). `summaryCsv` is the SAME bytes as the standalone summary
+ *  artifact (BOM+CRLF), embedded as {yyyymm}_集計.csv so the accountant who
+ *  only opens the ZIP still gets the cost breakdown. */
 export function assembleProofsZip(
-  month: string,
+  names: PackNames,
   entries: ProofZipEntry[],
-  noticeInput: TransitionNoticeInput,
+  noticeInput: PackNoticeInput,
   summaryCsv: string,
-  attendeesCsv: string,
-  /** Reconciliation CSVs (review #2) — byte-identical copies of the standalone
-   *  artifacts, embedded at ZIP root as AMEX{month}_Reconciliation.csv etc. so
-   *  the ZIP alone is the complete accountant package (same doctrine as
-   *  集計.csv / 参加者一覧.csv). Absent entries are skipped (e.g. no DIGITAL
-   *  rows this month). */
+  /** Reconciliation CSVs — byte-identical copies of the standalone artifacts,
+   *  embedded at ZIP root under their pack names so the ZIP alone is the
+   *  complete accountant package (same doctrine as 集計.csv). Absent entries
+   *  are skipped (e.g. no DIGITAL rows this month). */
   reconciliationCsvs?: { amex?: string | null; cash?: string | null; digital?: string | null },
 ): Uint8Array {
-  const root = ROOT_PREFIX(month);
+  const root = names.rootFolder;
   const files: Record<string, Uint8Array> = {};
   // Per-folder dedupe so a (rare) filename collision gets a -2/-3 suffix.
   const seenPerFolder = new Map<string, Set<string>>();
@@ -321,62 +317,36 @@ export function assembleProofsZip(
   const encoder = new TextEncoder();
 
   for (const entry of entries) {
-    const folder = folderFor(entry.paymentPath);
-    let filename: string;
+    const folder = folderForPath(entry.paymentPath, names);
     const seen = seenPerFolder.get(folder) ?? new Set<string>();
-    if (entry.filename) {
-      // Pre-assigned evidence name (科目＆No convention). Collisions cannot
-      // happen for distinct receipts (per-category sequence is unique), but a
-      // defensive -2/-3 suffix keeps the ZIP writable if inputs ever repeat.
-      filename = entry.filename;
-      let fileIndex = 1;
-      while (seen.has(filename)) {
-        fileIndex += 1;
-        const dot = entry.filename.lastIndexOf(".");
-        filename = `${entry.filename.slice(0, dot)}-${fileIndex}${entry.filename.slice(dot)}`;
-      }
-    } else {
-      const base = buildProofFilename({
-        no: entry.no,
-        categoryJa: entry.categoryJa,
-        merchant: entry.merchant,
-        amountMinor: entry.amountMinor,
-        currency: entry.currency,
-        ext: entry.ext,
-      });
-      filename = base;
-      let fileIndex = 1;
-      while (seen.has(filename)) {
-        fileIndex += 1;
-        filename = buildProofFilename({
-          no: entry.no,
-          categoryJa: entry.categoryJa,
-          merchant: entry.merchant,
-          amountMinor: entry.amountMinor,
-          currency: entry.currency,
-          ext: entry.ext,
-          fileIndex,
-        });
-      }
+    // Evidence name from the single naming authority (科目＆No convention).
+    // Collisions cannot happen for distinct receipts (per-category sequence is
+    // unique), but a defensive -2/-3 suffix keeps the ZIP writable if inputs
+    // ever repeat.
+    let filename = entry.filename;
+    let fileIndex = 1;
+    while (seen.has(filename)) {
+      fileIndex += 1;
+      const dot = entry.filename.lastIndexOf(".");
+      filename = `${entry.filename.slice(0, dot)}-${fileIndex}${entry.filename.slice(dot)}`;
     }
     seen.add(filename);
     seenPerFolder.set(folder, seen);
-    files[`${root}${folder}${filename}`] = entry.bytes;
+    files[`${root}/${folder}/${filename}`] = entry.bytes;
   }
 
-  // 目次.csv retired (draft-round feedback 2026-07-18): the AMEX/CASH/DIGITAL
-  // 照合CSVs' 領収書ファイル名 column IS the index now.
-  files[`${root}集計.csv`] = encoder.encode(summaryCsv);
-  files[`${root}参加者一覧.csv`] = encoder.encode(attendeesCsv);
-  files[`${root}お知らせ.txt`] = encoder.encode(buildTransitionNotice(noticeInput));
+  files[`${root}/${names.summaryCsv}`] = encoder.encode(summaryCsv);
+  files[`${root}/${names.noticeFile}`] = encoder.encode(
+    buildPackNotice(noticeInput, names),
+  );
   if (reconciliationCsvs?.amex) {
-    files[`${root}AMEX${month}_Reconciliation.csv`] = encoder.encode(reconciliationCsvs.amex);
+    files[`${root}/${names.amexReconciliationCsv}`] = encoder.encode(reconciliationCsvs.amex);
   }
   if (reconciliationCsvs?.cash) {
-    files[`${root}CASH${month}_Reconciliation.csv`] = encoder.encode(reconciliationCsvs.cash);
+    files[`${root}/${names.cashReconciliationCsv}`] = encoder.encode(reconciliationCsvs.cash);
   }
   if (reconciliationCsvs?.digital) {
-    files[`${root}DIGITAL${month}_Reconciliation.csv`] = encoder.encode(reconciliationCsvs.digital);
+    files[`${root}/${names.digitalReconciliationCsv}`] = encoder.encode(reconciliationCsvs.digital);
   }
 
   return zipSync(files, { level: 0 });

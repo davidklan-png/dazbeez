@@ -1,0 +1,12 @@
+Dazbeez encoding probe kit - integrity manifest
+Generated 2026-08-07 in a Linux sandbox (no macOS tooling touched these bytes).
+
+Verify on the Mac BEFORE sending:
+  cd ~/projects/work/dazbeez/accountant-encoding-probe && shasum -a 256 *.zip *.csv
+Every line below must match exactly.
+
+f64bd78baa3177924e3cd3d8555fa5f8c12b3f7933eaad747ea1cf8a5da38e57  probe-1-utf8-flagged.zip  (3977 bytes)
+fc1628832cccf42f908b931b2d53fd8c16c8ddfeba1547b402dd31138ea37667  probe-2-cp932-noflag.zip  (3362 bytes)
+b36ce3bb23b299321fcb00e54cf1eef12e12a42d9dc4432beea63499e0f28199  probe-3-utf8-noflag.zip  (3977 bytes)
+e00672a01aa7ba2d1085375a8d274a586332d29e5e02cfce97a07a54d95da2f5  content-utf8-bom.csv  (160 bytes)
+5db78134367845f5e09394e1c14cf194c18ccc7ffd98811cc184603b074132ac  content-cp932.csv  (113 bytes)

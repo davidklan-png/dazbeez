@@ -33,7 +33,7 @@ import {
   buildEvidenceAssignments,
   buildAmexReconciliationCsv,
   buildPaymentPathReconciliationCsv,
-  attendeeIdCells,
+  attendeeCountCell,
   missingReceiptCell,
   type EvidenceUnit,
   type AmexLineAppend,
@@ -43,10 +43,11 @@ import { archiveBundle, archiveManifest, getReceiptFile, computeSha256Hex } from
 import {
   assembleProofsZip,
   verifyProofFileSha256,
-  deriveTransitionNoticeInput,
+  derivePackNoticeInput,
   type ProofZipEntry,
   type ProofPaymentPath,
 } from "@/lib/receipts/proofs";
+import { buildPackNames } from "@/lib/receipts/pack-naming";
 import { listFilesForObject } from "@/lib/receipts/files";
 import { requiresAttendees } from "@/lib/receipts/categories";
 import { composeFinalizeNoticeData, notifyAccountantOfFinalize } from "@/lib/receipts/notify";
@@ -139,8 +140,8 @@ export async function POST(request: Request) {
     // 参加者一覧 (attendees) — maps the receipts CSV's AttendeeIds column to
     // name/company/title. Built from the union of attendee names referenced
     // across the bundle's rows (receipt attendees + the line-attendee fallback
-    // in resolveRowAttendees). Same BOM+CRLF bytes are embedded in the proofs
-    // ZIP as 参加者一覧.csv next to 集計.csv.
+    // in resolveRowAttendees). RETAINED as a standalone artifact only — no
+    // longer embedded in the proofs ZIP (D9: not delivered to the accountant).
     const referencedAttendeeNames = [
       ...new Set(
         bundle.rows.flatMap((r) =>
@@ -286,6 +287,20 @@ export async function POST(request: Request) {
         ? (bundle.attendeeMap.get(row.receiptId) ?? row.attendees ?? []).join("; ")
         : "";
       const assignment = evidenceAssignments.get(row.receiptId);
+      const filename = assignment?.filename;
+      if (!filename) {
+        // Every proof-bearing receipt has a 科目＆No evidence assignment from
+        // buildEvidenceAssignments (built over the same row population — AMEX
+        // lines + CASH/DIGITAL receipt rows with a chosen file). A missing
+        // assignment means a row type the assignment builder doesn't cover
+        // (e.g. a future bank-debit line) reached the proofs loop — fail loudly
+        // rather than silently fall back to a second naming scheme (Gap 1).
+        throw new Error(
+          `Receipt ${row.receiptId}: no 科目＆No evidence assignment — cannot ` +
+            `name its proof file. Re-run evidence assignment, or extend ` +
+            `buildEvidenceAssignments to cover this row type explicitly.`,
+        );
+      }
       proofsEntries.push({
         no: i + 1,
         categoryJa: row.expenseCategoryJa ?? row.expenseCategoryCode ?? "",
@@ -301,7 +316,7 @@ export async function POST(request: Request) {
           : row.paymentPath === "CASH"
             ? "CASH"
             : "AMEX") as ProofPaymentPath,
-        filename: assignment?.filename,
+        filename,
       });
     }
 
@@ -313,6 +328,21 @@ export async function POST(request: Request) {
     // payment path, only emitted when the path has rows.
     const reconciliationWarnings: string[] = [];
     const amexArtifact = await getAmexArtifactByMonth(month);
+
+    // Pack names — the single naming authority for every human-facing name in
+    // the proofs ZIP (root folder, receipt folders, index files). hasAmex is
+    // true iff an AMEX statement is imported — only then does the pack carry
+    // AMEX-dated artifacts (the AMEX folder + 照合CSV) and require the
+    // payment-due date. A month with no statement yet (a cash/digital-only
+    // draft) passes hasAmex=false so a missing date does NOT block the draft.
+    // When hasAmex is true a null/unparseable date still throws
+    // (pack-naming.dueDateCode) before any R2 puts — a pack is never named
+    // after the wrong date.
+    const packNames = buildPackNames(
+      month,
+      amexArtifact?.payment_due_date ?? null,
+      /* hasAmex */ amexArtifact != null,
+    );
 
     let amexReconShipped: string | null = null;
     if (amexArtifact) {
@@ -344,7 +374,6 @@ export async function POST(request: Request) {
           bundle.attendeeMap,
           bundle.amexAttendees,
         );
-        const { ids, count } = attendeeIdCells(attendees, bundle.attendeeDirectory);
         appends.set(row.rawCsvLineNumber, {
           kamokuNo:
             assignment?.label ??
@@ -352,8 +381,7 @@ export async function POST(request: Request) {
             row.expenseCategoryCode ??
             "",
           businessPurpose: row.businessPurpose ?? "",
-          attendeeIds: ids,
-          attendeeCount: count,
+          attendeeCount: attendeeCountCell(attendees),
           receiptFileCell:
             assignment?.filename ?? missingReceiptCell(row.missingReceiptReason),
         });
@@ -384,7 +412,6 @@ export async function POST(request: Request) {
         buildPaymentPathReconciliationCsv(
           rows,
           bundle.attendeeMap,
-          bundle.attendeeDirectory,
           bundle.amexAttendees,
           evidenceAssignments,
         ),
@@ -417,25 +444,23 @@ export async function POST(request: Request) {
 
     // ── Proofs ZIP assembly ───────────────────────────────────────────────
     // Assembled AFTER the reconciliation CSVs so their shipped bytes can be
-    // embedded at ZIP root (AMEX{month}_Reconciliation.csv etc.) — the ZIP
-    // alone is the complete accountant package. Transition notice via the
-    // shared builder (also used by the finalize email, so the notice text
-    // cannot drift between the ZIP and the notification).
-    const proofsNoticeInput = deriveTransitionNoticeInput(
+    // embedded at ZIP root under their pack names ({yyyymmdd}_AMEXカード利用明細.csv
+    // etc.) — the ZIP alone is the complete accountant package. Pack notice via
+    // the shared builder (also used by the finalize email, so the notice text
+    // cannot drift between the ZIP and the notification). All names come from
+    // `packNames` (single naming authority).
+    const proofsNoticeInput = derivePackNoticeInput(
       month,
       bundle.rows,
-      bundle.receipts,
       { rowCount: bundle.rows.length, receiptCount: proofsEntries.length },
-      { exportRevision, supersedesExportId, correctionReason },
     );
 
     const proofsKey = buildProofsKey(month, exportId);
     const proofsZipBytes = assembleProofsZip(
-      month,
+      packNames,
       proofsEntries,
       proofsNoticeInput,
       summaryShipped,
-      attendeesShipped,
       {
         amex: amexReconShipped,
         cash: cashReconShipped,
@@ -528,9 +553,9 @@ export async function POST(request: Request) {
       },
     );
 
-    // Attendees CSV (参加者一覧) — same bytes embedded in the proofs ZIP. Derived
-    // key like summary (no column on receipt_exports); csv content type +
-    // retention metadata, mirroring the summary block.
+    // Attendees CSV (参加者一覧) — retained internally, no longer embedded in the
+    // proofs ZIP (D9: not delivered). Derived key like summary (no column on
+    // receipt_exports); csv content type + retention metadata, mirroring summary.
     await getReceiptsArchiveBucket().put(
       attendeesKey,
       encoder.encode(attendeesShipped).buffer as ArrayBuffer,
@@ -595,7 +620,7 @@ export async function POST(request: Request) {
       // Notification email (PR 3). Failure never fails finalize — it becomes a
       // warning in the response + a notification_failed audit entry.
       if (exportRecord) {
-        const notifyData = composeFinalizeNoticeData(month, bundle, exportRecord);
+        const notifyData = await composeFinalizeNoticeData(month, bundle, exportRecord);
         const notifyResult = await notifyAccountantOfFinalize(notifyData);
         if (notifyResult.ok) {
           await createAuditEntry(getReceiptsDb(), {
@@ -625,6 +650,7 @@ export async function POST(request: Request) {
         manifestSha256,
         proofsKey,
         proofsSha256,
+        amexArtifact?.payment_due_date ?? null,
       );
       // Audit the rebuild (finalize:false) — "export.generated" was defined
       // for this. The finalize:true path is audited by finalizeExport

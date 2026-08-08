@@ -3,12 +3,14 @@ import assert from "node:assert/strict";
 import {
   EXPORT_DOWNLOAD_FILES,
   resolveBundleDownload,
+  contentDispositionAttachment,
   buildMonthlyExportCsv,
   buildExportSummaryCsv,
   buildManifestCsv,
   buildExportReadme,
 } from "@/lib/receipts/export";
 import { assembleProofsZip } from "@/lib/receipts/proofs";
+import { buildPackNames } from "@/lib/receipts/pack-naming";
 import { computeSha256Hex } from "@/lib/receipts/storage";
 import type { DownloadExportRecord } from "@/lib/receipts/export";
 import type { ExportRow } from "@/lib/receipts/types";
@@ -22,6 +24,7 @@ const finalized: DownloadExportRecord = {
   manifest_r2_key: "exports/2026-06/exp-fin-manifest.csv",
   proofs_r2_key: "exports/2026-06/exp-fin-proofs.zip",
   bundle_built_at: "2026-07-01T00:00:00Z",
+  payment_due_date: "2026-06-04",
 };
 const draftRebuilt: DownloadExportRecord = {
   id: "exp-draft",
@@ -29,6 +32,7 @@ const draftRebuilt: DownloadExportRecord = {
   manifest_r2_key: "exports/2026-06/exp-draft-manifest.csv",
   proofs_r2_key: "exports/2026-06/exp-draft-proofs.zip",
   bundle_built_at: "2026-07-10T00:00:00Z",
+  payment_due_date: "2026-06-04",
 };
 const draftUnbuilt: DownloadExportRecord = {
   id: "exp-draft2",
@@ -105,8 +109,8 @@ test("draft=true serves the rebuilt draft's artifact with DRAFT- prefix", () => 
   assert.equal(r.r2Key, draftRebuilt.proofs_r2_key);
   assert.equal(
     r.filename,
-    "DRAFT-export-2026-06-proofs.zip",
-    "draft filenames are prefixed DRAFT-",
+    "DRAFT-202606_Dazbeez_Monthly_Expense_Report.zip",
+    "draft proofs filename is the pack container name, DRAFT- prefixed",
   );
 });
 
@@ -174,6 +178,106 @@ test("draft=true prefixes DRAFT- on every file kind; default never does", () => 
     );
     assert.equal(f.draft, false);
   }
+});
+
+// ─── D15: reconciliation CSV downloads named by the single authority ────────
+
+test("D15: AMEX/CASH/DIGITAL reconciliation downloads share the pack names", () => {
+  // The standalone reconciliation CSV downloads must match the file names
+  // inside the proofs ZIP (one naming authority) — not the old divergent
+  // AMEX{month}_Reconciliation.csv labels.
+  const amex = ok(
+    resolveBundleDownload({
+      month,
+      file: "amex",
+      draft: false,
+      draftRecord: null,
+      finalizedRecord: finalized,
+    }),
+  );
+  assert.equal(amex.filename, "20260604_AMEXカード利用明細.csv", "AMEX recon → pack name (dated by the revision snapshot)");
+
+  const cash = ok(
+    resolveBundleDownload({
+      month,
+      file: "cash",
+      draft: false,
+      draftRecord: null,
+      finalizedRecord: finalized,
+    }),
+  );
+  assert.equal(cash.filename, "202606_現金払いリスト.csv", "cash recon → pack name (month)");
+
+  const digital = ok(
+    resolveBundleDownload({
+      month,
+      file: "digital",
+      draft: false,
+      draftRecord: null,
+      finalizedRecord: finalized,
+    }),
+  );
+  assert.equal(digital.filename, "202606_デジタル払いリスト.csv", "digital recon → pack name (month)");
+
+  // Draft recon downloads are DRAFT- prefixed (same as every other file kind),
+  // dated by the draft revision's own snapshot.
+  const amexDraft = ok(
+    resolveBundleDownload({
+      month,
+      file: "amex",
+      draft: true,
+      draftRecord: draftRebuilt,
+      finalizedRecord: finalized,
+    }),
+  );
+  assert.equal(
+    amexDraft.filename,
+    "DRAFT-20260604_AMEXカード利用明細.csv",
+    "draft AMEX recon → DRAFT- + pack name",
+  );
+
+  // A legacy revision (NULL payment_due_date snapshot, pre-0035) still resolves:
+  // the AMEX 照合CSV object lives at a revision-stable key, so it is served with
+  // a stable ASCII fallback name — never 404'd on the date (P2: the old gate
+  // 404'd sealed objects when the current artifact was later replaced). A real
+  // 404 belongs at the R2 layer (object absent), out of scope here.
+  const legacy = ok(
+    resolveBundleDownload({
+      month,
+      file: "amex",
+      draft: false,
+      draftRecord: null,
+      finalizedRecord: { ...finalized, payment_due_date: null },
+    }),
+  );
+  assert.ok(legacy.r2Key, "sealed AMEX object is reachable regardless of the date");
+  assert.equal(
+    legacy.filename,
+    "AMEX2026-06_Reconciliation.csv",
+    "legacy null snapshot → ASCII fallback name",
+  );
+});
+
+// ─── Content-Disposition encoding (P1: non-ASCII download names) ────────────
+
+test("contentDispositionAttachment: ASCII stays plain; non-ASCII gets RFC 5987 filename*", () => {
+  // ASCII (proofs ZIP, receipts CSV) — unchanged plain form, a valid ByteString.
+  assert.equal(
+    contentDispositionAttachment("export-2026-06-receipts.csv"),
+    `attachment; filename="export-2026-06-receipts.csv"`,
+  );
+  // Non-ASCII (the reconciliation-CSV names after D15) — ASCII fallback + an
+  // RFC 5987 filename*=UTF-8''… parameter. The UTF-8 value must round-trip to
+  // the original name (else the accountant's browser shows garbage), and the
+  // whole header value must be Latin-1 safe (the ByteString guard the bare
+  // filename="…" form tripped).
+  const jp = "202606_現金払いリスト.csv";
+  const cd = contentDispositionAttachment(jp);
+  assert.ok(cd.startsWith(`attachment; filename="`), "has an ASCII filename");
+  assert.ok(cd.includes("filename*=UTF-8''"), "RFC 5987 filename* present");
+  const encoded = cd.slice(cd.indexOf("filename*=UTF-8''") + "filename*=UTF-8''".length);
+  assert.equal(decodeURIComponent(encoded), jp, "filename* decodes back to the original");
+  assert.ok(/^[\x00-\xFF]*$/.test(cd), "header value is Latin-1 (ByteString) safe");
 });
 
 // ─── Byte-identity: no draft/finalize-conditional content ───────────────────
@@ -264,10 +368,11 @@ test("byte-identity: text artifacts are deterministic (no draft-conditional cont
 });
 
 test("byte-identity: the proofs ZIP builder takes no draft flag (draft⇄seal can't diverge at build time)", async () => {
-  // assembleProofsZip(month, entries, noticeInput) — no draft/finalize param.
-  // A draft and a finalize that stage the same entries produce the same zip;
-  // finalize re-uses the staged object rather than rebuilding, so the operator's
-  // downloaded draft zip and the sealed zip are the same bytes.
+  // assembleProofsZip(names, entries, noticeInput, summaryCsv) — no
+  // draft/finalize param. A draft and a finalize that stage the same entries
+  // produce the same zip; finalize re-uses the staged object rather than
+  // rebuilding, so the operator's downloaded draft zip and the sealed zip are
+  // the same bytes.
   const enc = new TextEncoder();
   const entries = [
     {
@@ -281,6 +386,7 @@ test("byte-identity: the proofs ZIP builder takes no draft flag (draft⇄seal ca
       transactionDate: "2026-06-11",
       attendees: "",
       paymentPath: "AMEX" as const,
+      filename: "研究開発費Jun2026③OpenAI￥108,341.pdf",
     },
   ];
   const notice = {
@@ -288,10 +394,9 @@ test("byte-identity: the proofs ZIP builder takes no draft flag (draft⇄seal ca
     rowCount: 1,
     receiptCount: 1,
     missingReceiptLines: [],
-    icAdvisories: [],
-    exportRevision: 1,
   };
-  const a = assembleProofsZip(month, entries, notice, "﻿Field,Value\r\nMonth,2026-06\r\n", "﻿AttendeeId,Name,Company,Title\r\n");
+  const names = buildPackNames(month, "2026-06-04");
+  const a = assembleProofsZip(names, entries, notice, "﻿Field,Value\r\nMonth,2026-06\r\n");
   assert.ok(a instanceof Uint8Array && a.length > 0);
   // The builder has no draft parameter to branch on — draft and finalize share
   // it. (Cross-call byte equality is not asserted because the zip's own
