@@ -92,3 +92,29 @@ test("settings: homebase_signals corrupt/non-array value falls back to default",
   ]);
   assert.deepEqual(nonStringArray.homebase_signals, COMPLIANCE_DEFAULTS.homebase_signals);
 });
+
+// ─── notification_cc_recipient (Change 5 — Cc/business-manager recipient) ─────
+// Same KV pattern as notification_recipient: empty-string default, no env
+// fallback. Read at send; empty ⇒ the Cc field is omitted from the payload.
+
+test("settings: notification_cc_recipient defaults to empty string", () => {
+  const empty = parseComplianceSettings([]);
+  assert.equal(empty.notification_cc_recipient, "");
+  assert.equal(
+    COMPLIANCE_DEFAULTS.notification_cc_recipient,
+    "",
+    "default is empty — no env fallback like notification_recipient has",
+  );
+});
+
+test("settings: notification_cc_recipient explicit value overrides the default", () => {
+  const settings = parseComplianceSettings([
+    { key: "notification_cc_recipient", value: "ops@dazbeez.com" },
+  ]);
+  assert.equal(settings.notification_cc_recipient, "ops@dazbeez.com");
+  // Untouched recipient keeps its own default (the two are independent keys).
+  assert.equal(
+    settings.notification_recipient,
+    COMPLIANCE_DEFAULTS.notification_recipient,
+  );
+});

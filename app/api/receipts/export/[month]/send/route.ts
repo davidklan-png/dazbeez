@@ -18,7 +18,7 @@ import {
   getAccountantEmail,
 } from "@/lib/cloudflare-runtime";
 import { getComplianceSettings } from "@/lib/receipts/settings";
-import { resolveNotificationRecipient } from "@/lib/receipts/notify";
+import { resolveNotificationRecipient, isValidDeliveryAddress } from "@/lib/receipts/notify";
 import { computeSha256Hex } from "@/lib/receipts/storage";
 import {
   decideSendAction,
@@ -110,15 +110,38 @@ export async function POST(request: Request, { params }: RouteContext) {
     }
 
     // ── Recipients + transport config (Settings/config — not pack state) ─────
+    // To: accountant (settings.notification_recipient → ACCOUNTANT_EMAIL
+    // fallback). Cc: business manager (settings.notification_cc_recipient — no
+    // fallback). Cc is OPTIONAL (Change 5): unset → omitted from the Resend
+    // payload entirely (performDelivery passes cc:null → undefined; B-4: never
+    // cc:null/cc:""). To is REQUIRED: no resolvable To = a partially-configured
+    // recipient list → refuse, do not deliver.
     const settings = await getComplianceSettings();
     const to = resolveNotificationRecipient(
       settings.notification_recipient,
       getAccountantEmail(),
     ).email;
-    const cc: string | null = null; // Change 5: the new Cc compliance setting.
+    const cc = (settings.notification_cc_recipient ?? "").trim() || null;
+    // Change 5 boundaries — checked BEFORE the send (a malformed address is a
+    // definitive Resend 4xx; correct, but a wasted attempt + confusing audit):
+    //  - Both unset / no resolvable To → refuse (partially-configured list).
+    //  - Validate BOTH addresses. To may arrive via the unvalidated
+    //    ACCOUNTANT_EMAIL fallback, so it is not trusted from save-time alone.
     if (!to) {
       return NextResponse.json(
-        { error: "No delivery recipient configured (set it in Settings → Compliance)." },
+        { error: "No delivery recipient (To) configured (set it in Settings → Compliance)." },
+        { status: 422 },
+      );
+    }
+    if (!isValidDeliveryAddress(to)) {
+      return NextResponse.json(
+        { error: `Delivery recipient (To) is not a valid email address: ${to}` },
+        { status: 422 },
+      );
+    }
+    if (cc !== null && !isValidDeliveryAddress(cc)) {
+      return NextResponse.json(
+        { error: `Delivery Cc recipient is not a valid email address: ${cc}` },
         { status: 422 },
       );
     }

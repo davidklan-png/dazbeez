@@ -145,6 +145,7 @@ export type AuditAction =
   | "archive.created"
   | "settings.updated"
   | "settings.notification_recipient_changed"
+  | "settings.notification_cc_recipient_changed"
   | "receipt.export_statement_month_assigned"
   | "receipt.export_statement_month_overridden"
   | "receipt.export_statement_month_rolled_forward"
@@ -638,6 +639,10 @@ export interface ComplianceSettings {
   /** Notification recipient email (Settings → Compliance). Empty = use the
    *  ACCOUNTANT_EMAIL var fallback. */
   notification_recipient: string;
+  /** Cc (business-manager) recipient for the monthly pack delivery (Change 5;
+   *  D15/§15). Empty = the Cc field is omitted from the Resend payload. No env
+   *  fallback. */
+  notification_cc_recipient: string;
   /**
    * Homebase location signals (ADR 0010 D3). A merchant whose string carries
    * one of these is treated as an at-homebase charge (not a trip anchor).

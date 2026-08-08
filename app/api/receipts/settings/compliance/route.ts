@@ -5,7 +5,7 @@ import {
   updateComplianceSettings,
 } from "@/lib/receipts/settings";
 import { createAuditEntry } from "@/lib/receipts/audit";
-import { resolveNotificationRecipient } from "@/lib/receipts/notify";
+import { resolveNotificationRecipient, recipientSettingMessage } from "@/lib/receipts/notify";
 import { getAccountantEmail, getReceiptsDb } from "@/lib/cloudflare-runtime";
 import type { ComplianceSettings } from "@/lib/receipts/types";
 
@@ -78,6 +78,19 @@ export async function PATCH(request: Request) {
       );
     }
 
+    // Change 5: the Cc (business-manager) recipient is validated with the same
+    // shape rule as the To recipient.
+    if (
+      body.notification_cc_recipient !== undefined &&
+      body.notification_cc_recipient !== "" &&
+      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.notification_cc_recipient)
+    ) {
+      return NextResponse.json(
+        { error: "notification_cc_recipient must be a valid email address." },
+        { status: 400 },
+      );
+    }
+
     const before = await getComplianceSettings();
     const settings = await updateComplianceSettings(body, actor);
 
@@ -89,6 +102,9 @@ export async function PATCH(request: Request) {
       newValueJson: JSON.stringify(body),
     });
 
+    // D7 — audit + message on a recipient-field change. To takes precedence if
+    // both changed in one save (the primary recipient governs delivery).
+    let recipientChangeMessage: string | null = null;
     if (
       body.notification_recipient !== undefined &&
       body.notification_recipient !== before.notification_recipient
@@ -101,10 +117,35 @@ export async function PATCH(request: Request) {
         oldValueJson: JSON.stringify({ notification_recipient: before.notification_recipient }),
         newValueJson: JSON.stringify({ notification_recipient: body.notification_recipient }),
       });
+      recipientChangeMessage = recipientSettingMessage("notification_recipient");
+    }
+    if (
+      body.notification_cc_recipient !== undefined &&
+      body.notification_cc_recipient !== before.notification_cc_recipient
+    ) {
+      await createAuditEntry(getReceiptsDb(), {
+        actor,
+        action: "settings.notification_cc_recipient_changed",
+        objectType: "compliance_settings",
+        objectId: "global",
+        oldValueJson: JSON.stringify({ notification_cc_recipient: before.notification_cc_recipient }),
+        newValueJson: JSON.stringify({ notification_cc_recipient: body.notification_cc_recipient }),
+      });
+      // To's message already describes delivery; only set the Cc message when To
+      // did not also change.
+      if (recipientChangeMessage === null) {
+        recipientChangeMessage = recipientSettingMessage("notification_cc_recipient");
+      }
     }
 
     return NextResponse.json(
-      { settings, effectiveRecipient: resolveEffectiveRecipient(settings) },
+      {
+        settings,
+        effectiveRecipient: resolveEffectiveRecipient(settings),
+        // D7: present only when a recipient field changed this save. Phase C
+        // renders it; the audit entry is the durable record.
+        ...(recipientChangeMessage ? { recipientChangeMessage } : {}),
+      },
       { status: 200 },
     );
   } catch (error) {

@@ -89,6 +89,26 @@ test("performDelivery: success records the provider message id; sends Idempotenc
   assert.equal(body.attachments[0].filename, "202606_Dazbeez_Monthly_Expense_Report.zip");
 });
 
+// ─── Change 5: an UNSET Cc is omitted from the payload entirely ──────────────
+// B-4 in a new place: never send cc:null / cc:"" and rely on the provider
+// tolerating it. sendDeliveryViaResend maps cc:null → undefined, which JSON
+// serialization drops, so `cc` is simply absent from the request body.
+test("performDelivery: cc=null omits the Cc field from the Resend body (never cc:null/cc:'')", async () => {
+  const { fetchImpl, calls } = fakeResend({ ok: true });
+  await performDelivery({
+    fetchImpl: fetchImpl as unknown as typeof fetch,
+    apiKey: "key", from: "from@dazbeez.com", to: "cpa@example.com", cc: null,
+    subject: "【領収証憑】2026年6月分", text: "body", html: "<p>body</p>",
+    zipFilename: "202606_Dazbeez_Monthly_Expense_Report.zip",
+    zipBytes: new Uint8Array([0x50, 0x4b, 0x03, 0x04]),
+    idempotencyKey: "dazbeez-delivery-no-cc",
+  });
+  assert.equal(calls.length, 1);
+  const body = JSON.parse(calls[0]!.init.body as string);
+  assert.deepEqual(body.to, ["cpa@example.com"]);
+  assert.equal(body.cc, undefined, "unset Cc ⇒ field absent from the payload (not null / not [])");
+});
+
 test("performDelivery: an oversized pack throws BEFORE any Resend call (B-1)", async () => {
   const { fetchImpl, calls } = fakeResend({ ok: true });
   await assert.rejects(
