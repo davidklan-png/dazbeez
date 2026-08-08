@@ -332,6 +332,58 @@ June lands elsewhere and undated receipts fall to the unassigned-residue surface
 June is currently a draft, so it is **not** in `loadSealedExportMonths` and new
 CASH/DIGITAL membership is permitted — verified at `membership.ts:44`.
 
+---
+
+# Post-merge: what code review caught that this verification did not
+
+Merged as `d2170f8` (PR #160). A Codex review found three defects in `3067f02`,
+**all downstream of decisions recorded above as accepted**. Recorded here because the
+pattern matters more than the individual bugs.
+
+**P1 — non-ASCII `Content-Disposition` 500'd the Japanese download endpoints.**
+D15 renamed standalone downloads to `202606_現金払いリスト.csv`. HTTP header values are
+ByteString; a bare `filename="…"` with non-ASCII throws in the `Response` constructor,
+so the AMEX/CASH/DIGITAL endpoints returned 500. Fixed with an ASCII fallback plus
+RFC 5987 `filename*=UTF-8''`. **I recommended D15 having already read the
+`Content-Disposition` line at `download/route.ts:104` and did not connect the two.**
+
+**P1 — finalize could 500 after sealing.** `composeFinalizeNoticeData` became async
+(worker decision #2, which this document explicitly "accepted without change"). It was
+awaited after `finalizeExport` sealed the month but *outside* the non-blocking
+handler, so a throw returned 500 on an already-finalized month and the retry hit a
+conflict. Fixed by moving the prep inside the try/catch. **I reviewed that async change
+and checked only whether the data would be available — not where the `await` sat
+relative to the error boundary.** Doubly bad given D2 exists precisely to stop a
+delivery failure from damaging a seal.
+
+**P2 — `payment_due_date` was live-looked-up, violating ADR 0009.** The AMEX 照合CSV
+download filename was derived from the *current* `amex_statement_artifacts` row. A
+statement re-import with a different due date would rename a sealed export's download
+differently from the file inside its sealed ZIP, and a replaced artifact could 404 a
+download whose R2 object still exists. Fixed by migration `0035_export_payment_due_date`
+— snapshot the date onto `receipt_exports` at bundle-build time. **I invoked "don't
+live-lookup sealed months" repeatedly this session — against ADR 0013's 家事按分 ratio
+and in D2's state machine — then specified D15 as a live fetch.**
+
+## Lesson for the next verification pass
+
+This document verified **outputs** thoroughly — filenames diffed 33/33, preflight
+fixtures proven to fail, legacy symbols traced for reachability — and under-verified
+**integration boundaries**: what a value must satisfy once it leaves the module (HTTP
+header charset), where an `await` sits relative to an error boundary, and whether a
+read is against mutable or sealed state.
+
+Add to the standing protocol: for any change that alters a value crossing a boundary,
+check the boundary's constraints, not just the value's correctness.
+
+## Operational note — 0035 is additive with no backfill
+
+Pre-existing export rows read `payment_due_date` as NULL and fall back to a legacy
+ASCII download filename until their draft is rebuilt. The June redraft (D17) will
+populate it.
+
+---
+
 ## Before Phase A can be called done
 
 1. Delete the legacy naming branch; make `filename` required (Gap 1)
