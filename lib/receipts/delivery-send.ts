@@ -110,3 +110,50 @@ export async function performDelivery(opts: {
     opts.idempotencyKey,
   );
 }
+
+// ─── Email body assembly (SINGLE path — Change 4 replaces this, not duplicates) ─
+//
+// Phase A's drift between the notice and the ZIP came from two assembly paths.
+// There is one here. Change 2 ships a minimal summary-only body (no live D1 —
+// B-5; no revision info — O2). Change 4 REPLACES this function in place to
+// regenerate the summary from the sealed pack's 集計.csv and inject the one
+// operator message into both this body and 【今月のご連絡】. Do not add a second
+// builder alongside it.
+
+export interface DeliveryEmail {
+  subject: string;
+  text: string;
+  html: string;
+}
+
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+export function buildDeliveryEmail(opts: {
+  month: string;
+  /** The operator's free-text message. Change 4 sources this from the export
+   *  record (one stored value, two surfaces); Change 2 passes null. */
+  operatorMessage: string | null;
+}): DeliveryEmail {
+  const y = opts.month.slice(0, 4);
+  const m = Number(opts.month.slice(5, 7));
+  const monthLabel = `${y}年${m}月`;
+  const lines: string[] = [];
+  lines.push(`${monthLabel} の領収証憑一式を添付にてお送りします。`);
+  lines.push("");
+  const msg = opts.operatorMessage?.trim() ?? "";
+  if (msg.length > 0) {
+    lines.push("【今月のご連絡】");
+    lines.push(msg);
+    lines.push("");
+  }
+  // Change 4: regenerate the 勘定科目別集計 here from the sealed 集計.csv (B-5).
+  lines.push("ご不明な点があればお知らせください。");
+  const text = lines.join("\r\n");
+  return {
+    subject: `【領収証憑】${monthLabel}分`, // O2: no revision info
+    text,
+    html: `<!DOCTYPE html><html><body><div style="white-space:pre-wrap;font-family:sans-serif;font-size:14px;line-height:1.6;color:#1a1a1a">${escapeHtml(text)}</div></body></html>`,
+  };
+}

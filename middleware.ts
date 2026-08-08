@@ -53,7 +53,12 @@ export const PUBLIC_ROUTES: string[] = [
   "/api/receipts/inbox/:id/promote",
 ];
 
-const isPublicRoute = createRouteMatcher(PUBLIC_ROUTES);
+// Exported so the middleware-routing test can assert a route is actually
+// exempted (or not) by running the real matcher — not by eyeballing the array.
+// Used to guard the monthly-delivery send endpoint (it emails the financial
+// pack to a configured address): it MUST stay under auth.protect(), i.e. never
+// match a PUBLIC_ROUTES entry.
+export const isPublicRoute = createRouteMatcher(PUBLIC_ROUTES);
 
 export default clerkMiddleware(async (auth, request) => {
   if (!isPublicRoute(request)) {

@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { config, PUBLIC_ROUTES } from "@/middleware";
+import { NextRequest } from "next/server";
+import { config, PUBLIC_ROUTES, isPublicRoute } from "@/middleware";
 
 // These tests assert against the real, exported Clerk routing config —
 // `config.matcher` (the exact value Next.js statically extracts at build time)
@@ -57,4 +58,22 @@ test("matcher: pre-existing gates are intact", () => {
   for (const gate of ["/receipts/:path*", "/admin/:path*", "/api/receipts/:path*"]) {
     assert.ok(MATCHER.includes(gate), `${gate} must remain matched`);
   }
+});
+
+test("matcher: the monthly-delivery send endpoint is Clerk-protected (auth.protect() applies)", () => {
+  // POST /api/receipts/export/:month/send emails the financial pack to a
+  // configured address. It is matched via /api/receipts/:path* and MUST NOT be
+  // in the PUBLIC_ROUTES exception list (the processor-key routes) — a future
+  // edit that exempted it would silently expose an endpoint that mails financial
+  // records. Asserted with the real matcher so a broad new pattern cannot sneak
+  // it through either.
+  const sendRequest = new NextRequest(
+    "https://dazbeez.com/api/receipts/export/2026-06/send",
+    { method: "POST" },
+  );
+  assert.ok(MATCHER.includes("/api/receipts/:path*"), "the broad receipts gate covers the send route");
+  assert.ok(
+    !isPublicRoute(sendRequest),
+    "the send route must NOT be exempted from auth.protect() (not in PUBLIC_ROUTES)",
+  );
 });
