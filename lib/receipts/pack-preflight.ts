@@ -150,16 +150,40 @@ function evidenceByFolder(entries: PackPreflightEntry[]): Map<string, string[]> 
   return out;
 }
 
+// The charge rows of a reconciliation CSV: rows AFTER the header (the row
+// containing 科目＆No. — present in both the AMEX and CASH/DIGITAL recon
+// headers), excluding total/blank rows. The AMEX statement's Netアンサー layout
+// puts metadata (カード名称 / ご利用者名 / お支払日) BEFORE the 利用日 header and
+// 小計/合計 totals AFTER the charges; CASH/DIGITAL CSVs have the header at row 0.
+// Charge rows carry the appended columns (≥ the header's width); total/metadata
+// rows do not, so a width check excludes them. (P2 #2 — the gate must pass a
+// real pack, not just the flat test fixture.)
+function reconChargeRows(rows: string[][]): string[][] {
+  const headerIdx = rows.findIndex((r) => r.includes("科目＆No."));
+  if (headerIdx === -1) return [];
+  const width = rows[headerIdx]!.length;
+  const out: string[][] = [];
+  for (let i = headerIdx + 1; i < rows.length; i++) {
+    const row = rows[i]!;
+    if (row.length < width) continue; // total / blank / metadata row (narrower)
+    out.push(row);
+  }
+  return out;
+}
+
+/** The index of the recon header row (contains 科目＆No.), or -1 if none. */
+function reconHeaderIndex(rows: string[][]): number {
+  return rows.findIndex((r) => r.includes("科目＆No."));
+}
+
 // Evidence filenames referenced by the 領収書ファイル名 (last) column of each
-// reconciliation CSV, excluding the header row, 領収書なし markers, and blanks.
+// reconciliation CSV's charge rows, excluding 領収書なし markers and blanks.
 function referencedEvidence(
   reconCsvs: PreflightCsvInput[],
 ): Set<string> {
   const out = new Set<string>();
   for (const csv of reconCsvs) {
-    const rows = parseCsvRows(csv.text);
-    for (let i = 1; i < rows.length; i++) {
-      const row = rows[i]!;
+    for (const row of reconChargeRows(parseCsvRows(csv.text))) {
       if (row.length < 2) continue;
       const cell = row[row.length - 1]!.trim();
       if (!cell || cell.startsWith("領収書なし")) continue;
@@ -401,12 +425,12 @@ const checks: { key: string; run: Check }[] = [
       const reconByCat = new Map<string, { count: number; total: number }>();
       for (const csv of reconCsvs) {
         const rows = parseCsvRows(csv.text);
-        const header = rows[0] ?? [];
+        const headerIdx = reconHeaderIndex(rows);
+        if (headerIdx === -1) continue; // 集計-like (no 科目＆No.), skip
+        const header = rows[headerIdx]!;
         const kamokuIdx = header.indexOf("科目＆No.");
         const amountIdx = header.indexOf("金額");
-        if (kamokuIdx === -1) continue; // 集計-like, skip
-        for (let r = 1; r < rows.length; r++) {
-          const row = rows[r]!;
+        for (const row of reconChargeRows(rows)) {
           const label = row[kamokuIdx] ?? "";
           const amount = parseAmountCell(row[amountIdx] ?? "") ?? 0;
           // Category = label with the MonYYYY+circled suffix removed.
@@ -484,7 +508,7 @@ const checks: { key: string; run: Check }[] = [
     run: ({ entries, csvs, noticeText }) => {
       const reconCsvs = csvs.filter((c) => c.label !== "集計");
       const rowCount = reconCsvs.reduce(
-        (n, csv) => n + Math.max(0, parseCsvRows(csv.text).length - 1),
+        (n, csv) => n + reconChargeRows(parseCsvRows(csv.text)).length,
         0,
       );
       const evidenceCount = [...evidenceByFolder(entries).values()].reduce(

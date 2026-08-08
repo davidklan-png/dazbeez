@@ -286,3 +286,60 @@ test("csv-no-attendee-id-column: a 会議-出席者ID column in a CSV fails", ()
   cash.text = cash.text.replace("事業目的,人数", "事業目的,会議-出席者ID,人数");
   failsOnly(runPackPreflight(input), "csv-no-attendee-id-column");
 });
+
+// ─── P2 #2: a real Netアンサー AMEX CSV has metadata before the 利用日 header
+//    and 小計/合計 totals after the charges. The flat-fixture assumption (row 0
+//    = header, every later row a charge) mis-counts both and fails a valid pack.
+test("preflight: a realistic AMEX statement (metadata + header + charges + totals) passes", () => {
+  const AMEX_REALISTIC = [
+    "カード名称,セゾンプラチナビジネス・アメリカンエキスプレス・カード",
+    "ご利用者名,DAVID KLAN",
+    "お支払日,2026/07/06",
+    "利用日,ご利用店名及び商品名,会員区分,支払区分名称,分割区分,金額,備考,科目＆No.,事業目的,人数,領収書ファイル名",
+    '2026/04/17,小田原みなと食堂,,1回,,6490,,会議費Jun2026①,打ち合わせ,1,"会議費Jun2026①小田原みなと食堂￥6,490.jpg"',
+    '2026/05/02,OpenAI,,1回,,108341,,研究開発費Jun2026①,API,1,"研究開発費Jun2026①OpenAI￥108,341.pdf"',
+    "小計,,,,,114831", // total row — narrower than the 11-col charge rows
+    "合計,,,,,114831",
+  ].join("\r\n");
+  const SUMMARY_2 = [
+    "Field,Value", "Month,2026-06", "GeneratedAt,t", "",
+    "勘定科目,件数,合計金額", "会議費,1,6490", "研究開発費,1,108341", "",
+    "支払方法,件数,合計金額", "AMEX,2,114831", "現金,0,0", "デジタル,0,0", "",
+    "総合計,2,114831",
+  ].join("\r\n");
+  const notice = buildPackNotice(
+    { monthLabel: "2026年6月", rowCount: 2, receiptCount: 2, missingReceiptLines: [], hasAmex: true, hasCash: false, hasDigital: false },
+    names,
+  );
+  const root = names.rootFolder;
+  const input: PackPreflightInput = {
+    month: "2026-06",
+    paymentDueDate: "2026-06-04",
+    containerNames: { zipName: names.zipName, rootFolder: names.rootFolder },
+    noticeText: notice,
+    csvs: [
+      { label: "集計", text: SUMMARY_2 },
+      { label: "AMEX", text: AMEX_REALISTIC },
+    ],
+    entries: [
+      entry(`${root}/${names.summaryCsv}`, SUMMARY_2),
+      entry(`${root}/${names.noticeFile}`, notice),
+      entry(`${root}/${names.amexReconciliationCsv}`, AMEX_REALISTIC),
+      entry(`${root}/${names.amexFolder}/会議費Jun2026①小田原みなと食堂￥6,490.jpg`, "img1"),
+      entry(`${root}/${names.amexFolder}/研究開発費Jun2026①OpenAI￥108,341.pdf`, "img2"),
+    ],
+    amexStatementTotalCents: 114831,
+    maxPackBytes: 100_000_000,
+  };
+  const report = runPackPreflight(input);
+  const failed = report.results.filter((r) => !r.passed);
+  assert.equal(
+    report.passed,
+    true,
+    `a realistic AMEX pack must pass; failures: ${JSON.stringify(failed)}`,
+  );
+  // Specifically: the charge-row count is 2 (the two charges), NOT 6
+  // (metadata+header+charges+totals-1) — the pre-fix length-1 assumption.
+  const counts = report.results.find((r) => r.check === "notice-counts-match-pack")!;
+  assert.equal(counts.passed, true, "notice-counts-match-pack passes (2 charge rows, not the metadata/header/totals)");
+});
