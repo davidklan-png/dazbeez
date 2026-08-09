@@ -491,6 +491,34 @@ starts. Design consequences:
     asserts that importer set. Without it the contract is convention, and
     convention is what failed. This is the only part of #18 that protects the
     NEXT path rather than the four current ones.
+    **PREMISE CORRECTED 2026-08-09 (worker finding).** #18 assumed
+    `createReceiptRecord` is the single insert path. It is not: there are TWO
+    `INSERT INTO receipt_records` — `db.ts:91` and `mobile-upload.ts:56`
+    (`createMobileReceiptRecord`, adding `device_id`, `client_capture_id`,
+    `captured_at_client`, `upload_origin`). The mobile route never imports
+    `createReceiptRecord`, so the importer test alone would PASS while the
+    mobile path bypassed the contract. Note `email-intake.ts:18` already said
+    "Do not add a second insert path" — migration 0015 added one anyway. A rule
+    in a comment, unenforced, silently violated.
+    So the test must assert BOTH: (1) exactly one `createReceiptRecord`
+    importer, AND (2) no `INSERT INTO receipt_records` outside `db.ts`.
+    Resolution = **Option A**: extend `CreateReceiptInput` +
+    `createReceiptRecord` with the optional mobile fields, delete
+    `createMobileReceiptRecord`, mobile route calls `captureReceipt`. Option B
+    (insert-then-UPDATE) is rejected on CORRECTNESS, not taste: the partial
+    UNIQUE index (`0015`, `WHERE device_id IS NOT NULL AND client_capture_id IS
+    NOT NULL`) only fires when both columns are set AT INSERT, so a
+    NULL-at-insert window lets two concurrent mobile uploads both succeed and
+    silently breaks idempotency.
+    (ii-b) **Merging the two INSERTs must not silently pick a winner.** Report a
+    column-by-column divergence audit before the merge lands. One is already
+    known: `preservation_status` is hardcoded `'needs_review'` in db.ts,
+    `'captured'` in mobile-upload.ts, while migration 0014's own backfill maps
+    `status='captured'` → `'needs_metadata'`. Three answers, no reader.
+    RULING: derive it from `status` using 0014's CASE as the single authority
+    (pure + unit-testable); do not hardcode either literal. Do NOT backfill
+    existing rows in this PR — that writes to every receipt including sealed
+    months and could trip the export-lock/finalized guards; file separately.
     (iii) Failure semantics stay deliberately different: manifest fails LOUD
     (`hardDeleteReceipt` + throw), enqueue fails BEST-EFFORT. Do not unify.
     (iv) `needs_render` opts out via an `enqueue: false` parameter, not a
@@ -516,6 +544,25 @@ starts. Design consequences:
     extraction leg — classify permanent render failures and POST a
     processor-key-guarded endpoint that records the failure, so it surfaces
     like `extraction_state='failed'` does.
+
+23. **`preservation_status` is a three-way inconsistency in existing rows —
+    backfill SEPARATELY (not in the capture-contract PR).** Found during the #18
+    column-by-column divergence audit: at insert, `createReceiptRecord`
+    hardcodes `'needs_review'`, `createMobileReceiptRecord` hardcodes
+    `'captured'`, and migration 0014's own backfill CASE maps
+    `status='captured' → 'needs_metadata'`. Three answers for one concept on a
+    10-year tax record, undetected because nothing reads the column. The
+    capture-contract merge FIXES the insert (derives `preservation_status` from
+    `status` via 0014's CASE as the single authority — pure, unit-tested, no
+    literal on either path), but deliberately does NOT backfill existing rows
+    in that PR. **Open question for the backfill (filed here, NOT resolved):**
+    a backfill writes to EVERY receipt including finalized/sealed statement
+    months, which could trip the export-lock / finalized-reconciliation guards
+    (a sealed month's rows are supposed to be immutable). Decide before
+    backfilling whether (a) `preservation_status` is exempt from those seals
+    (it's display-only — nothing reads it today), permitting a blanket UPDATE,
+    or (b) the backfill must respect the seal and skip/defer sealed-month rows.
+    Do NOT backfill until that is answered.
 
 19. **Never-enqueued receipts are undetectable — wire a pipeline health
     surface.** NOT DISPATCHED — same prompt as #18, Part A (do it FIRST).
