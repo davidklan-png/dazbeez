@@ -25,6 +25,7 @@ import {
   filterReviewQueue,
   isConcreteMonth,
   mergeMonthOptions,
+  resolveQueueNavigation,
   resolveReviewMonthScope,
   resolveReviewScope,
   type ReviewScope,
@@ -165,9 +166,16 @@ async function renderReceiptPage(
     buildQueueItems(queue, attentionReasons, Date.now(), locks),
     DEFAULT_SORT,
   );
-  const activeIndex = queueItems.findIndex((q) => q.id === id);
-  const nextReceiptId = queueItems[activeIndex + 1]?.id ?? null;
-  const prevReceiptId = queueItems[activeIndex - 1]?.id ?? null;
+  // Queue position/nav. resolveQueueNavigation returns index:null when the
+  // active receipt is NOT in the working set (e.g. an undated capture that
+  // extracted into a prior month — backlog #17). The page passes null through
+  // to FormPane, which renders "not in this view" and disables save-and-advance
+  // + Skip rather than fabricating "1 of N" and navigating to queueItems[0].
+  // State it, don't fix it up: the working set is export/closing-scope authority,
+  // not a display convenience — never widen it to make the receipt fit.
+  const nav = resolveQueueNavigation(queueItems, id);
+  const nextReceiptId = nav.nextId;
+  const prevReceiptId = nav.prevId;
 
   const needsAttention = workingReceipts.filter(
     (r) => !locks.get(r.id)?.locked && attentionIds.has(r.id),
@@ -221,7 +229,7 @@ async function renderReceiptPage(
           <FormPane
             receipt={receipt}
             initialAttendees={attendees}
-            queueIndex={Math.max(1, activeIndex + 1)}
+            queueIndex={nav.index === null ? null : nav.index + 1}
             queueTotal={queueItems.length}
             nextReceiptId={nextReceiptId}
             prevReceiptId={prevReceiptId}

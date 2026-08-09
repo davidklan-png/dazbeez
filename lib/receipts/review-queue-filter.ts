@@ -169,6 +169,29 @@ export function filterReviewQueue(
   }
 }
 
+/** Resolve the active receipt's position + neighbours in a queue working set.
+ *
+ *  Pure counterpart to the page's findIndex-based nav. Returns `index: null`
+ *  (with null neighbours) when `activeId` is NOT in `items` — the case where the
+ *  receipt has left the working set (e.g. an undated capture that extracted into
+ *  a prior month, or a shared deep link crossing a month boundary). Callers MUST
+ *  treat `null` as "not in this view": render no fabricated position and disable
+ *  queue navigation, rather than falling back to `items[0]` (the original
+ *  defect — backlog #17). `index` is 0-based; UIs render `index + 1` ("3 of 23").
+ *  Accepts any `{ id }`-shaped item so it is unit-testable without QueueItem. */
+export function resolveQueueNavigation(
+  items: ReadonlyArray<{ id: string }>,
+  activeId: string,
+): { index: number | null; nextId: string | null; prevId: string | null } {
+  const index = items.findIndex((i) => i.id === activeId);
+  if (index < 0) return { index: null, nextId: null, prevId: null };
+  return {
+    index,
+    nextId: items[index + 1]?.id ?? null,
+    prevId: items[index - 1]?.id ?? null,
+  };
+}
+
 /** The effective month label/value for the SubHeader + picker: 'all', or the
  *  month scope (current calendar month when on the default / no param). */
 export function effectiveReviewMonth(

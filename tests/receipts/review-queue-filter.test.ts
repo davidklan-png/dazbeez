@@ -11,6 +11,7 @@ import {
   mergeMonthOptions,
   normalizeReviewFilter,
   parseReviewScope,
+  resolveQueueNavigation,
   resolveReviewMonthScope,
   resolveReviewScope,
 } from "@/lib/receipts/review-queue-filter";
@@ -318,5 +319,57 @@ test("normalizeReviewFilter: legacy + unknown keys normalize to All ('')", () =>
   assert.equal(normalizeReviewFilter(""), "");
   assert.equal(normalizeReviewFilter(null), "");
   assert.equal(normalizeReviewFilter(undefined), "");
+});
+
+// ─── resolveQueueNavigation ────────────────────────────────────────────────
+
+test("resolveQueueNavigation: active id present → correct 0-based index + neighbours", () => {
+  const items = [{ id: "a" }, { id: "b" }, { id: "c" }, { id: "d" }];
+  const nav = resolveQueueNavigation(items, "c");
+  assert.equal(nav.index, 2);
+  assert.equal(nav.nextId, "d");
+  assert.equal(nav.prevId, "b");
+});
+
+test("resolveQueueNavigation: active id absent → index/next/prev all null (NOT items[0])", () => {
+  const items = [{ id: "a" }, { id: "b" }, { id: "c" }];
+  const nav = resolveQueueNavigation(items, "zzz");
+  assert.equal(nav.index, null);
+  assert.equal(nav.nextId, null);
+  assert.equal(nav.prevId, null);
+  // The actual defect (backlog #17): nextId must NOT resolve to items[0] — the
+  // fabricated jump to an unrelated receipt that Save-and-advance / Skip took.
+  assert.notEqual(nav.nextId, items[0].id);
+  assert.equal(nav.nextId, null);
+});
+
+test("resolveQueueNavigation: single-item set, active id absent → index null (the live '1 of 1' case)", () => {
+  // Observed in production 2026-08-09: 020ba685 (Jul 26) open in the Aug scope,
+  // rail held only an unrelated receipt → page rendered "1 of 1".
+  const nav = resolveQueueNavigation([{ id: "only" }], "elsewhere");
+  assert.equal(nav.index, null);
+  assert.equal(nav.nextId, null);
+  assert.equal(nav.prevId, null);
+});
+
+test("resolveQueueNavigation: empty set → all null, no throw", () => {
+  const nav = resolveQueueNavigation([], "a");
+  assert.equal(nav.index, null);
+  assert.equal(nav.nextId, null);
+  assert.equal(nav.prevId, null);
+});
+
+test("resolveQueueNavigation: first position → prevId null; last position → nextId null", () => {
+  const items = [{ id: "a" }, { id: "b" }, { id: "c" }];
+  assert.deepEqual(resolveQueueNavigation(items, "a"), {
+    index: 0,
+    nextId: "b",
+    prevId: null,
+  });
+  assert.deepEqual(resolveQueueNavigation(items, "c"), {
+    index: 2,
+    nextId: null,
+    prevId: "b",
+  });
 });
 

@@ -45,7 +45,7 @@ const SAVE_DEBOUNCE_MS = 450;
 export interface FormPaneProps {
   receipt: ReceiptRecord;
   initialAttendees: ReceiptAttendee[];
-  queueIndex: number; // 1-based for "3 of 23"
+  queueIndex: number | null; // 1-based for "3 of 23"; null when not in the working set
   queueTotal: number;
   nextReceiptId: string | null;
   prevReceiptId: string | null;
@@ -94,6 +94,11 @@ export function FormPane(props: FormPaneProps) {
   const queueIndex = queuePos.index >= 0 ? queuePos.index : props.queueIndex;
   const queueTotal = queuePos.index >= 0 ? queuePos.total : props.queueTotal;
   const nextReceiptId = queuePos.index >= 0 ? queuePos.nextId : props.nextReceiptId;
+  // null when the receipt is outside the working set (queuePos missed it AND the
+  // server passed null — backlog #17: an undated capture that extracted into a
+  // prior month). Render "not in this view" and disable save-and-advance + Skip
+  // rather than fabricating a position / navigating to queueItems[0].
+  const inView = queueIndex !== null;
 
   // OCR runs on the Mac processor, not here. While the receipt is still pending
   // there is no stored OCR text, so the reprocess button (which only re-parses
@@ -445,7 +450,7 @@ export function FormPane(props: FormPaneProps) {
       // Same shared gate as the button (canMarkReviewed): a reconciled/reviewed/
       // exported/archived receipt must not save-and-advance through a shortcut
       // presented as "Mark reviewed" (architect review 2026-07-21).
-      if (!canMarkReviewed(receipt.status, isLocked)) return;
+      if (!canMarkReviewed(receipt.status, isLocked) || !inView) return;
       e.preventDefault();
       onMarkReviewed();
     },
@@ -521,7 +526,7 @@ export function FormPane(props: FormPaneProps) {
           <span>{transactionLabel}</span>
           <span>·</span>
           <span>
-            {queueIndex} of {queueTotal}
+            {queueIndex !== null ? `${queueIndex} of ${queueTotal}` : "not in this view"}
           </span>
         </div>
       </header>
@@ -792,7 +797,7 @@ export function FormPane(props: FormPaneProps) {
             kind="primary"
             size="md"
             onClick={onMarkReviewed}
-            disabled={!canMarkReviewed(receipt.status, isLocked)}
+            disabled={!canMarkReviewed(receipt.status, isLocked) || !inView}
             rightIcon={<ArrowRightIcon size={14} className="text-white" />}
           >
             Mark reviewed → next
