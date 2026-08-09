@@ -482,6 +482,40 @@ starts. Design consequences:
     (attachment), `promoteBodyIntake` (defers enqueue to `/render`). This is
     the AGENTS.md "boundary checks are the writer's job" failure at the level
     of a whole subsystem.
+    DECISIONS (2026-08-09, architect, on the worker's B2 proposal):
+    (i) Full `captureReceipt()` wrapper in `lib/receipts/capture.ts`, NOT a
+    thinner `completeCapture()` — one door, not a step you can skip.
+    (ii) **The real deliverable is enforcement, not the wrapper.** After the
+    refactor there must be exactly ONE importer of `createReceiptRecord`:
+    `lib/receipts/capture.ts`. Add a test that reads the source tree and
+    asserts that importer set. Without it the contract is convention, and
+    convention is what failed. This is the only part of #18 that protects the
+    NEXT path rather than the four current ones.
+    (iii) Failure semantics stay deliberately different: manifest fails LOUD
+    (`hardDeleteReceipt` + throw), enqueue fails BEST-EFFORT. Do not unify.
+    (iv) `needs_render` opts out via an `enqueue: false` parameter, not a
+    branch on source type.
+    (v) #20 marker = nullable `extraction_enqueue_failed_at` column, NOT a
+    fourth `extraction_state` (which would enter `PENDING_EXTRACTION_STATES`
+    and touch every consumer). Migration is additive, no backfill, and ships in
+    the same PR as the code that writes it.
+    (vi) Surface it as a separate health class 1b, not folded into class 1 —
+    "never tried" is a code defect to report, "queue outage" is a retry, and
+    folding them dilutes class 1's provable-not-heuristic property.
+
+22. **Render-leg failures are stderr-only.** `process_renders`
+    (`scripts/receipts-consumer/consumer.py:955`) catches every exception and
+    prints to `~/Library/Logs/dazbeez/receipts-auto-promote-render.err.log`.
+    No D1 write, no `extraction_state='failed'`, no badge — a failing render
+    leg leaves receipts at `needs_render=1` silently and indefinitely. Backlog
+    #19's class 3 DETECTS the aging, but cannot name which receipt failed or
+    why. Note this is backlog #12 ("error-surfacing hardening", declared
+    CLOSED) not covering a path that shipped after it — the same
+    fix-applied-path-by-path pattern as #5 recurring in `promoteIntake` and
+    #9's backfill net missing never-extracted receipts. Design: mirror the
+    extraction leg — classify permanent render failures and POST a
+    processor-key-guarded endpoint that records the failure, so it surfaces
+    like `extraction_state='failed'` does.
 
 19. **Never-enqueued receipts are undetectable — wire a pipeline health
     surface.** NOT DISPATCHED — same prompt as #18, Part A (do it FIRST).
