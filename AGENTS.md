@@ -518,7 +518,30 @@ starts. Design consequences:
     RULING: derive it from `status` using 0014's CASE as the single authority
     (pure + unit-testable); do not hardcode either literal. Do NOT backfill
     existing rows in this PR — that writes to every receipt including sealed
-    months and could trip the export-lock/finalized guards; file separately.
+    months and could trip the export-lock/finalized guards; file separately
+    (filed as #23).
+    (ii-c) **A column audit cannot see the real risks — they live AROUND the
+    INSERT.** Four behavioural divergences found 2026-08-09, two with teeth:
+    (a) **Audit payload.** Both emit action `receipt.uploaded`, but db.ts writes
+    `{paymentPath, expenseType, source}` while mobile writes eight fields
+    including `device_id`, `client_capture_id`, `app_version`, `note`.
+    `app_version` and `note` never reach `receipt_records` at all — they exist
+    only in the audit JSON, so a column-by-column diff is structurally blind to
+    them. The merged payload MUST be a superset or every mobile capture loses
+    device provenance from a 10-year tax record.
+    (b) **Error taxonomy.** `createMobileReceiptRecord` throws on the 0015
+    unique-index collision and the ROUTE (`app/api/mobile/receipts/upload/route.ts:98`)
+    catches it, looks up `findMobileReceiptByIdempotency`, deletes the R2
+    object, and returns 200 `{duplicate:true}`. `captureReceipt`'s manifest-LOUD
+    policy also throws (after `hardDeleteReceipt`), and that catch block cannot
+    tell the two apart — a manifest failure would be mis-handled as an
+    idempotency race and vice versa. `captureReceipt` MUST throw typed errors
+    (e.g. `CaptureIdempotencyConflict` vs `CaptureManifestFailure`) so the route
+    branches on cause, not on "something threw".
+    (c) After the merge the mobile path gains `assertTransactionMonthEditable`
+    (split lock, audit A5) and (d) `assignMembershipForReceipt` (ADR 0008).
+    Both are no-ops today because mobile inserts with no `transaction_date` —
+    recorded as deliberate findings, not assumptions.
     (iii) Failure semantics stay deliberately different: manifest fails LOUD
     (`hardDeleteReceipt` + throw), enqueue fails BEST-EFFORT. Do not unify.
     (iv) `needs_render` opts out via an `enqueue: false` parameter, not a
