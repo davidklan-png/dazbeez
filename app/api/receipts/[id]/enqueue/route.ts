@@ -108,6 +108,7 @@ export async function POST(request: Request, { params }: RouteContext) {
         `UPDATE receipt_records
            SET extraction_state = 'queued',
                extraction_enqueued_at = ?,
+               extraction_enqueue_failed_at = NULL,
                updated_at = ?
          WHERE id = ?`,
       )

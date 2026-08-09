@@ -1,16 +1,11 @@
 import { NextResponse } from "next/server";
-import { getReceiptsBucket, getReceiptsDb } from "@/lib/cloudflare-runtime";
-import { createReceiptFile } from "@/lib/receipts/files";
+import { getReceiptsBucket } from "@/lib/cloudflare-runtime";
 import { generateR2Key, uploadOriginal } from "@/lib/receipts/storage";
 import { requireMobileActor } from "@/lib/receipts/trusted-devices";
 import { validateReceiptFile } from "@/lib/receipts/validation";
-import {
-  createMobileReceiptRecord,
-  findMobileReceiptByIdempotency,
-} from "@/lib/receipts/mobile-upload";
-import { hardDeleteReceipt, updateReceiptRecord } from "@/lib/receipts/db";
+import { findMobileReceiptByIdempotency } from "@/lib/receipts/mobile-upload";
+import { captureReceipt, CaptureIdempotencyConflict } from "@/lib/receipts/capture";
 import { ExportFinalizedError } from "@/lib/receipts/month-lock";
-import { buildExtractionJob, enqueueExtractionJob } from "@/lib/receipts/queue";
 import type { PaymentPath } from "@/lib/receipts/types";
 
 async function sha256Hex(data: ArrayBuffer): Promise<string> {
@@ -80,132 +75,78 @@ export async function POST(request: Request) {
 
     await uploadOriginal(r2Key, bytes, contentType);
 
-    let receiptId: string;
+    // Backlog #18: captureReceipt is the single door. Mobile provenance
+    // (device_id/client_capture_id/captured_at_client/upload_origin) + the
+    // audit-only app_version/note flow through CreateReceiptInput; the 0015
+    // partial UNIQUE index enforces idempotency AT INSERT, so a concurrent
+    // retry surfaces as CaptureIdempotencyConflict (not a bare error the route
+    // can't distinguish from a manifest failure — #18 ii-c(b)).
+    let capture: { receiptId: string; enqueued: boolean };
     try {
-      receiptId = await createMobileReceiptRecord({
+      capture = await captureReceipt({
+        record: {
+          capturedBy: device.actor,
+          source: "mobile_capture",
+          sourceType: "paper_scanned",
+          uploadOrigin: "mobile",
+          deviceId: device.deviceId,
+          clientCaptureId,
+          capturedAtClient,
+          appVersion,
+          note,
+          paymentPath,
+          originalFilename: file.name,
+          originalR2Key: r2Key,
+          originalSha256: sha256,
+          originalContentType: contentType,
+          originalSizeBytes: file.size,
+          status: "captured",
+        },
+        file: { sha256, sizeBytes: file.size, contentType, filename: file.name },
+        r2Strategy: { kind: "uploaded" },
+        enqueue: true,
         actor: device.actor,
-        deviceId: device.deviceId,
-        clientCaptureId,
-        capturedAtClient,
-        appVersion,
-        note,
-        paymentPath,
-        originalFilename: file.name,
-        originalR2Key: r2Key,
-        originalSha256: sha256,
-        originalContentType: contentType,
-        originalSizeBytes: file.size,
       });
-    } catch (dbError) {
-      // If the unique index races against a concurrent retry, surface the
-      // already-saved receipt instead of leaving an orphan.
-      const existingOnRace = await findMobileReceiptByIdempotency(
-        device.deviceId,
-        clientCaptureId,
-      );
+    } catch (err) {
+      // Clean up the uploaded object (captureReceipt handles receipt rollback
+      // for a manifest failure; for an idempotency collision the row belongs to
+      // the concurrent winner). Then: collision + the winner exists → duplicate;
+      // anything else (CaptureManifestFailure, other DB error) → surface as error.
       try {
         await getReceiptsBucket().delete(r2Key);
       } catch {
         // best-effort
       }
-      if (existingOnRace) {
-        return NextResponse.json(
-          {
-            ok: true,
-            duplicate: true,
-            receiptId: existingOnRace.id,
-            status: existingOnRace.status,
-            reviewUrl: `/receipts/review/${existingOnRace.id}`,
-          },
-          { status: 200 },
+      if (err instanceof CaptureIdempotencyConflict) {
+        const existingOnRace = await findMobileReceiptByIdempotency(
+          device.deviceId,
+          clientCaptureId,
         );
+        if (existingOnRace) {
+          return NextResponse.json(
+            {
+              ok: true,
+              duplicate: true,
+              receiptId: existingOnRace.id,
+              status: existingOnRace.status,
+              reviewUrl: `/receipts/review/${existingOnRace.id}`,
+            },
+            { status: 200 },
+          );
+        }
       }
-      throw dbError;
-    }
-
-    // Audit finding A1: a failed manifest write previously left an orphan
-    // receipt_records row + R2 object. Mobile retries are normal (offline
-    // queue), but the idempotency key protects against re-running the
-    // compensating delete on a successful retry — by the time the retry
-    // lands, either the original failed (and was hard-deleted, so the
-    // idempotency lookup misses) or the original succeeded (no rollback).
-    try {
-      await createReceiptFile(getReceiptsDb(), {
-        objectType: "receipt",
-        objectId: receiptId,
-        role: "original",
-        r2Bucket: "receipts",
-        r2Key,
-        originalFilename: file.name,
-        contentType,
-        fileSizeBytes: file.size,
-        sha256Hash: sha256,
-        uploadedBy: device.actor,
-        isOriginal: true,
-      });
-    } catch (fileError) {
-      console.error(
-        "[mobile/receipts/upload] file manifest write failed — compensating delete",
-        fileError,
-      );
-      try {
-        await getReceiptsBucket().delete(r2Key);
-      } catch (r2CleanupError) {
-        console.error(
-          "[mobile/receipts/upload] R2 cleanup after manifest failure also failed",
-          r2CleanupError,
-        );
-      }
-      try {
-        await hardDeleteReceipt(
-          receiptId,
-          device.actor,
-          "manifest write failed during mobile upload",
-        );
-      } catch (deleteError) {
-        console.error(
-          "[mobile/receipts/upload] hardDeleteReceipt after manifest failure also failed — manual cleanup required",
-          deleteError,
-        );
-      }
-      return NextResponse.json(
-        {
-          ok: false,
-          error:
-            "Upload failed: file manifest could not be written. Receipt rolled back.",
-        },
-        { status: 500 },
-      );
-    }
-
-    // ADR 0001: enqueue the extraction job (best-effort). If the queue is
-    // unavailable the receipt stays captured/extraction_state='captured' and a
-    // backfill can pick it up — capture must not fail on queue errors.
-    const enqueuedAt = new Date().toISOString();
-    const enqueued = await enqueueExtractionJob(
-      buildExtractionJob({ receiptId, r2Key, contentType, enqueuedAt }),
-    );
-    if (enqueued) {
-      try {
-        await updateReceiptRecord(
-          receiptId,
-          { extractionState: "queued", extractionEnqueuedAt: enqueuedAt },
-          device.actor,
-        );
-      } catch (markError) {
-        console.error("[mobile/receipts/upload] mark-queued failed", markError);
-      }
+      throw err;
     }
 
     return NextResponse.json(
       {
         ok: true,
         duplicate: false,
-        receiptId,
+        receiptId: capture.receiptId,
         status: "captured",
-        extractionState: enqueued ? "queued" : "captured",
+        extractionState: capture.enqueued ? "queued" : "captured",
         pendingProcessing: true,
-        reviewUrl: `/receipts/review/${receiptId}`,
+        reviewUrl: `/receipts/review/${capture.receiptId}`,
       },
       { status: 201 },
     );

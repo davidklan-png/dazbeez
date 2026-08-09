@@ -20,6 +20,42 @@ import { generateR2Key, uploadOriginal } from "@/lib/receipts/storage";
 import { nowIso } from "@/lib/receipts/db-utils";
 import type { CreateReceiptInput } from "@/lib/receipts/types";
 
+/** Thrown when the receipt_records INSERT collides on the 0015 partial UNIQUE
+ *  index (device_id + client_capture_id both set) — a mobile-capture retry the
+ *  client already processed. The route catches this to return { duplicate: true }
+ *  rather than an error. Distinct from CaptureManifestFailure so the route's
+ *  catch cannot mistake a manifest failure for a race (#18 ii-c(b)). */
+export class CaptureIdempotencyConflict extends Error {
+  readonly kind = "CaptureIdempotencyConflict" as const;
+  constructor(message = "mobile capture idempotency conflict") {
+    super(message);
+    this.name = "CaptureIdempotencyConflict";
+  }
+}
+
+/** Thrown when the manifest (receipt_files) write fails after the receipt was
+ *  created — the receipt is compensating-deleted (hardDeleteReceipt) first, then
+ *  this is thrown. Typed so the route does NOT treat it as an idempotency race
+ *  (#18 ii-c(b)): a manifest failure must surface as an error, not duplicate. */
+export class CaptureManifestFailure extends Error {
+  readonly kind = "CaptureManifestFailure" as const;
+  constructor(
+    message = "manifest write failed during capture",
+    public readonly cause?: unknown,
+  ) {
+    super(message);
+    this.name = "CaptureManifestFailure";
+  }
+}
+
+/** True when a D1 error is the 0015 mobile-idempotency UNIQUE collision. D1/SQLite
+ *  surfaces it as "UNIQUE constraint failed: receipt_records.device_id, …".
+ *  Exported so the race-vs-manifest classification (#18 ii-c(b)) is unit-testable. */
+export function isMobileIdempotencyCollision(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /UNIQUE constraint/i.test(msg) && /device_id|client_capture_id/i.test(msg);
+}
+
 /** Manifest metadata for the original file. The bytes themselves are either
  *  already in R2 (`uploaded`) or read from the intake object (`intake-copy`),
  *  so this carries only what the manifest row needs. */
@@ -135,8 +171,17 @@ async function compensate(receiptId: string, actor: string, reason: string): Pro
 export async function captureReceipt(input: CaptureInput): Promise<CaptureResult> {
   const db = getReceiptsDb();
 
-  // (a) the receipt record — the sacred single insert path.
-  const receiptId = await createReceiptRecord(input.record, input.actor);
+  // (a) the receipt record — the sacred single insert path. A collision on the
+  // 0015 mobile-idempotency index (device_id+client_capture_id) throws
+  // CaptureIdempotencyConflict so the route returns { duplicate: true }; any
+  // other DB error propagates.
+  let receiptId: string;
+  try {
+    receiptId = await createReceiptRecord(input.record, input.actor);
+  } catch (err) {
+    if (isMobileIdempotencyCollision(err)) throw new CaptureIdempotencyConflict();
+    throw err;
+  }
 
   // Resolve the final standard key + (for intake-copy) move the object there.
   let r2Key: string;
@@ -179,7 +224,7 @@ export async function captureReceipt(input: CaptureInput): Promise<CaptureResult
       console.error("[captureReceipt] R2 cleanup after manifest failure also failed", r2Err);
     }
     await compensate(receiptId, input.actor, "manifest write failed during capture");
-    throw fileError;
+    throw new CaptureManifestFailure("manifest write failed during capture", fileError);
   }
 
   // (c) enqueue — BEST-EFFORT. Capture never fails because the queue is down;

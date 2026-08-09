@@ -52,6 +52,31 @@ import type {
 
 // ─── Receipt records ─────────────────────────────────────────────────────────
 
+/**
+ * preservation_status derived from lifecycle status — migration 0014's backfill
+ * CASE as the SINGLE authority (backlog #18 audit / #23). Both capture paths
+ * previously hardcoded a literal ('needs_review' / 'captured'), disagreeing with
+ * 0014's 'needs_metadata' for status='captured' — three answers for one concept,
+ * undetected because nothing reads the column. Pure + unit-tested; no path
+ * writes a preservation_status literal. (Existing rows are NOT backfilled here —
+ * see backlog #23 + its sealed-month question.)
+ */
+export function derivePreservationStatus(status: ReceiptStatus | undefined): string {
+  switch (status) {
+    case "archived":
+      return "archived";
+    case "exported":
+      return "exported";
+    case "reconciled":
+    case "reviewed":
+      return "reviewed";
+    case "captured":
+      return "needs_metadata";
+    default:
+      return "needs_review";
+  }
+}
+
 export async function createReceiptRecord(
   input: CreateReceiptInput,
   actor: string,
@@ -97,8 +122,9 @@ export async function createReceiptRecord(
          original_r2_key, original_sha256, original_content_type, original_size_bytes,
          legacy, retention_until, legal_hold,
          source_type, preservation_status, qualified_invoice_status,
-         created_at, updated_at, extraction_r2_key, needs_render)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 1, ?, 'needs_review', 'not_checked', ?, ?, ?, ?)`,
+         created_at, updated_at, extraction_r2_key, needs_render,
+         device_id, client_capture_id, captured_at_client, upload_origin)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 1, ?, ?, 'not_checked', ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .bind(
       id,
@@ -115,13 +141,8 @@ export async function createReceiptRecord(
       input.taxAmountMinor ?? null,
       input.businessPurpose ?? null,
       input.alcoholPresent ? 1 : 0,
-      // expense_type is deprecated (Expense Type field removed from the
-      // review form; category — expense_category_code — is now the single
-      // classification input). It's always "UNKNOWN" at insert time
-      // regardless (extraction never invents category, per ADR — see
-      // extraction.ts), so this branch never fired live. attendees_required
-      // is derived from category client-side (categoryRequiresAttendees in
-      // form-pane.tsx) rather than stored per-insert.
+      // attendees_required is derived client-side from category
+      // (categoryRequiresAttendees in form-pane.tsx), not stored per-insert.
       0,
       status,
       extractionState,
@@ -131,14 +152,25 @@ export async function createReceiptRecord(
       input.originalSizeBytes,
       retentionUntilIso(now),
       sourceType,
+      // preservation_status: derived from status via 0014's CASE — no literal
+      // on either path (backlog #18 audit / #23).
+      derivePreservationStatus(status),
       now,
       now,
       null, // extraction_r2_key — NULL until the Mac render completes (/render).
       // ADR 0011 Phase B: email_body receipts must be rendered to PDF/image on
       // the Mac before MLX extraction. needs_render=1 keeps them out of the
-      // pending-extraction query (and thus off month-close / backfill) until
-      // /render clears it and enqueues. Every other source is render-ready now.
+      // pending-extraction query until /render clears it and enqueues.
       sourceType === "email_body" ? 1 : 0,
+      // Mobile provenance (backlog #18 merge — createMobileReceiptRecord folded
+      // in). NULL for non-mobile captures; the 0015 partial UNIQUE index on
+      // (device_id, client_capture_id) only fires when both are NOT NULL, so
+      // non-mobile rows never collide. captureReceipt throws
+      // CaptureIdempotencyConflict on a collision so the route returns duplicate.
+      input.deviceId ?? null,
+      input.clientCaptureId ?? null,
+      input.capturedAtClient ?? null,
+      input.uploadOrigin ?? null,
     )
     .run();
 
@@ -147,7 +179,21 @@ export async function createReceiptRecord(
     action: "receipt.uploaded",
     objectType: "receipt",
     objectId: id,
-    newValueJson: stringifyJson({ paymentPath, expenseType, source: input.source ?? "upload" }),
+    // Superset (backlog #18 ii-c(a)): emit mobile provenance when present, so a
+    // mobile capture does not silently lose device_id/client_capture_id/
+    // app_version/note from this 10-year record's audit trail. app_version +
+    // note are audit-JSON ONLY (never columns) — a column diff is blind to them.
+    newValueJson: stringifyJson({
+      paymentPath,
+      expenseType,
+      source: input.source ?? "upload",
+      ...(input.sourceType ? { source_type: input.sourceType } : {}),
+      ...(input.uploadOrigin ? { upload_origin: input.uploadOrigin } : {}),
+      ...(input.deviceId ? { device_id: input.deviceId } : {}),
+      ...(input.clientCaptureId ? { client_capture_id: input.clientCaptureId } : {}),
+      ...(input.appVersion ? { app_version: input.appVersion } : {}),
+      ...(input.note ? { note: input.note } : {}),
+    }),
   });
 
   // ADR 0008 (was ADR 0006 PR #2): assign calendar-month membership at capture
