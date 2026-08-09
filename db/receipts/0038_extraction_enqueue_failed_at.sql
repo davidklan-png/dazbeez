@@ -1,0 +1,19 @@
+-- 0038_extraction_enqueue_failed_at.sql
+--
+-- Distinguish a queue OUTAGE from a forgotten enqueue (backlog #20). Before this
+-- column, both left a receipt at extraction_state='captured' with a NULL
+-- extraction_enqueued_at — indistinguishable, which is why the 2026-08-09
+-- three-receipt diagnosis needed a code read rather than a query.
+--
+-- captureReceipt() (lib/receipts/capture.ts, backlog #18) sets this when
+-- enqueueExtractionJob returns false (best-effort: capture must never fail
+-- because the queue is down). The dashboard pipeline-health surface reports it
+-- as a SEPARATE class 1b ("enqueue failed" — a retry) from class 1 ("never
+-- tried" — a code defect to report); folding them would dilute class 1's
+-- provable-not-heuristic property.
+--
+-- A nullable column, NOT a fourth extraction_state: a new state value would
+-- enter PENDING_EXTRACTION_STATES and touch every consumer (month-close gate,
+-- queue-items, review-attention, …). The column is local. Additive only; NULL
+-- when the enqueue succeeded or was never attempted (the needs_render path).
+ALTER TABLE receipt_records ADD COLUMN extraction_enqueue_failed_at TEXT;
