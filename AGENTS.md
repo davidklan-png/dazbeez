@@ -482,6 +482,110 @@ starts. Design consequences:
     (attachment), `promoteBodyIntake` (defers enqueue to `/render`). This is
     the AGENTS.md "boundary checks are the writer's job" failure at the level
     of a whole subsystem.
+    DECISIONS (2026-08-09, architect, on the worker's B2 proposal):
+    (i) Full `captureReceipt()` wrapper in `lib/receipts/capture.ts`, NOT a
+    thinner `completeCapture()` — one door, not a step you can skip.
+    (ii) **The real deliverable is enforcement, not the wrapper.** After the
+    refactor there must be exactly ONE importer of `createReceiptRecord`:
+    `lib/receipts/capture.ts`. Add a test that reads the source tree and
+    asserts that importer set. Without it the contract is convention, and
+    convention is what failed. This is the only part of #18 that protects the
+    NEXT path rather than the four current ones.
+    **PREMISE CORRECTED 2026-08-09 (worker finding).** #18 assumed
+    `createReceiptRecord` is the single insert path. It is not: there are TWO
+    `INSERT INTO receipt_records` — `db.ts:91` and `mobile-upload.ts:56`
+    (`createMobileReceiptRecord`, adding `device_id`, `client_capture_id`,
+    `captured_at_client`, `upload_origin`). The mobile route never imports
+    `createReceiptRecord`, so the importer test alone would PASS while the
+    mobile path bypassed the contract. Note `email-intake.ts:18` already said
+    "Do not add a second insert path" — migration 0015 added one anyway. A rule
+    in a comment, unenforced, silently violated.
+    So the test must assert BOTH: (1) exactly one `createReceiptRecord`
+    importer, AND (2) no `INSERT INTO receipt_records` outside `db.ts`.
+    Resolution = **Option A**: extend `CreateReceiptInput` +
+    `createReceiptRecord` with the optional mobile fields, delete
+    `createMobileReceiptRecord`, mobile route calls `captureReceipt`. Option B
+    (insert-then-UPDATE) is rejected on CORRECTNESS, not taste: the partial
+    UNIQUE index (`0015`, `WHERE device_id IS NOT NULL AND client_capture_id IS
+    NOT NULL`) only fires when both columns are set AT INSERT, so a
+    NULL-at-insert window lets two concurrent mobile uploads both succeed and
+    silently breaks idempotency.
+    (ii-b) **Merging the two INSERTs must not silently pick a winner.** Report a
+    column-by-column divergence audit before the merge lands. One is already
+    known: `preservation_status` is hardcoded `'needs_review'` in db.ts,
+    `'captured'` in mobile-upload.ts, while migration 0014's own backfill maps
+    `status='captured'` → `'needs_metadata'`. Three answers, no reader.
+    RULING: derive it from `status` using 0014's CASE as the single authority
+    (pure + unit-testable); do not hardcode either literal. Do NOT backfill
+    existing rows in this PR — that writes to every receipt including sealed
+    months and could trip the export-lock/finalized guards; file separately
+    (filed as #23).
+    (ii-c) **A column audit cannot see the real risks — they live AROUND the
+    INSERT.** Four behavioural divergences found 2026-08-09, two with teeth:
+    (a) **Audit payload.** Both emit action `receipt.uploaded`, but db.ts writes
+    `{paymentPath, expenseType, source}` while mobile writes eight fields
+    including `device_id`, `client_capture_id`, `app_version`, `note`.
+    `app_version` and `note` never reach `receipt_records` at all — they exist
+    only in the audit JSON, so a column-by-column diff is structurally blind to
+    them. The merged payload MUST be a superset or every mobile capture loses
+    device provenance from a 10-year tax record.
+    (b) **Error taxonomy.** `createMobileReceiptRecord` throws on the 0015
+    unique-index collision and the ROUTE (`app/api/mobile/receipts/upload/route.ts:98`)
+    catches it, looks up `findMobileReceiptByIdempotency`, deletes the R2
+    object, and returns 200 `{duplicate:true}`. `captureReceipt`'s manifest-LOUD
+    policy also throws (after `hardDeleteReceipt`), and that catch block cannot
+    tell the two apart — a manifest failure would be mis-handled as an
+    idempotency race and vice versa. `captureReceipt` MUST throw typed errors
+    (e.g. `CaptureIdempotencyConflict` vs `CaptureManifestFailure`) so the route
+    branches on cause, not on "something threw".
+    (c) After the merge the mobile path gains `assertTransactionMonthEditable`
+    (split lock, audit A5) and (d) `assignMembershipForReceipt` (ADR 0008).
+    Both are no-ops today because mobile inserts with no `transaction_date` —
+    recorded as deliberate findings, not assumptions.
+    (iii) Failure semantics stay deliberately different: manifest fails LOUD
+    (`hardDeleteReceipt` + throw), enqueue fails BEST-EFFORT. Do not unify.
+    (iv) `needs_render` opts out via an `enqueue: false` parameter, not a
+    branch on source type.
+    (v) #20 marker = nullable `extraction_enqueue_failed_at` column, NOT a
+    fourth `extraction_state` (which would enter `PENDING_EXTRACTION_STATES`
+    and touch every consumer). Migration is additive, no backfill, and ships in
+    the same PR as the code that writes it.
+    (vi) Surface it as a separate health class 1b, not folded into class 1 —
+    "never tried" is a code defect to report, "queue outage" is a retry, and
+    folding them dilutes class 1's provable-not-heuristic property.
+
+22. **Render-leg failures are stderr-only.** `process_renders`
+    (`scripts/receipts-consumer/consumer.py:955`) catches every exception and
+    prints to `~/Library/Logs/dazbeez/receipts-auto-promote-render.err.log`.
+    No D1 write, no `extraction_state='failed'`, no badge — a failing render
+    leg leaves receipts at `needs_render=1` silently and indefinitely. Backlog
+    #19's class 3 DETECTS the aging, but cannot name which receipt failed or
+    why. Note this is backlog #12 ("error-surfacing hardening", declared
+    CLOSED) not covering a path that shipped after it — the same
+    fix-applied-path-by-path pattern as #5 recurring in `promoteIntake` and
+    #9's backfill net missing never-extracted receipts. Design: mirror the
+    extraction leg — classify permanent render failures and POST a
+    processor-key-guarded endpoint that records the failure, so it surfaces
+    like `extraction_state='failed'` does.
+
+23. **`preservation_status` is a three-way inconsistency in existing rows —
+    backfill SEPARATELY (not in the capture-contract PR).** Found during the #18
+    column-by-column divergence audit: at insert, `createReceiptRecord`
+    hardcodes `'needs_review'`, `createMobileReceiptRecord` hardcodes
+    `'captured'`, and migration 0014's own backfill CASE maps
+    `status='captured' → 'needs_metadata'`. Three answers for one concept on a
+    10-year tax record, undetected because nothing reads the column. The
+    capture-contract merge FIXES the insert (derives `preservation_status` from
+    `status` via 0014's CASE as the single authority — pure, unit-tested, no
+    literal on either path), but deliberately does NOT backfill existing rows
+    in that PR. **Open question for the backfill (filed here, NOT resolved):**
+    a backfill writes to EVERY receipt including finalized/sealed statement
+    months, which could trip the export-lock / finalized-reconciliation guards
+    (a sealed month's rows are supposed to be immutable). Decide before
+    backfilling whether (a) `preservation_status` is exempt from those seals
+    (it's display-only — nothing reads it today), permitting a blanket UPDATE,
+    or (b) the backfill must respect the seal and skip/defer sealed-month rows.
+    Do NOT backfill until that is answered.
 
 19. **Never-enqueued receipts are undetectable — wire a pipeline health
     surface.** NOT DISPATCHED — same prompt as #18, Part A (do it FIRST).

@@ -8,11 +8,9 @@ import {
   type Source,
 } from "@/lib/receipts/upload-policy";
 import { generateR2Key, uploadOriginal } from "@/lib/receipts/storage";
-import { createReceiptRecord, hardDeleteReceipt, updateReceiptRecord } from "@/lib/receipts/db";
-import { createReceiptFile } from "@/lib/receipts/files";
+import { captureReceipt } from "@/lib/receipts/capture";
 import { ExportFinalizedError } from "@/lib/receipts/month-lock";
-import { buildExtractionJob, enqueueExtractionJob } from "@/lib/receipts/queue";
-import { getReceiptsBucket, getReceiptsDb } from "@/lib/cloudflare-runtime";
+import { getReceiptsBucket } from "@/lib/cloudflare-runtime";
 import type { PaymentPath } from "@/lib/receipts/types";
 
 async function sha256Hex(data: ArrayBuffer): Promise<string> {
@@ -80,10 +78,14 @@ export async function POST(request: Request) {
 
     await uploadOriginal(r2Key, bytes, contentType);
 
-    let receiptId: string;
+    // ADR 0001 + backlog #18: captureReceipt is the single door — createReceiptRecord
+    // (a) + the is_original manifest row (b) + enqueue (c), with manifest LOUD
+    // (compensating delete on failure) and enqueue best-effort. Nothing else
+    // imports createReceiptRecord (enforced by tests/receipts/capture-contract.test.ts).
+    let capture: { receiptId: string; enqueued: boolean };
     try {
-      receiptId = await createReceiptRecord(
-        {
+      capture = await captureReceipt({
+        record: {
           capturedBy: actor,
           source,
           sourceType,
@@ -94,105 +96,34 @@ export async function POST(request: Request) {
           originalSha256: sha256,
           originalContentType: contentType,
           originalSizeBytes: file.size,
-          // ADR 0001: capture path is async store-and-forward. The receipt lands
-          // as 'captured' (pending processing) and an extraction job is enqueued
-          // for the Mac MLX consumer to drain. No AI runs in the Worker.
           status: "captured",
         },
+        file: { sha256, sizeBytes: file.size, contentType, filename: file.name },
+        r2Strategy: { kind: "uploaded" },
+        enqueue: true,
         actor,
-      );
-    } catch (dbError) {
+      });
+    } catch (captureError) {
+      // captureReceipt handles manifest-failure rollback (hardDeleteReceipt +
+      // r2Key delete) internally. For a createReceiptRecord failure there is no
+      // receipt yet — clean up the object we uploaded.
       try {
         await getReceiptsBucket().delete(r2Key);
       } catch {
-        console.error("[receipts/upload] R2 cleanup failed after DB error", dbError);
+        console.error("[receipts/upload] R2 cleanup after capture failure", captureError);
       }
-      throw dbError;
-    }
-
-    // Manifest row for the original file. Audit finding A1: a failed
-    // manifest write previously left an orphan receipt_records row + R2
-    // object (15-orphan incident on 2026-07-04). Now we compensating-delete
-    // both and surface a 500 to the client. The desktop client renders an
-    // error tile (4a08f92); the queue enqueue below only runs on success.
-    try {
-      await createReceiptFile(getReceiptsDb(), {
-        objectType: "receipt",
-        objectId: receiptId,
-        role: "original",
-        r2Bucket: "receipts",
-        r2Key,
-        originalFilename: file.name,
-        contentType,
-        fileSizeBytes: file.size,
-        sha256Hash: sha256,
-        uploadedBy: actor,
-        isOriginal: true,
-      });
-    } catch (fileError) {
-      console.error(
-        "[receipts/upload] file manifest write failed — compensating delete",
-        fileError,
-      );
-      try {
-        await getReceiptsBucket().delete(r2Key);
-      } catch (r2CleanupError) {
-        console.error(
-          "[receipts/upload] R2 cleanup after manifest failure also failed",
-          r2CleanupError,
-        );
-      }
-      try {
-        await hardDeleteReceipt(
-          receiptId,
-          actor,
-          "manifest write failed during upload",
-        );
-      } catch (deleteError) {
-        console.error(
-          "[receipts/upload] hardDeleteReceipt after manifest failure also failed — manual cleanup required",
-          deleteError,
-        );
-      }
-      return NextResponse.json(
-        {
-          ok: false,
-          error:
-            "Upload failed: file manifest could not be written. Receipt rolled back.",
-        },
-        { status: 500 },
-      );
-    }
-
-    // ADR 0001: enqueue the extraction job. Best-effort — if the queue binding
-    // is missing or send fails, the receipt remains at status='captured' /
-    // extraction_state='captured' and a backfill can enqueue it later. Capture
-    // must never fail because the queue is unavailable.
-    const enqueuedAt = new Date().toISOString();
-    const enqueued = await enqueueExtractionJob(
-      buildExtractionJob({ receiptId, r2Key, contentType, enqueuedAt }),
-    );
-    if (enqueued) {
-      try {
-        await updateReceiptRecord(
-          receiptId,
-          { extractionState: "queued", extractionEnqueuedAt: enqueuedAt },
-          actor,
-        );
-      } catch (markError) {
-        console.error("[receipts/upload] mark-queued failed", markError);
-      }
+      throw captureError;
     }
 
     return NextResponse.json(
       {
         ok: true,
-        receiptId,
+        receiptId: capture.receiptId,
         status: "captured",
-        extractionState: enqueued ? "queued" : "captured",
+        extractionState: capture.enqueued ? "queued" : "captured",
         pendingProcessing: true,
         sourceType,
-        reviewUrl: `/receipts/review/${receiptId}`,
+        reviewUrl: `/receipts/review/${capture.receiptId}`,
       },
       { status: 201 },
     );

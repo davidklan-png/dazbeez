@@ -312,6 +312,11 @@ export interface ReceiptRecord {
   // Extraction queue state (0016_extraction_queue.sql, ADR 0001)
   extraction_state?: ExtractionState;
   extraction_enqueued_at?: string | null;
+  // Backlog #20 (0038): set when enqueueExtractionJob returned false, so a queue
+  // outage is distinguishable from a forgotten enqueue (both otherwise look like
+  // captured + enqueued_at NULL). NULL when the enqueue succeeded or was never
+  // attempted (needs_render path). See lib/receipts/capture.ts.
+  extraction_enqueue_failed_at?: string | null;
   extraction_processed_at?: string | null;
   extraction_attempts?: number;
   extraction_processor?: string | null;
@@ -707,6 +712,20 @@ export interface CreateReceiptInput {
   // synchronous path). The async capture path (ADR 0001) passes 'captured',
   // which also seeds extraction_state='captured' (pending processing).
   status?: ReceiptStatus;
+  // Mobile-capture provenance (backlog #18 merge — createMobileReceiptRecord's
+  // divergent INSERT folded in). device_id/client_capture_id/captured_at_client/
+  // upload_origin are written to receipt_records columns; the 0015 partial
+  // UNIQUE index on (device_id, client_capture_id) enforces idempotency AT
+  // INSERT (so it fires for mobile, never for non-mobile where both are NULL).
+  // app_version/note are audit-JSON ONLY (never columns) — the receipt.uploaded
+  // audit emits them when present, or mobile captures lose device provenance
+  // (same class of loss the promote path guards against via SPF/DKIM).
+  deviceId?: string;
+  clientCaptureId?: string;
+  capturedAtClient?: string | null;
+  uploadOrigin?: string;
+  appVersion?: string | null;
+  note?: string | null;
 }
 
 export interface UpdateReceiptInput {
