@@ -169,6 +169,59 @@ export function filterReviewQueue(
   }
 }
 
+/** Resolve the active receipt's position + neighbours in a queue working set.
+ *
+ *  Pure counterpart to the page's findIndex-based nav. Returns `index: null`
+ *  (with null neighbours) when `activeId` is NOT in `items` — the case where the
+ *  receipt has left the working set (e.g. an undated capture that extracted into
+ *  a prior month, or a shared deep link crossing a month boundary). Callers MUST
+ *  treat `null` as "not in this view": render no fabricated position and disable
+ *  queue navigation, rather than falling back to `items[0]` (the original
+ *  defect — backlog #17). `index` is 0-based; UIs render `index + 1` ("3 of 23").
+ *  Accepts any `{ id }`-shaped item so it is unit-testable without QueueItem. */
+export function resolveQueueNavigation(
+  items: ReadonlyArray<{ id: string }>,
+  activeId: string,
+): { index: number | null; nextId: string | null; prevId: string | null } {
+  const index = items.findIndex((i) => i.id === activeId);
+  if (index < 0) return { index: null, nextId: null, prevId: null };
+  return {
+    index,
+    nextId: items[index + 1]?.id ?? null,
+    prevId: items[index - 1]?.id ?? null,
+  };
+}
+
+/** The "switch to its month" target for a receipt that has left the working set:
+ *  its transaction_date's YYYY-MM, but only when that differs from the current
+ *  scope's month — so a tab-filtered receipt in the SAME month (and the "all
+ *  months" view, where monthScope is undefined) does not get a misleading link.
+ *  Returns null when there is no useful target (undated, same month, or in view).
+ *  Pure. */
+export function switchToMonthTarget(args: {
+  inView: boolean;
+  receiptMonth: string | null;
+  scopeMonth: string | undefined;
+}): string | null {
+  if (args.inView) return null;
+  if (!args.receiptMonth || !args.scopeMonth) return null;
+  return args.receiptMonth !== args.scopeMonth ? args.receiptMonth : null;
+}
+
+const REVIEW_MONTH_NAMES: readonly string[] = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
+
+/** Format a YYYY-MM as a friendly English label ("July 2026") for the
+ *  "View in <month>" affordance. Falls back to the raw value if malformed. Pure. */
+export function formatReviewMonthLabel(month: string): string {
+  const m = /^(\d{4})-(\d{2})$/.exec(month);
+  if (!m) return month;
+  const idx = Number(m[2]) - 1;
+  return idx >= 0 && idx <= 11 ? `${REVIEW_MONTH_NAMES[idx]} ${m[1]}` : month;
+}
+
 /** The effective month label/value for the SubHeader + picker: 'all', or the
  *  month scope (current calendar month when on the default / no param). */
 export function effectiveReviewMonth(

@@ -119,8 +119,41 @@ When Claude Code runs in a cloud sandbox (e.g. claude.ai/code web session) the c
 
 ## Verification
 1. Run `npm run build:cf` before shipping deployment changes
-2. For Cloudflare runtime checks, run `npm run cf:dev`
+2. For Cloudflare runtime checks, run `npm run cf:dev` (boot/routing/auth-gating
+   only — local miniflare bindings, NOT real data; see Mac M4 note above)
 3. Smoke-test the deployment with `bash scripts/check-deployment.sh <base-url>`
+4. **Open the affected screen in the live app, signed in, and read the state the
+   operator sees.** Required, not optional — see below.
+
+### Step 4: open it and look
+
+Steps 1–3 prove the code compiles, the worker boots, and the routes answer.
+None of them prove the receipt is *right*. Every defect found on 2026-08-09 was
+invisible to steps 1–3 and to diff review:
+
+- `promoteIntake` never enqueued extraction — found by a D1 state query, not by
+  reading the promote path.
+- `promoteIntake` never wrote the `receipt_files` manifest row — found by
+  opening the receipt and seeing a `missing_receipt` blocker next to a rendered
+  87 KB PDF. It survived a careful architect review of that exact function,
+  because the review was checking the change against its spec, and the omission
+  was in what the function *didn't* do.
+- Backlog #17 (fake queue position) was observed firing in production during
+  the same session, on the ordinary flow — not the rare trigger it was filed
+  under.
+
+So: after deploying anything that touches receipt state, open the affected
+receipt/queue/month in the browser and check the blocker list, the badges, the
+counts, and the field values — not merely that the page renders. A screen that
+loads is not a screen that is correct.
+
+Whoever closes the task does this. In the two-agent split the ARCHITECT also
+does it independently before signing off; verification that only reads the
+worker's report inherits the worker's blind spots.
+
+A useful heuristic for what to look at: pick the invariant the change was
+supposed to establish, and find the place in the UI where its violation would
+be visible. If there is no such place, that absence is itself a finding.
 
 ## Cloudflare Plan & CPU Budget (root cause of 2026-07-04 Error 1102s)
 
@@ -390,12 +423,26 @@ starts. Design consequences:
     `Math.max(1, activeIndex + 1)` then renders a false **"1 of N"**, and
     `nextReceiptId` resolves to `queueItems[0]` — so Skip and save-and-advance
     jump into an unrelated queue. (`prevReceiptId` is harmless: `[-2]` →
-    undefined.) Live trigger is a **shared deep link crossing a month
-    boundary**: rail hrefs come from `buildReviewQueryParams`, which only emits
-    `month` when the operator used the month picker, so a link copied from the
-    default view carries none — after the calendar month rolls over the
-    recipient's rail is the new month and both bugs fire. Now reachable in
-    practice: receipt links are being shared with a second Clerk user
+    undefined.)
+    **OBSERVED LIVE IN PRODUCTION 2026-08-09 — the filed trigger was wrong.**
+    This was filed as a latent bug gated behind a rare sharing scenario. It is
+    routine. Observed with no deep link, no second user, and no month picker:
+    the three recovered `email_attachment` receipts were undated (so they sat in
+    the default Aug-2026 working set); extraction backfilled transaction dates of
+    Jul 22 / Jul 26 / Jul 31; all three immediately left the Aug working set
+    while one was still the open receipt. The page then rendered a fabricated
+    **"1 of 1"** / "0 of 1 done" while the rail held only an unrelated receipt,
+    and `nextReceiptId` pointed at that unrelated receipt — so `s` (save &
+    advance) would have jumped queues. **Any undated capture that extracts into
+    a prior month reproduces this**, which is the normal path for anything
+    captured near a month boundary or recovered after a delay. Re-prioritize
+    accordingly, and do NOT let an implementer test only the deep-link path.
+    The original (still valid, but secondary) trigger: a **shared deep link
+    crossing a month boundary** — rail hrefs come from `buildReviewQueryParams`,
+    which only emits `month` when the operator used the month picker, so a link
+    copied from the default view carries none — after the calendar month rolls
+    over the recipient's rail is the new month and both bugs fire. Also reachable
+    in practice: receipt links are being shared with a second Clerk user
     (2026-08-04 decision — Clerk account + existing protected deep link;
     a signed capability-link design was assessed and rejected: third principal
     class, scoped PATCH, unauthenticated R2 read path, seal-guard

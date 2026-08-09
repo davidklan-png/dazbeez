@@ -31,6 +31,7 @@ import {
   canPromoteToReviewed,
 } from "@/lib/receipts/receipt-status-policy";
 import { resolveWorkMonth, withWorkMonth } from "@/lib/receipts/work-month";
+import { formatReviewMonthLabel } from "@/lib/receipts/review-queue-filter";
 import type {
   PaymentPath,
   ReceiptAttendee,
@@ -45,8 +46,11 @@ const SAVE_DEBOUNCE_MS = 450;
 export interface FormPaneProps {
   receipt: ReceiptRecord;
   initialAttendees: ReceiptAttendee[];
-  queueIndex: number; // 1-based for "3 of 23"
+  queueIndex: number | null; // 1-based for "3 of 23"; null when not in the working set
   queueTotal: number;
+  /** "View in <its month>" target when the receipt is out of the working set
+   *  because its transaction_date is in a different month (backlog #17). */
+  switchToMonth?: string | null;
   nextReceiptId: string | null;
   prevReceiptId: string | null;
   hasAmexMatch: boolean;
@@ -94,6 +98,11 @@ export function FormPane(props: FormPaneProps) {
   const queueIndex = queuePos.index >= 0 ? queuePos.index : props.queueIndex;
   const queueTotal = queuePos.index >= 0 ? queuePos.total : props.queueTotal;
   const nextReceiptId = queuePos.index >= 0 ? queuePos.nextId : props.nextReceiptId;
+  // null when the receipt is outside the working set (queuePos missed it AND the
+  // server passed null — backlog #17: an undated capture that extracted into a
+  // prior month). Render "not in this view" and disable save-and-advance + Skip
+  // rather than fabricating a position / navigating to queueItems[0].
+  const inView = queueIndex !== null;
 
   // OCR runs on the Mac processor, not here. While the receipt is still pending
   // there is no stored OCR text, so the reprocess button (which only re-parses
@@ -445,7 +454,7 @@ export function FormPane(props: FormPaneProps) {
       // Same shared gate as the button (canMarkReviewed): a reconciled/reviewed/
       // exported/archived receipt must not save-and-advance through a shortcut
       // presented as "Mark reviewed" (architect review 2026-07-21).
-      if (!canMarkReviewed(receipt.status, isLocked)) return;
+      if (!canMarkReviewed(receipt.status, isLocked) || !inView) return;
       e.preventDefault();
       onMarkReviewed();
     },
@@ -521,8 +530,16 @@ export function FormPane(props: FormPaneProps) {
           <span>{transactionLabel}</span>
           <span>·</span>
           <span>
-            {queueIndex} of {queueTotal}
+            {queueIndex !== null ? `${queueIndex} of ${queueTotal}` : "not in this view"}
           </span>
+          {!inView && props.switchToMonth && (
+            <Link
+              href={`/receipts/review/${receipt.id}?month=${props.switchToMonth}`}
+              className="font-medium text-amber-600 underline-offset-2 hover:text-amber-700 hover:underline"
+            >
+              View in {formatReviewMonthLabel(props.switchToMonth)}
+            </Link>
+          )}
         </div>
       </header>
 
@@ -792,7 +809,7 @@ export function FormPane(props: FormPaneProps) {
             kind="primary"
             size="md"
             onClick={onMarkReviewed}
-            disabled={!canMarkReviewed(receipt.status, isLocked)}
+            disabled={!canMarkReviewed(receipt.status, isLocked) || !inView}
             rightIcon={<ArrowRightIcon size={14} className="text-white" />}
           >
             Mark reviewed → next
