@@ -7,8 +7,8 @@ import type { ClosingAttentionCode } from "@/lib/receipts/attention-codes";
 /** Audit B6 / Task 4: per-receipt "stuck?" threshold for the review queue.
  *  Receipts pending extraction older than this get an amber badge in the
  *  rail so the operator notices a stalled consumer immediately, not at
- *  month-close. Distinct from STALE_PENDING_MS in extraction-state.ts (20m
- *  header-chip threshold); this is a louder, per-row surface. */
+ *  month-close. Distinct from STALE_PENDING_MS in pipeline-health.ts (20m
+ *  dashboard pipeline-health threshold); this is a louder, per-row surface. */
 const STUCK_PENDING_MS = 30 * 60 * 1000;
 
 export type QueueItem = {

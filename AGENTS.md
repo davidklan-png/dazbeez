@@ -416,8 +416,19 @@ starts. Design consequences:
     booking, whether the system's derived deductible is authoritative or
     informational).
 
-17. **Review screen fakes queue position for out-of-view receipts.** NOT
-    DISPATCHED — spec ready at `prompts/WORKER-PROMPT-share-receipt-link.md`.
+17. **Review screen fakes queue position for out-of-view receipts.** DONE —
+    CLOSED 2026-08-09 (PR #163, commits 00b9a09 + 9e6b9d8, master 37cb88c,
+    deployed and verified live by the architect per §Verification Step 4).
+    Pure `resolveQueueNavigation` + nullable `queueIndex` + "not in this view";
+    the working set was NOT widened. A server-derived **"View in July 2026"**
+    link (`switchToMonthTarget`, suppressed for same-month / all-months /
+    undated) turns the dead end into a route and delivers what the CUT
+    Copy-link button was for, closing that design thread. Known acceptable gap:
+    a receipt filtered out by *Closing scope* rather than month shows
+    "not in this view" with no link — the remedy there is switching the tab, so
+    a month link would mislead. Original spec was at
+    `prompts/WORKER-PROMPT-share-receipt-link.md`; the corrected one is
+    `prompts/WORKER-PROMPT-queue-position-out-of-view.md`. History below.
     In `review/[id]/page.tsx`, `activeIndex = queueItems.findIndex(...)` is
     `-1` when the active receipt isn't in the working set;
     `Math.max(1, activeIndex + 1)` then renders a false **"1 of N"**, and
@@ -455,6 +466,58 @@ starts. Design consequences:
     button + share-URL builder were designed and CUT in the same pass: ordinary
     right-click-copy covers the common cases and the button's only real value
     was pinning the month, i.e. a workaround for this bug.
+
+18. **Capture completeness is not a contract — unify the four capture paths.**
+    NOT DISPATCHED — spec at `prompts/WORKER-PROMPT-capture-contract.md`.
+    `createReceiptRecord` is fiercely single-sourced ("Do not add a second
+    insert path"), but the *rest* of a capture — the `is_original`
+    `receipt_files` row and the extraction enqueue — is a hand-rolled sequence
+    copy-pasted into each route. On 2026-08-09 `promoteIntake`'s attachment
+    branch was found to have omitted **both** (fixed: 2f2474f, 1cea51c). A
+    fourth capture path was added and simply forgot; a fifth will too. The
+    invariant to make structural: **a capture is not complete until the receipt
+    has (a) a row, (b) an `is_original` `receipt_files` row, and (c) EITHER an
+    enqueued extraction job OR `needs_render=1`.** Paths:
+    `/api/receipts/upload`, `/api/mobile/receipts/upload`, `promoteIntake`
+    (attachment), `promoteBodyIntake` (defers enqueue to `/render`). This is
+    the AGENTS.md "boundary checks are the writer's job" failure at the level
+    of a whole subsystem.
+
+19. **Never-enqueued receipts are undetectable — wire a pipeline health
+    surface.** NOT DISPATCHED — same prompt as #18, Part A (do it FIRST).
+    `getExtractionHealth` (`lib/receipts/extraction-state.ts:69`) is written
+    and unit-tested but imported by **nothing outside its own test**, and it
+    reads `pendingProcessingReceipts`, which excludes `needs_render`. So the
+    system has no surface for "the pipeline is not draining." The 2026-08-09
+    receipts sat 6 days; the only signal was a per-row `stuck?` badge in one
+    rail, and the operator found them by eye. Three distinct failure classes
+    need covering, the first of which is **provable, not heuristic**:
+    (a) `extraction_state='captured' AND extraction_enqueued_at IS NULL AND
+    needs_render=0` → no consumer will ever see this receipt;
+    (b) pending with `enqueued_at` set and older than the consumer interval →
+    consumer stalled; (c) `needs_render=1` aging → render leg stalled
+    (its failures are stderr-only in `process_renders`, never written to D1).
+    Related: `receipt_files`-count zero is a fourth invariant already computed
+    by `countReceiptFilesByObjectIds`.
+
+20. **Enqueue failure and never-enqueued are indistinguishable in D1.**
+    `enqueueExtractionJob` returns `false` on failure and callers then leave
+    `extraction_state='captured'` with a null `extraction_enqueued_at` — byte
+    for byte what a missing enqueue call produces. A queue outage and a code
+    path that forgot to enqueue cannot be told apart after the fact. Wants a
+    distinct marker (a timestamp column or a fourth `extraction_state`); fold
+    into #18 rather than shipping alone.
+
+21. **`/extract` doesn't recompute compliance.** Observed 2026-08-09: after the
+    consumer wrote merchant/date/amount, `receipt_compliance_checks` still
+    showed `missing_receipt` / `missing_transaction_date` / `missing_amount`
+    OPEN until the review page was loaded and `runComplianceChecksForReceipt`
+    refreshed them. Pre-existing, not introduced by that session's fixes, and
+    self-healing on operator visit — but it means any dashboard or gate reading
+    persisted compliance rows (rather than recomputing) can be stale by exactly
+    one review-page load. Decide whether compliance should be recomputed at the
+    end of `/extract` or whether every consumer of those rows must recompute.
+    Low urgency; the month-close gate recomputes.
 
 ## Two-Agent Workflow: Sandbox (Architect) vs. CLI (Worker)
 
