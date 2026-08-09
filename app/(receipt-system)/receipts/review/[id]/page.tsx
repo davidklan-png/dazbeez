@@ -14,6 +14,7 @@ import { buildQueueItems } from "@/lib/receipts/queue-items";
 import { ImagePane } from "@/components/receipts/review/image-pane";
 import { FormPane } from "@/components/receipts/review/form-pane";
 import { listOpenExportMonths, naturalMonthForDate } from "@/lib/receipts/membership";
+import { transactionMonthOf } from "@/lib/receipts/month-lock";
 import { getReceiptLocks, UNLOCKED_RECEIPT } from "@/lib/receipts/receipt-locks";
 import { collectClosingAttentionReasons } from "@/lib/receipts/review-attention";
 import { loadClosingScopeWorkingSet } from "@/lib/receipts/review-scope";
@@ -28,6 +29,7 @@ import {
   resolveQueueNavigation,
   resolveReviewMonthScope,
   resolveReviewScope,
+  switchToMonthTarget,
   type ReviewScope,
 } from "@/lib/receipts/review-queue-filter";
 import {
@@ -176,6 +178,15 @@ async function renderReceiptPage(
   const nav = resolveQueueNavigation(queueItems, id);
   const nextReceiptId = nav.nextId;
   const prevReceiptId = nav.prevId;
+  // "View in <its month>" affordance for a receipt that has left the working set
+  // (backlog #17): the target is its transaction_date's YYYY-MM, but only when
+  // that differs from the current scope — a tab-filtered receipt in the SAME
+  // month, or the "all months" view, gets no link.
+  const switchToMonth = switchToMonthTarget({
+    inView: nav.index !== null,
+    receiptMonth: transactionMonthOf(receipt.transaction_date),
+    scopeMonth: monthScope,
+  });
 
   const needsAttention = workingReceipts.filter(
     (r) => !locks.get(r.id)?.locked && attentionIds.has(r.id),
@@ -231,6 +242,7 @@ async function renderReceiptPage(
             initialAttendees={attendees}
             queueIndex={nav.index === null ? null : nav.index + 1}
             queueTotal={queueItems.length}
+            switchToMonth={switchToMonth}
             nextReceiptId={nextReceiptId}
             prevReceiptId={prevReceiptId}
             hasAmexMatch={activeFlags?.hasMatch ?? false}

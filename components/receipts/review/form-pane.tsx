@@ -31,6 +31,7 @@ import {
   canPromoteToReviewed,
 } from "@/lib/receipts/receipt-status-policy";
 import { resolveWorkMonth, withWorkMonth } from "@/lib/receipts/work-month";
+import { formatReviewMonthLabel } from "@/lib/receipts/review-queue-filter";
 import type {
   PaymentPath,
   ReceiptAttendee,
@@ -47,6 +48,9 @@ export interface FormPaneProps {
   initialAttendees: ReceiptAttendee[];
   queueIndex: number | null; // 1-based for "3 of 23"; null when not in the working set
   queueTotal: number;
+  /** "View in <its month>" target when the receipt is out of the working set
+   *  because its transaction_date is in a different month (backlog #17). */
+  switchToMonth?: string | null;
   nextReceiptId: string | null;
   prevReceiptId: string | null;
   hasAmexMatch: boolean;
@@ -528,6 +532,14 @@ export function FormPane(props: FormPaneProps) {
           <span>
             {queueIndex !== null ? `${queueIndex} of ${queueTotal}` : "not in this view"}
           </span>
+          {!inView && props.switchToMonth && (
+            <Link
+              href={`/receipts/review/${receipt.id}?month=${props.switchToMonth}`}
+              className="font-medium text-amber-600 underline-offset-2 hover:text-amber-700 hover:underline"
+            >
+              View in {formatReviewMonthLabel(props.switchToMonth)}
+            </Link>
+          )}
         </div>
       </header>
 

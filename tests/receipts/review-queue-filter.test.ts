@@ -9,11 +9,13 @@ import {
   filterReviewQueue,
   isConcreteMonth,
   mergeMonthOptions,
+  formatReviewMonthLabel,
   normalizeReviewFilter,
   parseReviewScope,
   resolveQueueNavigation,
   resolveReviewMonthScope,
   resolveReviewScope,
+  switchToMonthTarget,
 } from "@/lib/receipts/review-queue-filter";
 import { currentCalendarMonth } from "@/lib/receipts/month-lock";
 import type { ReceiptRecord } from "@/lib/receipts/types";
@@ -371,5 +373,53 @@ test("resolveQueueNavigation: first position → prevId null; last position → 
     nextId: null,
     prevId: "b",
   });
+});
+
+// ─── switchToMonthTarget + formatReviewMonthLabel ("View in <month>" link) ──
+
+test("switchToMonthTarget: out of view + different month → that month", () => {
+  assert.equal(
+    switchToMonthTarget({ inView: false, receiptMonth: "2026-07", scopeMonth: "2026-08" }),
+    "2026-07",
+  );
+});
+
+test("switchToMonthTarget: in view → null (no link needed)", () => {
+  assert.equal(
+    switchToMonthTarget({ inView: true, receiptMonth: "2026-07", scopeMonth: "2026-08" }),
+    null,
+  );
+});
+
+test("switchToMonthTarget: out of view but SAME month (tab-filtered) → null", () => {
+  assert.equal(
+    switchToMonthTarget({ inView: false, receiptMonth: "2026-08", scopeMonth: "2026-08" }),
+    null,
+  );
+});
+
+test("switchToMonthTarget: out of view, undated (no receiptMonth) → null", () => {
+  assert.equal(
+    switchToMonthTarget({ inView: false, receiptMonth: null, scopeMonth: "2026-08" }),
+    null,
+  );
+});
+
+test("switchToMonthTarget: 'all months' view (scopeMonth undefined) → null", () => {
+  assert.equal(
+    switchToMonthTarget({ inView: false, receiptMonth: "2026-07", scopeMonth: undefined }),
+    null,
+  );
+});
+
+test("formatReviewMonthLabel: YYYY-MM → '<Month> <Year>'", () => {
+  assert.equal(formatReviewMonthLabel("2026-07"), "July 2026");
+  assert.equal(formatReviewMonthLabel("2026-01"), "January 2026");
+  assert.equal(formatReviewMonthLabel("2026-12"), "December 2026");
+});
+
+test("formatReviewMonthLabel: malformed → raw input", () => {
+  assert.equal(formatReviewMonthLabel("2026-7"), "2026-7");
+  assert.equal(formatReviewMonthLabel("all"), "all");
 });
 
