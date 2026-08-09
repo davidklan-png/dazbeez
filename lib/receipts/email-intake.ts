@@ -18,8 +18,17 @@
 // existing insert path. Do not add a second insert path into receipt_records.
 
 import { getReceiptsDb, getReceiptsBucket } from "@/lib/cloudflare-runtime";
-import { createReceiptRecord } from "@/lib/receipts/db";
+import {
+  createReceiptRecord,
+  hardDeleteReceipt,
+  updateReceiptRecord,
+} from "@/lib/receipts/db";
 import { createAuditEntry } from "@/lib/receipts/audit";
+import {
+  buildExtractionJob,
+  enqueueExtractionJob,
+  type ExtractionJob,
+} from "@/lib/receipts/queue";
 import { nowIso, newUuid, stringifyJson } from "@/lib/receipts/db-utils";
 import {
   generateR2Key,
@@ -27,7 +36,7 @@ import {
   sanitizeFilenameForR2,
   computeSha256Hex,
 } from "@/lib/receipts/storage";
-import { createReceiptFile } from "@/lib/receipts/files";
+import { createReceiptFile, type CreateReceiptFileInput } from "@/lib/receipts/files";
 import {
   ALLOWED_RECEIPT_MIME_TYPES,
   ALLOWED_RECEIPT_EXTENSIONS,
@@ -452,6 +461,62 @@ export function buildPromoteReceiptInput(intake: EmailReceiptIntake): CreateRece
 }
 
 /**
+ * Build the extraction job for a just-promoted attachment receipt — the pure
+ * half of promoteIntake's enqueue step, the way buildPromoteReceiptInput is the
+ * pure half of its createReceiptRecord step. r2Key is the STANDARD receipts/...
+ * key the object was copied to in step 2 — NEVER the intake key, which step 5
+ * deletes (the consumer would otherwise fetch a key about to vanish). Exported
+ * so that invariant is unit-testable without exercising the binding-coupled
+ * promoteIntake body, exactly as buildPromoteReceiptInput is tested while
+ * createReceiptRecord is not.
+ */
+export function buildPromoteExtractionJob(input: {
+  receiptId: string;
+  standardKey: string;
+  intakeContentType: string | null;
+}): ExtractionJob {
+  return buildExtractionJob({
+    receiptId: input.receiptId,
+    r2Key: input.standardKey,
+    contentType: input.intakeContentType ?? "application/octet-stream",
+  });
+}
+
+/**
+ * Build the is_original receipt_files manifest row input for a just-promoted
+ * attachment receipt — the OTHER pure half of promoteIntake (alongside
+ * buildPromoteReceiptInput and buildPromoteExtractionJob). r2Key is the STANDARD
+ * receipts/... key from step 3, NEVER the intake key (r2_key is UNIQUE and step
+ * 5 deletes the intake object), and isOriginal is always true — the attachment
+ * IS the receipt's true original, mirroring promoteBodyIntake. Exported so the
+ * standard-key + isOriginal invariants are unit-testable without exercising the
+ * binding-coupled promoteIntake body. Before this, the attachment branch wrote
+ * the receipt but never its manifest row — leaving email_attachment receipts
+ * with zero file rows, which blocks month finalize under the proofs gate.
+ */
+export function buildPromoteFileInput(args: {
+  receiptId: string;
+  standardKey: string;
+  intake: EmailReceiptIntake;
+  fileSizeFallbackBytes: number;
+  actor: string;
+}): CreateReceiptFileInput {
+  return {
+    objectType: "receipt",
+    objectId: args.receiptId,
+    role: "original",
+    r2Bucket: "receipts",
+    r2Key: args.standardKey,
+    originalFilename: args.intake.attachment_filename ?? "attachment",
+    contentType: args.intake.attachment_content_type ?? "application/octet-stream",
+    fileSizeBytes: args.intake.attachment_size_bytes ?? args.fileSizeFallbackBytes,
+    sha256Hash: args.intake.attachment_sha256 as string,
+    uploadedBy: args.actor,
+    isOriginal: true,
+  };
+}
+
+/**
  * Refuse promotion for rows that have nothing to promote or are no longer
  * pending. Throws a plain Error whose message is safe to surface as 409 body.
  * ADR 0011 Phase B: a body-only row (no attachment, but a captured text/html
@@ -684,6 +749,85 @@ export async function promoteIntake(
     )
     .bind(standardKey, now, receiptId)
     .run();
+
+  // 3.5. Write the is_original receipt_files manifest row — the OTHER step the
+  //      body branch (promoteBodyIntake) performs that this branch had skipped
+  //      (same divergence root cause as the enqueue). r2_key is the standard key
+  //      (UNIQUE; the intake key is deleted in step 5). Ordered BEFORE the
+  //      enqueue (3.6) so a fast consumer drain can't outrun the manifest, and
+  //      before the intake flip (step 4) so a failure here leaves the intake row
+  //      re-promotable. Unlike the enqueue (best-effort), a manifest-write
+  //      failure fails LOUDLY (backlog #5 / audit A1): the proofs gate counts
+  //      file rows (validateMonthReadyForExportCore), so a half-promoted receipt
+  //      with no manifest row would silently block month finalize. Follow the
+  //      upload-route precedent — compensating-delete the R2 object + receipt
+  //      and throw, rather than leave a half-promoted row.
+  try {
+    await createReceiptFile(
+      db,
+      buildPromoteFileInput({
+        receiptId,
+        standardKey,
+        intake,
+        fileSizeFallbackBytes: bytes.byteLength,
+        actor,
+      }),
+    );
+  } catch (fileError) {
+    console.error(
+      "[promoteIntake] file manifest write failed — compensating delete",
+      fileError,
+    );
+    try {
+      await bucket.delete(standardKey);
+    } catch (r2Err) {
+      console.error(
+        "[promoteIntake] R2 cleanup after manifest failure also failed",
+        r2Err,
+      );
+    }
+    try {
+      await hardDeleteReceipt(
+        receiptId,
+        actor,
+        "manifest write failed during email-attachment promote",
+      );
+    } catch (deleteErr) {
+      console.error(
+        "[promoteIntake] hardDeleteReceipt after manifest failure also failed — manual cleanup required",
+        deleteErr,
+      );
+    }
+    throw fileError;
+  }
+
+  // 3.6. Enqueue the extraction job for the Mac MLX consumer (ADR 0001). Same
+  //      best-effort contract as /api/receipts/upload: a missing/failing queue
+  //      must NOT fail the promotion — the receipt stays at
+  //      extraction_state='captured' for the /enqueue recovery endpoint to pick
+  //      up later. buildPromoteExtractionJob sets r2Key = the standard key from
+  //      step 3 (NEVER the intake key, which step 5 deletes — unit-tested), and
+  //      the enqueue happens AFTER the original_r2_key patch so the consumer
+  //      can never fetch a key that step 5 is about to delete. Before this
+  //      step, every email_attachment receipt sat at captured/never-enqueued
+  //      forever (3 stranded on 2026-08-03).
+  const job = buildPromoteExtractionJob({
+    receiptId,
+    standardKey,
+    intakeContentType: intake.attachment_content_type,
+  });
+  const enqueued = await enqueueExtractionJob(job);
+  if (enqueued) {
+    try {
+      await updateReceiptRecord(
+        receiptId,
+        { extractionState: "queued", extractionEnqueuedAt: job.enqueuedAt },
+        actor,
+      );
+    } catch (markError) {
+      console.error("[promoteIntake] mark-queued failed", markError);
+    }
+  }
 
   // 4. Flip the intake row (idempotent guard on status). Null the intake key —
   //    the object was moved to the standard key.

@@ -18,6 +18,8 @@ import {
   listPendingIntake,
   rejectIntake,
   buildPromoteReceiptInput,
+  buildPromoteExtractionJob,
+  buildPromoteFileInput,
   assertPromotable,
   isBodyOnlyIntake,
 } from "@/lib/receipts/email-intake";
@@ -525,6 +527,103 @@ test("buildPromoteReceiptInput: copies R2 metadata from the intake row", () => {
   assert.equal(input.originalContentType, "application/pdf");
   assert.equal(input.originalSizeBytes, 99);
   assert.equal(input.originalFilename, "f.pdf");
+});
+
+// ─── buildPromoteExtractionJob (pure half of the attachment enqueue) ────────
+
+test("buildPromoteExtractionJob: r2Key is the STANDARD key, NEVER the intake key", () => {
+  const standardKey = "receipts/2026/08/rcpt-1/abc-r.pdf";
+  const intakeKey = "receipts-intake/2026/08/intake-1/xyz-r.pdf";
+  const job = buildPromoteExtractionJob({
+    receiptId: "rcpt-1",
+    standardKey,
+    intakeContentType: "application/pdf",
+  });
+  assert.equal(job.r2Key, standardKey, "enqueues the standard key");
+  assert.notEqual(
+    job.r2Key,
+    intakeKey,
+    "never enqueues the intake key (deleted in step 5)",
+  );
+  assert.ok(
+    !job.r2Key.startsWith("receipts-intake/"),
+    "standard key uses the receipts/ prefix, not receipts-intake/",
+  );
+});
+
+test("buildPromoteExtractionJob: stamps receiptId + falls back contentType to octet-stream when null", () => {
+  const job = buildPromoteExtractionJob({
+    receiptId: "rcpt-2",
+    standardKey: "receipts/2026/08/rcpt-2/abc.png",
+    intakeContentType: null,
+  });
+  assert.equal(job.receiptId, "rcpt-2");
+  assert.equal(
+    job.contentType,
+    "application/octet-stream",
+    "null intake contentType falls back to a safe default",
+  );
+  assert.ok(job.enqueuedAt, "enqueuedAt is stamped on the job");
+});
+
+// ─── buildPromoteFileInput (pure half of the attachment manifest write) ─────
+
+test("buildPromoteFileInput: r2Key is the STANDARD key (never the intake key); isOriginal true", () => {
+  const standardKey = "receipts/2026/08/rcpt-1/abc-r.pdf";
+  const intakeKey = "receipts-intake/2026/08/intake-1/xyz-r.pdf";
+  const file = buildPromoteFileInput({
+    receiptId: "rcpt-1",
+    standardKey,
+    intake: intakeRow({ attachment_r2_key: intakeKey, attachment_sha256: "deadbeef" }),
+    fileSizeFallbackBytes: 999,
+    actor: "operator@dazbeez.com",
+  });
+  assert.equal(file.r2Key, standardKey, "manifest row points at the standard key");
+  assert.notEqual(file.r2Key, intakeKey, "never the intake key (deleted in step 5)");
+  assert.ok(!file.r2Key.startsWith("receipts-intake/"), "uses the receipts/ prefix");
+  assert.equal(file.isOriginal, true, "the attachment IS the receipt's true original");
+  assert.equal(file.objectType, "receipt");
+  assert.equal(file.objectId, "rcpt-1");
+  assert.equal(file.role, "original");
+  assert.equal(file.r2Bucket, "receipts");
+  assert.equal(file.uploadedBy, "operator@dazbeez.com");
+});
+
+test("buildPromoteFileInput: maps intake metadata with safe fallbacks", () => {
+  const file = buildPromoteFileInput({
+    receiptId: "rcpt-2",
+    standardKey: "receipts/2026/08/rcpt-2/abc.pdf",
+    intake: intakeRow({
+      attachment_filename: "invoice.pdf",
+      attachment_content_type: "application/pdf",
+      attachment_size_bytes: 4321,
+      attachment_sha256: "abc123",
+    }),
+    fileSizeFallbackBytes: 0,
+    actor: "a",
+  });
+  assert.equal(file.originalFilename, "invoice.pdf");
+  assert.equal(file.contentType, "application/pdf");
+  assert.equal(file.fileSizeBytes, 4321, "uses stored size when present");
+  assert.equal(file.sha256Hash, "abc123");
+});
+
+test("buildPromoteFileInput: falls back filename/contentType/size when intake metadata is null", () => {
+  const file = buildPromoteFileInput({
+    receiptId: "rcpt-3",
+    standardKey: "receipts/2026/08/rcpt-3/abc",
+    intake: intakeRow({
+      attachment_filename: null,
+      attachment_content_type: null,
+      attachment_size_bytes: null,
+      attachment_sha256: "h",
+    }),
+    fileSizeFallbackBytes: 7000,
+    actor: "a",
+  });
+  assert.equal(file.originalFilename, "attachment");
+  assert.equal(file.contentType, "application/octet-stream");
+  assert.equal(file.fileSizeBytes, 7000, "falls back to the provided byte length");
 });
 
 // ─── assertPromotable (pure half of promote) ────────────────────────────────

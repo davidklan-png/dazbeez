@@ -67,6 +67,15 @@ against mutable state for a sealed artifact. Whoever writes a value that
 crosses a boundary checks that boundary's constraints. Verification that only
 diffs outputs will not catch these.
 
+A concrete recurring boundary: any new `app/api/receipts/[id]/*` handler doing
+processor-key-OR-Clerk layered auth is correct in its module but **must also be
+added to `PUBLIC_ROUTES` in `middleware.ts`** — or Clerk's `auth.protect()`
+404-rewrites the processor-key request before the handler runs. This is the
+*second* occurrence of the PR #59 failure that silently dropped 17 receipts
+(2026-08-09, `/enqueue`; first occurrence documented at `middleware.ts:39-41`).
+The writer of a new processor-key route adds it to `PUBLIC_ROUTES` in the same
+change; `tests/middleware-routing.test.ts` asserts the exemption.
+
 ## Deployment
 
 - Cloudflare build: `npm run build:cf`
@@ -87,14 +96,15 @@ The receipts module (`app/(receipt-system)/receipts/`, `app/api/receipts/`, `lib
 - Owns `wrangler.jsonc` bindings for D1 (`RECEIPTS_DB`, `CRM_DB`), R2 (`RECEIPTS_BUCKET`, `RECEIPTS_ARCHIVE_BUCKET`), and any AI bindings
 - Holds Cloudflare Tunnel config, Access policies, and auth keys
 - Runs SQL migrations against live D1
-- Runs `npm run dev` for fast UI iteration and `npm run cf:dev` for end-to-end runtime testing against real bindings
+- Runs `npm run dev` for fast UI iteration
+- Runs `npm run cf:dev` (`opennextjs-cloudflare preview`) for runtime checks — **local miniflare bindings only**: empty local D1/R2/Queue, and `RECEIPTS_PROCESSOR_KEY` (a wrangler secret) is absent locally. It proves the worker boots and routes are mounted/auth-gated; it is NOT a real-data functional test. Do **not** add `--remote` to the default `cf:dev` script. The live functional gate is post-deploy `bash scripts/check-deployment.sh`.
 - Runs `npm run build:cf` to validate production builds
 - Deploys via `npm run deploy`
 
 ### Workflow
 
 1. Branch from `main` on the Mac
-2. Implement + run `npm run cf:dev` against real bindings to verify behavior
+2. Implement + run `npm run cf:dev` to verify boot/routing/auth-gating (local miniflare bindings — NOT real data; see Mac M4 note above)
 3. `npm run build:cf` must pass
 4. Smoke-test with `bash scripts/check-deployment.sh <base-url>` after deploy
 5. Commit, push, open PR, merge, deploy
