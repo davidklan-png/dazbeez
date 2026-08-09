@@ -10,6 +10,7 @@ import { requireReceiptsActor } from "@/lib/receipts/auth";
 import { assertReceiptsPageAccess } from "@/lib/receipts/auth-request";
 import { headers } from "next/headers";
 import { AmexMissingStatementAlert } from "@/components/receipts/amex-missing-statement-alert";
+import { PipelineHealthAlert } from "@/components/receipts/pipeline-health-alert";
 import { Card } from "@/components/ui/card";
 import { Pill } from "@/components/ui/pill";
 import { ArrowRightIcon, CameraIcon } from "@/components/ui/icons";
@@ -17,6 +18,11 @@ import { StatTile } from "@/components/receipts/ui/stat-tile";
 import { formatMonth } from "@/lib/receipts/format";
 import { ComplianceSummaryCards } from "@/components/receipts/ComplianceSummaryCards";
 import { summarizeOpenChecksForMonth } from "@/lib/receipts/compliance";
+import {
+  getPipelineHealth,
+  listNeverEnqueuedReceipts,
+  PIPELINE_ALL_CLEAR,
+} from "@/lib/receipts/pipeline-health";
 import { getReceiptsDb } from "@/lib/cloudflare-runtime";
 
 export const dynamic = "force-dynamic";
@@ -82,18 +88,31 @@ export default async function ReceiptsDashboardPage() {
     /* alerts optional */
   }
 
-  const [monthReceipts, allLines, exports, complianceSummary] = await Promise.all([
-    listReceiptRecords({ month, limit: RECEIPT_BULK_LIMIT }),
-    listAmexLineCountsByMonth(),
-    listExports(),
-    summarizeOpenChecksForMonth(getReceiptsDb(), month).catch(() => ({
-      blockers: 0,
-      warnings: 0,
-      info: 0,
-      total: 0,
-      byType: {},
-    })),
-  ]);
+  const [monthReceipts, allLines, exports, complianceSummary, pipelineHealth] =
+    await Promise.all([
+      listReceiptRecords({ month, limit: RECEIPT_BULK_LIMIT }),
+      listAmexLineCountsByMonth(),
+      listExports(),
+      summarizeOpenChecksForMonth(getReceiptsDb(), month).catch(() => ({
+        blockers: 0,
+        warnings: 0,
+        info: 0,
+        total: 0,
+        byType: {},
+      })),
+      // Backlog #19: cheap 4-class pipeline health (COUNT + MIN, no row loads).
+      // Crashes fall back to all-clear — a health check that breaks the page is
+      // worse than none.
+      getPipelineHealth(getReceiptsDb()).catch(() => PIPELINE_ALL_CLEAR),
+    ]);
+
+  // Load the class-1 receipts only when class 1 is lit (rare) — for the
+  // per-receipt Enqueue action.
+  const neverEnqueuedReceipts = pipelineHealth.lit.some(
+    (c) => c.kind === "never_enqueued",
+  )
+    ? await listNeverEnqueuedReceipts(getReceiptsDb()).catch(() => [])
+    : [];
 
   const unreviewed = monthReceipts.filter(
     (r) => r.status === "captured" || r.status === "needs_review",
@@ -113,6 +132,11 @@ export default async function ReceiptsDashboardPage() {
           {formatMonth(month)} at a glance
         </span>
       </div>
+
+      <PipelineHealthAlert
+        lit={pipelineHealth.lit}
+        neverEnqueuedReceipts={neverEnqueuedReceipts}
+      />
 
       {missingAlerts.length > 0 && (
         <div className="mb-6 space-y-3">
