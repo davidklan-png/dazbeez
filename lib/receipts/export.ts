@@ -5,7 +5,7 @@ import {
   ACCOUNTANT_DISCLAIMER_EN,
   ACCOUNTANT_DISCLAIMER_JA,
 } from "@/lib/receipts/settings";
-import { packZipName, buildPackNames } from "@/lib/receipts/pack-naming";
+import { packZipName, buildPackNames, monthCode } from "@/lib/receipts/pack-naming";
 
 /**
  * CSV cell escaper.
@@ -333,6 +333,18 @@ export function buildProofsKey(month: string, exportId: string): string {
   return `exports/${month}/${exportId}-proofs.zip`;
 }
 
+/**
+ * NoReceipts draft variant of the proofs ZIP (D). Same pack root as
+ * {@link buildProofsKey} — the 照合CSVs + 集計.csv + ご連絡事項.txt — with ZERO
+ * image/PDF entries. Built at rebuild time from the identical assembleProofsZip
+ * arguments as the WithReceipts zip (only `entries` differs: `[]`), so the
+ * shared entries are byte-identical by construction. Draft-only convenience;
+ * never sealed (finalize seals only the WithReceipts proofs zip).
+ */
+export function buildProofsNoReceiptsKey(month: string, exportId: string): string {
+  return `exports/${month}/${exportId}-proofs-noreceipts.zip`;
+}
+
 // ─── Reconciliation-file keys (monthly closing review #2) ────────────────────
 // Derived keys like summary/attendees — no column on receipt_exports. Old
 // sealed revisions predate these artifacts and simply 404 from R2.
@@ -479,6 +491,12 @@ export const EXPORT_DOWNLOAD_FILES = [
   "amex",
   "cash",
   "digital",
+  // Draft-only whole-pack downloads (D): the two-link draft panel. draft_wr is
+  // the full candidate-seal pack; draft_nr is the NoReceipts variant (CSVs +
+  // notice, zero images). Handled entirely in resolveBundleDownload's draft
+  // branch; the finalized path 404s them (resolveExportDownload returns no key).
+  "draft_wr",
+  "draft_nr",
 ] as const;
 
 export type ExportDownloadFile = (typeof EXPORT_DOWNLOAD_FILES)[number];
@@ -637,6 +655,13 @@ export function resolveExportDownload(
         contentType: csv,
         filename: buildPackNames(month, null, false).digitalReconciliationCsv,
       };
+    case "draft_wr":
+    case "draft_nr":
+      // Draft-only (D). These never resolve from the finalized path —
+      // resolveBundleDownload's draft branch maps them to the staged proofs /
+      // proofs-noreceipts keys with a ${yyyymm}_Draft_*.zip name. Returning no
+      // key here makes any finalized-path request 404.
+      return { r2Key: null, contentType: "application/zip", filename: "" };
   }
 }
 
@@ -711,6 +736,33 @@ export function resolveBundleDownload(opts: {
         ok: false,
         status: 404,
         message: "Draft not rebuilt yet — click Rebuild draft first.",
+      };
+    }
+    // Draft-only whole-pack downloads (D). Two links instead of the per-artifact
+    // grid: draft_wr = the full candidate-seal pack (the staged proofs ZIP);
+    // draft_nr = the NoReceipts variant staged alongside it at rebuild from the
+    // identical assembleProofsZip inputs (so shared entries are byte-identical).
+    // Both carry a ${yyyymm}_Draft_*.zip name — "Draft" in the filename is the
+    // not-sealed signal, replacing the old DRAFT- prefix for the draft panel.
+    if (file === "draft_wr" || file === "draft_nr") {
+      const yyyymm = monthCode(month);
+      if (file === "draft_wr") {
+        return {
+          ok: true,
+          r2Key: buildProofsKey(month, draftRecord.id),
+          contentType: "application/zip",
+          filename: `${yyyymm}_Draft_WithReceipts.zip`,
+          exportId: draftRecord.id,
+          draft: true,
+        };
+      }
+      return {
+        ok: true,
+        r2Key: buildProofsNoReceiptsKey(month, draftRecord.id),
+        contentType: "application/zip",
+        filename: `${yyyymm}_Draft_NoReceipts.zip`,
+        exportId: draftRecord.id,
+        draft: true,
       };
     }
     const target = resolveExportDownload(month, draftRecord, file);

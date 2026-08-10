@@ -14,6 +14,7 @@ import {
   type Blocker,
   type DuplicateBadge,
 } from "@/lib/receipts/blockers";
+import type { ExportBlocker } from "@/lib/receipts/month-closing";
 import type {
   AmexStatementLine,
   BusinessTripReport,
@@ -23,7 +24,10 @@ import type {
 } from "@/lib/receipts/types";
 import type { StatementWindow } from "@/lib/receipts/statement-window";
 import type { CategoryRule } from "@/lib/receipts/category-rules";
+import type { PackNoticeInput } from "@/lib/receipts/proofs";
+import type { PackNames } from "@/lib/receipts/pack-naming";
 import { withWorkMonth } from "@/lib/receipts/work-month";
+import { PrefaceEditor } from "@/components/receipts/export/preface-editor";
 
 export interface ReviewScreenProps {
   month: string;
@@ -34,7 +38,7 @@ export interface ReviewScreenProps {
   receipts: ReceiptRecord[];
   currentExport: ReceiptExport | null;
   reconciliationSealed: boolean;
-  gateBlockers: string[];
+  gateBlockers: ExportBlocker[];
   tileBlockers: Blocker[];
   warnings: Blocker[];
   tripReports: BusinessTripReport[];
@@ -42,6 +46,12 @@ export interface ReviewScreenProps {
   /** Active category pattern rules → live suggestion affordance on unmatched,
    *  uncategorized AMEX lines (ADR: category-rules). */
   categoryRules: CategoryRule[];
+  /** Server-derived notice input for the preface editor's live preview (E2). The
+   *  operatorMessage field is overridden client-side with the live draft. */
+  prefaceNoticeInput: PackNoticeInput;
+  /** Pack names for the preview, from the single naming authority. null when the
+   *  AMEX payment-due date is unavailable (preview hidden). */
+  prefaceNames: PackNames | null;
 }
 
 export function ReviewScreen(props: ReviewScreenProps) {
@@ -107,6 +117,20 @@ export function ReviewScreen(props: ReviewScreenProps) {
           )}
         />
       </div>
+
+      {/* Editable preface (E2) — the ONE UI surface that writes operator_message.
+          Rendered whenever an export exists (draft → editable; sealed → disabled
+          with an explanation). Sits above the finalize card so the operator sets
+          the message before sealing it into the pack. */}
+      {props.currentExport && (
+        <PrefaceEditor
+          month={props.month}
+          initialMessage={props.currentExport.operator_message ?? null}
+          editable={props.currentExport.status === "draft"}
+          noticeInput={props.prefaceNoticeInput}
+          names={props.prefaceNames}
+        />
+      )}
 
       <FinalizeCard
         month={props.month}
@@ -202,7 +226,7 @@ function GateVerdict({
   warnings,
   finalized,
 }: {
-  gateBlockers: string[];
+  gateBlockers: ExportBlocker[];
   tileBlockers: Blocker[];
   warnings: Blocker[];
   finalized: boolean;
@@ -224,7 +248,15 @@ function GateVerdict({
           <code>validateMonthReadyForExport</code>:
           <ul className="mt-1.5 list-disc space-y-0.5 pl-5 text-[12.5px]">
             {gateBlockers.map((b, i) => (
-              <li key={i}>{b}</li>
+              <li key={`${b.code}-${i}`}>
+                {b.href ? (
+                  <Link href={b.href} className="underline decoration-amber-600/60 underline-offset-2 hover:text-amber-700">
+                    {b.message}
+                  </Link>
+                ) : (
+                  b.message
+                )}
+              </li>
             ))}
           </ul>
         </div>

@@ -22,6 +22,7 @@ import {
   buildSummaryKey,
   buildAttendeesKey,
   buildProofsKey,
+  buildProofsNoReceiptsKey,
   buildManifestCsv,
   buildReadmeKey,
   buildExportReadme,
@@ -166,6 +167,16 @@ export async function POST(request: Request) {
     const exportRevision = exportRecord?.export_revision ?? 1;
     const supersedesExportId = exportRecord?.supersedes_export_id ?? null;
     const correctionReason = exportRecord?.correction_reason ?? null;
+    // E1: the operator message must survive a rebuild that omits it from the
+    // request body. Resolve it ONCE — body wins when explicitly present,
+    // otherwise the stored draft row's value carries forward. Pre-E1 every
+    // rebuild bound `body.operatorMessage ?? null`, so a rebuild triggered
+    // without the message nulled the stored column and it vanished from the
+    // next notice (the preflight O7 check then flagged the drift). Trim + the
+    // 2000-char cap are enforced by the PATCH writer; the rebuild only carries
+    // the resolved value forward verbatim.
+    const operatorMessage =
+      body.operatorMessage ?? exportRecord?.operator_message ?? null;
 
     // Record exactly which receipts and AMEX lines ship in this bundle. The
     // one-draft-per-month invariant means an existing draft's items get
@@ -454,7 +465,7 @@ export async function POST(request: Request) {
         bundle.rows,
         { rowCount: bundle.rows.length, receiptCount: proofsEntries.length },
       ),
-      operatorMessage: body.operatorMessage ?? undefined,
+      operatorMessage: operatorMessage ?? undefined,
     };
 
     const proofsKey = buildProofsKey(month, exportId);
@@ -471,6 +482,32 @@ export async function POST(request: Request) {
     );
     const proofsSha256 = await computeSha256Hex(proofsZipBytes);
     await getReceiptsArchiveBucket().put(proofsKey, proofsZipBytes, {
+      httpMetadata: { contentType: "application/zip" },
+      customMetadata: retentionMetadata(),
+    });
+
+    // ── NoReceipts draft variant (D) ──────────────────────────────────────
+    // The SAME assembleProofsZip call as above with `entries: []` — identical
+    // packNames / noticeInput / summaryShipped / recon CSVs, zero image/PDF
+    // entries. Built here at rebuild (where those arguments are in scope) rather
+    // than at download time: it guarantees the shared entries (照合CSVs + 集計 +
+    // ご連絡) are byte-identical to the WithReceipts pack by construction, and
+    // keeps the download route a thin verbatim R2 proxy. The notice still reads
+    // 証憑ファイル数: <receiptCount> — the counts describe the month, not the
+    // zip you're holding (decision 1). Draft-only; finalize never seals this.
+    const proofsNoReceiptsKey = buildProofsNoReceiptsKey(month, exportId);
+    const proofsNoReceiptsBytes = assembleProofsZip(
+      packNames,
+      [],
+      proofsNoticeInput,
+      summaryShipped,
+      {
+        amex: amexReconShipped,
+        cash: cashReconShipped,
+        digital: digitalReconShipped,
+      },
+    );
+    await getReceiptsArchiveBucket().put(proofsNoReceiptsKey, proofsNoReceiptsBytes, {
       httpMetadata: { contentType: "application/zip" },
       customMetadata: retentionMetadata(),
     });
@@ -621,7 +658,7 @@ export async function POST(request: Request) {
         // the preflight date check + pack naming; operator_message drives the
         // O7 one-message-two-surfaces check #19).
         amexArtifact?.payment_due_date ?? null,
-        body.operatorMessage ?? null,
+        operatorMessage,
       );
       // A7: non-blocking warning when an earlier statement month is still
       // open. Surfaced in the finalize response so the operator's toast on
@@ -643,7 +680,7 @@ export async function POST(request: Request) {
         proofsKey,
         proofsSha256,
         amexArtifact?.payment_due_date ?? null,
-        body.operatorMessage ?? null,
+        operatorMessage,
       );
       // Audit the rebuild (finalize:false) — "export.generated" was defined
       // for this. The finalize:true path is audited by finalizeExport

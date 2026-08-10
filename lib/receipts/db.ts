@@ -3072,7 +3072,8 @@ export async function recordExportBundle(
            proofs_sha256 = ?,
            bundle_built_at = ?,
            payment_due_date = ?,
-           operator_message = ?
+           operator_message = ?,
+           operator_message_updated_at = ?
        WHERE id = ? AND status = 'draft'`,
     )
     .bind(
@@ -3085,8 +3086,36 @@ export async function recordExportBundle(
       now,
       paymentDueDate ?? null,
       operatorMessage ?? null,
+      now,
       exportId,
     )
+    .run();
+}
+
+/**
+ * Update ONLY operator_message on an open draft revision (E1 — the editable
+ * preface). Deliberately touches no other column: it must NOT advance
+ * bundle_built_at (that would mask the staleness the finalize gate detects —
+ * E3) and must not re-write the sealed bundle columns the way recordExportBundle
+ * does. The WHERE status='draft' guard means a sealed month is never mutated;
+ * the PATCH /message caller checks for an open draft first and 409s otherwise,
+ * so this update should always match exactly one draft row. Trim + the 2000-char
+ * cap are applied by the caller; null clears the column (buildPackNotice then
+ * omits the whole 【今月のご連絡】 heading).
+ */
+export async function updateExportOperatorMessage(
+  exportId: string,
+  operatorMessage: string | null,
+): Promise<void> {
+  const db = getReceiptsDb();
+  await db
+    .prepare(
+      `UPDATE receipt_exports
+       SET operator_message = ?,
+           operator_message_updated_at = ?
+       WHERE id = ? AND status = 'draft'`,
+    )
+    .bind(operatorMessage, nowIso(), exportId)
     .run();
 }
 

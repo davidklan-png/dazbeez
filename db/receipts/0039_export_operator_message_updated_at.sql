@@ -1,0 +1,18 @@
+-- 0039_export_operator_message_updated_at.sql
+--
+-- Last-write timestamp for operator_message (E3). The editable preface is frozen
+-- into the sealed pack bytes at build time (buildPackNotice runs at rebuild, the
+-- notice is sealed + hashed inside the proofs ZIP). Editing the message on an
+-- already-built draft therefore makes the built bundle stale: the bytes an
+-- operator previewed no longer match what finalize would seal. Without a signal,
+-- finalize would silently seal a pack whose notice the operator never reviewed.
+--
+-- This column lets the finalize gate compare operator_message's last write
+-- against bundle_built_at: if the message was edited after the bundle was built,
+-- gate code `message_stale` blocks finalize and requires a rebuild first.
+--
+-- Written by updateExportOperatorMessage (the PATCH /message writer) and by
+-- recordExportBundle (the rebuild writer, in lockstep with bundle_built_at, so a
+-- fresh rebuild clears staleness). Additive only; NULL on legacy rows (no
+-- staleness signal → no message_stale blocker, matching pre-E3 behaviour).
+ALTER TABLE receipt_exports ADD COLUMN operator_message_updated_at TEXT;
