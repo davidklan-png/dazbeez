@@ -202,23 +202,25 @@ export default async function ExportPage({
           {currentExport.bundle_built_at ? (
             <>
               <p className="mt-1 text-xs text-amber-800">
-                Open draft, NOT yet sealed. These are the candidate-seal bytes
-                (identical to what Finalize will seal). Downloaded filenames are
-                prefixed <code>DRAFT-</code> so they&apos;re unmistakable — verify,
-                then finalize.
+                Open draft, NOT yet sealed. <strong>証憑あり</strong> is
+                byte-identical to what Finalize will seal; <strong>証憑なし</strong>{" "}
+                is the pack root only (照合CSVs + 集計.csv + ご連絡事項.txt, no
+                images/PDFs). The word <code>Draft</code> in the filename is the
+                not-sealed signal — verify, then finalize.
               </p>
               <div className="mt-3 flex flex-wrap gap-3">
-                {BUNDLE_DOWNLOAD_LINKS.filter(
-                  ({ file }) => file !== "proofs" || !!currentExport.proofs_r2_key,
-                ).map(({ file, label }) => (
-                  <a
-                    key={file}
-                    href={`/api/receipts/export/${month}/download?file=${file}&draft=true`}
-                    className="rounded-xl border border-amber-400 bg-amber-100 px-4 py-2 text-xs font-semibold text-amber-900 hover:bg-amber-200"
-                  >
-                    {`DRAFT-${label}`}
-                  </a>
-                ))}
+                <a
+                  href={`/api/receipts/export/${month}/download?file=draft_nr&draft=true`}
+                  className="rounded-xl border border-amber-400 bg-amber-100 px-4 py-2 text-xs font-semibold text-amber-900 hover:bg-amber-200"
+                >
+                  下書き（証憑なし）
+                </a>
+                <a
+                  href={`/api/receipts/export/${month}/download?file=draft_wr&draft=true`}
+                  className="rounded-xl border border-amber-400 bg-amber-100 px-4 py-2 text-xs font-semibold text-amber-900 hover:bg-amber-200"
+                >
+                  下書き（証憑あり）
+                </a>
               </div>
             </>
           ) : (

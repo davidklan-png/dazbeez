@@ -136,6 +136,7 @@ export type AuditAction =
   | "export.finalized"
   | "export.revision_created"
   | "export.downloaded"
+  | "export.message_updated"
   | "export.notification_sent"
   | "export.notification_failed"
   | "export.notification_test"
@@ -536,6 +537,14 @@ export interface ReceiptExport {
   // build time, and into the delivery email body at send time. NULL when no
   // message.
   operator_message?: string | null;
+  // Last-write timestamp for operator_message (0039 / E3). The preface is frozen
+  // into the sealed bytes at build time, so editing it after a build makes the
+  // built bundle stale. The finalize gate compares this against bundle_built_at
+  // (operator_message_updated_at > bundle_built_at ⇒ message_stale). NULL on
+  // legacy rows predating 0039 (no staleness signal — no blocker, matching
+  // pre-E3 behaviour). Written in lockstep with bundle_built_at by
+  // recordExportBundle, and alone by updateExportOperatorMessage.
+  operator_message_updated_at?: string | null;
 }
 
 /**

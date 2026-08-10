@@ -144,10 +144,17 @@ test("draft=true 404s when there is no draft revision", () => {
   }
 });
 
-// ─── DRAFT- prefix on EVERY file kind ───────────────────────────────────────
+// ─── Draft filename conventions ─────────────────────────────────────────────
+// Two schemes by design (D): the 9 verbatim artifacts keep the DRAFT- prefix
+// (a draft receipts CSV is unmistakable); the two whole-pack draft downloads
+// use a ${yyyymm}_Draft_*.zip name where "Draft" is the not-sealed signal,
+// replacing the DRAFT- prefix for the draft panel's two links.
 
-test("draft=true prefixes DRAFT- on every file kind; default never does", () => {
-  for (const file of EXPORT_DOWNLOAD_FILES) {
+test("draft=true prefixes DRAFT- on every verbatim artifact; default never does", () => {
+  const verbatimFiles = EXPORT_DOWNLOAD_FILES.filter(
+    (f) => f !== "draft_wr" && f !== "draft_nr",
+  );
+  for (const file of verbatimFiles) {
     const d = ok(
       resolveBundleDownload({
         month,
@@ -177,6 +184,50 @@ test("draft=true prefixes DRAFT- on every file kind; default never does", () => 
       `finalized ${file} must NOT be DRAFT- prefixed (got ${f.filename})`,
     );
     assert.equal(f.draft, false);
+  }
+});
+
+test("D: draft_wr / draft_nr are draft-only whole-pack downloads with Draft_ names", () => {
+  // WithReceipts = the staged proofs ZIP; NoReceipts = the proofs-noreceipts
+  // ZIP staged alongside it at rebuild. Both carry a ${yyyymm}_Draft_*.zip name
+  // and are NEVER served from the finalized path (no sealed counterpart).
+  const wr = ok(
+    resolveBundleDownload({
+      month,
+      file: "draft_wr",
+      draft: true,
+      draftRecord: draftRebuilt,
+      finalizedRecord: finalized,
+    }),
+  );
+  assert.equal(wr.r2Key, "exports/2026-06/exp-draft-proofs.zip");
+  assert.equal(wr.filename, "202606_Draft_WithReceipts.zip");
+  assert.equal(wr.draft, true);
+
+  const nr = ok(
+    resolveBundleDownload({
+      month,
+      file: "draft_nr",
+      draft: true,
+      draftRecord: draftRebuilt,
+      finalizedRecord: finalized,
+    }),
+  );
+  assert.equal(nr.r2Key, "exports/2026-06/exp-draft-proofs-noreceipts.zip");
+  assert.equal(nr.filename, "202606_Draft_NoReceipts.zip");
+  assert.equal(nr.draft, true);
+
+  // Finalized path: draft-only files have no sealed counterpart → 404.
+  for (const file of ["draft_wr", "draft_nr"] as const) {
+    const r = resolveBundleDownload({
+      month,
+      file,
+      draft: false,
+      draftRecord: draftRebuilt,
+      finalizedRecord: finalized,
+    });
+    assert.equal(r.ok, false, `${file} must not resolve from the finalized path`);
+    if (!r.ok) assert.equal(r.status, 404);
   }
 });
 

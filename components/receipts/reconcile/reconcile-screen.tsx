@@ -54,6 +54,7 @@ import {
   matchExplanation,
   type ConfidenceBand,
 } from "@/lib/receipts/confidence";
+import { isSettled, groupLinesByStatus } from "@/lib/receipts/reconcile-grouping";
 
 export interface ReconcileScreenProps {
   amexLines: AmexStatementLine[];
@@ -177,11 +178,9 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
   );
 
   const counts = useMemo(() => {
-    const confirmed = props.amexLines.filter(
-      (l) => l.match_status === "confirmed" || l.match_status === "no_receipt",
-    ).length;
+    const confirmed = props.amexLines.filter((l) => isSettled(l)).length;
     const obvious = linesWithBand.filter(
-      (l) => l.band === "obvious" && l.line.match_status !== "confirmed",
+      (l) => l.band === "obvious" && !isSettled(l.line),
     ).length;
     const likely = linesWithBand.filter((l) => l.band === "likely").length;
     const review = linesWithBand.filter((l) => l.band === "review").length;
@@ -305,7 +304,7 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
       (l) =>
         l.band === "obvious" &&
         l.match &&
-        l.line.match_status !== "confirmed",
+        !isSettled(l.line),
     );
     if (candidates.length === 0) return;
     setBulkProgress({ current: 0, total: candidates.length });
@@ -679,20 +678,8 @@ function LinesPane({
   duplicateCandidates: Map<string, AmexDuplicateCandidate[]>;
   onOpenCluster: (ids: string[]) => void;
 }) {
-  const groupReview = linesWithBand.filter(
-    (l) =>
-      (l.band === "review" || l.band === "none") &&
-      l.line.match_status !== "confirmed",
-  );
-  const groupLikely = linesWithBand.filter(
-    (l) => l.band === "likely" && l.line.match_status !== "confirmed",
-  );
-  const groupObvious = linesWithBand.filter(
-    (l) => l.band === "obvious" && l.line.match_status !== "confirmed",
-  );
-  const groupConfirmed = linesWithBand.filter(
-    (l) => l.line.match_status === "confirmed",
-  );
+  const { review: groupReview, likely: groupLikely, obvious: groupObvious, confirmed: groupConfirmed } =
+    groupLinesByStatus(linesWithBand);
 
   return (
     <div className="flex h-full flex-col overflow-hidden border-r border-gray-200 bg-white">

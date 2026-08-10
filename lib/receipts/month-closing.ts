@@ -2,6 +2,7 @@ import { getCategoryByCode, requiresAttendees } from "@/lib/receipts/categories"
 import type { ReceiptAttendeeDirectoryEntry } from "@/lib/receipts/attendee-directory";
 import { resolveAttendeeNames } from "@/lib/receipts/attendee-directory";
 import {
+  getExport,
   getFinalizedReconciliationForMonth,
   listAmexLineAttendeeNamesByMonth,
   listAmexLines,
@@ -271,18 +272,55 @@ export interface ValidateMonthReadyInput {
   /** Gate 7: receipt_files row count per shipped receipt id (absent = 0). A
    *  shipped receipt with zero rows has no proof to include in the ZIP. */
   receiptFileCounts: Map<string, number>;
+  /** E3 (gate 1.5): the open draft's build + operator-message timestamps. The
+   *  preface is frozen into the sealed bytes at build time, so a message edited
+   *  after the build makes the bundle stale. When operatorMessageUpdatedAt >
+   *  bundleBuiltAt, emit `message_stale`. null/undefined when there is no draft
+   *  or nothing is built yet — no staleness check (matches pre-E3 behaviour). */
+  exportBuild?: { bundleBuiltAt: string | null; operatorMessageUpdatedAt: string | null } | null;
 }
 
 /**
- * Pure synchronous core of the export-finalize gate. Given the data the gates
- * need (fetched by {@link validateMonthReadyForExport}), returns the blocker
- * strings in the gate's canonical order (1 → 2 → 2.5 → 3 → 4 → 5 → 6).
- * Extracted verbatim from the former inline body so the gate is unit-testable
- * without D1 and so the tile (Task 3) can share the exact same rule logic.
+ * A single finalize-gate blocker with a stable code and (optionally) an in-app
+ * destination that clears it. {@link validateMonthReadyForExportCoreDetailed}
+ * returns these; the original string[] contract
+ * ({@link validateMonthReadyForExportCore}) projects them to `.message`. Tests
+ * assert on `code`, never on prose. `href` is set only where a concrete in-app
+ * remedy exists (gate 1 → Reconcile); for every other blocker it is undefined —
+ * do not guess destinations. `message_stale` is reserved for the editable-preface
+ * staleness gate (E3); it is in the union now so the review screen can type it.
  */
-export function validateMonthReadyForExportCore(
+export interface ExportBlocker {
+  code:
+    | "reconciliation_not_finalized"
+    | "payment_path_unknown"
+    | "receipt_unreviewed"
+    | "receipt_field_missing"
+    | "attendees_required"
+    | "attendee_unresolved"
+    | "amex_line"
+    | "compliance"
+    | "cross_month"
+    | "missing_proof_file"
+    | "message_stale";
+  message: string;
+  /** In-app destination that lets the operator clear this blocker. */
+  href?: string;
+}
+
+/**
+ * Pure synchronous core of the export-finalize gate — DETAILED variant. Same
+ * gate logic and canonical order (1 → 2 → 2.5 → 3 → 4 → 5 → 6 → 7) as the
+ * original string[] core, but each blocker carries a stable `code` and, for
+ * gate 1, a link to Reconcile so the pre-finalize review renders it as an
+ * actionable link instead of dead prose. The string[] core delegates here, so
+ * there is exactly one rule implementation. Extracted verbatim from the former
+ * inline body so the gate is unit-testable without D1 and so the tile (Task 3)
+ * shares the exact same rule logic.
+ */
+export function validateMonthReadyForExportCoreDetailed(
   input: ValidateMonthReadyInput,
-): string[] {
+): ExportBlocker[] {
   const {
     month,
     reconciliation,
@@ -295,21 +333,47 @@ export function validateMonthReadyForExportCore(
     crossMonthMatchedLines,
     receiptFileCounts,
   } = input;
-  const blockers: string[] = [];
+  const blockers: ExportBlocker[] = [];
 
-  // (1) Statement-sealed gate.
+  // (1) Statement-sealed gate. The integrity anchor: the pack asserts it
+  // reconciles against a sealed statement. Downgrading would let a pack be
+  // built against a statement that can still change underneath it; only the
+  // presentation changes — it becomes a link to Reconcile (June review).
   if (!reconciliation) {
-    blockers.push(
-      `No finalized reconciliation for ${month}. Sign off the reconciliation first.`,
-    );
+    blockers.push({
+      code: "reconciliation_not_finalized",
+      message: `No finalized reconciliation for ${month}. Sign off the reconciliation first.`,
+      href: `/receipts/reconcile?month=${month}`,
+    });
+  }
+
+  // (1.5) Message staleness (E3). The editable preface is frozen into the sealed
+  // bytes at build time (buildPackNotice runs at rebuild; the notice is sealed
+  // + hashed inside the proofs ZIP). Editing it afterwards makes the built
+  // bundle stale — the bytes the operator previewed no longer match what
+  // finalize would seal. Require a rebuild (which re-bakes the message and
+  // re-syncs operator_message_updated_at to bundle_built_at) before finalizing.
+  // ISO-8601 strings compare lexicographically in chronological order.
+  const build = input.exportBuild;
+  if (
+    build?.bundleBuiltAt &&
+    build?.operatorMessageUpdatedAt &&
+    build.operatorMessageUpdatedAt > build.bundleBuiltAt
+  ) {
+    blockers.push({
+      code: "message_stale",
+      message:
+        "Message edited after the draft was built. Rebuild the draft before finalizing.",
+    });
   }
 
   // (2) UNKNOWN payment_path gate.
   for (const row of unknownReceipts) {
     const label = row.merchant ?? row.id;
-    blockers.push(
-      `Receipt ${label}: payment_path is UNKNOWN — classify as AMEX, CASH, or DIGITAL before export`,
-    );
+    blockers.push({
+      code: "payment_path_unknown",
+      message: `Receipt ${label}: payment_path is UNKNOWN — classify as AMEX, CASH, or DIGITAL before export`,
+    });
   }
 
   // (2.5) Unreviewed-receipt gate. isPendingProcessing exclusion matches the
@@ -319,62 +383,76 @@ export function validateMonthReadyForExportCore(
   for (const r of unreviewedReceipts) {
     if (!isUnreviewedReceipt(r)) continue;
     const label = r.merchant ?? r.id;
-    blockers.push(
-      `Receipt ${label}: unreviewed (status='needs_review') — mark reviewed before exporting`,
-    );
+    blockers.push({
+      code: "receipt_unreviewed",
+      message: `Receipt ${label}: unreviewed (status='needs_review') — mark reviewed before exporting`,
+    });
   }
 
   // (3) Receipt-level checks on CASH/DIGITAL receipts in the bundle.
   for (const receipt of bundle.receipts) {
     if (receipt.payment_path === "AMEX") continue;
     const label = receipt.merchant ?? receipt.id;
-    if (!receipt.transaction_date) blockers.push(`Receipt ${receipt.id}: missing date`);
-    if (!receipt.merchant) blockers.push(`Receipt ${receipt.id}: missing merchant`);
-    if (receipt.amount_minor === null) blockers.push(`Receipt ${receipt.id}: missing amount`);
+    if (!receipt.transaction_date) {
+      blockers.push({ code: "receipt_field_missing", message: `Receipt ${receipt.id}: missing date` });
+    }
+    if (!receipt.merchant) {
+      blockers.push({ code: "receipt_field_missing", message: `Receipt ${receipt.id}: missing merchant` });
+    }
+    if (receipt.amount_minor === null) {
+      blockers.push({ code: "receipt_field_missing", message: `Receipt ${receipt.id}: missing amount` });
+    }
     if (!receipt.expense_category_code) {
-      blockers.push(`Receipt ${receipt.id}: missing expense category`);
+      blockers.push({
+        code: "receipt_field_missing",
+        message: `Receipt ${receipt.id}: missing expense category`,
+      });
     }
     if (requiresAttendees(receipt.expense_category_code)) {
       const attendees = bundle.attendeeMap.get(receipt.id) ?? [];
       if (attendees.length === 0) {
-        blockers.push(`Receipt ${label}: requires attendees`);
+        blockers.push({ code: "attendees_required", message: `Receipt ${label}: requires attendees` });
       } else {
         // Attendees present → every name must resolve to a directory entry
         // (company/title). Unresolved names block finalize (business-manager
         // review: every 会議費/接待交際費 attendee must show company + title).
         const { unresolved } = resolveAttendeeNames(attendees, bundle.attendeeDirectory);
         for (const name of unresolved) {
-          blockers.push(
-            `Receipt ${label}: attendee "${name}" is not registered in the attendee directory (company/title required)`,
-          );
+          blockers.push({
+            code: "attendee_unresolved",
+            message: `Receipt ${label}: attendee "${name}" is not registered in the attendee directory (company/title required)`,
+          });
         }
       }
     }
   }
 
-  // (4) AMEX-line checks.
+  // (4) AMEX-line checks. validateAmexLinesForSignoff returns prose strings;
+  // each is tagged with the gate-level code `amex_line`.
   const receiptMap = new Map<string, ReceiptRecord>();
   for (const r of bundle.receipts) receiptMap.set(r.id, r);
-  blockers.push(
-    ...validateAmexLinesForSignoff(
-      bundle.amexLines,
-      amexAttendees,
-      bundle.attendeeMap,
-      receiptMap,
-      bundle.attendeeDirectory,
-    ),
-  );
+  for (const message of validateAmexLinesForSignoff(
+    bundle.amexLines,
+    amexAttendees,
+    bundle.attendeeMap,
+    receiptMap,
+    bundle.attendeeDirectory,
+  )) {
+    blockers.push({ code: "amex_line", message });
+  }
 
   // (5) Compliance-engine gate.
   if (complianceSummary.blockers > 0) {
-    blockers.push(
-      `${complianceSummary.blockers} open compliance blocker(s) on receipts in ${month}`,
-    );
+    blockers.push({
+      code: "compliance",
+      message: `${complianceSummary.blockers} open compliance blocker(s) on receipts in ${month}`,
+    });
   }
   if (complianceSettings.export_block_on_warnings && complianceSummary.warnings > 0) {
-    blockers.push(
-      `${complianceSummary.warnings} open compliance warning(s) in ${month} (export_block_on_warnings=true)`,
-    );
+    blockers.push({
+      code: "compliance",
+      message: `${complianceSummary.warnings} open compliance warning(s) in ${month} (export_block_on_warnings=true)`,
+    });
   }
 
   // (6) Cross-month match integrity (audit A7). A receipt matched to lines in
@@ -391,9 +469,10 @@ export function validateMonthReadyForExportCore(
   for (const [receiptId, months] of monthsByReceipt) {
     if (months.size > 1 && months.has(month)) {
       const others = [...months].filter((m) => m !== month).join(", ");
-      blockers.push(
-        `Receipt ${receiptId}: matched to AMEX lines in multiple statement months (${[...months].join(", ")}). Disambiguate before finalizing ${month} (other month(s): ${others}).`,
-      );
+      blockers.push({
+        code: "cross_month",
+        message: `Receipt ${receiptId}: matched to AMEX lines in multiple statement months (${[...months].join(", ")}). Disambiguate before finalizing ${month} (other month(s): ${others}).`,
+      });
     }
   }
 
@@ -403,19 +482,33 @@ export function validateMonthReadyForExportCore(
   // Missing proof_copy is NOT a blocker (the ZIP falls back to the original).
   for (const receipt of receiptsMissingProofFiles(bundle.receipts, receiptFileCounts)) {
     const label = receipt.merchant ?? receipt.id;
-    blockers.push(
-      `Receipt ${label}: no proof file on record (no original or proof_copy) — cannot build the proofs bundle`,
-    );
+    blockers.push({
+      code: "missing_proof_file",
+      message: `Receipt ${label}: no proof file on record (no original or proof_copy) — cannot build the proofs bundle`,
+    });
   }
 
   return blockers;
 }
 
-export async function validateMonthReadyForExport(
+/**
+ * Pure synchronous core — ORIGINAL string[] contract, kept for every existing
+ * caller (API routes, finalize-card, backfill script, tests). Now a thin
+ * projection over {@link validateMonthReadyForExportCoreDetailed} so there is
+ * exactly one rule implementation; the messages are byte-identical to the
+ * former inline body.
+ */
+export function validateMonthReadyForExportCore(
+  input: ValidateMonthReadyInput,
+): string[] {
+  return validateMonthReadyForExportCoreDetailed(input).map((b) => b.message);
+}
+
+export async function validateMonthReadyForExportDetailed(
   month: string,
   prebuiltBundle?: ExportBundle,
   preloadedReconciliation?: AmexReconciliation | null,
-): Promise<string[]> {
+): Promise<ExportBlocker[]> {
   // (1) Statement-sealed gate. Callers that already fetched the reconciliation
   // (e.g. /api/receipts/export/month to populate the manifest pointer) may
   // pass it in to avoid a second D1 round-trip.
@@ -486,7 +579,17 @@ export async function validateMonthReadyForExport(
     bundle.receipts.map((r) => r.id),
   );
 
-  return validateMonthReadyForExportCore({
+  // (1.5) Message staleness (E3): the open draft's build vs operator-message
+  // timestamps. getExport returns the current row (draft iff one is open).
+  const exportRecord = await getExport(month);
+  const exportBuild = exportRecord
+    ? {
+        bundleBuiltAt: exportRecord.bundle_built_at ?? null,
+        operatorMessageUpdatedAt: exportRecord.operator_message_updated_at ?? null,
+      }
+    : null;
+
+  return validateMonthReadyForExportCoreDetailed({
     month,
     reconciliation,
     bundle,
@@ -497,7 +600,25 @@ export async function validateMonthReadyForExport(
     complianceSettings: settings,
     crossMonthMatchedLines: matchedLineMonths.results ?? [],
     receiptFileCounts,
+    exportBuild,
   });
+}
+
+/**
+ * Async wrapper — ORIGINAL string[] contract, kept for every existing caller.
+ * Now a thin projection over {@link validateMonthReadyForExportDetailed} so the
+ * fetch logic lives in one place; the messages are byte-identical to before.
+ */
+export async function validateMonthReadyForExport(
+  month: string,
+  prebuiltBundle?: ExportBundle,
+  preloadedReconciliation?: AmexReconciliation | null,
+): Promise<string[]> {
+  return (await validateMonthReadyForExportDetailed(
+    month,
+    prebuiltBundle,
+    preloadedReconciliation,
+  )).map((b) => b.message);
 }
 
 /**

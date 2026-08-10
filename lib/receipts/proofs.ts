@@ -141,7 +141,7 @@ export function buildPackNotice(input: PackNoticeInput, names: PackNames): strin
   // digital rows names the DIGITAL list (the previously-unmentioned case).
   if (hasAmex) {
     lines.push(
-      `・カード明細の照合表（${names.amexReconciliationCsv}）は、カード会社の明細CSVをそのまま再現し、右側に「科目＆No.」「事業目的」「人数」「領収書ファイル名」の列を追記したものです。`,
+      `・カード明細の照合表（${names.amexReconciliationCsv}）は、カード会社の明細CSVを基に、右側に「科目＆No.」「事業目的」「人数」「領収書ファイル名」の列を追記したものです。`,
     );
   }
   if (hasCash) {
@@ -161,7 +161,7 @@ export function buildPackNotice(input: PackNoticeInput, names: PackNames): strin
     "・紙の領収書は一つにまとめたPDFではなく、1件ずつの画像ファイルとして同封しています。",
   );
   lines.push(
-    "・証憑画像は容量削減のため再圧縮しています（長辺1600px・JPEG品質75）。原本は当方で保管しており、ご要望があれば原本データをご提供します。",
+    "・証憑画像は容量削減のため再圧縮しています（長辺1600px・JPEG品質75）。原本は当方で保管しており、ご要望があれば原本データを提出致します。",
   );
   lines.push(
     "・PDFの領収書は原本をそのまま同封しています（テキスト情報を保つため再圧縮していません）。",
