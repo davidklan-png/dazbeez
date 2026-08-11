@@ -71,6 +71,60 @@ test("Review with gate blockers ⇒ Review BLOCKED, carries the blockers", () =>
   assert.equal(s.finalize.status, "pending", "a blocked Review must not let Finalize read done/pending-green");
 });
 
+// ─── §2 blocker placement: a blocker sits on the stage whose ACTION clears it ──
+
+test("§2: message_stale blocks DRAFT (Rebuild draft), NOT Review/Finalize — the 2026-06 trap fixed", () => {
+  // The remedy for a stale message is Rebuild draft, a Draft-stage control on
+  // the export page. Placing it on Review/Finalize would put the blocker on a
+  // different page from the button that clears it. Here Draft is built but
+  // stale ⇒ Draft is the blocked active stage; Review reads pending (not done),
+  // never blocked.
+  const s = byKey(
+    derive(input({ reconciled: true, draftBuilt: true, reviewBlockers: [blocker("message_stale")] })),
+  );
+  assert.equal(s.draft.status, "blocked", "message_stale blocks Draft");
+  assert.ok(
+    s.draft.blockers?.some((b) => b.code === "message_stale"),
+    "Draft carries the message_stale blocker",
+  );
+  assert.equal(s.review.status, "pending", "Review is pending behind the blocked Draft, not blocked itself");
+  assert.equal(s.review.blockers, undefined, "message_stale does NOT leak onto Review");
+  assert.equal(s.draft.primaryAction?.label, "ドラフトを再作成", "primary action is rebuild, not create");
+});
+
+test("§2: reconciliation_not_finalized blocks RECONCILE (cleared by reconciliation signoff)", () => {
+  const s = byKey(
+    derive(input({ reconciled: false, draftBuilt: false, reviewBlockers: [blocker("reconciliation_not_finalized")] })),
+  );
+  assert.equal(s.reconcile.status, "blocked");
+  assert.ok(s.reconcile.blockers?.some((b) => b.code === "reconciliation_not_finalized"));
+});
+
+test("§2: message_not_reviewed blocks REVIEW (cleared by the preface decision)", () => {
+  const s = byKey(
+    derive(input({ reconciled: true, draftBuilt: true, reviewBlockers: [blocker("message_not_reviewed")] })),
+  );
+  assert.equal(s.review.status, "blocked");
+  assert.ok(s.review.blockers?.some((b) => b.code === "message_not_reviewed"));
+});
+
+test("§2: message_stale + a Review-stage blocker together ⇒ Draft blocked (Draft is earlier); Review pending", () => {
+  // The active stage is the FIRST not-done. Draft (stale) comes before Review,
+  // so Draft is the blocked active stage even when Review also has a blocker;
+  // Review reads pending until the draft is rebuilt.
+  const s = byKey(
+    derive(
+      input({
+        reconciled: true,
+        draftBuilt: true,
+        reviewBlockers: [blocker("message_stale"), blocker("receipt_unreviewed")],
+      }),
+    ),
+  );
+  assert.equal(s.draft.status, "blocked");
+  assert.equal(s.review.status, "pending");
+});
+
 test("review clean, not finalized ⇒ Finalize current (the action is 確定する)", () => {
   const s = byKey(derive(input({ reconciled: true, draftBuilt: true })));
   // reviewBlockers empty ⇒ review done ⇒ finalize is the active stage

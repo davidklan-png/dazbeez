@@ -100,13 +100,39 @@ export interface MonthStageInput {
  * after are `pending`. A fully-delivered month has no active stage ⇒ all `done`
  * (Closed included).
  *
+ * Blocker PLACEMENT follows the stage whose action clears them, not the gate
+ * number: `reconciliation_not_finalized` → Reconcile, `message_stale` → Draft
+ * (Rebuild draft), `message_not_reviewed` + every other gate blocker → Review.
+ * Placing `message_stale` on Review/Finalize would reproduce on every future
+ * month the 2026-06 trap (blocker on one page, the Rebuild button on another).
+ *
  * The honest-green guarantee (the point of #24): a finalized-but-undelivered
  * month derives Reconcile/Draft/Review/Finalize `done`, Send `current` — never a
  * fully-green pipeline. "Archived" no longer flips green at the seal.
  */
 export function deriveMonthStageCore(input: MonthStageInput): MonthStage[] {
   const { month, reconciled, draftBuilt, reviewBlockers, finalized, delivered } = input;
-  const reviewDone = reviewBlockers.length === 0;
+
+  // Partition the gate blockers by the stage whose ACTION clears them — the #24
+  // organising rule (a blocker and its control belong in the same place). This
+  // is what keeps message_stale off Review/Finalize: its remedy (Rebuild draft)
+  // is a Draft-stage control, so a stale message blocks Draft, not Review.
+  //   reconciliation_not_finalized → Reconcile (cleared by reconciliation signoff)
+  //   message_stale                → Draft     (cleared by Rebuild draft)
+  //   message_not_reviewed + rest  → Review    (cleared by fixing receipts /
+  //                                             attendees / compliance / preface)
+  const reconcileBlockers = reviewBlockers.filter((b) => b.code === "reconciliation_not_finalized");
+  const draftBlockers = reviewBlockers.filter((b) => b.code === "message_stale");
+  const reviewStageBlockers = reviewBlockers.filter(
+    (b) => b.code !== "reconciliation_not_finalized" && b.code !== "message_stale",
+  );
+
+  // `reconciled` / `draftBuilt` are authoritative when no draft exists to run the
+  // gate on (e.g. reconciled=false with no export row ⇒ reconcileBlockers empty
+  // but Reconcile is still not done). Combined with the partitioned blockers:
+  const reconcileDone = reconciled && reconcileBlockers.length === 0;
+  const draftDone = draftBuilt && draftBlockers.length === 0; // built AND not stale
+  const reviewDone = reviewStageBlockers.length === 0;
 
   type Raw = {
     key: MonthStageKey;
@@ -124,16 +150,22 @@ export function deriveMonthStageCore(input: MonthStageInput): MonthStage[] {
     {
       key: "reconcile",
       label: "Reconcile",
-      done: reconciled,
+      done: reconcileDone,
       href: `/receipts/reconcile?month=${month}`,
-      primaryLabel: reconciled ? undefined : "Reconcile を開く",
+      primaryLabel: reconcileDone ? undefined : "Reconcile を開く",
+      blockers: reconcileBlockers.length > 0 ? reconcileBlockers : undefined,
     },
     {
       key: "draft",
       label: "Draft",
-      done: draftBuilt,
+      done: draftDone,
       href: `/receipts/export?month=${month}`,
-      primaryLabel: draftBuilt ? undefined : "ドラフトを作成",
+      primaryLabel: draftDone
+        ? undefined
+        : draftBuilt
+          ? "ドラフトを再作成"
+          : "ドラフトを作成",
+      blockers: draftBlockers.length > 0 ? draftBlockers : undefined,
     },
     {
       key: "review",
@@ -141,7 +173,7 @@ export function deriveMonthStageCore(input: MonthStageInput): MonthStage[] {
       done: reviewDone,
       href: reviewHref,
       primaryLabel: reviewDone ? undefined : "確認して確定へ",
-      blockers: reviewDone ? undefined : reviewBlockers,
+      blockers: reviewStageBlockers.length > 0 ? reviewStageBlockers : undefined,
     },
     {
       key: "finalize",
