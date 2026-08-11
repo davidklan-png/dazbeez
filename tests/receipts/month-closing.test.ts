@@ -178,6 +178,25 @@ test("gate 1.6: no draft (exportBuild null) → no message_not_reviewed (nothing
   );
 });
 
+// (1.5) message_stale — Backlog #24 concrete case. The remedy (Rebuild draft)
+// lives on the export page but the blocker surfaces on /review; with no link the
+// operator had to hunt for it (2026-06). The blocker must now carry an href so
+// it reads as a route, not dead prose.
+test("gate 1.5 (message_stale): the blocker carries an href to the export page (Rebuild draft)", () => {
+  const blockers = validateMonthReadyForExportCoreDetailed(
+    makeInput({
+      exportBuild: { bundleBuiltAt: "2026-08-11T00:00:00Z", operatorMessageUpdatedAt: "2026-08-11T01:00:00Z" },
+    }),
+  );
+  const stale = blockers.find((b) => b.code === "message_stale");
+  assert.ok(stale, `expected message_stale; got ${JSON.stringify(blockers)}`);
+  assert.equal(
+    stale?.href,
+    `/receipts/export?month=${MONTH}`,
+    "message_stale must link to the export page where Rebuild draft lives",
+  );
+});
+
 // (1) Statement-sealed
 test("gate 1: missing reconciliation blocks", () => {
   const blockers = validateMonthReadyForExportCore(makeInput({ reconciliation: null }));
