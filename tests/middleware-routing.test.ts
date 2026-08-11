@@ -78,6 +78,26 @@ test("matcher: the monthly-delivery send endpoint is Clerk-protected (auth.prote
   );
 });
 
+test("matcher: the delivery-preview endpoint is Clerk-protected (auth.protect() applies)", () => {
+  // GET /api/receipts/export/:month/delivery-preview returns the composed
+  // delivery (recipients, subject/body, attachment SHA-256) for a sealed month.
+  // It is the read-only preview the composer page could fetch, and it MUST stay
+  // under auth.protect() — a future edit that added it to PUBLIC_ROUTES (the
+  // processor-key exemption list) would leak the composed pack metadata. Same
+  // guard as the send route above.
+  const previewRequest = new NextRequest(
+    "https://dazbeez.com/api/receipts/export/2026-06/delivery-preview",
+  );
+  assert.ok(
+    MATCHER.includes("/api/receipts/:path*"),
+    "the broad receipts gate covers the preview route",
+  );
+  assert.ok(
+    !isPublicRoute(previewRequest),
+    "the delivery-preview route must NOT be exempted from auth.protect() (not in PUBLIC_ROUTES)",
+  );
+});
+
 test("PUBLIC_ROUTES: the /enqueue recovery endpoint IS exempted (processor-key auth reaches the handler)", () => {
   // POST /api/receipts/[id]/enqueue does layered processor-key OR Clerk auth
   // inside the handler (mirroring /render, /promote). It MUST be in PUBLIC_ROUTES

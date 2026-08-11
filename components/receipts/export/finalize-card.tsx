@@ -80,7 +80,13 @@ export function FinalizeCard({
         return;
       }
       setConfirmType("");
-      router.refresh();
+      // Delivery-composer §5: on a successful finalize, hand the operator to
+      // the composer (sealed → review email → send). Sealing is the midpoint,
+      // not completion (decision 5) — finalize stays a separate operation from
+      // delivery (D1/D2); this is a CLIENT navigation only, no auto-send and no
+      // server-side coupling. The composer renders the sealed-undelivered state
+      // and the operator clicks Send himself.
+      router.push(`/receipts/export/${month}/send`);
     } catch {
       setError("Network error.");
     } finally {

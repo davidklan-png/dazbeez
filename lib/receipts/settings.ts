@@ -24,6 +24,9 @@ export const COMPLIANCE_DEFAULTS: ComplianceSettings = {
   // fallback (there is no BUSINESS_MANAGER_EMAIL var). Read at send; empty →
   // the Cc field is omitted from the Resend payload entirely (not cc:"").
   notification_cc_recipient: "",
+  // Delivery-composer decision 3: email-only signature, appended after the
+  // sealed notice's closing line. Empty default; composer maps empty → null.
+  delivery_signature: "",
   // ADR 0010 D3: verbatim former TOKYO_SIGNALS. Behavior unchanged until the
   // operator edits Settings → Compliance.
   homebase_signals: DEFAULT_HOMEBASE_SIGNALS,
@@ -120,6 +123,8 @@ export function parseComplianceSettings(
     notification_cc_recipient:
       map.get("notification_cc_recipient") ??
       COMPLIANCE_DEFAULTS.notification_cc_recipient,
+    delivery_signature:
+      map.get("delivery_signature") ?? COMPLIANCE_DEFAULTS.delivery_signature,
     homebase_signals: parseHomebaseSignals(map.get("homebase_signals")),
   };
 }

@@ -91,6 +91,28 @@ export async function PATCH(request: Request) {
       );
     }
 
+    // Delivery-composer decision 3: the email-only signature is free text,
+    // capped at 1000 chars and trimmed. Empty is allowed (→ no signature
+    // appended). Reject over-cap rather than silently truncating so the editor
+    // sees the real boundary.
+    if (body.delivery_signature !== undefined) {
+      if (typeof body.delivery_signature !== "string") {
+        return NextResponse.json(
+          { error: "delivery_signature must be a string." },
+          { status: 400 },
+        );
+      }
+      if (body.delivery_signature.length > 1000) {
+        return NextResponse.json(
+          { error: "delivery_signature must be 1000 characters or fewer." },
+          { status: 400 },
+        );
+      }
+      // Trim before storing so the empty→null mapping in composeDelivery is
+      // exact and there is no trailing-whitespace drift between save and send.
+      body.delivery_signature = body.delivery_signature.trim();
+    }
+
     const before = await getComplianceSettings();
     const settings = await updateComplianceSettings(body, actor);
 

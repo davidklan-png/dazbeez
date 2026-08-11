@@ -14,25 +14,14 @@ import {
   getReceiptsArchiveBucket,
   getReceiptsDb,
   getResendApiKeyOrNull,
-  getNotifyFromAddress,
-  getAccountantEmail,
 } from "@/lib/cloudflare-runtime";
-import { getComplianceSettings } from "@/lib/receipts/settings";
-import { resolveNotificationRecipient, isValidDeliveryAddress } from "@/lib/receipts/notify";
-import { computeSha256Hex } from "@/lib/receipts/storage";
 import {
   decideSendAction,
   idempotencyKeyForAttempt,
   ATTEMPT_STATE,
 } from "@/lib/receipts/delivery-state";
-import {
-  performDelivery,
-  assertDeliverySize,
-  buildDeliveryEmail,
-  MAX_DELIVERY_ZIP_BYTES,
-} from "@/lib/receipts/delivery-send";
-import { runPreflightOnSealedZip } from "@/lib/receipts/delivery-preflight";
-import { packZipName } from "@/lib/receipts/pack-naming";
+import { performDelivery, assertDeliverySize } from "@/lib/receipts/delivery-send";
+import { composeDelivery } from "@/lib/receipts/delivery-compose";
 
 type RouteContext = { params: Promise<{ month: string }> };
 
@@ -43,13 +32,25 @@ type RouteContext = { params: Promise<{ month: string }> };
  * manager — Change 5) as an attached ZIP. Fires strictly AFTER the seal commit
  * (D1); the seal is immutable and this only moves the month's delivery_state.
  *
+ * Composition (recipients, subject/body, preflight, attachment sha/filename) is
+ * single-sourced in {@link composeDelivery} — the SAME function the preview
+ * endpoint and the composer page use — so preview and send cannot disagree by
+ * construction. This handler owns only the send-specific concerns: the
+ * `force_new`-aware new/resume/blocked decision, the B-2 R2 HEAD-before-GET
+ * fetch, the delivery-row lifecycle, and the Resend call.
+ *
  * Boundary order:
  *  - B-2 (isolate memory): R2 HEAD size check BEFORE the body is streamed in.
  *  - B-1 (Resend ceiling): defence-in-depth size check inside performDelivery,
  *    before base64. [Two call sites — both reported in the commit.]
- *  - Change 3: preflight runs on the fetched bytes AFTER the delivery row exists
- *    and BEFORE performDelivery; a preflight failure marks the row failed (never
- *    leaves it pending, or a blocked send becomes the stuck-pending duplicate).
+ *  - Change 3: preflight runs on the fetched bytes BEFORE performDelivery (read
+ *    from the composed result — no re-run); a preflight failure is audited and
+ *    blocks before any delivery row is created.
+ *
+ * The POST body is IGNORED. Subject/body/To/Cc are NEVER accepted from the
+ * client — they are re-composed server-side from the sealed pack + Settings via
+ * composeDelivery (delivery-composer decision 2). A client that posts an edited
+ * body has no way to change what is sent.
  *
  * `force_new` is the DISTINCT override for the double-send guard (D6). Without
  * it: a resumeable pending is RESUMED (same attempt_id ⇒ same key ⇒ Resend
@@ -66,6 +67,9 @@ export async function POST(request: Request, { params }: RouteContext) {
       return NextResponse.json({ error: "Invalid month format." }, { status: 400 });
     }
     const forceNew = new URL(request.url).searchParams.get("force_new") === "true";
+    // The request body is deliberately unread — subject/body/To/Cc are never
+    // accepted from the client (decision 2). Send proceeds solely from the
+    // sealed pack + Settings via composeDelivery below.
 
     // ── Load the sealed export (D1: send is post-seal) ───────────────────────
     const exportRecord = await getLatestFinalizedExport(month);
@@ -76,7 +80,10 @@ export async function POST(request: Request, { params }: RouteContext) {
       );
     }
 
-    // ── Decide new vs resume vs blocked (D6 + the stuck-pending guard) ───────
+    // ── Decide new vs resume vs blocked (D6 + the stuck-pending guard). This
+    //    is the send-specific, force_new-aware decision; composeDelivery runs a
+    //    forceNew:false decision for DISPLAY only. Kept BEFORE the R2 fetch so a
+    //    double-send 409 rejects cheaply.
     const deliveries = (await listDeliveriesForMonth(month)).map((d) => ({
       id: d.id,
       exportId: d.export_id,
@@ -109,51 +116,6 @@ export async function POST(request: Request, { params }: RouteContext) {
       );
     }
 
-    // ── Recipients + transport config (Settings/config — not pack state) ─────
-    // To: accountant (settings.notification_recipient → ACCOUNTANT_EMAIL
-    // fallback). Cc: business manager (settings.notification_cc_recipient — no
-    // fallback). Cc is OPTIONAL (Change 5): unset → omitted from the Resend
-    // payload entirely (performDelivery passes cc:null → undefined; B-4: never
-    // cc:null/cc:""). To is REQUIRED: no resolvable To = a partially-configured
-    // recipient list → refuse, do not deliver.
-    const settings = await getComplianceSettings();
-    const to = resolveNotificationRecipient(
-      settings.notification_recipient,
-      getAccountantEmail(),
-    ).email;
-    const cc = (settings.notification_cc_recipient ?? "").trim() || null;
-    // Change 5 boundaries — checked BEFORE the send (a malformed address is a
-    // definitive Resend 4xx; correct, but a wasted attempt + confusing audit):
-    //  - Both unset / no resolvable To → refuse (partially-configured list).
-    //  - Validate BOTH addresses. To may arrive via the unvalidated
-    //    ACCOUNTANT_EMAIL fallback, so it is not trusted from save-time alone.
-    if (!to) {
-      return NextResponse.json(
-        { error: "No delivery recipient (To) configured (set it in Settings → Compliance)." },
-        { status: 422 },
-      );
-    }
-    if (!isValidDeliveryAddress(to)) {
-      return NextResponse.json(
-        { error: `Delivery recipient (To) is not a valid email address: ${to}` },
-        { status: 422 },
-      );
-    }
-    if (cc !== null && !isValidDeliveryAddress(cc)) {
-      return NextResponse.json(
-        { error: `Delivery Cc recipient is not a valid email address: ${cc}` },
-        { status: 422 },
-      );
-    }
-    const apiKey = getResendApiKeyOrNull();
-    const from = getNotifyFromAddress();
-    if (!apiKey || !from) {
-      return NextResponse.json(
-        { error: "Delivery not configured (RESEND_API_KEY / NOTIFY_FROM_ADDRESS)." },
-        { status: 422 },
-      );
-    }
-
     // ── B-2: size check via R2 HEAD BEFORE streaming the body into memory ────
     const bucket = getReceiptsArchiveBucket();
     const proofsKey = exportRecord.proofs_r2_key;
@@ -182,27 +144,41 @@ export async function POST(request: Request, { params }: RouteContext) {
       );
     }
     const zipBytes = new Uint8Array(await new Response(object.body).arrayBuffer());
-    const zipSha256 = await computeSha256Hex(zipBytes);
-    const zipFilename = packZipName(month); // ASCII container name (B-4, asserted in performDelivery)
 
-    // ── Change 3: preflight on the ACTUAL sealed bytes — a gate that checks a
-    //    different object than the one being sent is not a gate. Uses the SAME
-    //    zipBytes fetched once (no second R2 read). Runs BEFORE createDelivery:
-    //    a failing check rejects the pack at the gate — no delivery row is
-    //    created, so there is no pending row to get stuck (the duplicate-send
-    //    path the stuck-pending guard prevents). The report is returned to the
-    //    caller so Phase C can render it.
-    const { report: preflight, summary } = await runPreflightOnSealedZip({
-      zipBytes,
-      month,
-      paymentDueDate: exportRecord.payment_due_date ?? null,
-      maxPackBytes: MAX_DELIVERY_ZIP_BYTES,
-      operatorMessage: exportRecord.operator_message ?? null,
-    });
-    if (!preflight.passed) {
-      const failedChecks = preflight.results
+    // ── Compose (recipients / subject / body / preflight / sha / filename).
+    //    Pass the already-fetched bytes IN so compose runs the preflight on the
+    //    EXACT bytes that ship and does not fetch a second time. This is the
+    //    single composition path — the preview endpoint and composer page call
+    //    the same function, so preview/send cannot drift.
+    const composed = await composeDelivery(month, { zipBytes });
+
+    // Config problems (missing To, invalid address, no Resend key / From, missing
+    // ZIP) make sending impossible. The composer surfaces these BEFORE the
+    // operator clicks Send; this is the defensive guard for a race/direct POST.
+    const apiKey = getResendApiKeyOrNull();
+    if (
+      composed.configErrors.length > 0 ||
+      !composed.to ||
+      !composed.from ||
+      !apiKey
+    ) {
+      return NextResponse.json(
+        {
+          error: composed.configErrors[0] ?? "Delivery not configured.",
+          configErrors: composed.configErrors,
+        },
+        { status: 422 },
+      );
+    }
+
+    // ── Change 3: preflight gate on the sealed bytes. Read from the composed
+    //    result — compose already ran it on these exact bytes (no re-run). A
+    //    failing check rejects the pack at the gate, audited, BEFORE any
+    //    delivery row is created (so there is no pending row to get stuck).
+    if (!composed.preflight.passed) {
+      const failedChecks = composed.preflight.results
         .filter((r) => !r.passed)
-        .map((r) => r.check)
+        .map((r) => r.name)
         .join(", ");
       await createAuditEntry(getReceiptsDb(), {
         actor,
@@ -212,16 +188,10 @@ export async function POST(request: Request, { params }: RouteContext) {
         newValueJson: stringifyJson({ month, blockedBy: "preflight", failedChecks }),
       });
       return NextResponse.json(
-        { error: "Pre-send preflight failed.", report: preflight },
+        { error: "Pre-send preflight failed.", preflight: composed.preflight },
         { status: 422 },
       );
     }
-
-    // ── Email body — sealed values only (B-5). SINGLE path. The summary comes
-    //    from the preflight's parse of the sealed 集計 (D4 — regenerated at
-    //    send, not a stale snapshot). ──
-    const operatorMessage = exportRecord.operator_message ?? null; // 0037: same stored value the pack notice carries (O7)
-    const email = buildDeliveryEmail({ month, operatorMessage, summary });
 
     // ── attempt_id: resume reuses the pending one; a new send mints one ──────
     const attemptId = action.action === "resume" ? action.attemptId : newUuid();
@@ -236,17 +206,18 @@ export async function POST(request: Request, { params }: RouteContext) {
     }
 
     // ── Record the delivery attempt (pending) with the now-known bytes + sha ─
+    const operatorMessage = exportRecord.operator_message ?? null; // 0037: same stored value the pack notice carries (O7)
     const deliveryId = await createDelivery({
       exportId: exportRecord.id,
       attemptId,
       idempotencyKey: idempotencyKeyForAttempt(attemptId),
-      toAddress: to,
-      ccAddress: cc,
-      subject: email.subject,
-      body: email.text,
+      toAddress: composed.to,
+      ccAddress: composed.cc,
+      subject: composed.subject,
+      body: composed.text,
       operatorMessage,
-      zipFilename,
-      zipSha256,
+      zipFilename: composed.zipFilename,
+      zipSha256: composed.zipSha256,
       zipBytes: zipBytes.byteLength,
     });
 
@@ -255,13 +226,13 @@ export async function POST(request: Request, { params }: RouteContext) {
     //    the Idempotency-Key. Never throws across the boundary.
     const result = await performDelivery({
       apiKey,
-      from,
-      to,
-      cc,
-      subject: email.subject,
-      text: email.text,
-      html: email.html,
-      zipFilename,
+      from: composed.from,
+      to: composed.to,
+      cc: composed.cc,
+      subject: composed.subject,
+      text: composed.text,
+      html: composed.html,
+      zipFilename: composed.zipFilename,
       zipBytes,
       idempotencyKey: idempotencyKeyForAttempt(attemptId),
     });
@@ -277,7 +248,7 @@ export async function POST(request: Request, { params }: RouteContext) {
         newValueJson: stringifyJson({
           month,
           attemptId,
-          to,
+          to: composed.to,
           messageId: result.messageId ?? null,
         }),
       });
@@ -318,8 +289,8 @@ export async function POST(request: Request, { params }: RouteContext) {
         deliveryId,
         error: result.error,
         classification,
-        // Phase C renders "resume" (reuse the attempt) vs "retry" (new attempt)
-        // from this — ambiguous within 24h is resumable.
+        // The composer renders "resume" (reuse the attempt) vs "retry" (new
+        // attempt) from this — ambiguous within 24h is resumable.
         resumable: classification === "ambiguous",
       },
       { status: 200 },

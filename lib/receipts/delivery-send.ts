@@ -153,6 +153,12 @@ export function buildDeliveryEmail(opts: {
   /** Category totals from the sealed 集計.csv (D4 — regenerated at send from
    *  the sealed pack, not a stale snapshot). NULL when the 集計 is absent. */
   summary: { monthLabel: string; categoryTotals: { ja: string; count: number; totalMinor: number }[] } | null;
+  /** Email-only signature (delivery-composer decision 3), appended AFTER the
+   *  closing `ご不明な点があればお知らせください。` separated by a blank line.
+   *  Does NOT enter the sealed pack notice. Optional + defaults to null so the
+   *  existing callers/tests (which omit it) produce byte-identical output to
+   *  pre-signature behaviour — a hard requirement. Trimmed; empty → omitted. */
+  signature?: string | null;
 }): DeliveryEmail {
   const monthLabel = opts.summary?.monthLabel ?? `${opts.month.slice(0, 4)}年${Number(opts.month.slice(5, 7))}月`;
   const lines: string[] = [];
@@ -172,6 +178,15 @@ export function buildDeliveryEmail(opts: {
     lines.push("");
   }
   lines.push("ご不明な点があればお知らせください。");
+  // Decision 3: append the email-only signature after the closing line,
+  // separated by a blank line. Appended to `text` (not hand-built markup) so
+  // the pre-wrap HTML branch picks it up through escapeHtml(text) unchanged —
+  // one assembly path, no second builder. null/empty → nothing appended.
+  const sig = opts.signature?.trim() ?? "";
+  if (sig.length > 0) {
+    lines.push("");
+    lines.push(sig);
+  }
   const text = lines.join("\r\n");
   return {
     subject: `【領収証憑】${monthLabel}分`, // O2: no revision info

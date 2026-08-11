@@ -30,6 +30,7 @@ const LABELS: Record<keyof ComplianceSettings, string> = {
   track_tax_breakdown: "Track tax rate / amount breakdown",
   notification_recipient: "通知先 (Notification recipient)",
   notification_cc_recipient: "CC (Business manager / Cc recipient)",
+  delivery_signature: "配信メール署名 (Delivery email signature)",
   homebase_signals: "Homebase signals (ADR 0010)",
 };
 
@@ -288,6 +289,23 @@ export function ComplianceSettingsForm({
             </p>
           ) : null}
         </div>
+      </Row>
+
+      <Row
+        label={LABELS.delivery_signature}
+        hint="配信メールの末尾（「ご不明な点があればお知らせください。」の後）に追加される署名です。確定した封筒内の通知には含まれません（送信メールのみ）。空欄なら追加されません。"
+      >
+        <textarea
+          value={settings.delivery_signature}
+          onChange={(e) => update("delivery_signature", e.target.value)}
+          rows={4}
+          maxLength={1000}
+          className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm sm:w-96"
+          placeholder={"山田 太郎\nDazbeez合同会社\neditor@dazbeez.com"}
+        />
+        <p className="mt-1 text-[11px] text-gray-400">
+          {settings.delivery_signature.length}/1000
+        </p>
       </Row>
 
       <Row

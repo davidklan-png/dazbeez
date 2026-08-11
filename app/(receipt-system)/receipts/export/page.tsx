@@ -33,7 +33,9 @@ import {
 } from "@/lib/receipts/settings";
 import { buildExportBundle } from "@/lib/receipts/month-closing";
 import { BUNDLE_DOWNLOAD_LINK_DEFS } from "@/lib/receipts/export";
+import { deriveFinalizedMonthsDeliveryState } from "@/lib/receipts/delivery-status";
 import { CreateRevisionButton } from "@/components/receipts/export/create-revision-button";
+import { DeliveryMonthBanner } from "@/components/receipts/export/delivery-month-banner";
 
 export const dynamic = "force-dynamic";
 
@@ -57,10 +59,14 @@ export default async function ExportPage({
       ? params.month
       : null;
 
-  const [lineCountsByMonth, reconciliationStatusByMonth] = await Promise.all([
-    listAmexLineCountsByMonth(),
-    listReconciliationStatusByMonth(),
-  ]);
+  const [lineCountsByMonth, reconciliationStatusByMonth, deliveryByMonth] =
+    await Promise.all([
+      listAmexLineCountsByMonth(),
+      listReconciliationStatusByMonth(),
+      // §6: one server-side Map<month, DeliveryState|null> drives every alert
+      // surface (this page's banner + pills, the dashboard banner).
+      deriveFinalizedMonthsDeliveryState(),
+    ]);
 
   const availableMonths: MonthOption[] = [...lineCountsByMonth.entries()]
     .map(([optionMonth, counts]) => ({
@@ -68,6 +74,12 @@ export default async function ExportPage({
       lineCount: counts.total,
       unmatchedCount: counts.unmatched,
       status: reconciliationStatusByMonth.get(optionMonth) ?? null,
+      // Only finalized months are in the delivery map. has() distinguishes
+      // "not finalized → undefined (legacy pill)" from "finalized never sent →
+      // null (red pill)" — `?? undefined` alone would wrongly drop the null.
+      deliveryState: deliveryByMonth.has(optionMonth)
+        ? (deliveryByMonth.get(optionMonth) ?? null)
+        : undefined,
     }))
     .sort((a, b) => a.month.localeCompare(b.month));
 
@@ -128,6 +140,13 @@ export default async function ExportPage({
   const draftStats = computeDraftStats(bundle.rows);
   const breakdown = computeBreakdown(bundle.rows);
 
+  // §6: the active month's delivery state — drives the banner above the sealed
+  // bundle. latestFinalized implies the month is finalized ⇒ in the delivery map
+  // (get() returns DeliveryState|null; the ?? null is a safe fallback).
+  const monthDeliveryState = latestFinalized
+    ? (deliveryByMonth.get(month) ?? null)
+    : null;
+
   return (
     <>
       <div className="border-b border-gray-200 bg-gray-50 px-8 py-4">
@@ -148,6 +167,13 @@ export default async function ExportPage({
         breakdown={breakdown}
         unassignableReceipts={unassignable}
       />
+      {latestFinalized && (
+        <DeliveryMonthBanner
+          month={month}
+          monthLabel={monthLabel}
+          state={monthDeliveryState}
+        />
+      )}
       {/* Sealed bundle — latest FINALIZED revision. Served even while a
           revision draft is open (getLatestFinalizedExport, NOT getExport, so an
           open draft never makes the sealed package undownloadable). */}
