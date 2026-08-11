@@ -197,22 +197,27 @@ test("decideSendAction: a stale pending (beyond 24h) blocks without override; ov
   );
 });
 
-test("decideSendAction: a pending for a DIFFERENT (earlier) revision is not a blocker ⇒ new (revision-scoped)", () => {
-  // BEHAVIOUR CHANGE (this item). Pre-fix this returned `blocked` via the
-  // month-wide stale guard. Under revision scoping a pending for an EARLIER
-  // revision is a different pack — not a duplicate of the current revision's
-  // pack — so it no longer blocks the current revision's first send. (If that
-  // stuck pending was accepted the accountant may receive two packs; stuck
-  // pendings are surfaced separately by the stuck-pending pill, backlog #12,
-  // rather than blocking the new revision.)
-  const otherExport = sum({ exportId: "exp-old", attemptId: "att-other" });
+test("decideSendAction: a pending for a DIFFERENT (earlier) revision ⇒ redelivery (the mail may have been accepted)", () => {
+  // §1 correction. A pending earlier-revision attempt is in flight — the mail
+  // MAY have been accepted, so the accountant may already hold that pack, and
+  // sending the current revision produces a possible second email. That is
+  // exactly the situation `redelivery` exists to make explicit (with UI
+  // confirmation), NOT a silent `new`. (The 24h window is irrelevant — a
+  // different pack, so Resend dedupe does not enter in.) Pre-fix the old
+  // month-wide stale guard called this `blocked`; the first revision-scoped cut
+  // wrongly relaxed it to `new`; the correct answer is `redelivery`.
+  const otherExport = sum({ exportId: "exp-old", attemptId: "att-other", state: ATTEMPT_STATE.PENDING });
   const res = decideSendAction({
     latestExportId: "exp",
     deliveries: [otherExport],
     now: NOW,
     forceNew: false,
   });
-  assert.equal(res.action, "new");
+  assert.equal(res.action, "redelivery");
+  if (res.action === "redelivery") {
+    assert.equal(res.priorAttemptId, "att-other");
+    assert.equal(res.priorAttemptState, ATTEMPT_STATE.PENDING, "evidence is pending ⇒ may have reached, not was delivered");
+  }
 });
 
 test("decideSendAction: a resumeable pending supersedes an older sent (corrected re-delivery in flight)", () => {
@@ -304,6 +309,58 @@ test("decideSendAction: a SENT for an EARLIER revision (current not sent) ⇒ re
   assert.equal(res.action, "redelivery");
   if (res.action === "redelivery") {
     assert.equal(res.priorAttemptId, "att-old", "carries the earlier revision's delivered attempt id");
+    assert.equal(res.priorAttemptState, ATTEMPT_STATE.SENT, "evidence is sent ⇒ was delivered");
+  }
+});
+
+test("decideSendAction: an AMBIGUOUS earlier-revision attempt ⇒ redelivery (the mail may have been accepted)", () => {
+  // §1: ambiguous is the false-negative case — the mail may have been accepted,
+  // so the accountant may hold the earlier pack ⇒ redelivery, not a silent new.
+  const res = decideSendAction({
+    latestExportId: "exp-v2",
+    deliveries: [
+      sum({ id: "d-old", exportId: "exp-v1", attemptId: "att-amb", state: ATTEMPT_STATE.AMBIGUOUS, createdAt: beyondWindow }),
+    ],
+    now: NOW,
+    forceNew: false,
+  });
+  assert.equal(res.action, "redelivery");
+  if (res.action === "redelivery") {
+    assert.equal(res.priorAttemptState, ATTEMPT_STATE.AMBIGUOUS, "evidence is ambiguous ⇒ may have reached");
+  }
+});
+
+test("decideSendAction: a definitive FAILED earlier-revision attempt ⇒ new (the mail was never accepted)", () => {
+  // §1: only `failed` (Resend 4xx — definitively rejected, never accepted) falls
+  // through to `new`. The accountant did not receive the earlier pack, so this
+  // is not a re-delivery.
+  const res = decideSendAction({
+    latestExportId: "exp-v2",
+    deliveries: [
+      sum({ id: "d-old", exportId: "exp-v1", attemptId: "att-rej", state: ATTEMPT_STATE.FAILED }),
+    ],
+    now: NOW,
+    forceNew: false,
+  });
+  assert.equal(res.action, "new");
+});
+
+test("decideSendAction: redelivery prefers `sent` over pending/ambiguous when several earlier attempts qualify (strongest evidence)", () => {
+  // §1: priorAttemptId/State should name the strongest evidence. With an earlier
+  // `sent` AND an earlier `pending`, the redelivery carries the sent attempt.
+  const res = decideSendAction({
+    latestExportId: "exp-v2",
+    deliveries: [
+      sum({ id: "d-pend", exportId: "exp-v1", attemptId: "att-pend", state: ATTEMPT_STATE.PENDING }),
+      sum({ id: "d-sent", exportId: "exp-v1", attemptId: "att-sent", state: ATTEMPT_STATE.SENT }),
+    ],
+    now: NOW,
+    forceNew: false,
+  });
+  assert.equal(res.action, "redelivery");
+  if (res.action === "redelivery") {
+    assert.equal(res.priorAttemptId, "att-sent", "prefers the definitive sent over the pending");
+    assert.equal(res.priorAttemptState, ATTEMPT_STATE.SENT);
   }
 });
 

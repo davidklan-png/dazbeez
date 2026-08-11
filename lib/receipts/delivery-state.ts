@@ -220,31 +220,57 @@ export interface DeliveryAttemptSummary {
  *  - `resume`: a resumeable attempt exists for the CURRENT revision (pending, or
  *    an ambiguous failure within the window) — reuse its attempt_id so Resend
  *    replays (no duplicate). Distinct from a new send; no override needed.
- *  - `redelivery`: a DIFFERENT, earlier revision was delivered (sent) and the
- *    current revision has not been. This is the FIRST send of the current
- *    revision — legitimate, not a duplicate of the current pack. Needs an
- *    explicit UI confirmation (the accountant receives a second email) but NOT
- *    force_new, and it audits as a re-delivery, not an override. Carries the
- *    prior (delivered) attempt id.
+ *  - `redelivery`: a DIFFERENT, earlier revision has an attempt whose mail MAY
+ *    have reached the accountant (sent / pending / ambiguous — anything but a
+ *    definitive `failed`), and the current revision has no such attempt. This is
+ *    the FIRST send of the current revision — legitimate, not a duplicate of the
+ *    current pack. Needs an explicit UI confirmation (the accountant may receive
+ *    a second email) but NOT force_new, and it audits as a re-delivery, not an
+ *    override. Carries the prior attempt id + its state, because the composer
+ *    copy must not claim the earlier pack WAS delivered when the evidence is
+ *    only pending/ambiguous.
  *  - `blocked`: the CURRENT revision (latestExportId) was already delivered
  *    (`sent`), OR has a pending/ambiguous attempt that is NOT resumeable (stale
  *    beyond the 24h window) — a new send risks a duplicate of THIS revision's
  *    pack, so it needs the explicit override (forceNew).
  *
  *  State and action are scoped to the latest finalized revision; month-wide
- *  delivery history is still consulted to tell `redelivery` (a `sent` for an
- *  earlier revision) apart from `blocked` (a `sent` for this one). A definitive
- *  `failed` attempt is neither resumeable nor a blocker — Resend definitively
- *  rejected it, so a retry is a clean new send. */
+ *  delivery history is still consulted to tell `redelivery` (an earlier
+ *  revision's sent / pending / ambiguous) apart from `blocked` (a `sent` for
+ *  this one). A definitive `failed` attempt is neither resumeable nor a
+ *  redelivery signal nor a blocker — Resend definitively rejected it, so the
+ *  accountant never received it and a retry is a clean new send. */
 export type SendAction =
   | { action: "new" }
-  | { action: "redelivery"; priorAttemptId: string }
+  | {
+      action: "redelivery";
+      priorAttemptId: string;
+      /** The prior (earlier-revision) attempt's state. `sent` ⇒ the earlier pack
+       *  was delivered; `pending`/`ambiguous` ⇒ it may have been. The composer
+       *  copy branches on this so it never overclaims delivery. */
+      priorAttemptState: AttemptState;
+    }
   | { action: "resume"; attemptId: string; deliveryId: string }
   | { action: "blocked"; reason: "sent" | "stale"; priorAttemptId: string };
 
 /** States that are resumeable when fresh: in-flight (`pending`) or a false-
  *  negative failure (`ambiguous` — the mail may have been accepted). */
 const RESUMEABLE_STATES = [ATTEMPT_STATE.PENDING, ATTEMPT_STATE.AMBIGUOUS] as const;
+
+/** Attempt states in which the accountant MAY already hold a pack for the
+ *  attempt's revision: `sent` (definitely delivered) plus the resumeable states
+ *  `pending` (in flight) / `ambiguous` (false-negative — may have been
+ *  accepted). `failed` is definitive rejection — never accepted, so the
+ *  accountant does not have it. This is the predicate for
+ *  {@link SendAction.redelivery} on an EARLIER revision: any of these means
+ *  sending the current revision produces a second email, which `redelivery`
+ *  exists to make explicit.
+ *
+ *  The 24h idempotency window is IRRELEVANT here — resumability is about whether
+ *  Resend will dedupe a retry of the SAME pack; this is a different pack, so
+ *  window state does not change whether the accountant already got mail. Derived
+ *  from {@link RESUMEABLE_STATES} + SENT rather than spelling the set out again. */
+const MAY_HAVE_REACHED_RECIPIENT_STATES = [...RESUMEABLE_STATES, ATTEMPT_STATE.SENT] as const;
 
 /** Is `d` a resumeable attempt for the CURRENT revision — pending or ambiguous,
  *  for this export, still inside Resend's 24h idempotency window? A resume
@@ -301,12 +327,12 @@ export function findRevisionSendBlocker(
  *
  * STATE and ACTION are scoped to the latest finalized revision: a `sent` or
  * stale-pending for THIS revision blocks (genuine duplicate of the current
- * pack); a `sent` for a DIFFERENT (earlier) revision is a `redelivery` — the
- * first send of the current revision, legitimate, needing UI confirmation but
- * not force_new. This is the fix for the month-wide `sent` lookups that made a
- * corrected-but-unsent revision read as delivered (display) and forced the
- * operator through force_new for its FIRST send (send path, audited as an
- * override).
+ * pack); an earlier revision's sent / pending / ambiguous is a `redelivery` —
+ * the first send of the current revision, legitimate, needing UI confirmation
+ * but not force_new (the accountant may already hold the earlier pack). This is
+ * the fix for the month-wide `sent` lookups that made a corrected-but-unsent
+ * revision read as delivered (display) and forced the operator through force_new
+ * for its FIRST send (send path, audited as an override).
  *
  * Resume (pending/ambiguous, this revision, within 24h) wins first — a
  * corrected re-delivery in flight supersedes a prior delivered pack. forceNew
@@ -344,14 +370,28 @@ export function decideSendAction(opts: {
     };
   }
 
-  // No blocker for the current revision. A `sent` for an EARLIER revision means
-  // this is the first send of the current revision — a legitimate re-delivery
-  // (the accountant receives a second email), not a duplicate and not an override.
-  const sentForEarlierRevision = deliveries.find(
-    (d) => d.exportId !== latestExportId && d.state === ATTEMPT_STATE.SENT,
+  // No blocker for the current revision. An EARLIER-revision attempt whose mail
+  // MAY have reached the accountant (sent / pending / ambiguous — anything but a
+  // definitive `failed`) means this is the first send of the current revision
+  // and the accountant may already hold an earlier pack: a legitimate re-delivery
+  // requiring UI confirmation, not a duplicate and not an override. The 24h
+  // window does not enter in — a different pack, so Resend dedupe is irrelevant.
+  const earlierMayHaveReached = deliveries.filter(
+    (d) =>
+      d.exportId !== latestExportId &&
+      (MAY_HAVE_REACHED_RECIPIENT_STATES as readonly AttemptState[]).includes(d.state),
   );
-  if (sentForEarlierRevision) {
-    return { action: "redelivery", priorAttemptId: sentForEarlierRevision.attemptId };
+  if (earlierMayHaveReached.length > 0) {
+    // If several qualify, prefer `sent` (definitive) over pending/ambiguous so
+    // the audit and the UI name the strongest evidence.
+    const prior =
+      earlierMayHaveReached.find((d) => d.state === ATTEMPT_STATE.SENT) ??
+      earlierMayHaveReached[0]!;
+    return {
+      action: "redelivery",
+      priorAttemptId: prior.attemptId,
+      priorAttemptState: prior.state,
+    };
   }
 
   return { action: "new" };

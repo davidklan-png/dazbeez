@@ -36,6 +36,7 @@ import { computeSha256Hex } from "@/lib/receipts/storage";
 import { nowIso } from "@/lib/receipts/db-utils";
 import {
   decideSendAction,
+  type AttemptState,
   type DeliveryState,
 } from "@/lib/receipts/delivery-state";
 import {
@@ -102,9 +103,10 @@ export interface ComposedDelivery {
   /** What the Send button should offer, from decideSendAction(forceNew:false).
    *  The send route re-decides with the real forceNew from the query; this is
    *  the display verdict (the natural-state action the operator first sees).
-   *  `redelivery` = a different, earlier revision was delivered and this is the
-   *  first send of the current revision — a primary action (no force_new), but
-   *  the composer surfaces the second-email consequence explicitly. */
+   *  `redelivery` = a different, earlier revision's mail MAY have reached the
+   *  accountant (sent / pending / ambiguous) and this is the first send of the
+   *  current revision — a primary action (no force_new), but the composer
+   *  surfaces the possible-second-email consequence explicitly. */
   action: "new" | "resume" | "redelivery" | "blocked";
   /** Present only when action === "blocked". The real enum from
    *  decideSendAction is "sent" | "stale" (the spec wrote "stale_pending";
@@ -112,8 +114,13 @@ export interface ComposedDelivery {
    *  pending). */
   blockedReason?: "sent" | "stale";
   /** For `resume` the resumeable attempt id; for `redelivery` the earlier
-   *  revision's delivered attempt id; for `blocked` the blocking attempt id. */
+   *  revision's attempt id; for `blocked` the blocking attempt id. */
   priorAttemptId?: string;
+  /** Present only when action === "redelivery": the earlier attempt's state.
+   *  `sent` ⇒ that pack was delivered; `pending`/`ambiguous` ⇒ it may have been.
+   *  The composer copy branches on this so it never claims the earlier pack WAS
+   *  delivered when the evidence is uncertain. */
+  priorAttemptState?: AttemptState;
 }
 
 /**
@@ -233,11 +240,13 @@ export async function composeDelivery(
   let action: ComposedDelivery["action"];
   let blockedReason: ComposedDelivery["blockedReason"];
   let priorAttemptId: string | undefined;
+  let priorAttemptState: AttemptState | undefined;
   if (decision.action === "new") {
     action = "new";
   } else if (decision.action === "redelivery") {
     action = "redelivery";
     priorAttemptId = decision.priorAttemptId;
+    priorAttemptState = decision.priorAttemptState;
   } else if (decision.action === "resume") {
     action = "resume";
     priorAttemptId = decision.attemptId;
@@ -274,6 +283,7 @@ export async function composeDelivery(
     action,
     ...(blockedReason ? { blockedReason } : {}),
     ...(priorAttemptId ? { priorAttemptId } : {}),
+    ...(priorAttemptState ? { priorAttemptState } : {}),
   };
 }
 
