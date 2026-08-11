@@ -41,9 +41,13 @@ export interface PackPreflightInput {
   noticeText: string;
   /** The reconciliation + summary CSVs present in the pack. */
   csvs: PreflightCsvInput[];
-  /** AMEX statement total (cents) for the payment-path reconciliation check;
-   *  null when no AMEX artifact. */
-  amexStatementTotalCents: number | null;
+  /** AMEX statement total for the payment-path reconciliation check. Discriminated:
+   *  - `none` — no AMEX 照合CSV in the pack (skip the check, as the old null did).
+   *  - `total` — amount column resolved; cents summed from the sealed AMEX CSV.
+   *  - `parse-error` — the AMEX CSV is present but its amount column (or recon
+   *    header) could not be resolved; the check MUST fail with this detail rather
+   *    than compare a fabricated zero. */
+  amexStatementTotal: AmexStatementTotal;
   /** Configured attachment-size ceiling (bytes) for the transport check. */
   maxPackBytes: number;
   /** The stored operator_message from the export record (0037). Checked against
@@ -63,6 +67,13 @@ export interface PackPreflightReport {
   passed: boolean;
   results: PreflightResult[];
 }
+
+/** The AMEX statement total, as resolved by the caller from the sealed AMEX 照合CSV
+ *  via {@link sumReconChargeAmounts}. See {@link PackPreflightInput.amexStatementTotal}. */
+export type AmexStatementTotal =
+  | { kind: "none" }
+  | { kind: "total"; cents: number }
+  | { kind: "parse-error"; detail: string };
 
 // ─── Small parsing helpers ──────────────────────────────────────────────────
 
@@ -180,22 +191,95 @@ function reconHeaderIndex(rows: string[][]): number {
   return rows.findIndex((r) => r.includes("科目＆No."));
 }
 
+/** The amount column of a reconciliation CSV is located SEMANTICALLY — the one
+ *  header cell that contains 金額 — not positionally. This is deliberate and
+ *  load-bearing: the AMEX importer (validation.ts) reads the amount by POSITION
+ *  (fields[5]) because it owns its own robustness. The preflight is a VERIFICATION
+ *  layer; if it located the amount the same positional way the importer does, a
+ *  column-shift regression would move both sides together and the check would
+ *  become tautological. Deriving the amount by an independent method (semantic
+ *  name match) is what lets the check catch a layout change. The two must
+ *  disagree loudly when the card company moves the column.
+ *
+ *  Exactly-one-match-or-fail: zero matches (the June-2026 AMEX passthrough whose
+ *  amount cell is 利用金額, not 金額, under the old exact-`indexOf("金額")` read) or
+ *  two-or-more (a future 支払金額 alongside 利用金額) both return a NAMED failure
+ *  instead of summing the wrong column or zero. There is no path where an
+ *  unfindable amount column produces a number. */
+export type AmountColumnResult =
+  | { ok: true; index: number }
+  | { ok: false; kind: "zero" | "multiple"; matches: string[] };
+
+/** The index of the single header cell containing 金額, or a named failure.
+ *  `header` is a row of cells (parseCsvRows output). */
+export function amountColumnIndex(header: string[]): AmountColumnResult {
+  const matches: { index: number; cell: string }[] = [];
+  for (let i = 0; i < header.length; i++) {
+    const cell = header[i] ?? "";
+    if (cell.includes("金額")) matches.push({ index: i, cell });
+  }
+  if (matches.length === 1) return { ok: true, index: matches[0]!.index };
+  return {
+    ok: false,
+    kind: matches.length === 0 ? "zero" : "multiple",
+    matches: matches.map((m) => m.cell),
+  };
+}
+
+/** Format a named amount-column failure for a check detail string. Single-sourced
+ *  so the AMEX-total check, the per-category check, and the delivery-preflight
+ *  boundary all report the same shape. Lists the matching cells (for "multiple")
+ *  and the full actual header so the operator can see what the parser saw. */
+export function describeAmountColumnFailure(opts: {
+  label: string;
+  kind: "zero" | "multiple";
+  matches: string[];
+  headerCells: string[];
+}): string {
+  const which =
+    opts.kind === "zero"
+      ? "no header cell contains 金額"
+      : `${opts.matches.length} header cells contain 金額 (${opts.matches.map((m) => `"${m}"`).join(", ")})`;
+  return `${opts.label} recon CSV: ${which}; expected exactly one amount column. Header: [${opts.headerCells.join(" | ")}]`;
+}
+
 /** Sum the 金額 of a reconciliation CSV's charge rows — used to derive the AMEX
  *  statement total from the sealed AMEX 照合CSV (B-5: no live lookup). This is
  *  the INDEPENDENT source for summary-payment-path-reconciles (which compares it
  *  against the 集計's AMEX total); reading the total from 集計 itself would be
- *  circular. Returns 0 if the CSV has no recognisable recon header. */
-export function sumReconChargeAmounts(csvText: string): number {
+ *  circular.
+ *
+ *  Never returns a number for "column not found" — a preflight that reported ¥0
+ *  instead of "I can't find the column" produced a scary wrong "the pack doesn't
+ *  reconcile" instead of "the parser is broken." On any failure to resolve the
+ *  amount column (or the recon header) it returns `ok: false` carrying the actual
+ *  header cells + matches so the caller can surface a named, diagnosis-ready
+ *  check failure. */
+export type ReconAmountSumResult =
+  | { ok: true; total: number }
+  | {
+      ok: false;
+      kind: "no-header" | "zero" | "multiple";
+      headerCells: string[];
+      matches: string[];
+    };
+
+export function sumReconChargeAmounts(csvText: string): ReconAmountSumResult {
   const rows = parseCsvRows(csvText);
   const headerIdx = reconHeaderIndex(rows);
-  if (headerIdx === -1) return 0;
-  const amountIdx = rows[headerIdx]!.indexOf("金額");
-  if (amountIdx === -1) return 0;
+  if (headerIdx === -1) {
+    return { ok: false, kind: "no-header", headerCells: rows[0] ?? [], matches: [] };
+  }
+  const header = rows[headerIdx]!;
+  const col = amountColumnIndex(header);
+  if (!col.ok) {
+    return { ok: false, kind: col.kind, headerCells: header, matches: col.matches };
+  }
   let sum = 0;
   for (const row of reconChargeRows(rows)) {
-    sum += parseAmountCell(row[amountIdx] ?? "") ?? 0;
+    sum += parseAmountCell(row[col.index] ?? "") ?? 0;
   }
-  return sum;
+  return { ok: true, total: sum };
 }
 
 /** Parse the 勘定科目 section of a 集計 CSV → per-category {ja, count, totalMinor}.
@@ -522,11 +606,14 @@ const checks: { key: string; run: Check }[] = [
           total: parseInt(row[2] ?? "0", 10),
         });
       }
-      // Recon rows per category: 科目＆No (col before last 3) → category prefix
-      // (strip the MonYYYY+circled suffix); 金額 (col before last 2). Layouts:
-      //   AMEX: 7 base + [科目＆No, 事業目的, 人数, 領収書ファイル名] → 金額 is field[5]
-      //   CASH/DIGITAL: [No,利用日,店舗名,金額,科目＆No,事業目的,人数,領収書ファイル名]
-      // Compute by locating the 科目＆No + 金額 columns from the header.
+      // Recon rows per category: 科目＆No → category prefix (strip the
+      // MonYYYY+circled suffix); the amount column located SEMANTICALLY via
+      // amountColumnIndex (the single header cell containing 金額) — not by
+      // position, so this verification layer stays independent of the importer
+      // (validation.ts reads amount positionally; the two must disagree loudly
+      // on a column shift). On any failure to resolve the amount column for a
+      // recon CSV, fail THIS check naming that CSV and its actual header — never
+      // silently sum a wrong/missing column.
       const reconByCat = new Map<string, { count: number; total: number }>();
       for (const csv of reconCsvs) {
         const rows = parseCsvRows(csv.text);
@@ -534,10 +621,22 @@ const checks: { key: string; run: Check }[] = [
         if (headerIdx === -1) continue; // 集計-like (no 科目＆No.), skip
         const header = rows[headerIdx]!;
         const kamokuIdx = header.indexOf("科目＆No.");
-        const amountIdx = header.indexOf("金額");
+        const col = amountColumnIndex(header);
+        if (!col.ok) {
+          return {
+            check: "summary-category-reconciles",
+            passed: false,
+            detail: describeAmountColumnFailure({
+              label: csv.label,
+              kind: col.kind,
+              matches: col.matches,
+              headerCells: header,
+            }),
+          };
+        }
         for (const row of reconChargeRows(rows)) {
           const label = row[kamokuIdx] ?? "";
-          const amount = parseAmountCell(row[amountIdx] ?? "") ?? 0;
+          const amount = parseAmountCell(row[col.index] ?? "") ?? 0;
           // Category = label with the MonYYYY+circled suffix removed.
           const m = label.match(/^(.*?)[A-Z][a-z]{2}\d{4}/);
           const cat = m ? m[1]! : label;
@@ -568,7 +667,7 @@ const checks: { key: string; run: Check }[] = [
   },
   {
     key: "summary-payment-path-reconciles",
-    run: ({ csvs, amexStatementTotalCents }) => {
+    run: ({ csvs, amexStatementTotal }) => {
       const summary = csvs.find((c) => c.label === "集計");
       if (!summary) {
         return {
@@ -577,9 +676,20 @@ const checks: { key: string; run: Check }[] = [
           detail: "集計 CSV not supplied",
         };
       }
-      if (amexStatementTotalCents === null) {
+      // No AMEX 照合CSV in the pack ⇒ nothing to reconcile (cash/digital only).
+      if (amexStatementTotal.kind === "none") {
         return { check: "summary-payment-path-reconciles", passed: true };
       }
+      // AMEX CSV present but its amount column could not be resolved ⇒ a NAMED
+      // failure. Never compare against a fabricated zero.
+      if (amexStatementTotal.kind === "parse-error") {
+        return {
+          check: "summary-payment-path-reconciles",
+          passed: false,
+          detail: amexStatementTotal.detail,
+        };
+      }
+      const stmtTotal = amexStatementTotal.cents;
       const rows = parseCsvRows(summary.text);
       let amexTotal: number | null = null;
       let inPaths = false;
@@ -599,12 +709,12 @@ const checks: { key: string; run: Check }[] = [
           detail: "集計 has no AMEX payment-path total to reconcile",
         };
       }
-      return amexTotal === amexStatementTotalCents
+      return amexTotal === stmtTotal
         ? { check: "summary-payment-path-reconciles", passed: true }
         : {
             check: "summary-payment-path-reconciles",
             passed: false,
-            detail: `集計 AMEX total ${amexTotal} ≠ statement total ${amexStatementTotalCents}`,
+            detail: `集計 AMEX total ${amexTotal} ≠ statement total ${stmtTotal}`,
           };
     },
   },
