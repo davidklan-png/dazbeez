@@ -254,3 +254,76 @@ Personally re-read and confirmed: A-M1, A-M2, B-F2, B-F3 (and the canonical bars
 Agent-reported with precise file:line, not separately re-verified: B-F1, B-F4,
 B-F5, B-F6, B-F7, B-F8, B-F9, A-L1–A-L4. The architect should spot-check any
 finding before acting.
+
+---
+
+# Appendix (added 2026-08-12, architect follow-up §5) — deep-dive on the top two
+
+## A-M1 deep-dive — latent by construction; cannot misfire on a real header today
+
+The wrong output described in A-M1 (`kamokuIdx = -1` → every charge row dropped →
+`reconByCat` empty → the `summary-category-reconciles` check reports false
+`0件/0` mismatches or passes vacuously) is **not reachable on any header the
+system actually generates.** The 照合CSV builders emit the column header as the
+exact literal `"科目＆No."` (reconciliation-files.ts:119 and :264 — full-width
+`＆`, trailing `.`), which is byte-identical to the `header.indexOf("科目＆No.")`
+operand. The preflight reads these CSVs back out of the sealed ZIP (system-built,
+not passthrough bank data), so the cell the `indexOf` scans is always the cell the
+builder wrote. `reconHeaderIndex` (`.includes`, substring) and `kamokuIdx`
+(`indexOf`, exact) therefore agree on every real header.
+
+**Break condition:** the bug fires the day the header literal drifts between the
+builder and the `indexOf` — a rename to `科目＆No` (no period), `科目＆№`, a
+localized variant, or a BOM/whitespace prefix. That is exactly the assumption
+that broke the amount column (`金額` → `利用金額`) one lookup over, which is why
+this is still worth fixing despite being latent.
+
+**Sharpened recommendation:** mirror `amountColumnIndex` — a semantic
+`kamokuColumnIndex(header)` returning `{ok:false}` on a miss + failing the check
+naming the CSV and its actual header, instead of `?? ""` + `continue`.
+**Urgency LOW** (defensive — closes the recurrence the amount-column fix left
+standing, not an active misfire). Downgraded from the original A-M1 framing,
+which read as if it could fire today.
+
+## B-F2 deep-dive — the operator badge is CORRECT in all races; the real defect is the comment + the response field
+
+Traced `reconcileExtractionState` (extraction-queue-db.ts:92) + the route end to
+end. `reconcileExtractionState` flips `WHERE id=? AND extraction_state IN
+(captured, queued, processing)` → `failed`; the badge UPDATE is `WHERE id=? AND
+extraction_state='failed'`. Per receipt state on entry:
+
+| Entry state | reconcile flip | badge UPDATE | operator sees |
+|---|---|---|---|
+| captured/queued/processing (normal poison pill) | → failed | matches, writes badge | red failure pill ✓ |
+| already `processed` (parallel `/extract` won) | no-op | no-op (state is `processed`) | normal receipt ✓ (it isn't failed) |
+| already `failed` (duplicate POST) | no-op | matches, overwrites badge | red failure pill ✓ |
+
+**The review-page badge never lies** — in every race the badge write's
+`WHERE state='failed'` is consistent with `reconcileExtractionState`'s effect, so
+the no-op cases are exactly the cases where the receipt isn't actually failed.
+**The original B-F2 framing ("the red failure pill never renders … exactly the
+stuck-receipt-no-signal symptom") is inaccurate and should be corrected** — that
+symptom is not produced by this path.
+
+**The real defects (lower severity than first reported):**
+1. **The comment lies.** extraction-failed/route.ts:138-140 says *"If a parallel
+   request already advanced this receipt, the UPDATE is a no-op and we surface
+   that to the caller as 409."* The code surfaces no 409 for that case (the 409
+   earlier in the route is the finalized-reconciliation lock, a different
+   condition) — it returns `ok:true`. A maintainer trusting the comment believes
+   a guard exists that doesn't.
+2. **The 200 response misreports state.** It returns `{ ok:true,
+   extractionState: "failed", failedAt }` UNCONDITIONALLY — including when a
+   parallel `/extract` left the receipt `processed`. So the HTTP response tells
+   the Mac consumer `extractionState:"failed"` for a receipt that is actually
+   `processed`. The consumer logs/acts on a failure that didn't happen (to that
+   final state). The badge (read from D1) is correct; the response field (read
+   by the consumer) is the thing that lies.
+3. The write is unverified (a 0-row badge UPDATE is not detected), but as traced
+   that 0-row case is benign.
+
+**Fix shape (when the architect picks it up):** have the route re-read the
+receipt's `extraction_state` after `reconcileExtractionState` and return the
+*actual* state in the response (and a 409 only if the receipt is sealed/locked);
+correct or delete the misleading comment. LOW–MEDIUM severity (consumer-facing
+misinformation, not an operator-facing wrong badge).
