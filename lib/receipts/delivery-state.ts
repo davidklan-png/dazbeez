@@ -72,6 +72,25 @@ export const DELIVERY_STATE = {
 } as const;
 export type DeliveryState = (typeof DELIVERY_STATE)[keyof typeof DELIVERY_STATE];
 
+/** The pill/colour discriminant for a month's delivery state (delivery-composer
+ *  §6 table). Pure + client-safe (this module has no D1/R2 imports) so the shared
+ *  MonthSwitcher component and the server helper in delivery-status.ts both
+ *  import it from here — one mapping authority, no drift. */
+export type DeliveryPillState = "delivered" | "pending" | "undelivered";
+
+/** Map a month's derived delivery state to its pill tone. `delivered` → green ✓,
+ *  `pending` → blue (in-flight), and BOTH `sealed_undelivered` (failed) AND null
+ *  (sealed, never attempted) → `undelivered` (red). The null→undelivered mapping
+ *  is the whole point: a sealed-but-never-sent month must read as action-needed
+ *  red, not neutral grey. */
+export function deliveryStateToPill(
+  state: DeliveryState | null | undefined,
+): DeliveryPillState {
+  if (state === DELIVERY_STATE.DELIVERED) return "delivered";
+  if (state === DELIVERY_STATE.PENDING) return "pending";
+  return "undelivered";
+}
+
 /** Prefix for the Resend `Idempotency-Key` header. */
 export const IDEMPOTENCY_KEY_PREFIX = "dazbeez-delivery-";
 

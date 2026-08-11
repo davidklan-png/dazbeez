@@ -1,11 +1,21 @@
 import Link from "next/link";
 import { withWorkMonth } from "@/lib/receipts/work-month";
+import {
+  deliveryStateToPill,
+  type DeliveryState,
+} from "@/lib/receipts/delivery-state";
 
 export interface MonthOption {
   month: string;
   lineCount: number;
   unmatchedCount: number;
   status: "draft" | "finalized" | null;
+  /** Per-month delivery state (delivery-composer §6). OPTIONAL because
+   *  MonthSwitcher is shared with the reconcile and AMEX pages, which must keep
+   *  compiling and rendering unchanged — only the export page populates it.
+   *  `undefined` = not provided (keep existing pill behaviour). `null` = sealed,
+   *  never attempted (a real value → red, action-needed). */
+  deliveryState?: DeliveryState | null;
 }
 
 interface MonthSwitcherProps {
@@ -91,7 +101,12 @@ function MonthPill({
       <span className={active ? "text-amber-50" : "text-gray-500"}>
         {option.lineCount} line{option.lineCount !== 1 ? "s" : ""}
       </span>
-      <StatusDot status={option.status} unmatchedCount={option.unmatchedCount} active={active} />
+      <StatusDot
+        status={option.status}
+        unmatchedCount={option.unmatchedCount}
+        active={active}
+        deliveryState={option.deliveryState}
+      />
     </Link>
   );
 }
@@ -100,12 +115,43 @@ function StatusDot({
   status,
   unmatchedCount,
   active,
+  deliveryState,
 }: {
   status: "draft" | "finalized" | null;
   unmatchedCount: number;
   active: boolean;
+  deliveryState?: DeliveryState | null;
 }) {
   if (status === "finalized") {
+    // Only colour by delivery when the caller populated deliveryState (export
+    // page). Reconcile/AMEX pages leave it undefined → keep the legacy green ✓.
+    if (deliveryState !== undefined) {
+      const pill = deliveryStateToPill(deliveryState);
+      if (pill === "undelivered") {
+        return (
+          <span
+            className={`inline-flex h-4 w-4 items-center justify-center rounded-full text-[10px] ${
+              active ? "bg-white text-red-600" : "bg-red-100 text-red-700"
+            }`}
+            title="未送信 — 未クローズ (sealed, not yet delivered)"
+          >
+            !
+          </span>
+        );
+      }
+      if (pill === "pending") {
+        return (
+          <span
+            className={`inline-flex h-4 w-4 items-center justify-center rounded-full text-[10px] ${
+              active ? "bg-white text-blue-600" : "bg-blue-100 text-blue-700"
+            }`}
+            title="送信中 (delivery in flight)"
+          >
+            …
+          </span>
+        );
+      }
+    }
     return (
       <span
         className={`inline-flex h-4 w-4 items-center justify-center rounded-full text-[10px] ${

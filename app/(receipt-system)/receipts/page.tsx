@@ -23,6 +23,11 @@ import {
   listNeverEnqueuedReceipts,
   PIPELINE_ALL_CLEAR,
 } from "@/lib/receipts/pipeline-health";
+import {
+  deriveFinalizedMonthsDeliveryState,
+  needsDeliveryAction,
+} from "@/lib/receipts/delivery-status";
+import { SealedUndeliveredAlert } from "@/components/receipts/sealed-undelivered-alert";
 import { getReceiptsDb } from "@/lib/cloudflare-runtime";
 
 export const dynamic = "force-dynamic";
@@ -88,7 +93,7 @@ export default async function ReceiptsDashboardPage() {
     /* alerts optional */
   }
 
-  const [monthReceipts, allLines, exports, complianceSummary, pipelineHealth] =
+  const [monthReceipts, allLines, exports, complianceSummary, pipelineHealth, deliveryByMonth] =
     await Promise.all([
       listReceiptRecords({ month, limit: RECEIPT_BULK_LIMIT }),
       listAmexLineCountsByMonth(),
@@ -104,7 +109,16 @@ export default async function ReceiptsDashboardPage() {
       // Crashes fall back to all-clear — a health check that breaks the page is
       // worse than none.
       getPipelineHealth(getReceiptsDb()).catch(() => PIPELINE_ALL_CLEAR),
+      // §6: sealed-undelivered months for the dashboard banner. Falls back to an
+      // empty map on failure so a delivery-state query error never breaks the
+      // dashboard (mirrors the pipeline-health degrade-gracefully pattern).
+      deriveFinalizedMonthsDeliveryState().catch(() => new Map()),
     ]);
+
+  const sealedUndeliveredMonths = [...deliveryByMonth.entries()]
+    .filter(([, state]) => needsDeliveryAction(state))
+    .map(([m, state]) => ({ month: m, state }))
+    .sort((a, b) => b.month.localeCompare(a.month));
 
   // Load the class-1 receipts only when class 1 is lit (rare) — for the
   // per-receipt Enqueue action.
@@ -137,6 +151,8 @@ export default async function ReceiptsDashboardPage() {
         lit={pipelineHealth.lit}
         neverEnqueuedReceipts={neverEnqueuedReceipts}
       />
+
+      <SealedUndeliveredAlert months={sealedUndeliveredMonths} />
 
       {missingAlerts.length > 0 && (
         <div className="mb-6 space-y-3">

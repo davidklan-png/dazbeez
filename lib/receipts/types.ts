@@ -658,6 +658,12 @@ export interface ComplianceSettings {
    *  D15/§15). Empty = the Cc field is omitted from the Resend payload. No env
    *  fallback. */
   notification_cc_recipient: string;
+  /** Email-only signature appended to the delivery email body AFTER the sealed
+   *  pack notice's closing line (delivery-composer decision 3). Stored as a
+   *  trimmed string (empty when unset); the composer maps empty → null at the
+   *  email boundary. Does NOT enter the sealed pack notice (buildPackNotice is
+   *  unchanged) — it is a transport-layer adornment on the delivery email only. */
+  delivery_signature: string;
   /**
    * Homebase location signals (ADR 0010 D3). A merchant whose string carries
    * one of these is treated as an at-homebase charge (not a trip anchor).
