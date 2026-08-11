@@ -101,13 +101,18 @@ export interface ComposedDelivery {
   configErrors: string[];
   /** What the Send button should offer, from decideSendAction(forceNew:false).
    *  The send route re-decides with the real forceNew from the query; this is
-   *  the display verdict (the natural-state action the operator first sees). */
-  action: "new" | "resume" | "blocked";
+   *  the display verdict (the natural-state action the operator first sees).
+   *  `redelivery` = a different, earlier revision was delivered and this is the
+   *  first send of the current revision — a primary action (no force_new), but
+   *  the composer surfaces the second-email consequence explicitly. */
+  action: "new" | "resume" | "redelivery" | "blocked";
   /** Present only when action === "blocked". The real enum from
    *  decideSendAction is "sent" | "stale" (the spec wrote "stale_pending";
    *  the code's authority is "stale" — same case, the 24h-window-expired
    *  pending). */
   blockedReason?: "sent" | "stale";
+  /** For `resume` the resumeable attempt id; for `redelivery` the earlier
+   *  revision's delivered attempt id; for `blocked` the blocking attempt id. */
   priorAttemptId?: string;
 }
 
@@ -230,6 +235,9 @@ export async function composeDelivery(
   let priorAttemptId: string | undefined;
   if (decision.action === "new") {
     action = "new";
+  } else if (decision.action === "redelivery") {
+    action = "redelivery";
+    priorAttemptId = decision.priorAttemptId;
   } else if (decision.action === "resume") {
     action = "resume";
     priorAttemptId = decision.attemptId;

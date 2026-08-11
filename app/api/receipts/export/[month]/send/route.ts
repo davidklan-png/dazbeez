@@ -17,8 +17,8 @@ import {
 } from "@/lib/cloudflare-runtime";
 import {
   decideSendAction,
+  findRevisionSendBlocker,
   idempotencyKeyForAttempt,
-  ATTEMPT_STATE,
 } from "@/lib/receipts/delivery-state";
 import { performDelivery, assertDeliverySize } from "@/lib/receipts/delivery-send";
 import { composeDelivery } from "@/lib/receipts/delivery-compose";
@@ -80,10 +80,10 @@ export async function POST(request: Request, { params }: RouteContext) {
       );
     }
 
-    // ── Decide new vs resume vs blocked (D6 + the stuck-pending guard). This
-    //    is the send-specific, force_new-aware decision; composeDelivery runs a
-    //    forceNew:false decision for DISPLAY only. Kept BEFORE the R2 fetch so a
-    //    double-send 409 rejects cheaply.
+    // ── Decide new vs resume vs redelivery vs blocked (D6 + the stuck-pending
+    //    guard). This is the send-specific, force_new-aware decision;
+    //    composeDelivery runs a forceNew:false decision for DISPLAY only. Kept
+    //    BEFORE the R2 fetch so a duplicate 409 rejects cheaply.
     const deliveries = (await listDeliveriesForMonth(month)).map((d) => ({
       id: d.id,
       exportId: d.export_id,
@@ -91,15 +91,11 @@ export async function POST(request: Request, { params }: RouteContext) {
       state: d.state,
       createdAt: d.created_at,
     }));
-    // Capture the prior blocker (if any) for the override audit BEFORE the
-    // decision collapses it to "new" on forceNew.
-    const priorBlocker = deliveries.find(
-      (d) => d.state === ATTEMPT_STATE.SENT || d.state === ATTEMPT_STATE.PENDING,
-    );
+    const now = nowIso();
     const action = decideSendAction({
       latestExportId: exportRecord.id,
       deliveries,
-      now: nowIso(),
+      now,
       forceNew,
     });
     if (action.action === "blocked") {
@@ -107,7 +103,7 @@ export async function POST(request: Request, { params }: RouteContext) {
         {
           error:
             action.reason === "sent"
-              ? "This month is already delivered. Pass force_new=true to re-send (audited)."
+              ? "This month's current revision has already been delivered. Pass force_new=true to re-send (audited)."
               : "This month has a pending delivery that can no longer be safely resumed (past Resend's 24h idempotency window). Pass force_new=true to send anew (audited).",
           reason: action.reason,
           priorAttemptId: action.priorAttemptId,
@@ -193,16 +189,44 @@ export async function POST(request: Request, { params }: RouteContext) {
       );
     }
 
-    // ── attempt_id: resume reuses the pending one; a new send mints one ──────
+    // ── attempt_id: resume reuses the pending one; a new/redelivery send mints one.
     const attemptId = action.action === "resume" ? action.attemptId : newUuid();
-    if (forceNew && priorBlocker) {
+    // Audit the send's nature. A `redelivery` is the first send of a corrected
+    // revision AFTER an earlier revision was already delivered — legitimate, and
+    // it records as a re-delivery (the accountant gets a second email), NOT as
+    // the force_new override. force_new overriding a genuine duplicate guard for
+    // THIS revision still records as an override; the revision-scoped blocker
+    // (findRevisionSendBlocker) is what force_new actually overrode, replacing
+    // the old month-wide SENT/PENDING capture that mislabelled a redelivery as
+    // an override. `redelivery` and `override` are mutually exclusive: a
+    // sent-for-this-revision that force_new collapses returns `new` (override),
+    // never `redelivery`.
+    if (action.action === "redelivery") {
       await createAuditEntry(getReceiptsDb(), {
         actor,
-        action: "export.delivery_override",
+        action: "export.delivery_redelivery",
         objectType: "export",
         objectId: exportRecord.id,
-        newValueJson: stringifyJson({ month, priorAttemptId: priorBlocker.attemptId }),
+        newValueJson: stringifyJson({
+          month,
+          priorAttemptId: action.priorAttemptId,
+        }),
       });
+    } else if (forceNew) {
+      const overrode = findRevisionSendBlocker(deliveries, exportRecord.id, now);
+      if (overrode) {
+        await createAuditEntry(getReceiptsDb(), {
+          actor,
+          action: "export.delivery_override",
+          objectType: "export",
+          objectId: exportRecord.id,
+          newValueJson: stringifyJson({
+            month,
+            reason: overrode.reason,
+            priorAttemptId: overrode.priorAttemptId,
+          }),
+        });
+      }
     }
 
     // ── Record the delivery attempt (pending) with the now-known bytes + sha ─

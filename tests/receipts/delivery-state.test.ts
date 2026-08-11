@@ -11,6 +11,7 @@ import {
   deriveMonthDeliveryState,
   isWithinResumeWindow,
   decideSendAction,
+  findRevisionSendBlocker,
   classifyDeliveryFailure,
   type AttemptRow,
   type DeliveryAttemptSummary,
@@ -196,7 +197,14 @@ test("decideSendAction: a stale pending (beyond 24h) blocks without override; ov
   );
 });
 
-test("decideSendAction: a pending for a DIFFERENT export is not resumeable ⇒ blocks without override", () => {
+test("decideSendAction: a pending for a DIFFERENT (earlier) revision is not a blocker ⇒ new (revision-scoped)", () => {
+  // BEHAVIOUR CHANGE (this item). Pre-fix this returned `blocked` via the
+  // month-wide stale guard. Under revision scoping a pending for an EARLIER
+  // revision is a different pack — not a duplicate of the current revision's
+  // pack — so it no longer blocks the current revision's first send. (If that
+  // stuck pending was accepted the accountant may receive two packs; stuck
+  // pendings are surfaced separately by the stuck-pending pill, backlog #12,
+  // rather than blocking the new revision.)
   const otherExport = sum({ exportId: "exp-old", attemptId: "att-other" });
   const res = decideSendAction({
     latestExportId: "exp",
@@ -204,7 +212,7 @@ test("decideSendAction: a pending for a DIFFERENT export is not resumeable ⇒ b
     now: NOW,
     forceNew: false,
   });
-  assert.equal(res.action, "blocked");
+  assert.equal(res.action, "new");
 });
 
 test("decideSendAction: a resumeable pending supersedes an older sent (corrected re-delivery in flight)", () => {
@@ -276,4 +284,108 @@ test("decideSendAction: ambiguous resumeable wins over an older definitive failu
   });
   assert.equal(res.action, "resume");
   if (res.action === "resume") assert.equal(res.attemptId, "att-amb");
+});
+
+// ─── revision-scoped delivery (Codex P1 #1): redelivery vs blocked vs new ────
+
+test("decideSendAction: a SENT for an EARLIER revision (current not sent) ⇒ redelivery — the first send of the current revision", () => {
+  // The bug this item fixes. rev 1 delivered, rev 2 finalized + unsent. The old
+  // month-wide `deliveries.find(SENT)` matched rev 1's sent ⇒ `blocked/sent`,
+  // forcing force_new for rev 2's FIRST send and auditing it as an override.
+  // Revision scoping recognises this as a legitimate re-delivery instead.
+  const res = decideSendAction({
+    latestExportId: "exp-v2",
+    deliveries: [
+      sum({ id: "d-old", exportId: "exp-v1", attemptId: "att-old", state: ATTEMPT_STATE.SENT }),
+    ],
+    now: NOW,
+    forceNew: false,
+  });
+  assert.equal(res.action, "redelivery");
+  if (res.action === "redelivery") {
+    assert.equal(res.priorAttemptId, "att-old", "carries the earlier revision's delivered attempt id");
+  }
+});
+
+test("decideSendAction: redelivery needs NO force_new — a redundant force_new still returns redelivery, not an override", () => {
+  // force_new is for overriding a genuine duplicate of THIS revision. On a
+  // redelivery it is redundant and must NOT relabel the send as an override.
+  const res = decideSendAction({
+    latestExportId: "exp-v2",
+    deliveries: [
+      sum({ id: "d-old", exportId: "exp-v1", attemptId: "att-old", state: ATTEMPT_STATE.SENT }),
+    ],
+    now: NOW,
+    forceNew: true,
+  });
+  assert.equal(res.action, "redelivery");
+});
+
+test("decideSendAction: a SENT for the CURRENT revision takes precedence over an earlier sent ⇒ blocked (genuine duplicate), not redelivery", () => {
+  // Both this revision and an earlier one were delivered. The current pack's
+  // duplicate guard fires first — force_new is the override, redelivery is the
+  // wrong label (this would re-send the SAME revision, not a new one).
+  const res = decideSendAction({
+    latestExportId: "exp-v2",
+    deliveries: [
+      sum({ id: "d-old", exportId: "exp-v1", attemptId: "att-old", state: ATTEMPT_STATE.SENT }),
+      sum({ id: "d-cur", exportId: "exp-v2", attemptId: "att-cur", state: ATTEMPT_STATE.SENT }),
+    ],
+    now: NOW,
+    forceNew: false,
+  });
+  assert.equal(res.action, "blocked");
+  if (res.action === "blocked") {
+    assert.equal(res.reason, "sent");
+    assert.equal(res.priorAttemptId, "att-cur", "blocks on the CURRENT revision's sent, not the earlier one");
+  }
+});
+
+test("decideSendAction: force_new over a SENT-for-current-revision (earlier sent too) ⇒ new (override), NOT redelivery", () => {
+  // force_new collapses the genuine-duplicate block to a fresh send; the
+  // earlier revision's sent must NOT turn this into a redelivery. (The route
+  // audits it as an override via findRevisionSendBlocker, not as a redelivery.)
+  const res = decideSendAction({
+    latestExportId: "exp-v2",
+    deliveries: [
+      sum({ id: "d-old", exportId: "exp-v1", attemptId: "att-old", state: ATTEMPT_STATE.SENT }),
+      sum({ id: "d-cur", exportId: "exp-v2", attemptId: "att-cur", state: ATTEMPT_STATE.SENT }),
+    ],
+    now: NOW,
+    forceNew: true,
+  });
+  assert.equal(res.action, "new");
+});
+
+test("findRevisionSendBlocker: scoped to the latest revision — sent/stale for OTHER revisions are not blockers", () => {
+  // The route's force_new-override audit trusts this helper. A sent for an
+  // earlier revision is NOT a blocker for the current revision (it's a
+  // redelivery signal); only a sent or stale-pending for THIS revision blocks.
+  const deliveries: DeliveryAttemptSummary[] = [
+    sum({ id: "d-old", exportId: "exp-v1", attemptId: "att-old", state: ATTEMPT_STATE.SENT }),
+    sum({ id: "d-old-stale", exportId: "exp-v1", attemptId: "att-old-stale", state: ATTEMPT_STATE.PENDING, createdAt: beyondWindow }),
+  ];
+  assert.equal(
+    findRevisionSendBlocker(deliveries, "exp-v2", NOW),
+    null,
+    "earlier-revision sent + stale are not blockers for the current revision",
+  );
+  const withCurrentSent: DeliveryAttemptSummary[] = [
+    ...deliveries,
+    sum({ id: "d-cur", exportId: "exp-v2", attemptId: "att-cur", state: ATTEMPT_STATE.SENT }),
+  ];
+  assert.deepEqual(
+    findRevisionSendBlocker(withCurrentSent, "exp-v2", NOW),
+    { reason: "sent", priorAttemptId: "att-cur" },
+    "a sent for the CURRENT revision is the blocker",
+  );
+  const withCurrentStale: DeliveryAttemptSummary[] = [
+    ...deliveries,
+    sum({ id: "d-cur-stale", exportId: "exp-v2", attemptId: "att-cur-stale", state: ATTEMPT_STATE.PENDING, createdAt: beyondWindow }),
+  ];
+  assert.deepEqual(
+    findRevisionSendBlocker(withCurrentStale, "exp-v2", NOW),
+    { reason: "stale", priorAttemptId: "att-cur-stale" },
+    "a stale pending for the CURRENT revision is the blocker",
+  );
 });

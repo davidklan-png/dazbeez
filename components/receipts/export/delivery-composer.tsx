@@ -396,7 +396,7 @@ function PrimaryAction({
   disabled,
   onSend,
 }: {
-  action: "new" | "resume";
+  action: "new" | "resume" | "redelivery";
   monthLabel: string;
   confirmed: boolean;
   setConfirmed: (v: boolean) => void;
@@ -412,6 +412,14 @@ function PrimaryAction({
           が重複配送することはありません）。
         </p>
       )}
+      {action === "redelivery" && (
+        <div className="mb-3 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-[12px] text-amber-800">
+          <strong>再配送（会計士に 2 通目のメール）</strong> — 前の改訂版は既に会計士へ送信済みです。
+          ここでの送信は今回の改訂版の<strong>初回</strong>送信ですが、会計士には 2 通目の
+          メールが届きます。同じ改訂版の重複配送ではないため force_new は不要です（監査ログには
+          再配送として記録され、override 扱いにはなりません）。
+        </div>
+      )}
       <label className="flex items-start gap-2.5 text-[13px] text-gray-700">
         <input
           type="checkbox"
@@ -421,7 +429,11 @@ function PrimaryAction({
         />
         <span>
           宛先・件名・本文・添付を確認しました。{" "}
-          <strong>{`「送信」をクリックすると ${monthLabel} の領収証憑一式が送信されます。`}</strong>
+          <strong>
+            {action === "redelivery"
+              ? `「再配送」をクリックすると ${monthLabel} の領収証憑一式が再配送され、会計士に 2 通目のメールが送信されます。`
+              : `「送信」をクリックすると ${monthLabel} の領収証憑一式が送信されます。`}
+          </strong>
         </span>
       </label>
       <button
@@ -434,7 +446,9 @@ function PrimaryAction({
           ? "送信中… この画面を閉じないでください"
           : action === "resume"
             ? "送信を再開"
-            : "送信する"}
+            : action === "redelivery"
+              ? "再配送する"
+              : "送信する"}
       </button>
     </div>
   );
