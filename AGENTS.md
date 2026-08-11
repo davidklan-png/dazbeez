@@ -642,6 +642,25 @@ starts. Design consequences:
     accept BOTH layouts; add a regression test pinning a pre-change notice.
     No migration, no re-seal of existing packs.
 
+26. **Sealed-export deletion is out-of-band and untyped.** NOT STARTED.
+    Found 2026-08-12 while investigating 2026-06's missing revisions 1 & 2
+    (audit in `docs/audits/2026-08-backlog-questions.md` §3). Verdict on the
+    deletion itself: legitimate — operator-authorized pre-close test-seal
+    cleanup on 2026-07-22 (batch 8a4671fb…), R2 objects removed with no
+    orphans, other months contiguous from rev 1. **The gap is the
+    mechanism.** The audit actions written (`export.test_seal_removed`,
+    `export.draft_supersession_cleared`) are NOT members of the
+    `AuditAction` union, and no committed code deletes `receipt_exports`
+    (only the 0017 FK cascade, never reached from app code). So rows for a
+    SEALED export under `legal_hold=1` were deleted by an out-of-band
+    operation that does not exist in the repository, recorded with a
+    free-text `retention_legalhold_exception`. On a 10-year tax record that
+    is the finding. Fix = a typed `export.deleted` AuditAction, a committed
+    script that is the only way to do it (asserting the legal-hold
+    exception is explicit and recorded), and a runbook entry. Related
+    doctrine: sealing locks edits — the deletion path is the one hole in
+    that guarantee and it currently has no code review surface.
+
 19. **Never-enqueued receipts are undetectable — wire a pipeline health
     surface.** NOT DISPATCHED — same prompt as #18, Part A (do it FIRST).
     `getExtractionHealth` (`lib/receipts/extraction-state.ts:69`) is written
