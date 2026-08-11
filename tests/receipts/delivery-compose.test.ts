@@ -12,7 +12,7 @@ import { buildDeliveryEmail } from "@/lib/receipts/delivery-send";
 //     ComposedDelivery.configErrors; composeDelivery calls this with resolved
 //     values, so these paths are unit-testable without D1/R2 bindings) ──────────
 
-const VALID = { to: "cpa@example.com", cc: null, from: "notify@dazbeez.com", hasResendKey: true };
+const VALID = { to: "cpa@example.com", cc: null, replyTo: null, from: "notify@dazbeez.com", hasResendKey: true };
 
 test("configErrors: empty when fully configured (happy path)", () => {
   assert.deepEqual(computeDeliveryConfigErrors(VALID), []);
@@ -41,15 +41,28 @@ test("configErrors: invalid Cc → names the bad Cc (null Cc is fine)", () => {
   );
 });
 
+test("configErrors: invalid Reply-To → names the bad address (null Reply-To is fine)", () => {
+  const errs = computeDeliveryConfigErrors({ ...VALID, replyTo: "bad-reply" });
+  assert.ok(
+    errs.some((e) => e.includes("Reply-To is not a valid") && e.includes("bad-reply")),
+  );
+  // null Reply-To alone is NOT an error (Reply-To is optional → omitted).
+  assert.deepEqual(
+    computeDeliveryConfigErrors({ ...VALID, replyTo: null }),
+    [],
+    "null Reply-To is valid (omitted from payload)",
+  );
+});
+
 test("configErrors: no Resend key → 'Delivery not configured'", () => {
   const errs = computeDeliveryConfigErrors({ ...VALID, hasResendKey: false });
-  assert.ok(errs.some((e) => e.includes("RESEND_API_KEY / NOTIFY_FROM_ADDRESS")));
+  assert.ok(errs.some((e) => e.includes("RESEND_API_KEY / DELIVERY_FROM_ADDRESS")));
   assert.equal(errs.length, 1);
 });
 
 test("configErrors: no From address → same 'Delivery not configured' message", () => {
   const errs = computeDeliveryConfigErrors({ ...VALID, from: null });
-  assert.ok(errs.some((e) => e.includes("RESEND_API_KEY / NOTIFY_FROM_ADDRESS")));
+  assert.ok(errs.some((e) => e.includes("RESEND_API_KEY / DELIVERY_FROM_ADDRESS")));
   assert.equal(errs.length, 1);
 });
 
@@ -57,6 +70,7 @@ test("configErrors: multiple problems accumulate (no To AND no key)", () => {
   const errs = computeDeliveryConfigErrors({
     to: null,
     cc: null,
+    replyTo: null,
     from: null,
     hasResendKey: false,
   });

@@ -1,6 +1,7 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import { Btn } from "@/components/ui/btn";
 import { buildPackNotice, type PackNoticeInput } from "@/lib/receipts/proofs";
 import type { PackNames } from "@/lib/receipts/pack-naming";
@@ -26,6 +27,7 @@ export function PrefaceEditor({
   editable,
   noticeInput,
   names,
+  onDirtyChange,
 }: {
   month: string;
   initialMessage: string | null;
@@ -37,15 +39,26 @@ export function PrefaceEditor({
    *  payment-due date is unavailable (an AMEX month whose statement artifact
    *  predates the 0035 snapshot) — the preview is hidden in that case. */
   names: PackNames | null;
+  /** Lifted dirty signal so the Finalize button can disable (and name the
+   *  reason) while the preface has unsaved edits — the client-side half of the
+   *  2026-06 message-loss fix (the server half is the message_not_reviewed gate). */
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   const [draft, setDraft] = useState(initialMessage ?? "");
   const [saved, setSaved] = useState(initialMessage ?? "");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [savedAt, setSavedAt] = useState<string | null>(null);
+  const router = useRouter();
 
   const dirty = draft !== saved;
   const overCap = draft.length > 2000;
+
+  // Lift the dirty flag so the finalize gate (a sibling client component) can
+  // block sealing while there are unsaved preface edits.
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+  }, [dirty, onDirtyChange]);
 
   // Live preview via the real builder — operatorMessage is the live draft, every
   // other input is the server-derived month state. Sliced to ~10 lines so the
@@ -59,15 +72,19 @@ export function PrefaceEditor({
     return full.split(/\r?\n/).slice(0, 10).join("\n");
   }, [names, noticeInput, draft]);
 
-  async function save() {
-    if (!editable || saving || overCap) return;
+  /** Persist the preface. `message` is the exact value to store (trimmed server-
+   *  side); pass "" to record an explicit "no message this month" decision — the
+   *  server stores NULL + sets the decision timestamp, clearing the
+   *  message_not_reviewed finalize blocker. */
+  async function persist(message: string) {
+    if (!editable || saving) return;
     setSaving(true);
     setError(null);
     try {
       const res = await fetch(`/api/receipts/export/${month}/message`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: draft }),
+        body: JSON.stringify({ message }),
       });
       const json = (await res.json().catch(() => ({}))) as {
         operatorMessage?: string | null;
@@ -75,7 +92,7 @@ export function PrefaceEditor({
       };
       if (!res.ok) {
         setError(json.error ?? "保存に失敗しました。");
-        return;
+        return false;
       }
       // Normalize to the server-stored (trimmed / NULL-cleared) value so the
       // dirty flag settles even when the server trims whitespace.
@@ -85,12 +102,31 @@ export function PrefaceEditor({
       setSavedAt(
         new Date().toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" }),
       );
+      // §2 (Codex P2 on #169): a verified save (res.ok ⇒ the rows-affected-checked
+      // write persisted) moves the server gate from message_not_reviewed to
+      // message_stale. The gate panel + FinalizeCard.blockerCount are server-
+      // rendered, so refresh them — never on an unverified/failed save. Refresh
+      // preserves this component's client state (draft/saved/savedAt are not
+      // reset by router.refresh), so the saved indicator is not bounced and
+      // unsaved edits are not clobbered.
+      router.refresh();
+      return true;
     } catch {
       setError("通信エラーが発生しました。");
+      return false;
     } finally {
       setSaving(false);
     }
   }
+
+  const save = () => persist(draft);
+  /** "No message this month" — a deliberate decision that writes the timestamp
+   *  with a NULL message, clearing message_not_reviewed without typing text. */
+  const decideNoMessage = () => persist("");
+
+  // A successful "no message" save leaves saved === "" with a timestamp; surface
+  // it distinctly so it doesn't read as "forgot to type."
+  const decidedNoMessage = !dirty && saved === "" && savedAt !== null;
 
   return (
     <div className="mx-8 mb-4 rounded-xl border border-gray-200 bg-white px-5 py-4">
@@ -130,9 +166,20 @@ export function PrefaceEditor({
             >
               {saving ? "保存中…" : "保存"}
             </Btn>
+            <Btn
+              kind="soft"
+              size="md"
+              onClick={decideNoMessage}
+              disabled={saving || decidedNoMessage}
+              title="今月はメッセージなしと明示的に記録します（タイムスタンプを書き込みます）"
+            >
+              今月はメッセージなし
+            </Btn>
             <span className="text-[11.5px] text-gray-500">
               {dirty ? (
                 <span className="text-amber-700">未保存</span>
+              ) : decidedNoMessage ? (
+                <span>メッセージなし（保存済み {savedAt}）</span>
               ) : savedAt ? (
                 <span>保存済み（{savedAt}）</span>
               ) : initialMessage ? (

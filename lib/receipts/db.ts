@@ -9,6 +9,7 @@ import {
 import { shouldOverwriteMerchant } from "@/lib/receipts/reconciliation";
 import { retentionUntilIso } from "@/lib/receipts/retention";
 import { assignMembershipForReceipt, postPatchMembershipDate } from "@/lib/receipts/membership";
+import { assertExactlyOneRowWritten } from "@/lib/receipts/operator-message";
 import { deleteAmexArtifact } from "@/lib/receipts/storage";
 import { PENDING_EXTRACTION_STATES } from "@/lib/receipts/types";
 import type { ReceiptAttendeeDirectoryEntry } from "@/lib/receipts/attendee-directory";
@@ -3056,7 +3057,14 @@ export async function recordExportBundle(
    *  sealed value (ADR 0009). The O7 preflight check (19th) verifies the
    *  notice's 【今月のご連絡】 matches this stored value at send time.
    *
-   *  REQUIRED (nullable) for the same reason as paymentDueDate. */
+   *  REQUIRED (nullable) for the same reason as paymentDueDate.
+   *
+   *  NOTE: this writes operator_message (the VALUE — O7 needs it sealed into the
+   *  bytes) but deliberately does NOT write operator_message_updated_at. That
+   *  timestamp is the message-DECISION signal (NULL = the operator never decided
+   *  ⇒ the message_not_reviewed finalize blocker); only updateExportOperatorMessage
+   *  (an explicit save / "no message") sets it. message_stale still clears on
+   *  rebuild because bundle_built_at advances past the save timestamp. */
   operatorMessage: string | null,
 ): Promise<void> {
   const db = getReceiptsDb();
@@ -3072,8 +3080,7 @@ export async function recordExportBundle(
            proofs_sha256 = ?,
            bundle_built_at = ?,
            payment_due_date = ?,
-           operator_message = ?,
-           operator_message_updated_at = ?
+           operator_message = ?
        WHERE id = ? AND status = 'draft'`,
     )
     .bind(
@@ -3086,7 +3093,6 @@ export async function recordExportBundle(
       now,
       paymentDueDate ?? null,
       operatorMessage ?? null,
-      now,
       exportId,
     )
     .run();
@@ -3102,13 +3108,25 @@ export async function recordExportBundle(
  * so this update should always match exactly one draft row. Trim + the 2000-char
  * cap are applied by the caller; null clears the column (buildPackNotice then
  * omits the whole 【今月のご連絡】 heading).
+ *
+ * After the 2026-06 message-loss incident: this is the ONLY writer of
+ * operator_message_updated_at (the message-DECISION timestamp; recordExportBundle
+ * no longer touches it). So a successful return here is the single signal that
+ * the operator made a message decision (save text, or "no message" with a NULL
+ * value) — which clears the message_not_reviewed finalize blocker.
+ *
+ * A2 hardening: a D1 UPDATE matching zero rows is an ERROR, not a silent 200.
+ * The 2026-06 loss was hard to diagnose in part because a no-op write would have
+ * returned success; now this throws, the PATCH route surfaces a 500, and the
+ * "saved" indicator never lies. The caller's draft check makes 0 rows a race
+ * (draft sealed between read and write), not normal flow.
  */
 export async function updateExportOperatorMessage(
   exportId: string,
   operatorMessage: string | null,
-): Promise<void> {
+): Promise<{ rowsWritten: number }> {
   const db = getReceiptsDb();
-  await db
+  const result = await db
     .prepare(
       `UPDATE receipt_exports
        SET operator_message = ?,
@@ -3117,6 +3135,9 @@ export async function updateExportOperatorMessage(
     )
     .bind(operatorMessage, nowIso(), exportId)
     .run();
+  const rowsWritten = result.meta?.changes ?? 0;
+  assertExactlyOneRowWritten(rowsWritten, `updateExportOperatorMessage(${exportId})`);
+  return { rowsWritten };
 }
 
 export async function finalizeExport(

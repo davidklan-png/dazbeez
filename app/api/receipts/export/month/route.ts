@@ -9,6 +9,7 @@ import {
   getFinalizedReconciliationForMonth,
   recordExportBundle,
   replaceExportItems,
+  updateExportOperatorMessage,
 } from "@/lib/receipts/db";
 import {
   bomPrefixedCrlf,
@@ -30,6 +31,7 @@ import {
   buildCashReconciliationKey,
   buildDigitalReconciliationKey,
 } from "@/lib/receipts/export";
+import { resolveOperatorMessageForRebuild, oneShotFinalizeDecision } from "@/lib/receipts/operator-message";
 import {
   buildEvidenceAssignments,
   buildAmexReconciliationCsv,
@@ -100,15 +102,21 @@ export async function POST(request: Request) {
     let reconciliation: AmexReconciliation | null = null;
     if (body.finalize) {
       reconciliation = await getFinalizedReconciliationForMonth(month);
-      const blockers = await validateMonthReadyForExport(
-        month,
-        bundle,
-        reconciliation,
-      );
-      if (blockers.length > 0) {
+      // §1 (Codex P1 on #169): the one-shot finalize path must not bypass
+      // message_not_reviewed. That gate keys on operator_message_updated_at,
+      // which is NULL on a freshly created draft — so the caller must state the
+      // decision explicitly (operatorMessage text, or null/"" for "no message").
+      // Omitted ⇒ 400. The decision is WRITTEN (setting the timestamp, exactly
+      // as the message route would) before validate, below — so the gate sees a
+      // real decision and the one-shot path stays usable, not silently unblockable.
+      const decision = oneShotFinalizeDecision(body.operatorMessage);
+      if (!decision.ok) {
         return NextResponse.json(
-          { error: "Export blocked — resolve these issues first.", blockers },
-          { status: 422 },
+          {
+            error:
+              "One-shot finalize requires an explicit message decision. Supply operatorMessage (the preface text), or operatorMessage: null / \"\" for 'no message this month'.",
+          },
+          { status: 400 },
         );
       }
     }
@@ -167,16 +175,46 @@ export async function POST(request: Request) {
     const exportRevision = exportRecord?.export_revision ?? 1;
     const supersedesExportId = exportRecord?.supersedes_export_id ?? null;
     const correctionReason = exportRecord?.correction_reason ?? null;
-    // E1: the operator message must survive a rebuild that omits it from the
-    // request body. Resolve it ONCE — body wins when explicitly present,
-    // otherwise the stored draft row's value carries forward. Pre-E1 every
-    // rebuild bound `body.operatorMessage ?? null`, so a rebuild triggered
-    // without the message nulled the stored column and it vanished from the
-    // next notice (the preflight O7 check then flagged the drift). Trim + the
-    // 2000-char cap are enforced by the PATCH writer; the rebuild only carries
-    // the resolved value forward verbatim.
-    const operatorMessage =
-      body.operatorMessage ?? exportRecord?.operator_message ?? null;
+    // E1/A2: the operator message must survive a rebuild that OMITS it from the
+    // request body, but an explicit empty string must CLEAR it. The old
+    // `body.operatorMessage ?? stored` collapsed those two (an empty string,
+    // which is present, overwrote the stored value — the same shape as the
+    // 2026-06 loss). Resolve by field PRESENCE via the shared pure helper.
+    // Trim + the 2000-char cap are enforced by the PATCH writer; the rebuild
+    // only carries the resolved value forward verbatim.
+    const operatorMessage = resolveOperatorMessageForRebuild(
+      body.operatorMessage,
+      exportRecord?.operator_message ?? null,
+    );
+
+    // §1 (Codex P1 on #169): on the one-shot finalize path, write the explicit
+    // decision at creation time → sets operator_message_updated_at (the decision
+    // timestamp), exactly as PATCH /message would (a VERIFIED write — throws on
+    // 0 rows). THEN run the full gate: it now sees a real decision, so
+    // message_not_reviewed does not fire. Validating here (after create + the
+    // decision-write, before any R2 upload) means a blocked one-shot returns 422
+    // with no side effects. The rebuild path (finalize:false) is unchanged.
+    // §1 (Codex P1 on #169): on the one-shot finalize path, write the explicit
+    // decision at creation time → sets operator_message_updated_at (the decision
+    // timestamp), exactly as PATCH /message would (a VERIFIED write — throws on
+    // 0 rows). THEN run the full gate: it now sees a real decision, so
+    // message_not_reviewed does not fire. Validating here (after create + the
+    // decision-write, before any R2 upload) means a blocked one-shot returns 422
+    // with no side effects. The rebuild path (finalize:false) is unchanged.
+    if (body.finalize) {
+      await updateExportOperatorMessage(exportId, operatorMessage);
+      const blockers = await validateMonthReadyForExport(
+        month,
+        bundle,
+        reconciliation,
+      );
+      if (blockers.length > 0) {
+        return NextResponse.json(
+          { error: "Export blocked — resolve these issues first.", blockers },
+          { status: 422 },
+        );
+      }
+    }
 
     // Record exactly which receipts and AMEX lines ship in this bundle. The
     // one-draft-per-month invariant means an existing draft's items get

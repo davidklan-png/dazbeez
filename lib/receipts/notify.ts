@@ -70,18 +70,24 @@ export interface ResendAttachment {
 }
 
 /** Delivery send via Resend. Extends {@link sendViaResend} with the ZIP
- *  attachment, a Cc recipient, and an `Idempotency-Key` header.
+ *  attachment, a Cc recipient, a Reply-To, and an `Idempotency-Key` header.
  *
  *  B-3: the key is derived from the attempt_id — stable across retries of one
  *  attempt, new per operator send — so a response-timeout retry does not
  *  double-send. On success the provider message id is returned so the caller
- *  can record it on the delivery row. */
+ *  can record it on the delivery row.
+ *
+ *  `replyTo` follows the same doctrine as `cc`: null/empty → the field is
+ *  OMITTED from the payload entirely (never `reply_to: null` / `""`). The
+ *  Reply-To is what keeps an accountant's reply out of the public intake
+ *  address that auto-ingests as a receipt (delivery-composer §B). */
 export async function sendDeliveryViaResend(
   fetchImpl: typeof fetch,
   apiKey: string,
   from: string,
   to: string,
   cc: string | null,
+  replyTo: string | null,
   subject: string,
   text: string,
   html: string,
@@ -103,6 +109,7 @@ export async function sendDeliveryViaResend(
         from,
         to: [to],
         cc: cc ? [cc] : undefined,
+        reply_to: replyTo ? replyTo : undefined,
         subject,
         text,
         html,

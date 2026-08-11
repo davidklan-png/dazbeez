@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   validateMonthReadyForExportCore,
+  validateMonthReadyForExportCoreDetailed,
   type ExportBundle,
   type ValidateMonthReadyInput,
 } from "@/lib/receipts/month-closing";
@@ -137,6 +138,44 @@ function makeInput(overrides: Partial<ValidateMonthReadyInput> = {}): ValidateMo
 
 test("gate core: clean input returns no blockers", () => {
   assert.deepEqual(validateMonthReadyForExportCore(makeInput()), []);
+});
+
+// (1.6) message_not_reviewed — the server-side fix for the 2026-06 loss. A draft
+// whose operator_message decision timestamp is NULL (the operator never saved a
+// preface nor clicked "no message") must block finalize, so an empty
+// 【今月のご連絡】 can't ship indistinguishable from a deliberate "no message."
+// operator_message_updated_at is written ONLY by an explicit decision now
+// (recordExportBundle no longer touches it), so NULL reliably means undecided.
+test("gate 1.6 (message_not_reviewed): a draft with no message decision blocks finalize", () => {
+  const blockers = validateMonthReadyForExportCoreDetailed(
+    makeInput({
+      exportBuild: { bundleBuiltAt: "2026-08-11T00:00:00Z", operatorMessageUpdatedAt: null },
+    }),
+  );
+  assert.ok(
+    blockers.some((b) => b.code === "message_not_reviewed"),
+    `expected message_not_reviewed; got ${JSON.stringify(blockers)}`,
+  );
+});
+
+test("gate 1.6: a decided message (timestamp set) does NOT block on message_not_reviewed", () => {
+  const blockers = validateMonthReadyForExportCoreDetailed(
+    makeInput({
+      exportBuild: { bundleBuiltAt: "2026-08-11T00:00:00Z", operatorMessageUpdatedAt: "2026-08-11T01:00:00Z" },
+    }),
+  );
+  assert.ok(
+    !blockers.some((b) => b.code === "message_not_reviewed"),
+    `a decided message must not block; got ${JSON.stringify(blockers)}`,
+  );
+});
+
+test("gate 1.6: no draft (exportBuild null) → no message_not_reviewed (nothing to decide)", () => {
+  const blockers = validateMonthReadyForExportCoreDetailed(makeInput());
+  assert.ok(
+    !blockers.some((b) => b.code === "message_not_reviewed"),
+    "no open draft ⇒ no message decision required",
+  );
 });
 
 // (1) Statement-sealed

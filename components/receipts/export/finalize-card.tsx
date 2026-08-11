@@ -31,6 +31,7 @@ export function FinalizeCard({
   warningCount,
   rowsInDraft,
   hasProofsZip = true,
+  prefaceDirty = false,
 }: {
   month: string;
   monthLabel: string;
@@ -44,6 +45,11 @@ export function FinalizeCard({
    *  never a dead 404. Defaults true (the common case for a freshly finalized
    *  export). */
   hasProofsZip?: boolean;
+  /** True while the preface editor has unsaved edits (client-side half of the
+   *  2026-06 message-loss fix). Finalize is blocked and the reason is named in
+   *  the button state — never a dismissible dialog (an unsaved preface and a
+   *  sealed pack are mutually exclusive states). */
+  prefaceDirty?: boolean;
 }) {
   const router = useRouter();
   const [busy, setBusy] = useState(false);
@@ -54,6 +60,7 @@ export function FinalizeCard({
     !finalized &&
     draftBuilt &&
     blockerCount === 0 &&
+    !prefaceDirty &&
     confirmType.trim().toLowerCase() === monthLabel.toLowerCase();
 
   async function finalize() {
@@ -183,9 +190,11 @@ export function FinalizeCard({
             >
               {busy
                 ? "Finalizing…"
-                : blockerCount > 0
-                  ? `Finalize · resolve ${blockerCount} blocker${blockerCount === 1 ? "" : "s"} first`
-                  : `Finalize ${monthLabel}`}
+                : prefaceDirty
+                  ? "ご連絡を保存してください"
+                  : blockerCount > 0
+                    ? `Finalize · resolve ${blockerCount} blocker${blockerCount === 1 ? "" : "s"} first`
+                    : `Finalize ${monthLabel}`}
             </Btn>
             <div className="mt-2 text-center text-[11px] text-gray-400">
               Signoff uses your Clerk operator identity

@@ -109,6 +109,38 @@ test("performDelivery: cc=null omits the Cc field from the Resend body (never cc
   assert.equal(body.cc, undefined, "unset Cc ⇒ field absent from the payload (not null / not [])");
 });
 
+test("performDelivery: an omitted Reply-To omits reply_to from the Resend body (never reply_to: null)", async () => {
+  const { fetchImpl, calls } = fakeResend({ ok: true });
+  await performDelivery({
+    fetchImpl: fetchImpl as unknown as typeof fetch,
+    apiKey: "key", from: "from@dazbeez.com", to: "cpa@example.com", cc: null,
+    // replyTo omitted entirely → defaults to null → omitted from the payload
+    // (the cc doctrine: unset ⇒ absent, never reply_to: null / "").
+    subject: "【領収証憑】2026年6月", text: "body", html: "<p>body</p>",
+    zipFilename: "202606_Dazbeez_Monthly_Expense_Report.zip",
+    zipBytes: new Uint8Array([0x50, 0x4b, 0x03, 0x04]),
+    idempotencyKey: "dazbeez-delivery-no-reply",
+  });
+  assert.equal(calls.length, 1);
+  const body = JSON.parse(calls[0]!.init.body as string);
+  assert.equal(body.reply_to, undefined, "unset Reply-To ⇒ field absent from the payload");
+});
+
+test("performDelivery: a set Reply-To is carried as reply_to in the Resend body", async () => {
+  const { fetchImpl, calls } = fakeResend({ ok: true });
+  await performDelivery({
+    fetchImpl: fetchImpl as unknown as typeof fetch,
+    apiKey: "key", from: "monthlyreport@dazbeez.com", to: "cpa@example.com", cc: null,
+    replyTo: "tazukowen@gmail.com",
+    subject: "s", text: "t", html: "h",
+    zipFilename: "pack.zip",
+    zipBytes: new Uint8Array(10),
+    idempotencyKey: "dazbeez-delivery-with-reply",
+  });
+  const body = JSON.parse(calls[0]!.init.body as string);
+  assert.equal(body.reply_to, "tazukowen@gmail.com", "set Reply-To ⇒ carried on the payload");
+});
+
 test("performDelivery: an oversized pack throws BEFORE any Resend call (B-1)", async () => {
   const { fetchImpl, calls } = fakeResend({ ok: true });
   await assert.rejects(

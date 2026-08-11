@@ -27,6 +27,9 @@ export const COMPLIANCE_DEFAULTS: ComplianceSettings = {
   // Delivery-composer decision 3: email-only signature, appended after the
   // sealed notice's closing line. Empty default; composer maps empty → null.
   delivery_signature: "",
+  // Delivery Reply-To: where an accountant's reply lands. Empty = omitted from
+  // the Resend payload (no reply_to). Target tazukowen@gmail.com.
+  delivery_reply_to: "",
   // ADR 0010 D3: verbatim former TOKYO_SIGNALS. Behavior unchanged until the
   // operator edits Settings → Compliance.
   homebase_signals: DEFAULT_HOMEBASE_SIGNALS,
@@ -125,6 +128,8 @@ export function parseComplianceSettings(
       COMPLIANCE_DEFAULTS.notification_cc_recipient,
     delivery_signature:
       map.get("delivery_signature") ?? COMPLIANCE_DEFAULTS.delivery_signature,
+    delivery_reply_to:
+      map.get("delivery_reply_to") ?? COMPLIANCE_DEFAULTS.delivery_reply_to,
     homebase_signals: parseHomebaseSignals(map.get("homebase_signals")),
   };
 }

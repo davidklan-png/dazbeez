@@ -1,7 +1,6 @@
 import Link from "next/link";
 import { Card } from "@/components/ui/card";
 import { Pill } from "@/components/ui/pill";
-import { FinalizeCard } from "@/components/receipts/export/finalize-card";
 import { InlineCategoryCell } from "@/components/receipts/export/inline-category-cell";
 import { buildCategoryCellProps } from "@/lib/receipts/category-cell";
 import {
@@ -27,7 +26,7 @@ import type { CategoryRule } from "@/lib/receipts/category-rules";
 import type { PackNoticeInput } from "@/lib/receipts/proofs";
 import type { PackNames } from "@/lib/receipts/pack-naming";
 import { withWorkMonth } from "@/lib/receipts/work-month";
-import { PrefaceEditor } from "@/components/receipts/export/preface-editor";
+import { PrefaceFinalizeSection } from "@/components/receipts/export/preface-finalize-section";
 
 export interface ReviewScreenProps {
   month: string;
@@ -118,29 +117,22 @@ export function ReviewScreen(props: ReviewScreenProps) {
         />
       </div>
 
-      {/* Editable preface (E2) — the ONE UI surface that writes operator_message.
-          Rendered whenever an export exists (draft → editable; sealed → disabled
-          with an explanation). Sits above the finalize card so the operator sets
-          the message before sealing it into the pack. */}
-      {props.currentExport && (
-        <PrefaceEditor
-          month={props.month}
-          initialMessage={props.currentExport.operator_message ?? null}
-          editable={props.currentExport.status === "draft"}
-          noticeInput={props.prefaceNoticeInput}
-          names={props.prefaceNames}
-        />
-      )}
-
-      <FinalizeCard
+      {/* Editable preface (E2) + finalize card, paired behind one client-state
+          flag (preface dirty) so Finalize is blocked while the preface has
+          unsaved edits. The server-side message_not_reviewed / message_stale
+          gates are enforced via blockerCount (the authoritative gate verdict). */}
+      <PrefaceFinalizeSection
         month={props.month}
         monthLabel={props.monthLabel}
+        currentExport={props.currentExport}
         finalized={finalized}
         draftBuilt={Boolean(props.currentExport)}
         blockerCount={props.gateBlockers.length}
         warningCount={props.warnings.reduce((s, w) => s + w.count, 0)}
         rowsInDraft={props.rows.length}
         hasProofsZip={Boolean(props.currentExport?.proofs_r2_key)}
+        noticeInput={props.prefaceNoticeInput}
+        names={props.prefaceNames}
       />
     </div>
   );

@@ -3,6 +3,7 @@ import {
   deliveryStateToPill,
   type DeliveryState,
 } from "@/lib/receipts/delivery-state";
+import { formatMonthJa } from "@/lib/receipts/format";
 
 /**
  * Per-month delivery banner for the export page (delivery-composer §6, surface
@@ -15,13 +16,12 @@ import {
  */
 export function DeliveryMonthBanner({
   month,
-  monthLabel,
   state,
 }: {
   month: string;
-  monthLabel: string;
   state: DeliveryState | null;
 }) {
+  const monthLabel = formatMonthJa(month);
   const pill = deliveryStateToPill(state);
 
   if (pill === "delivered") {
