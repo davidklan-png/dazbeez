@@ -9,25 +9,55 @@
 //   (A2-2) a rebuild collapsing "omitted" and "empty string" (resolveOperatorMessageForRebuild)
 
 /**
- * Resolve the operator message for a rebuild from the request body vs the stored
- * draft value, DISTINGUISHING omitted from empty string (A2-2).
+ * Resolve the operator message from the request body vs the stored draft value,
+ * DISTINGUISHING omitted from an explicit decision (A2-2 / Codex P1 on #169).
  *
- * - bodyValue `undefined` (the field was not sent) → carry `storedValue` forward.
+ * - bodyValue `undefined` (the field was not sent) → carry `storedValue` forward
+ *   (a rebuild that omits the field keeps the stored message).
+ * - bodyValue `null` → explicit "no message this month" → `null`.
  * - bodyValue a string (present, including `""`) → that value wins, trimmed;
  *   empty/whitespace → `null` (clears the message — a deliberate act).
  *
  * The old `bodyValue ?? storedValue` collapsed these: an empty string (present)
  * is NOT nullish, so `??` let it overwrite the stored value — the same shape as
  * the 2026-06 loss. "Clearing the message must be a deliberate act, never a side
- * effect of a rebuild."
+ * effect of a rebuild." The one-shot finalize path uses omitted (`undefined`) as
+ * "no decision supplied" → the route blocks, rather than silently bypassing the
+ * message_not_reviewed gate.
  */
 export function resolveOperatorMessageForRebuild(
-  bodyValue: string | undefined,
+  bodyValue: string | null | undefined,
   storedValue: string | null,
 ): string | null {
-  return bodyValue !== undefined
-    ? bodyValue.trim() || null
-    : (storedValue ?? null);
+  if (bodyValue === undefined) return storedValue ?? null;
+  if (bodyValue === null) return null;
+  return bodyValue.trim() || null;
+}
+
+/**
+ * The one-shot finalize decision from the request body (Codex P1 on #169). The
+ * caller must state it explicitly so the path cannot bypass message_not_reviewed:
+ * - `operatorMessage: "<text>"` → preface text.
+ * - `operatorMessage: null` or `""` → explicit "no message this month."
+ * - omitted (`undefined`) → NO decision → `{ ok: false }` and the route blocks
+ *   with a message naming the field, rather than silently finalizing with an
+ *   empty 【今月のご連絡】.
+ *
+ * Chosen over a separate `messageDecision: "none"` flag: it reuses the existing
+ * `operatorMessage` field and the field-PRESENCE doctrine (omitted ≠ present)
+ * already used by the rebuild path, so one field means one thing across both
+ * routes. Nothing calls this path today (no UI, no tests, no scripts — only docs
+ * describe it), so the contract change has zero caller breakage.
+ */
+export function oneShotFinalizeDecision(
+  operatorMessage: string | null | undefined,
+):
+  | { ok: true; operatorMessage: string | null }
+  | { ok: false; reason: "no-decision" } {
+  if (operatorMessage === undefined) {
+    return { ok: false, reason: "no-decision" };
+  }
+  return { ok: true, operatorMessage: resolveOperatorMessageForRebuild(operatorMessage, null) };
 }
 
 /**

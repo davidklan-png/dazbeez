@@ -180,7 +180,7 @@ ADR: `docs/adr/0002-statement-month-export-scope.md`.
 
 ### Single enforcement authority
 
-`validateMonthReadyForExport(month, prebuiltBundle?, preloadedReconciliation?)` in `lib/receipts/month-closing.ts` is the **only** gate. Both finalize paths (`POST /api/receipts/export/month {finalize:true}` and `POST /api/receipts/export/[month]`) call it; UI tiles in `lib/receipts/blockers.ts` are presentation-only.
+`validateMonthReadyForExport(month, prebuiltBundle?, preloadedReconciliation?)` in `lib/receipts/month-closing.ts` is the **only** gate. Both finalize paths (`POST /api/receipts/export/month {finalize:true}` and `POST /api/receipts/export/[month]`) call it; UI tiles in `lib/receipts/blockers.ts` are presentation-only. The one-shot path (`POST /api/receipts/export/month {finalize:true}`) requires an explicit operator-message decision in the body — `operatorMessage` (the preface text) or `operatorMessage: null`/`""` ("no message this month"); omitted ⇒ 400. The decision is written (setting `operator_message_updated_at`) before the gate runs, so the `message_not_reviewed` gate cannot be bypassed on a freshly created draft. The finalize-only route (`POST /api/receipts/export/[month]`, what the UI uses) validates against the already-existing draft and is unaffected.
 
 The validator runs these gates in order (`validateMonthReadyForExportCore` in
 `lib/receipts/month-closing.ts`):

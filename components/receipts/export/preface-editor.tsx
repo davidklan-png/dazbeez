@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import { Btn } from "@/components/ui/btn";
 import { buildPackNotice, type PackNoticeInput } from "@/lib/receipts/proofs";
 import type { PackNames } from "@/lib/receipts/pack-naming";
@@ -48,6 +49,7 @@ export function PrefaceEditor({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [savedAt, setSavedAt] = useState<string | null>(null);
+  const router = useRouter();
 
   const dirty = draft !== saved;
   const overCap = draft.length > 2000;
@@ -100,6 +102,14 @@ export function PrefaceEditor({
       setSavedAt(
         new Date().toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" }),
       );
+      // §2 (Codex P2 on #169): a verified save (res.ok ⇒ the rows-affected-checked
+      // write persisted) moves the server gate from message_not_reviewed to
+      // message_stale. The gate panel + FinalizeCard.blockerCount are server-
+      // rendered, so refresh them — never on an unverified/failed save. Refresh
+      // preserves this component's client state (draft/saved/savedAt are not
+      // reset by router.refresh), so the saved indicator is not bounced and
+      // unsaved edits are not clobbered.
+      router.refresh();
       return true;
     } catch {
       setError("通信エラーが発生しました。");
