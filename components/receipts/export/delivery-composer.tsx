@@ -277,6 +277,7 @@ export function DeliveryComposer({
           <PrimaryAction
             action={composed.action}
             monthLabel={monthLabel}
+            priorAttemptState={composed.priorAttemptState}
             confirmed={confirmed}
             setConfirmed={setConfirmed}
             sending={phase === "sending"}
@@ -390,20 +391,28 @@ function PreflightBlock({
 function PrimaryAction({
   action,
   monthLabel,
+  priorAttemptState,
   confirmed,
   setConfirmed,
   sending,
   disabled,
   onSend,
 }: {
-  action: "new" | "resume";
+  action: "new" | "resume" | "redelivery";
   monthLabel: string;
+  /** Set when action === "redelivery": the earlier-revision attempt's state.
+   *  Drives whether the copy says the earlier pack WAS delivered (sent) or only
+   *  MAY have been (pending/ambiguous). */
+  priorAttemptState?: ComposedDelivery["priorAttemptState"];
   confirmed: boolean;
   setConfirmed: (v: boolean) => void;
   sending: boolean;
   disabled: boolean;
   onSend: () => void;
 }) {
+  // For redelivery, `sent` means the earlier pack was definitely delivered;
+  // `pending`/`ambiguous` mean it may have been. The copy must not overclaim.
+  const earlierDelivered = priorAttemptState === "sent";
   return (
     <div className="rounded-2xl border border-gray-200 bg-white p-5">
       {action === "resume" && (
@@ -411,6 +420,26 @@ function PrimaryAction({
           前回の送信試行を再開します（同じ idempotency key を再利用するため、Resend
           が重複配送することはありません）。
         </p>
+      )}
+      {action === "redelivery" && (
+        <div className="mb-3 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-[12px] text-amber-800">
+          {earlierDelivered ? (
+            <>
+              <strong>再配送（会計士に 2 通目のメールが届きます）</strong> — 前の改訂版は
+              既に会計士へ送信済みです。ここでの送信は今回の改訂版の<strong>初回</strong>送信ですが、
+              会計士には 2 通目のメールが届きます。同じ改訂版の重複配送ではないため force_new は不要です
+              （監査ログには再配送として記録され、override 扱いにはなりません）。
+            </>
+          ) : (
+            <>
+              <strong>再配送（会計士に 2 通目のメールが届く可能性があります）</strong> — 前の改訂版の
+              送信は完了していません（送信中、または結果不明のため、会計士に届いている可能性があります）。
+              ここでの送信は今回の改訂版の<strong>初回</strong>送信ですが、会計士に 2 通目のメールが
+              届く可能性があります。同じ改訂版の重複配送ではないため force_new は不要です
+              （監査ログには再配送として記録されます）。
+            </>
+          )}
+        </div>
       )}
       <label className="flex items-start gap-2.5 text-[13px] text-gray-700">
         <input
@@ -421,7 +450,13 @@ function PrimaryAction({
         />
         <span>
           宛先・件名・本文・添付を確認しました。{" "}
-          <strong>{`「送信」をクリックすると ${monthLabel} の領収証憑一式が送信されます。`}</strong>
+          <strong>
+            {action === "redelivery"
+              ? earlierDelivered
+                ? `「再配送」をクリックすると ${monthLabel} の領収証憑一式が再配送され、会計士に 2 通目のメールが送信されます。`
+                : `「再配送」をクリックすると ${monthLabel} の領収証憑一式が再配送され、会計士に 2 通目のメールが送信される可能性があります。`
+              : `「送信」をクリックすると ${monthLabel} の領収証憑一式が送信されます。`}
+          </strong>
         </span>
       </label>
       <button
@@ -434,7 +469,9 @@ function PrimaryAction({
           ? "送信中… この画面を閉じないでください"
           : action === "resume"
             ? "送信を再開"
-            : "送信する"}
+            : action === "redelivery"
+              ? "再配送する"
+              : "送信する"}
       </button>
     </div>
   );

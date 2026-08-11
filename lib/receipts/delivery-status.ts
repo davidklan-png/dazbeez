@@ -29,29 +29,55 @@ import {
 export { deliveryStateToPill, type DeliveryPillState };
 
 /**
- * Map<month, DeliveryState | null> for every finalized month. One row per
- * statement month (the latest finalized revision carries the month's delivery
- * state; deliveries span revisions and are read across all of them via
- * listDeliveriesForMonth). Drives the export-page banner, the dashboard banner,
- * and the month pills.
+ * Map<month, DeliveryState | null> for every finalized month. SCOPED TO THE
+ * LATEST FINALIZED REVISION: only that revision's attempt rows feed
+ * {@link deriveMonthDeliveryState}. Drives the export-page banner, the dashboard
+ * banner, and the month pills.
+ *
+ * Revision-scoping is the whole point. A month whose earlier revision was
+ * delivered but whose current (sealed, corrected) revision is unsent must read
+ * as action-needed, not green — the operator still owes the accountant the
+ * corrected pack. Reading deliveries month-wide (the old behaviour) painted
+ * such a month `delivered` off the superseded revision's `sent`. Same authority
+ * the send path's {@link decideSendAction} trusts: state is a property of the
+ * latest finalized revision, not of the month in aggregate.
  */
 export async function deriveFinalizedMonthsDeliveryState(): Promise<
   Map<string, DeliveryState | null>
 > {
   const all = await listExports();
-  const finalizedMonths = new Set(
-    all.filter((e) => e.status === "finalized").map((e) => e.export_month),
-  );
+  // Latest FINALIZED export id per month — tie-broken identically to
+  // getLatestFinalizedExport (revision DESC, then created_at DESC) so this and
+  // the send path always agree on which revision is "current".
+  const latestFinalizedByMonth = new Map<
+    string,
+    { id: string; revision: number; createdAt: string }
+  >();
+  for (const e of all) {
+    if (e.status !== "finalized") continue;
+    const revision = e.export_revision ?? 1;
+    const createdAt = e.created_at;
+    const cur = latestFinalizedByMonth.get(e.export_month);
+    if (
+      !cur ||
+      revision > cur.revision ||
+      (revision === cur.revision && createdAt > cur.createdAt)
+    ) {
+      latestFinalizedByMonth.set(e.export_month, { id: e.id, revision, createdAt });
+    }
+  }
   const result = new Map<string, DeliveryState | null>();
-  for (const month of finalizedMonths) {
+  for (const [month, latest] of latestFinalizedByMonth) {
     const deliveries = await listDeliveriesForMonth(month);
-    const attempts = deliveries.map((d) => ({
-      attemptId: d.attempt_id,
-      // The DB column allows 'ambiguous' at runtime (markDeliveryAmbiguous);
-      // the static type narrows to three values, so cast through the authority.
-      state: (d.state as AttemptState) ?? ATTEMPT_STATE.PENDING,
-      createdAt: d.created_at,
-    }));
+    const attempts = deliveries
+      .filter((d) => d.export_id === latest.id)
+      .map((d) => ({
+        attemptId: d.attempt_id,
+        // The DB column allows 'ambiguous' at runtime (markDeliveryAmbiguous);
+        // the static type narrows to three values, so cast through the authority.
+        state: (d.state as AttemptState) ?? ATTEMPT_STATE.PENDING,
+        createdAt: d.created_at,
+      }));
     result.set(month, deriveMonthDeliveryState(attempts));
   }
   return result;
