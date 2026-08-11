@@ -367,6 +367,11 @@ export function validateMonthReadyForExportCoreDetailed(
       code: "message_stale",
       message:
         "Message edited after the draft was built. Rebuild the draft before finalizing.",
+      // The remedy (Rebuild draft) lives on the export page's TopBar, but this
+      // blocker surfaces on the /review page — with no link the operator had to
+      // hunt for it (the 2026-06 incident). Point at the export page so the
+      // blocker reads as a route, not dead prose. (Backlog #24 concrete case.)
+      href: `/receipts/export?month=${month}`,
     });
   }
 
