@@ -92,12 +92,25 @@ tells them what stage they're in and what remains.
 
 | Stage | Done when | Primary action | Blocked when |
 |---|---|---|---|
-| Reconcile | reconciliation `finalized` for the month | Go to Reconcile | unmatched/unconfirmed lines |
-| Draft | `bundle_built_at` set on the open draft | Build / Rebuild draft | no reconciliation |
-| Review | gate blockers = 0 | Review & finalize | any `ExportBlocker` |
-| Finalize | export `status='finalized'` | Finalize | blockers, `message_stale`, `message_not_reviewed` |
+| Reconcile | reconciliation `finalized` for the month | Go to Reconcile | `reconciliation_not_finalized` (unmatched/unconfirmed lines) |
+| Draft | `bundle_built_at` set AND not stale | Build / Rebuild draft | `message_stale` (cleared by Rebuild draft) |
+| Review | no Review-stage blockers | Review & finalize | `message_not_reviewed` + receipt / attendee / compliance blockers |
+| Finalize | export `status='finalized'` | Finalize | — (blockers live on earlier stages) |
 | Send | delivery state `delivered` | Send | preflight failure, missing To, config errors |
 | Closed | delivered | — (retention shown as metadata) | — |
+
+**Blocker placement — the organising rule.** A blocker sits on the stage whose
+*action* clears it, not on the gate number that emits it:
+
+- `reconciliation_not_finalized` → **Reconcile** (cleared by reconciliation signoff)
+- `message_stale` → **Draft** (cleared by Rebuild draft)
+- `message_not_reviewed` + every other gate blocker → **Review** (cleared by fixing receipts / attendees / compliance / the preface decision)
+
+Placing `message_stale` on Review or Finalize would put the blocker on a
+different page from the Rebuild-draft button that clears it — the exact 2026-06
+trap, reproduced every month. *(Corrected on architect review 2026-08-12: an
+earlier draft of this table listed `message_*` under Finalize, which is the
+misplacement this rule exists to prevent.)*
 
 "Archived / 7-year retention" stops being a step and becomes a metadata
 line on the Closed stage, where it belongs.
