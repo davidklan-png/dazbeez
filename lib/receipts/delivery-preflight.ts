@@ -11,6 +11,8 @@ import {
   runPackPreflight,
   sumReconChargeAmounts,
   parseSummaryTotals,
+  describeAmountColumnFailure,
+  type AmexStatementTotal,
   type PackPreflightEntry,
   type PackPreflightInput,
   type PackPreflightReport,
@@ -82,8 +84,33 @@ export async function runPreflightOnSealedZip(opts: {
   const noticeText = rootText(names.noticeFile) ?? "";
   // AMEX statement total from the sealed AMEX 照合CSV — the INDEPENDENT source
   // for summary-payment-path-reconciles (reading it from 集計 would be circular).
+  // sumReconChargeAmounts never returns a number for "column not found": it
+  // surfaces a structured failure (no-header / zero / multiple 金額 cells) which
+  // we translate into a `parse-error` so the check fails with a named, diagnosis-
+  // ready detail instead of comparing against a fabricated zero.
   const amexText = rootText(names.amexReconciliationCsv);
-  const amexStatementTotalCents = amexText !== null ? sumReconChargeAmounts(amexText) : null;
+  const amexStatementTotal: AmexStatementTotal =
+    amexText === null
+      ? { kind: "none" }
+      : (() => {
+          const r = sumReconChargeAmounts(amexText);
+          if (r.ok) return { kind: "total", cents: r.total };
+          if (r.kind === "no-header") {
+            return {
+              kind: "parse-error",
+              detail: `AMEX recon CSV: no 科目＆No. header row found; first row: [${r.headerCells.join(" | ")}]`,
+            };
+          }
+          return {
+            kind: "parse-error",
+            detail: describeAmountColumnFailure({
+              label: "AMEX",
+              kind: r.kind,
+              matches: r.matches,
+              headerCells: r.headerCells,
+            }),
+          };
+        })();
 
   const input: PackPreflightInput = {
     month: opts.month,
@@ -92,7 +119,7 @@ export async function runPreflightOnSealedZip(opts: {
     entries,
     noticeText,
     csvs,
-    amexStatementTotalCents,
+    amexStatementTotal,
     maxPackBytes: opts.maxPackBytes,
     operatorMessage: opts.operatorMessage ?? null,
   };

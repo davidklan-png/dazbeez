@@ -73,7 +73,7 @@ function baseInput(): PackPreflightInput {
       { label: "AMEX", text: AMEX_RECON },
       { label: "CASH", text: CASH_RECON },
     ],
-    amexStatementTotalCents: 6490,
+    amexStatementTotal: { kind: "total", cents: 6490 },
     maxPackBytes: 100_000_000,
   };
 }
@@ -210,7 +210,7 @@ test("summary-category-reconciles: a 集計 category total that drifts fails", (
 
 test("summary-payment-path-reconciles: AMEX total ≠ statement total fails", () => {
   const input = clone(baseInput());
-  input.amexStatementTotalCents = 1; // 集計 says 6490
+  input.amexStatementTotal = { kind: "total", cents: 1 }; // 集計 says 6490
   failsOnly(runPackPreflight(input), "summary-payment-path-reconciles");
 });
 
@@ -329,7 +329,7 @@ test("preflight: a realistic AMEX statement (metadata + header + charges + total
       entry(`${root}/${names.amexFolder}/会議費Jun2026①小田原みなと食堂￥6,490.jpg`, "img1"),
       entry(`${root}/${names.amexFolder}/研究開発費Jun2026①OpenAI￥108,341.pdf`, "img2"),
     ],
-    amexStatementTotalCents: 114831,
+    amexStatementTotal: { kind: "total", cents: 114831 },
     maxPackBytes: 100_000_000,
   };
   const report = runPackPreflight(input);
