@@ -47,10 +47,15 @@ type RouteContext = { params: Promise<{ month: string }> };
  *    from the composed result — no re-run); a preflight failure is audited and
  *    blocks before any delivery row is created.
  *
- * The POST body is IGNORED. Subject/body/To/Cc are NEVER accepted from the
- * client — they are re-composed server-side from the sealed pack + Settings via
- * composeDelivery (delivery-composer decision 2). A client that posts an edited
- * body has no way to change what is sent.
+ * The POST body carries ONLY `{ compositionHash }` (Item 2) — the fingerprint of
+ * the composition the operator reviewed. Subject/body/To/Cc are NEVER accepted
+ * from the client (they are re-composed server-side from the sealed pack +
+ * Settings via composeDelivery — delivery-composer decision 2); the hash is a
+ * staleness check, not content. The route recomposes, recomputes its own hash,
+ * and on mismatch 409s with the fresh composition so a stale render (Settings
+ * edited, or a new revision finalized) can never silently send a different
+ * body/recipient/pack. A client that posts an edited body still has no way to
+ * change what is sent.
  *
  * `force_new` is the DISTINCT override for the double-send guard (D6). Without
  * it: a resumeable pending is RESUMED (same attempt_id ⇒ same key ⇒ Resend
@@ -67,9 +72,20 @@ export async function POST(request: Request, { params }: RouteContext) {
       return NextResponse.json({ error: "Invalid month format." }, { status: 400 });
     }
     const forceNew = new URL(request.url).searchParams.get("force_new") === "true";
-    // The request body is deliberately unread — subject/body/To/Cc are never
-    // accepted from the client (decision 2). Send proceeds solely from the
-    // sealed pack + Settings via composeDelivery below.
+    // The request body carries ONLY the compositionHash fingerprint (Item 2) —
+    // never subject/body/To/Cc (decision 2 stands: those are recomposed
+    // server-side from the sealed pack + Settings via composeDelivery below).
+    // The hash is a staleness check, not content; an absent/invalid hash (direct
+    // POST, pre-hash client) simply skips the check.
+    let postedCompositionHash: string | undefined;
+    try {
+      const body = (await request.json()) as { compositionHash?: unknown };
+      if (typeof body?.compositionHash === "string") {
+        postedCompositionHash = body.compositionHash;
+      }
+    } catch {
+      // No JSON body — pre-hash caller; the integrity check is skipped.
+    }
 
     // ── Load the sealed export (D1: send is post-seal) ───────────────────────
     const exportRecord = await getLatestFinalizedExport(month);
@@ -164,6 +180,25 @@ export async function POST(request: Request, { params }: RouteContext) {
           configErrors: composed.configErrors,
         },
         { status: 422 },
+      );
+    }
+
+    // ── Item 2: composition-integrity check. If the client posted a
+    //    compositionHash, the composition it reviewed must equal the one we just
+    //    recomposed. A mismatch means To/Cc/signature changed in Settings, or a
+    //    new revision was finalized, after the page rendered — Send would
+    //    deliver a different body / recipient / pack than the operator reviewed.
+    //    REJECT (409) with the FRESH composition so the UI re-renders and asks
+    //    for re-confirmation. Never silently proceed; never warn-and-continue.
+    if (postedCompositionHash && postedCompositionHash !== composed.compositionHash) {
+      return NextResponse.json(
+        {
+          error:
+            "Composition changed since you reviewed it. Please re-confirm the updated delivery.",
+          compositionStale: true,
+          composition: composed,
+        },
+        { status: 409 },
       );
     }
 

@@ -66,6 +66,14 @@ export interface ComposedPreflightResult {
 export interface ComposedDelivery {
   month: string;
   exportId: string;
+  /** Plain SHA-256 fingerprint of this composition ({exportId, zipSha256, to,
+   *  cc, subject, text}; Item 2). The composer posts it back on Send; the send
+   *  route recomposes, recomputes, and returns 409 on mismatch so a stale render
+   *  (Settings edited, or a new revision finalized after the page loaded) can
+   *  never silently send a different body / recipient / pack than the operator
+   *  reviewed. NOT the ZIP bytes (zipSha256 already pins the pack); NOT content
+   *  the client controls — it is a fingerprint the server recomputes. */
+  compositionHash: string;
   /** When the latest finalized revision was sealed (receipt_exports.finalized_at).
    *  The composer header renders "sealed on {date}, NOT yet delivered" — sealing
    *  is the midpoint, not completion (decision 5). Added beyond the spec'd
@@ -121,6 +129,47 @@ export interface ComposedDelivery {
    *  The composer copy branches on this so it never claims the earlier pack WAS
    *  delivered when the evidence is uncertain. */
   priorAttemptState?: AttemptState;
+}
+
+/**
+ * Plain SHA-256 fingerprint of a delivery composition — the identity of exactly
+ * what the operator reviewed on the composer page. Over {exportId, zipSha256,
+ * to, cc, subject, text} (the signature is part of the body, so it is included
+ * via `text`). NOT the ZIP bytes (the pack's sha already pins it).
+ *
+ * This is a CONCURRENCY / staleness check, NOT an auth boundary: plain SHA-256,
+ * no HMAC, no signing. The threat is a second tab or a new revision finalized
+ * after the page rendered — not a hostile client (the send route recomposes
+ * server-side and trusts nothing from the body but this fingerprint, which it
+ * recomputes). The composer posts { compositionHash } and nothing else; the
+ * route recomposes, hashes its own result, and on mismatch returns 409 with the
+ * fresh composition so the UI re-renders and asks for re-confirmation. Reject,
+ * never warn — a click-through warning is the failure mode being fixed.
+ *
+ * Determinism is the whole point: the page render and the send route both call
+ * {@link composeDelivery}, so both arrive at this hash via the same field set ⇒
+ * a matching hash proves the reviewed composition equals the one about to ship.
+ * The canonical form is a fixed-key-order JSON object (with a `v` tag so a
+ * future field-set change forces re-confirmation instead of silently colliding).
+ */
+export async function computeCompositionHash(input: {
+  exportId: string;
+  zipSha256: string;
+  to: string | null;
+  cc: string | null;
+  subject: string;
+  text: string;
+}): Promise<string> {
+  const canonical = JSON.stringify({
+    v: 1,
+    exportId: input.exportId,
+    zipSha256: input.zipSha256,
+    to: input.to,
+    cc: input.cc,
+    subject: input.subject,
+    text: input.text,
+  });
+  return computeSha256Hex(new TextEncoder().encode(canonical));
 }
 
 /**
@@ -256,9 +305,19 @@ export async function composeDelivery(
     priorAttemptId = decision.priorAttemptId;
   }
 
+  const compositionHash = await computeCompositionHash({
+    exportId: exportRecord.id,
+    zipSha256,
+    to,
+    cc,
+    subject: email.subject,
+    text: email.text,
+  });
+
   return {
     month,
     exportId: exportRecord.id,
+    compositionHash,
     sealedAt: exportRecord.finalized_at ?? null,
     to,
     cc,
@@ -303,6 +362,10 @@ function noBytesResult(
   return {
     month,
     exportId,
+    // No sealed bytes ⇒ no real composition was reviewed (Send is disabled in
+    // this state via configBlocked). An empty fingerprint can never match a real
+    // recomposed hash, so a stray POST would 409 rather than silently send.
+    compositionHash: "",
     sealedAt: null,
     to,
     cc,

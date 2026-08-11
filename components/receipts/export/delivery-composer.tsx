@@ -7,19 +7,27 @@ import type { ComposedDelivery } from "@/lib/receipts/delivery-compose";
 /**
  * Delivery composer UI (delivery-composer §4). Renders the server-composed
  * delivery (From/To/Cc, subject, body, attachment, preflight) READ-ONLY and
- * provides the two-step Confirm → Send flow. The Send button posts an EMPTY
- * body to POST /api/receipts/export/{month}/send — the route recomposes
- * server-side from the sealed pack + Settings, so a client cannot change what is
- * sent (decision 2). Sealing ≠ closing (decision 5): every string respects that
- * the seal is the midpoint, delivery closes the month for reporting.
+ * provides the two-step Confirm → Send flow. The Send button posts ONLY the
+ * `{ compositionHash }` fingerprint to POST /api/receipts/export/{month}/send
+ * — the route recomposes server-side from the sealed pack + Settings, compares
+ * its own hash, and 409s on mismatch, so a client cannot change what is sent
+ * (decision 2) and a stale render cannot silently send a different pack (Item
+ * 2). Sealing ≠ closing (decision 5): the seal is the midpoint, delivery closes
+ * the month for reporting.
  */
 export function DeliveryComposer({
-  composed,
+  composed: initialComposed,
   monthLabel,
 }: {
   composed: ComposedDelivery;
   monthLabel: string;
 }) {
+  // The composition can change under the operator (a Settings edit, or a new
+  // revision finalized while the page is open). Hold it in state so a 409
+  // composition-stale response can swap in the FRESH composition and require
+  // re-confirmation (Item 2) — never silently send a different pack than the
+  // one reviewed.
+  const [composed, setComposed] = useState(initialComposed);
   const month = composed.month;
   const hasBytes = composed.zipSha256.length > 0;
   const configBlocked = composed.configErrors.length > 0 || !hasBytes;
@@ -47,8 +55,14 @@ export function DeliveryComposer({
     setError(null);
     try {
       const url = `/api/receipts/export/${month}/send${forceNew ? "?force_new=true" : ""}`;
-      // Empty body: subject/body/To/Cc are NEVER sent from the client (decision 2).
-      const res = await fetch(url, { method: "POST" });
+      // Body carries ONLY the compositionHash fingerprint — never
+      // subject/body/To/Cc (decision 2). The route recomposes server-side and
+      // compares this hash to detect a stale render (Item 2).
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ compositionHash: composed.compositionHash }),
+      });
       const data = (await res.json().catch(() => ({}))) as {
         state?: string;
         error?: string;
@@ -57,6 +71,8 @@ export function DeliveryComposer({
         reason?: string;
         classification?: string;
         resumable?: boolean;
+        compositionStale?: boolean;
+        composition?: ComposedDelivery;
       };
       if (res.ok && data.state === "delivered") {
         setSentInfo({
@@ -68,6 +84,22 @@ export function DeliveryComposer({
         return;
       }
       if (res.status === 409) {
+        // Composition-stale (Item 2): the composition changed between render and
+        // send (Settings edited, or a new revision finalized). Replace the
+        // displayed composition with the FRESH one from the route and require
+        // re-confirmation — never silently send the updated pack. Distinct from
+        // the double-send guard below, which is a different 409.
+        if (data.compositionStale && data.composition) {
+          setComposed(data.composition);
+          setConfirmed(false);
+          setForceConfirmed(false);
+          setPhase("idle");
+          setError(
+            data.error ??
+              "提出内容が変わりました。もう一度確認のうえ送信してください。",
+          );
+          return;
+        }
         // Double-send guard fired between load and click (race) or the displayed
         // action was 'blocked'. Surface the route's reason and stay on the
         // composer so the operator can re-send with force_new if intended.

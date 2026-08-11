@@ -4,6 +4,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import {
   computeDeliveryConfigErrors,
+  computeCompositionHash,
   type ComposedDelivery,
 } from "@/lib/receipts/delivery-compose";
 import { buildDeliveryEmail } from "@/lib/receipts/delivery-send";
@@ -165,4 +166,85 @@ test("shape: ComposedDelivery's preflight result names map from the pack-preflig
     passed: true,
   };
   assert.equal(sample.name, "container-names-ascii");
+});
+
+// ─── Item 2: composition hash — the stale-render guard ──────────────────────
+
+test("computeCompositionHash: deterministic — identical inputs ⇒ identical hash", async () => {
+  const input = {
+    exportId: "exp-1",
+    zipSha256: "abc123def",
+    to: "cpa@example.com",
+    cc: "mgr@example.com",
+    subject: "2026年6月の領収証憑一式",
+    text: "お世話になっております。\n株式会社ダズビーズ",
+  };
+  assert.equal(
+    await computeCompositionHash(input),
+    await computeCompositionHash({ ...input }),
+    "two independently-constructed but equal inputs hash the same",
+  );
+});
+
+test("computeCompositionHash: changing ANY of the six fields changes the hash", async () => {
+  const base = {
+    exportId: "exp-1",
+    zipSha256: "abc123def",
+    to: "cpa@example.com",
+    cc: "mgr@example.com",
+    subject: "件名",
+    text: "本文",
+  };
+  const h = await computeCompositionHash(base);
+  for (const [field, value] of [
+    ["exportId", "exp-2"],
+    ["zipSha256", "def456789"],
+    ["to", "someone-else@example.com"],
+    ["cc", "other-cc@example.com"],
+    ["subject", "別の件名"],
+    ["text", "別の本文（署名入り）"],
+  ] as const) {
+    assert.notEqual(
+      await computeCompositionHash({ ...base, [field]: value }),
+      h,
+      `changing ${field} must change the hash — a stale render of any field must be detectable`,
+    );
+  }
+});
+
+test("computeCompositionHash: null vs empty-string To/Cc are distinct fingerprints (empty is meaningful)", async () => {
+  // The silent-overwrite shape Item 6(c) sweeps. The hash must distinguish
+  // null (omitted) from "" (present-but-empty) so a recipient change can't hide
+  // behind a coercion. (Plain equality of the canonical JSON pins this.)
+  const core = { exportId: "e", zipSha256: "z", subject: "s", text: "t" };
+  assert.notEqual(
+    await computeCompositionHash({ ...core, to: null, cc: null }),
+    await computeCompositionHash({ ...core, to: "", cc: "" }),
+  );
+});
+
+test("composition-integrity wiring (Item 2): the send route reads compositionHash and 409s on mismatch; the composer posts it", () => {
+  // Structural guard, same shape as the parity tests above. Before Item 2 the
+  // send route ignored the body entirely and the composer posted an empty body.
+  // If either is reverted, this fails — the guard must be wired, not just defined.
+  const send = readFileSync(
+    "app/api/receipts/export/[month]/send/route.ts",
+    "utf8",
+  );
+  assert.ok(
+    /postedCompositionHash/.test(send),
+    "send route reads postedCompositionHash from the body",
+  );
+  assert.ok(
+    /compositionStale:\s*true/.test(send),
+    "send route returns compositionStale:true on mismatch (409 with the fresh composition)",
+  );
+  const ui = readFileSync(
+    "components/receipts/export/delivery-composer.tsx",
+    "utf8",
+  );
+  assert.ok(
+    /compositionHash:\s*composed\.compositionHash/.test(ui),
+    "composer posts { compositionHash: composed.compositionHash }",
+  );
 });
