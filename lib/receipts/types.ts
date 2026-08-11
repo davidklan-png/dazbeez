@@ -537,13 +537,21 @@ export interface ReceiptExport {
   // build time, and into the delivery email body at send time. NULL when no
   // message.
   operator_message?: string | null;
-  // Last-write timestamp for operator_message (0039 / E3). The preface is frozen
-  // into the sealed bytes at build time, so editing it after a build makes the
-  // built bundle stale. The finalize gate compares this against bundle_built_at
-  // (operator_message_updated_at > bundle_built_at ⇒ message_stale). NULL on
-  // legacy rows predating 0039 (no staleness signal — no blocker, matching
-  // pre-E3 behaviour). Written in lockstep with bundle_built_at by
-  // recordExportBundle, and alone by updateExportOperatorMessage.
+  // operator_message_updated_at is the DECISION timestamp — it records the last
+  // time the operator made an explicit preface decision (saving text, or "no
+  // message this month" which stores NULL text + this timestamp). It is written
+  // ONLY by updateExportOperatorMessage (the PATCH /message route). recordExportBundle
+  // (rebuild + finalize) deliberately does NOT write it — doing so at rebuild would
+  // forge a decision the operator never made. NULL therefore reliably means "never
+  // decided," which the finalize gate asserts two ways:
+  //   - message_not_reviewed fires when this is NULL on an open draft (force a
+  //     decision before sealing — the 2026-06 loss fix).
+  //   - message_stale fires when this is set AND > bundle_built_at (the preface is
+  //     frozen into the sealed bytes at build, so an edit after the build makes the
+  //     bundle stale). A rebuild clears staleness because bundle_built_at advances
+  //     past this timestamp — no lockstep write needed (the old lockstep was removed
+  //     because it forged decisions; see db.ts recordExportBundle + the
+  //     operator-message-contract test).
   operator_message_updated_at?: string | null;
 }
 
