@@ -30,6 +30,7 @@ import {
   buildCashReconciliationKey,
   buildDigitalReconciliationKey,
 } from "@/lib/receipts/export";
+import { resolveOperatorMessageForRebuild } from "@/lib/receipts/operator-message";
 import {
   buildEvidenceAssignments,
   buildAmexReconciliationCsv,
@@ -167,16 +168,17 @@ export async function POST(request: Request) {
     const exportRevision = exportRecord?.export_revision ?? 1;
     const supersedesExportId = exportRecord?.supersedes_export_id ?? null;
     const correctionReason = exportRecord?.correction_reason ?? null;
-    // E1: the operator message must survive a rebuild that omits it from the
-    // request body. Resolve it ONCE — body wins when explicitly present,
-    // otherwise the stored draft row's value carries forward. Pre-E1 every
-    // rebuild bound `body.operatorMessage ?? null`, so a rebuild triggered
-    // without the message nulled the stored column and it vanished from the
-    // next notice (the preflight O7 check then flagged the drift). Trim + the
-    // 2000-char cap are enforced by the PATCH writer; the rebuild only carries
-    // the resolved value forward verbatim.
-    const operatorMessage =
-      body.operatorMessage ?? exportRecord?.operator_message ?? null;
+    // E1/A2: the operator message must survive a rebuild that OMITS it from the
+    // request body, but an explicit empty string must CLEAR it. The old
+    // `body.operatorMessage ?? stored` collapsed those two (an empty string,
+    // which is present, overwrote the stored value — the same shape as the
+    // 2026-06 loss). Resolve by field PRESENCE via the shared pure helper.
+    // Trim + the 2000-char cap are enforced by the PATCH writer; the rebuild
+    // only carries the resolved value forward verbatim.
+    const operatorMessage = resolveOperatorMessageForRebuild(
+      body.operatorMessage,
+      exportRecord?.operator_message ?? null,
+    );
 
     // Record exactly which receipts and AMEX lines ship in this bundle. The
     // one-draft-per-month invariant means an existing draft's items get

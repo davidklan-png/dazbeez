@@ -20,6 +20,20 @@ export function formatMonth(month: string): string {
 }
 
 /**
+ * Format a YYYY-MM string as Japanese "2026年10月" — for surfaces where the
+ * month label sits inside a Japanese sentence (the delivery composer header
+ * "2026年6月 の送信", the sealed-undelivered banner, the dashboard alert).
+ * `formatMonth` is en-US ("June 2026"); using it inside a Japanese sentence
+ * produced the mixed-locale "June 2026 の送信" slip (delivery-composer §D).
+ * Falls back to the raw input if the month string is malformed.
+ */
+export function formatMonthJa(month: string): string {
+  const [y, m] = month.split("-").map(Number);
+  if (!y || !m) return month;
+  return `${y}年${m}月`;
+}
+
+/**
  * Format a minor-unit amount as JPY ("¥1,234") when no currency is given
  * or when the currency is JPY. Other currencies are rendered with two
  * decimals and the ISO code.

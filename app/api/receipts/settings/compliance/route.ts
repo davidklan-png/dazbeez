@@ -113,6 +113,19 @@ export async function PATCH(request: Request) {
       body.delivery_signature = body.delivery_signature.trim();
     }
 
+    // Delivery-composer §B: Reply-To validated with the same email shape rule as
+    // the To/Cc recipients. Empty is allowed (→ reply_to omitted from payload).
+    if (
+      body.delivery_reply_to !== undefined &&
+      body.delivery_reply_to !== "" &&
+      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.delivery_reply_to)
+    ) {
+      return NextResponse.json(
+        { error: "delivery_reply_to must be a valid email address." },
+        { status: 400 },
+      );
+    }
+
     const before = await getComplianceSettings();
     const settings = await updateComplianceSettings(body, actor);
 

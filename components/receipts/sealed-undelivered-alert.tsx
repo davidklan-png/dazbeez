@@ -3,7 +3,7 @@ import {
   deliveryStateToPill,
   type DeliveryState,
 } from "@/lib/receipts/delivery-state";
-import { formatMonth } from "@/lib/receipts/format";
+import { formatMonthJa } from "@/lib/receipts/format";
 
 /**
  * Dashboard banner listing every finalized month that is NOT yet delivered
@@ -45,7 +45,7 @@ export function SealedUndeliveredAlert({
                 href={`/receipts/export/${month}/send`}
                 className="font-semibold text-red-800 underline hover:text-red-900"
               >
-                {formatMonth(month)}
+                {formatMonthJa(month)}
               </Link>
               <span className="text-red-600">· {label}</span>
             </li>

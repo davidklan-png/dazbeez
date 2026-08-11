@@ -168,11 +168,7 @@ export default async function ExportPage({
         unassignableReceipts={unassignable}
       />
       {latestFinalized && (
-        <DeliveryMonthBanner
-          month={month}
-          monthLabel={monthLabel}
-          state={monthDeliveryState}
-        />
+        <DeliveryMonthBanner month={month} state={monthDeliveryState} />
       )}
       {/* Sealed bundle — latest FINALIZED revision. Served even while a
           revision draft is open (getLatestFinalizedExport, NOT getExport, so an

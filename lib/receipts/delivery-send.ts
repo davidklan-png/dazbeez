@@ -91,6 +91,11 @@ export async function performDelivery(opts: {
   from: string;
   to: string;
   cc: string | null;
+  /** Reply-To for the delivery (delivery-composer §B). null/empty/omitted →
+   *  omitted from the Resend payload (mirrors cc; never reply_to: null/"").
+   *  Optional so existing callers/tests that don't care about Reply-To default
+   *  to "none"; the send route always passes composeDelivery's resolved value. */
+  replyTo?: string | null;
   subject: string;
   text: string;
   html: string;
@@ -110,6 +115,7 @@ export async function performDelivery(opts: {
     opts.from,
     opts.to,
     opts.cc,
+    opts.replyTo ?? null,
     opts.subject,
     opts.text,
     opts.html,

@@ -31,6 +31,7 @@ const LABELS: Record<keyof ComplianceSettings, string> = {
   notification_recipient: "通知先 (Notification recipient)",
   notification_cc_recipient: "CC (Business manager / Cc recipient)",
   delivery_signature: "配信メール署名 (Delivery email signature)",
+  delivery_reply_to: "配信 Reply-To (Delivery reply-to)",
   homebase_signals: "Homebase signals (ADR 0010)",
 };
 
@@ -292,6 +293,20 @@ export function ComplianceSettingsForm({
       </Row>
 
       <Row
+        label={LABELS.notification_cc_recipient}
+        hint="月次確定通知の CC（写し先）。空欄なら CC なし（Resend ペイロードから omitted）。"
+      >
+        <input
+          type="email"
+          value={settings.notification_cc_recipient}
+          onChange={(e) => update("notification_cc_recipient", e.target.value)}
+          className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm sm:w-80"
+          maxLength={160}
+          placeholder="ops@example.com"
+        />
+      </Row>
+
+      <Row
         label={LABELS.delivery_signature}
         hint="配信メールの末尾（「ご不明な点があればお知らせください。」の後）に追加される署名です。確定した封筒内の通知には含まれません（送信メールのみ）。空欄なら追加されません。"
       >
@@ -306,6 +321,20 @@ export function ComplianceSettingsForm({
         <p className="mt-1 text-[11px] text-gray-400">
           {settings.delivery_signature.length}/1000
         </p>
+      </Row>
+
+      <Row
+        label={LABELS.delivery_reply_to}
+        hint="月次パック配送メールの Reply-To。会計士が返信ボタンを押したときの着信先です。空欄なら Reply-To なし（From 宛ての返信は Email Routing が別途ルーティングする必要があります）。"
+      >
+        <input
+          type="email"
+          value={settings.delivery_reply_to}
+          onChange={(e) => update("delivery_reply_to", e.target.value)}
+          className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm sm:w-80"
+          maxLength={160}
+          placeholder="tazukowen@gmail.com"
+        />
       </Row>
 
       <Row

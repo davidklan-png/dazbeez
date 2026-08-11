@@ -24,7 +24,7 @@ import {
 import {
   getReceiptsArchiveBucket,
   getResendApiKeyOrNull,
-  getNotifyFromAddress,
+  getDeliveryFromAddress,
   getAccountantEmail,
 } from "@/lib/cloudflare-runtime";
 import { getComplianceSettings } from "@/lib/receipts/settings";
@@ -72,10 +72,14 @@ export interface ComposedDelivery {
   sealedAt: string | null;
   to: string | null;
   cc: string | null;
-  /** Resolved From address. null when NOTIFY_FROM_ADDRESS is unset (also a
-   *  configError). The interface in the spec read `from: string`; null is the
-   *  truthful shape — a missing From is a configError, not an empty string. */
+  /** Resolved From address (the delivery sender — DELIVERY_FROM_ADDRESS, falling
+   *  back to NOTIFY_FROM_ADDRESS). null when both are unset (also a configError).
+   *  Distinct from the intake address so an accountant's Reply is not parsed as
+   *  a receipt submission (delivery-composer §B). */
   from: string | null;
+  /** Resolved Reply-To (Settings → Compliance → delivery_reply_to). null/empty →
+   *  omitted from the Resend payload. Where an accountant's reply lands. */
+  replyTo: string | null;
   subject: string;
   text: string;
   html: string;
@@ -139,12 +143,14 @@ export async function composeDelivery(
   ).email;
   const cc = (settings.notification_cc_recipient ?? "").trim() || null;
   const signature = (settings.delivery_signature ?? "").trim() || null;
+  const replyTo = (settings.delivery_reply_to ?? "").trim() || null;
   const apiKey = getResendApiKeyOrNull();
-  const from = getNotifyFromAddress();
+  const from = getDeliveryFromAddress();
 
   const configErrors = computeDeliveryConfigErrors({
     to,
     cc,
+    replyTo,
     from,
     hasResendKey: !!apiKey,
   });
@@ -163,7 +169,7 @@ export async function composeDelivery(
       // composer disables Send. Use a placeholder sha so the shape is satisfied
       // (the composer won't render the attachment block when configErrors block
       // the ZIP — but the field is non-optional on the interface).
-      return noBytesResult(month, exportRecord.id, to, cc, from, signature, configErrors);
+      return noBytesResult(month, exportRecord.id, to, cc, from, replyTo, signature, configErrors);
     }
     try {
       assertDeliverySize(head.size); // B-2 — guards the isolate before the GET
@@ -171,12 +177,12 @@ export async function composeDelivery(
       configErrors.push(
         err instanceof Error ? err.message : "Pack exceeds the delivery ceiling.",
       );
-      return noBytesResult(month, exportRecord.id, to, cc, from, signature, configErrors);
+      return noBytesResult(month, exportRecord.id, to, cc, from, replyTo, signature, configErrors);
     }
     const object = await bucket.get(proofsKey);
     if (!object) {
       configErrors.push("Sealed proofs ZIP vanished between HEAD and GET.");
-      return noBytesResult(month, exportRecord.id, to, cc, from, signature, configErrors);
+      return noBytesResult(month, exportRecord.id, to, cc, from, replyTo, signature, configErrors);
     }
     zipBytes = new Uint8Array(await new Response(object.body).arrayBuffer());
   }
@@ -240,6 +246,7 @@ export async function composeDelivery(
     to,
     cc,
     from,
+    replyTo,
     subject: email.subject,
     text: email.text,
     html: email.html,
@@ -271,6 +278,7 @@ function noBytesResult(
   to: string | null,
   cc: string | null,
   from: string | null,
+  replyTo: string | null,
   signature: string | null,
   configErrors: string[],
 ): ComposedDelivery {
@@ -281,6 +289,7 @@ function noBytesResult(
     to,
     cc,
     from,
+    replyTo,
     subject: "",
     text: "",
     html: "",
@@ -316,6 +325,7 @@ export type { DeliveryState };
 export function computeDeliveryConfigErrors(opts: {
   to: string | null;
   cc: string | null;
+  replyTo: string | null;
   from: string | null;
   hasResendKey: boolean;
 }): string[] {
@@ -334,9 +344,14 @@ export function computeDeliveryConfigErrors(opts: {
       `Delivery Cc recipient is not a valid email address: ${opts.cc}`,
     );
   }
+  if (opts.replyTo !== null && !isValidDeliveryAddress(opts.replyTo)) {
+    errors.push(
+      `Delivery Reply-To is not a valid email address: ${opts.replyTo}`,
+    );
+  }
   if (!opts.hasResendKey || !opts.from) {
     errors.push(
-      "Delivery not configured (RESEND_API_KEY / NOTIFY_FROM_ADDRESS).",
+      "Delivery not configured (RESEND_API_KEY / DELIVERY_FROM_ADDRESS).",
     );
   }
   return errors;

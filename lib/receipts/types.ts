@@ -664,6 +664,12 @@ export interface ComplianceSettings {
    *  email boundary. Does NOT enter the sealed pack notice (buildPackNotice is
    *  unchanged) — it is a transport-layer adornment on the delivery email only. */
   delivery_signature: string;
+  /** Reply-To for the monthly pack delivery email. Distinct from the From
+   *  address (which is a no-reply-style verified sender on the Resend domain) so
+   *  an accountant's reply lands in the operator's inbox, not the public intake
+   *  address that auto-ingests as a receipt. Empty = the Reply-To field is
+   *  omitted from the Resend payload entirely (never reply_to: null / ""). */
+  delivery_reply_to: string;
   /**
    * Homebase location signals (ADR 0010 D3). A merchant whose string carries
    * one of these is treated as an at-homebase charge (not a trip anchor).

@@ -302,7 +302,8 @@ export interface ExportBlocker {
     | "compliance"
     | "cross_month"
     | "missing_proof_file"
-    | "message_stale";
+    | "message_stale"
+    | "message_not_reviewed";
   message: string;
   /** In-app destination that lets the operator clear this blocker. */
   href?: string;
@@ -351,9 +352,11 @@ export function validateMonthReadyForExportCoreDetailed(
   // bytes at build time (buildPackNotice runs at rebuild; the notice is sealed
   // + hashed inside the proofs ZIP). Editing it afterwards makes the built
   // bundle stale — the bytes the operator previewed no longer match what
-  // finalize would seal. Require a rebuild (which re-bakes the message and
-  // re-syncs operator_message_updated_at to bundle_built_at) before finalizing.
-  // ISO-8601 strings compare lexicographically in chronological order.
+  // finalize would seal. Require a rebuild (which re-bakes the message) before
+  // finalizing. ISO-8601 strings compare lexicographically in chronological order.
+  // (operator_message_updated_at is no longer re-synced to bundle_built_at at
+  // build — see recordExportBundle — but advancing bundle_built_at past the save
+  // timestamp still clears this gate, so "rebuild after edit" works as before.)
   const build = input.exportBuild;
   if (
     build?.bundleBuiltAt &&
@@ -364,6 +367,23 @@ export function validateMonthReadyForExportCoreDetailed(
       code: "message_stale",
       message:
         "Message edited after the draft was built. Rebuild the draft before finalizing.",
+    });
+  }
+
+  // (1.6) Message reviewed. The companion to E3 for the case E3 cannot see: the
+  // operator never opened the preface at all. operator_message_updated_at is
+  // written ONLY by an explicit decision (save text, or "no message this month"
+  // which writes the timestamp with a NULL message) — recordExportBundle no
+  // longer touches it. So a NULL timestamp on the open draft means no decision
+  // was made, and finalizing would silently ship an empty 【今月のご連絡】 that
+  // is indistinguishable from a deliberate "no message." Force the decision.
+  // This is the server-side gate for the 2026-06 loss (the client dirty-block
+  // catches an unsaved typed draft; this catches a field never opened).
+  if (build && build.operatorMessageUpdatedAt === null) {
+    blockers.push({
+      code: "message_not_reviewed",
+      message:
+        "Decide the monthly message before finalizing: save a preface, or mark “no message this month”.",
     });
   }
 

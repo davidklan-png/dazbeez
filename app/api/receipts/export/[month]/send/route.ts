@@ -229,6 +229,7 @@ export async function POST(request: Request, { params }: RouteContext) {
       from: composed.from,
       to: composed.to,
       cc: composed.cc,
+      replyTo: composed.replyTo,
       subject: composed.subject,
       text: composed.text,
       html: composed.html,

@@ -184,6 +184,12 @@ export function DeliveryComposer({
             mono
             emptyDisplay="（なし）"
           />
+          <ReadonlyRow
+            label="Reply-To"
+            value={composed.replyTo ?? null}
+            mono
+            emptyDisplay="（なし）"
+          />
         </div>
       )}
 

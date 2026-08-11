@@ -2,7 +2,7 @@ import { notFound } from "next/navigation";
 import Link from "next/link";
 import { composeDelivery, NoSealedExportError } from "@/lib/receipts/delivery-compose";
 import { assertReceiptsPageAccess } from "@/lib/receipts/auth-request";
-import { formatMonth } from "@/lib/receipts/format";
+import { formatMonthJa } from "@/lib/receipts/format";
 import { DeliveryComposer } from "@/components/receipts/export/delivery-composer";
 
 export const dynamic = "force-dynamic";
@@ -40,10 +40,10 @@ export default async function SendPage({ params }: { params: Params }) {
           href={`/receipts/export?month=${month}`}
           className="text-[12px] font-medium text-gray-500 hover:text-amber-700"
         >
-          ‹ {formatMonth(month)} のエクスポートに戻る
+          ‹ {formatMonthJa(month)} のエクスポートに戻る
         </Link>
       </div>
-      <DeliveryComposer composed={composed} monthLabel={formatMonth(month)} />
+      <DeliveryComposer composed={composed} monthLabel={formatMonthJa(month)} />
     </div>
   );
 }
