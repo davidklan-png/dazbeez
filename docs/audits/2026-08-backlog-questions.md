@@ -131,5 +131,75 @@ No finalize gate, no edit-lock predicate (`month-lock.ts`, `loadSealedExportMont
 
 ---
 
+---
+
+## §3 (added 2026-08-12, architect follow-up) — Missing 2026-06 revisions: deliberate test-seal cleanup, not data loss
+
+**Verdict: the missing rows WERE deleted — deliberately, operator-authorized, as
+pre-close production-test-seal cleanup. Not a bug, not data loss, and not an
+audit-trail gap (the removal is audited).** `createExportRevision` computes
+`(prior.export_revision ?? 1) + 1`, so a surviving rev 3 mathematically implied
+revs 1 and 2 existed; the audit log shows they did, and why they're gone.
+
+### Evidence
+
+1. **No app code deletes `receipt_exports`.** The only `DELETE` near the table
+   is `DELETE FROM receipt_export_items WHERE export_id = ?` (db.ts:2955, inside
+   `replaceExportItems` — clears items before re-insert, not a row delete). No
+   migration deletes/renumbers `receipt_exports` rows (migration 0017 defines a
+   child→parent `ON DELETE CASCADE` FK, but nothing in app code triggers it).
+   So the deletion was an **out-of-band operator action**, not a code path.
+2. **The audit log records the full 2026-06 history** (`object_type='export'`):
+   - 2026-07-12 `export.created` `bfa94a26` (rev 1) → 2026-07-14 `export.finalized`.
+   - 2026-07-15 `export.revision_created` `fc9b786d` (rev 2, "tranche1") → 2026-07-17 `export.finalized`.
+   - 2026-07-18 `export.revision_created` `fb8cf556` (rev 3, *"Smoke test 7.4
+     (review-queue lock release) — draft will be deleted, no data changes"*) — a
+     smoke-test draft, deleted same day.
+   - 2026-07-18 `export.revision_created` `4e5afb3e` (rev 3, *"Draft 2 submit for
+     review"*) — the real rev 3 (the smoke test had been deleted, so the max
+     revision fell back to 2 ⇒ this is rev 3 again, consistently).
+   - **2026-07-22 cleanup (batch `8a4671fb-6e43-4328-aae7-e6432f976ce8`):**
+     `export.test_seal_removed` for `bfa94a26` AND `fc9b786d` — *"operator-
+     authorized removal of pre-close production-test seal"*, with
+     `retention_legalhold_exception: "limited to this test artifact"` and
+     `preserved_draft_id: 4e5afb3e`. Plus `export.draft_supersession_cleared`
+     for `4e5afb3e` — *"logical predecessor (rev2) removed as operator-authorized
+     pre-close test artifact; active accountant-review draft (rev3) preserved."*
+   - 2026-08-11 `export.finalized` `4e5afb3e` (rev 3) → `revision_created`
+     `c88c1097` (rev 4, "Rebuild for email message") → `finalized`.
+3. **Other months are NOT affected.** 2026-05 = rev 1; 2026-07 = rev 1
+   (contiguous). 2026-06 is unique because it is the only month that carried
+   pre-close production-test seals.
+4. **No orphaned R2.** Probed `exports/2026-06/{rev1id}-proofs.zip` and
+   `{rev2id}-proofs.zip` (and the smoke-test draft) in `dazbeez-receipts-archive`:
+   all three are **absent**. The cleanup removed both the D1 rows AND their
+   staged R2 objects — the only staged 2026-06 objects are the real rev 3 +
+   rev 4, exactly as measured in the original Item 0 R2 sweep.
+
+### Process finding (for the architect — not a code defect)
+The cleanup was a one-off out-of-band operation:
+- It used **non-standard audit actions** (`export.test_seal_removed`,
+  `export.draft_supersession_cleared`) that are **not in the `AuditAction`
+  union** and have **no committed code** (grep of lib/app/scripts is empty) — it
+  was a run-once script / direct D1 on 2026-07-22.
+- It deleted rows with `legal_hold` set (createExport inserts `legal_hold=1`),
+  under a recorded `retention_legalhold_exception` — a serious action on a
+  10-year-tax-record table that should remain rare and tightly controlled.
+- There is **no standard `export.deleted` audit action**; the trail relies on
+  the one-off `test_seal_removed`. If another such cleanup happens, it should
+  use a consistent, typed action promoted into `AuditAction`, and ideally be a
+  committed, logged runbook rather than an ad-hoc script. (The smoke-test draft
+  `fb8cf556` was deleted with no removal audit at all — lower-stakes as an
+  unfinalized draft, but worth noting.)
+
+**Bottom line:** the 2026-06 revision gap is benign and fully explained. No
+action needed on the data. The only takeaway is the process note above: sealed-
+export deletion is currently an out-of-band, legal-hold-exception,
+untyped-audit operation with no committed code — a documented runbook + a typed
+`export.deleted`/`export.test_seal_removed` action would make the next one safer
+and more discoverable.
+
+---
+
 ## Verification
 Personally re-read/confirmed: T1-1 (the import graph), and all four Part (b) findings (D1 queries + the `hardDeleteReceipt` batch + the `preservation_status` grep). Part (a) T1-2…T3 are agent-reported with precise file:line — the architect should spot-check before acting. No code or data was modified.
