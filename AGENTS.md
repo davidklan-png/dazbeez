@@ -587,6 +587,80 @@ starts. Design consequences:
     or (b) the backfill must respect the seal and skip/defer sealed-month rows.
     Do NOT backfill until that is answered.
 
+24. **Export workflow UX — staged, predictable month-close.** NOT STARTED.
+    Do not begin until 2026-06 is sent and closed. Full design:
+    `docs/export-workflow-ux-plan.md`. Operator complaint (2026-08-11):
+    "Review & finalize" and "Send" must be separate, clearly-sequenced
+    steps with visual cues for complete / in-progress / pending, and the
+    operator shouldn't hunt the page for what comes next. Root causes found
+    in code: the `Pipeline` component (`export-screen.tsx:269`) models
+    Reconcile→Draft→Review→Finalize→**Archived** — Send is not a stage at
+    all, so delivery is bolted on as a banner below the export history
+    table; "Archived" is a property not a stage and goes green at finalize,
+    so the pipeline reads fully complete at the exact moment the month is
+    sealed-undelivered (how 2026-06 sat unsent); `stepIndex` (line 278) has
+    two identical branches so blocker count never affects the step; and
+    "Reconcile" is hardcoded `done: true`. The next action lives in four
+    different places across three pages, and `Pipeline` renders only on the
+    export page — so the map disappears the moment you advance a stage.
+    Fix = one server-derived `deriveMonthStage()` (same one-authority
+    pattern as `delivery-status.ts` / the `ExportBlocker` union), a stage
+    model of Reconcile→Draft→Review→Finalize→Send→Closed, one primary
+    action in one fixed position, and the pipeline mounted on all three
+    surfaces. No server-side gate changes; the finalize/send decoupling
+    (D1/D2) and the three-page split both stay.
+
+25. **Japanese business-letter ordering for the delivery email + pack
+    notice.** NOT STARTED. Filed 2026-08-11 after the 2026-06 delivery.
+    Japanese business correspondence opens with the recipient, salutation,
+    and message — not with a machine statement. Today both
+    `buildDeliveryEmail` (`delivery-send.ts:150`) and `buildPackNotice`
+    (`proofs.ts:120`) emit `{monthLabel} の領収証憑一式を…お送りします。`
+    FIRST, then 【今月のご連絡】 with the operator's greeting under it, so
+    the letter opens mid-sentence from the accountant's point of view.
+    **Target order (operator-approved, BOTH surfaces):** operator preface
+    (recipient → salutation → message) → 【今月のご連絡】 → the
+    `領収証憑一式` line → then 【勘定科目別集計】 (email) /
+    【この資料について】 (notice) → closing → signature. The heading moves
+    with the machine line so it introduces the business content rather than
+    labelling the greeting.
+    **Empty-message degradation:** with no operator message the surface
+    opens directly at 【今月のご連絡】 + the `領収証憑一式` line. Do not emit
+    a bare heading with nothing under it and do not leave a leading blank.
+    **The trap — O7 / preflight check #19.** `pack-preflight.ts` extracts
+    the operator message as the lines BETWEEN 【今月のご連絡】 and
+    【この資料について】 (~L285-300) and check #19 asserts it equals the
+    stored `operator_message`. Under the new order the preface sits ABOVE
+    【今月のご連絡】, i.e. from start-of-file to that heading — the extractor
+    inverts and MUST change in the same PR or #19 fails on every new pack.
+    The separate 【この資料について】 anchor at L276 is unaffected (that
+    heading does not move).
+    **Second trap — old sealed packs.** Preflight runs at SEND time, not
+    seal time, so any month sealed before this ships (2026-06 and earlier)
+    still carries the old layout. If such a pack is ever re-sent, a parser
+    that understands only the new order will fail it. The extractor must
+    accept BOTH layouts; add a regression test pinning a pre-change notice.
+    No migration, no re-seal of existing packs.
+
+26. **Sealed-export deletion is out-of-band and untyped.** NOT STARTED.
+    Found 2026-08-12 while investigating 2026-06's missing revisions 1 & 2
+    (audit in `docs/audits/2026-08-backlog-questions.md` §3). Verdict on the
+    deletion itself: legitimate — operator-authorized pre-close test-seal
+    cleanup on 2026-07-22 (batch 8a4671fb…), R2 objects removed with no
+    orphans, other months contiguous from rev 1. **The gap is the
+    mechanism.** The audit actions written (`export.test_seal_removed`,
+    `export.draft_supersession_cleared`) are NOT members of the
+    `AuditAction` union, and no committed code deletes `receipt_exports`
+    (only the 0017 FK cascade, never reached from app code). So rows for a
+    SEALED export under `legal_hold=1` were deleted by an out-of-band
+    operation that does not exist in the repository, recorded with a
+    free-text `retention_legalhold_exception`. On a 10-year tax record that
+    is the finding. Fix = a typed `export.deleted` AuditAction, a committed
+    script that is the only way to do it (asserting the legal-hold
+    exception is explicit and recorded), and a runbook entry. Related
+    doctrine: sealing locks edits — the deletion path is the one hole in
+    that guarantee and it currently has no code review surface.
+
 19. **Never-enqueued receipts are undetectable — wire a pipeline health
     surface.** NOT DISPATCHED — same prompt as #18, Part A (do it FIRST).
     `getExtractionHealth` (`lib/receipts/extraction-state.ts:69`) is written
