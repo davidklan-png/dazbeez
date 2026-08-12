@@ -13,6 +13,7 @@
 
 import { dueDateCode } from "@/lib/receipts/pack-naming";
 import { circledNumber } from "@/lib/receipts/reconciliation-files";
+import { isPackNoticeMachineLine } from "@/lib/receipts/proofs";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -352,12 +353,13 @@ function noticeFilenames(noticeText: string): string[] {
 function noticeMessageLayout(lines: string[]): "new" | "old" | "none" {
   const headingIdx = lines.findIndex((l) => l.startsWith("【今月のご連絡】"));
   if (headingIdx === -1) return "none";
-  // In the new layout the generated machine line sits directly after the heading
-  // and ends with お送りします。. In the old layout the line after the heading is
-  // the operator message (different verb form). This positional + shape check is
-  // robust against operator text that happens to contain the marker phrase.
+  // In the new layout the generated machine line sits directly after the heading.
+  // In the old layout the line after the heading is the operator message (which
+  // does not match the generated shape). The predicate is the single source of
+  // truth for the machine line's identity — it and buildPackNotice share one
+  // constant, so a copy edit updates both by construction (no parallel regex).
   const next = lines[headingIdx + 1] ?? "";
-  return /^.*の領収証憑一式を.*お送りします。$/.test(next) ? "new" : "old";
+  return isPackNoticeMachineLine(next) ? "new" : "old";
 }
 
 /** Remove the operator's free text from a notice, so preflight checks scan only
@@ -769,8 +771,13 @@ const checks: { key: string; run: Check }[] = [
         (n, files) => n + files.length,
         0,
       );
-      const noticeRows = noticeText.match(/明細行数:\s*(\d+)/);
-      const noticeFiles = noticeText.match(/証憑ファイル数:\s*(\d+)/);
+      // Scan stripped text (generated structure only) for consistency with the
+      // other notice checks — operator prose is removed first. The counts live
+      // in the generated 【今月の内容】 section, so stripping does not change
+      // them; this is a consistency hardening, not a fix.
+      const stripped = stripOperatorMessageSection(noticeText);
+      const noticeRows = stripped.match(/明細行数:\s*(\d+)/);
+      const noticeFiles = stripped.match(/証憑ファイル数:\s*(\d+)/);
       const problems: string[] = [];
       if (noticeRows && Number(noticeRows[1]) !== rowCount) {
         problems.push(`明細行数: notice ${noticeRows[1]} vs pack ${rowCount}`);

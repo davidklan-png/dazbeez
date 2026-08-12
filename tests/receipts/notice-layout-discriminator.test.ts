@@ -1,6 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildPackNotice } from "@/lib/receipts/proofs";
+import {
+  buildPackNotice,
+  packNoticeMachineLine,
+  isPackNoticeMachineLine,
+} from "@/lib/receipts/proofs";
 import {
   extractOperatorMessageFromNotice,
   stripOperatorMessageSection,
@@ -176,4 +180,25 @@ test("fail-then-pass: the OLD document-wide findIndex discriminator FAILS the ad
   assert.equal(oldDiscriminator(lines), "old");
   // …while the real extractor gets the preface right (proving "new" classification).
   assert.equal(extractOperatorMessageFromNotice(notice), ADVERSARIAL);
+});
+
+// ─── builder/predicate single-source agreement ──────────────────────────────
+
+test("single-source: isPackNoticeMachineLine accepts exactly what packNoticeMachineLine emits", () => {
+  // The builder and the predicate share one constant (MACHINE_LINE_SUFFIX). This
+  // test makes drift IMPOSSIBLE: if someone edits the wording in the constant,
+  // both update together; if someone introduces a parallel pattern, this fails.
+  for (const label of ["2026年6月", "2026年8月", "2026年12月"]) {
+    const line = packNoticeMachineLine(label);
+    assert.ok(
+      isPackNoticeMachineLine(line),
+      `predicate must accept the builder's output for ${label}`,
+    );
+  }
+  // The predicate must NOT accept arbitrary operator prose that merely contains
+  // the marker phrase (different verb form).
+  assert.ok(
+    !isPackNoticeMachineLine("前回の領収証憑一式をお送りした際に不足がございました。"),
+    "operator prose with the marker but a different verb form must NOT match",
+  );
 });
