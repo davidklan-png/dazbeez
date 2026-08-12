@@ -8,6 +8,10 @@ import {
   buildReadmeKey,
   buildSummaryKey,
 } from "@/lib/receipts/export";
+import {
+  ATTEMPT_STATE,
+  MAY_HAVE_REACHED_RECIPIENT_STATES,
+} from "@/lib/receipts/delivery-state";
 
 // Backlog #26: the single sanctioned planner for deleting a sealed export. PURE
 // (no D1/R2) so the refusal paths are unit-testable without bindings. The
@@ -73,13 +77,17 @@ function refuse(reason: string): { ok: false; reason: string } {
  *   - the legal-hold exception is empty (legal_hold defaults to 1, so deleting
  *     is always a retention exception — the operator must state it);
  *   - the row is not found, or its id/month don't match the request;
- *   - any delivery row is state `'sent'` (a delivered month's seal is not
- *     deletable by this tool at all — a different authorization).
- *
- * `pending`/`ambiguous` deliveries are NOT refused here (the literal gate is the
- * delivered state, `'sent'`). They mean a send may or may not have landed; the
- * script can additionally refuse them — see delivery-state.ts
- * MAY_HAVE_REACHED_RECIPIENT_STATES.
+ *   - any delivery row is in a state where the pack MAY have reached the
+ *     accountant — `MAY_HAVE_REACHED_RECIPIENT_STATES` from delivery-state.ts
+ *     (`sent` / `pending` / `ambiguous`). Only a definitively `failed` delivery
+ *     (never accepted ⇒ nothing was delivered ⇒ nothing to destroy) permits
+ *     deletion. This is the same doctrine #171 used to require an explicit
+ *     confirmation before SENDING a second pack; it applies more forcefully to
+ *     DELETING a sealed export — if the pack may have reached the accountant,
+ *     deleting destroys the only record of what they were sent. The refusal
+ *     message distinguishes `sent` ("already delivered") from `pending`/
+ *     `ambiguous` ("may have been delivered") so the operator is never told a
+ *     pack was delivered when the evidence is ambiguous.
  */
 export function planExportDeletion(
   req: ExportDeletionRequest,
@@ -117,9 +125,21 @@ export function planExportDeletion(
       `month mismatch: requested ${req.month}, row export_month is ${row.export_month}`,
     );
   }
-  if (ctx.deliveries.some((d) => d.state === "sent")) {
+  // Refuse if any delivery may have reached the accountant. Reuse the named
+  // constant from delivery-state.ts (the doctrine #171 settled) rather than
+  // re-spelling the set. Only a definitively 'failed' delivery permits deletion.
+  const reaching = ctx.deliveries.filter((d) =>
+    (MAY_HAVE_REACHED_RECIPIENT_STATES as readonly string[]).includes(d.state),
+  );
+  if (reaching.length > 0) {
+    if (reaching.some((d) => d.state === ATTEMPT_STATE.SENT)) {
+      return refuse(
+        `export ${exportId} has a delivery row in state 'sent' — already delivered. A delivered month's seal is not deletable by this tool; that is a different authorization.`,
+      );
+    }
+    const states = [...new Set(reaching.map((d) => d.state))].sort().join("/");
     return refuse(
-      `export ${exportId} has a delivery row in state 'sent' (delivered) — a delivered month's seal is not deletable by this tool; that is a different authorization`,
+      `export ${exportId} has a delivery row in state '${states}' — may have been delivered (a send is in flight or its outcome is unknown). Not deletable: if the pack reached the accountant, deleting destroys the only record of what they were sent.`,
     );
   }
 

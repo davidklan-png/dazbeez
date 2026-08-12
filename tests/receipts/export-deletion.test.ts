@@ -104,10 +104,35 @@ test("refuses: month mismatch (the row belongs to a different month)", () => {
   );
 });
 
-test("refuses: a delivered (state='sent') export is not deletable by this tool", () => {
+test("refuses: a delivered (state='sent') export — 'already delivered'", () => {
   assert.match(
     refuseCode(planExportDeletion(req(), ctx({ deliveries: [{ state: "sent" }] }))),
-    /state 'sent' \(delivered\)/,
+    /state 'sent' — already delivered/,
+  );
+});
+
+test("refuses: a pending delivery — 'may have been delivered' (not 'already delivered')", () => {
+  const reason = refuseCode(
+    planExportDeletion(req(), ctx({ deliveries: [{ state: "pending" }] })),
+  );
+  assert.match(reason, /may have been delivered/);
+  assert.doesNotMatch(reason, /already delivered/, "pending is not 'already delivered' — the evidence is in-flight, not certain");
+});
+
+test("refuses: an ambiguous delivery — 'may have been delivered' (not 'already delivered')", () => {
+  const reason = refuseCode(
+    planExportDeletion(req(), ctx({ deliveries: [{ state: "ambiguous" }] })),
+  );
+  assert.match(reason, /may have been delivered/);
+  assert.doesNotMatch(reason, /already delivered/);
+});
+
+test("refuses: mixed ambiguous + sent reports the definitive 'already delivered' (the worst state wins the message)", () => {
+  assert.match(
+    refuseCode(
+      planExportDeletion(req(), ctx({ deliveries: [{ state: "ambiguous" }, { state: "sent" }] })),
+    ),
+    /already delivered/,
   );
 });
 
@@ -144,13 +169,4 @@ test("sanctions: proofs absent (sealed before proofs shipped) → 9 keys, no pro
   if (!r.ok) return;
   assert.equal(r.plan.r2Objects.length, 9);
   assert.ok(!r.plan.r2Objects.some((k) => k.endsWith("-proofs.zip")));
-});
-
-test("pending deliveries are NOT refused by the planner (the literal gate is 'sent')", () => {
-  // Documented behaviour: only state 'sent' (delivered) is refused here. pending
-  // / ambiguous mean a send may or may not have landed — the script can refuse
-  // those additionally; the planner flags only the delivered case. Pinned so a
-  // future tightening is a deliberate decision, not a silent one.
-  const r = planExportDeletion(req(), ctx({ deliveries: [{ state: "pending" }] }));
-  assert.equal(r.ok, true);
 });

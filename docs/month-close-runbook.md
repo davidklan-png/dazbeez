@@ -303,8 +303,16 @@ cannot go unrecorded. The R2 objects removed (3 sealed keys stored on the row +
 7 derived) are listed in the dry-run and recorded in the audit's
 `removedR2Objects`.
 
-`pending`/`ambiguous` deliveries are not auto-refused by the planner (only
-`sent` is) — they mean a send may or may not have landed. Re-examine before
-deleting anything with a non-`failed` delivery.
+**Deliveries:** the tool refuses if any delivery row is in a state where the pack
+**may have reached the accountant** — `sent` (delivered), `pending` (in flight),
+or `ambiguous` (false-negative — may have been accepted). This is the same
+doctrine that requires explicit confirmation before *sending* a second pack
+(#171), and it applies more forcefully to *deleting*: if the pack may have
+landed, deleting destroys the only record of what the accountant was sent. Only
+a definitively `failed` delivery (never accepted ⇒ nothing delivered) permits
+deletion. The refusal message distinguishes `sent` ("already delivered") from
+`pending`/`ambiguous` ("may have been delivered") so you are never told a pack
+was delivered when the evidence is uncertain. This is decided, not a judgment
+call for each deletion.
 
 
