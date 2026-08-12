@@ -486,8 +486,8 @@ export interface ListReceiptsFilter {
 
 export async function listReceiptRecords(
   filter?: ListReceiptsFilter,
+  db: D1Database = getReceiptsDb(),
 ): Promise<ReceiptRecord[]> {
-  const db = getReceiptsDb();
   const conditions: string[] = ["deleted_at IS NULL"];
   const binds: unknown[] = [];
 
@@ -628,21 +628,25 @@ export async function countCapturedSince(startIso: string): Promise<number> {
  */
 export async function listAllReceiptsInMonth(
   month: string,
-  opts?: { paymentPath?: string; hardCap?: number },
+  opts?: { paymentPath?: string; hardCap?: number; db?: D1Database },
 ): Promise<ReceiptRecord[]> {
   const paymentPath = opts?.paymentPath;
   const hardCap = opts?.hardCap ?? 10000;
+  const db = opts?.db;
   const PAGE = 500;
   const out: ReceiptRecord[] = [];
   let offset = 0;
   // Loop with offset until a page comes back short or we hit the cap.
   for (;;) {
-    const page = await listReceiptRecords({
-      month,
-      paymentPath,
-      limit: PAGE,
-      offset,
-    });
+    const page = await listReceiptRecords(
+      {
+        month,
+        paymentPath,
+        limit: PAGE,
+        offset,
+      },
+      db,
+    );
     out.push(...page);
     if (page.length < PAGE) return out;
     offset += PAGE;
@@ -692,9 +696,9 @@ const RECONCILE_RECEIPT_COLUMNS =
  */
 export async function listAmexReceiptsForReconcile(
   window: { start: string; end: string },
-  opts: { hardCap?: number } = {},
+  opts: { hardCap?: number; db?: D1Database } = {},
 ): Promise<ReceiptRecord[]> {
-  const db = getReceiptsDb();
+  const db = opts.db ?? getReceiptsDb();
   const hardCap = opts.hardCap ?? 5000;
   const PAGE = 500;
   const out: ReceiptRecord[] = [];
