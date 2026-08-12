@@ -203,3 +203,45 @@ and more discoverable.
 
 ## Verification
 Personally re-read/confirmed: T1-1 (the import graph), and all four Part (b) findings (D1 queries + the `hardDeleteReceipt` batch + the `preservation_status` grep). Part (a) T1-2…T3 are agent-reported with precise file:line — the architect should spot-check before acting. No code or data was modified.
+
+---
+
+## §5 priority 3 (added 2026-08-12) — a Tier-1 invariant promoted from agent-reported to VERIFIED
+
+Continuing the ranking, deepest blast radius first. This entry verifies the
+worst-class one (T1-7 in the list above) so the architect can act on it without
+re-checking.
+
+### T1-7 (VERIFIED) — exhaustive reads throw-at-cap, but the throw is untested
+
+`listAllReceiptsInMonth` (db.ts:616) and `listAmexReceiptsForReconcile`
+(db.ts:685) are the exhaustive reads that feed the **sealed export bundle** and
+the **reconcile view**. Both page internally and **throw** at a hard cap
+(default 10000 and 5000 respectively) rather than silently truncate — and their
+own comments name the failure mode ("silent truncation … would be an audit
+failure", "a truncated reconcile view would hide receipts").
+
+**Verified:** the throw is real in both (`if (out.length >= hardCap) throw new
+Error(...)` at db.ts:~649 and ~718/~735). **But `grep` of `tests/` for either
+function name returns nothing — no test exercises either, so no test asserts the
+throw.** The safety is a single untested conditional.
+
+**Blast radius — the worst class.** Removing the `if (out.length >= hardCap)
+throw` check would fail no test, and a month with >10000 receipts would then
+**silently omit receipts from the sealed export bundle** — a receipt the
+accountant never sees, permanent and undetected on a 10-year tax record. (The
+reconcile cap hiding receipts is serious but recoverable on the next reconcile;
+the export-bundle cap is the sealed-pack completeness failure.)
+
+**Recommended test (report, not fix):** a unit test that constructs the function
+at a tiny `hardCap` (e.g. `opts.hardCap = 2`) over ≥3 rows and asserts it
+throws. Both functions are D1-coupled (no fake-DB harness today), so this likely
+needs the same injected-DB treatment the agent noted for `buildExportBundle`
+(T1-2) — the two cheapest highest-leverage test harnesses to add.
+
+### Other Tier-1 candidates still agent-reported (not re-verified this pass)
+T1-2 (`buildExportBundle` "appears once, never twice" — no test at all),
+T1-5 (`delivery_state` same-batch write), T1-6 ("failed send never touches the
+seal"), T1-9 (`finalizeExport` refuses to run twice). All are the same shape
+(documented invariant, prose-only safety) and would fall to the same
+injected-DB / structural-assertion test technique.
