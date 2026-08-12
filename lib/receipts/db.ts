@@ -1410,8 +1410,8 @@ export async function updateAmexReconciliation(
   receiptId: string | null,
   matchStatus: AmexMatchStatus,
   actor: string,
+  db: D1Database = getReceiptsDb(),
 ): Promise<void> {
-  const db = getReceiptsDb();
   const now = nowIso();
 
   // Capture previous state for two reasons:
