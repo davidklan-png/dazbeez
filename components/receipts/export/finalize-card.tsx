@@ -17,16 +17,23 @@ const BUNDLE_DOWNLOAD_LINKS = BUNDLE_DOWNLOAD_LINK_DEFS;
 
 /**
  * Finalize action + panel. Extracted from export-screen.tsx so it can render at
- * the bottom of the pre-finalize review page (the new finalize surface). The
- * API (POST /api/receipts/export/[month]) and the confirm-type gate are
- * unchanged. `blockerCount` is the authoritative gate verdict
- * (validateMonthReadyForExport) on the review page.
+ * the bottom of the pre-finalize review page (the finalize surface).
+ *
+ * Seals via the ONE-SHOT path — `POST /api/receipts/export/month` with
+ * `{ month, finalize: true, operatorMessage }` — which builds, stages, gates,
+ * and seals the SAME bundle atomically (no separate Rebuild step, no stale-key
+ * seal). The operator message is passed explicitly (decision 2, WYSIWYG): the
+ * saved preface text the operator sees is byte-for-byte what seals — the server
+ * never silently falls back to stored `operator_message` for the UI path. The
+ * `prefaceDirty` gate guarantees the saved value is current (finalize is blocked
+ * while the preface has unsaved edits). The confirm-type gate is unchanged.
+ * `blockerCount` is the authoritative gate verdict (validateMonthReadyForExport).
  */
 export function FinalizeCard({
   month,
   monthLabel,
   finalized,
-  draftBuilt,
+  operatorMessage,
   blockerCount,
   warningCount,
   rowsInDraft,
@@ -36,7 +43,10 @@ export function FinalizeCard({
   month: string;
   monthLabel: string;
   finalized: boolean;
-  draftBuilt: boolean;
+  /** The saved operator preface (currentExport.operator_message). Passed
+   *  through to the one-shot seal verbatim — WYSIWYG (decision 2). null = an
+   *  explicit "no message this month", distinct from a server fallback. */
+  operatorMessage: string | null;
   blockerCount: number;
   warningCount: number;
   rowsInDraft: number;
@@ -58,7 +68,6 @@ export function FinalizeCard({
 
   const canFinalize =
     !finalized &&
-    draftBuilt &&
     blockerCount === 0 &&
     !prefaceDirty &&
     confirmType.trim().toLowerCase() === monthLabel.toLowerCase();
@@ -71,8 +80,10 @@ export function FinalizeCard({
     setBusy(true);
     setError(null);
     try {
-      const res = await fetch(`/api/receipts/export/${month}`, {
+      const res = await fetch("/api/receipts/export/month", {
         method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ month, finalize: true, operatorMessage }),
       });
       if (!res.ok) {
         const json = (await res.json().catch(() => ({}))) as {
@@ -82,7 +93,7 @@ export function FinalizeCard({
         setError(
           json.blockers?.length
             ? `${json.error ?? "Could not finalize"}: ${json.blockers.join("; ")}`
-            : json.error ?? "Finalize failed.",
+            : json.error ?? "Nothing was finalized — retry.",
         );
         return;
       }

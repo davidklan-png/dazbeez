@@ -24,6 +24,7 @@ import { deriveStatementWindow } from "@/lib/receipts/statement-window";
 import { formatMonth } from "@/lib/receipts/format";
 import { listCategoryRules } from "@/lib/receipts/category-rules";
 import { getReceiptsDb } from "@/lib/cloudflare-runtime";
+import { deriveMonthStage } from "@/lib/receipts/month-stage";
 import { ReviewScreen } from "@/components/receipts/export/review-screen";
 
 export const dynamic = "force-dynamic";
@@ -40,7 +41,7 @@ export default async function ReviewPage({ params }: { params: Params }) {
   // receipts (never month-scoped receipts for line-category resolution — see
   // PR #72). monthReceipts (membership in-scope: bundle ∪ UNKNOWN-in-window)
   // feeds only the tile's pending / unreviewed / unknown counts.
-  const [bundle, currentExport, reconciliation, monthLines, unknownInScope, tripReports] =
+  const [bundle, currentExport, reconciliation, monthLines, unknownInScope, tripReports, stages] =
     await Promise.all([
       buildExportBundle(month),
       getExport(month),
@@ -48,6 +49,7 @@ export default async function ReviewPage({ params }: { params: Params }) {
       listAmexLines(month),
       listUnknownInScopeReceipts(month),
       listBusinessTripReports(month),
+      deriveMonthStage(month),
     ]);
   // ADR 0006 (PR #2): tile counting set = in-scope receipts for M = the bundle
   // (matched AMEX + CASH/DIGITAL assigned to M) ∪ UNKNOWN in M's natural window
@@ -64,10 +66,19 @@ export default async function ReviewPage({ params }: { params: Params }) {
   // Authoritative gate verdict — pass the prebuilt bundle + reconciliation so
   // the gate doesn't re-fetch them. Detailed (ExportBlocker[]) so the review
   // screen can render gate 1 as a link to Reconcile instead of dead prose.
+  //
+  // bundleRebuiltInRequest: this page IS the one-shot finalize surface — the
+  // FinalizeCard POSTs /api/receipts/export/month with finalize:true, which
+  // rebuilds in-request. So message_stale (gate 1.5) is inapplicable here: if it
+  // were counted, blockerCount would include it and the FinalizeCard would
+  // disable Finalize — the exact prerequisite fix (a) removes — even though the
+  // one-shot would succeed. The staleness still surfaces, as an advisory, via the
+  // shared MonthPipeline (deriveMonthStage reads the gate WITHOUT this option).
   const gateBlockers = await validateMonthReadyForExportDetailed(
     month,
     bundle,
     reconciliation ?? null,
+    { bundleRebuiltInRequest: true },
   );
   const tileBlockers = computeExportBlockers(
     monthReceipts,
@@ -126,6 +137,7 @@ export default async function ReviewPage({ params }: { params: Params }) {
       categoryRules={categoryRules}
       prefaceNoticeInput={prefaceNoticeInput}
       prefaceNames={prefaceNames}
+      stages={stages}
     />
   );
 }

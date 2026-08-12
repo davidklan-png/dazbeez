@@ -23,7 +23,6 @@ export function PrefaceFinalizeSection({
   monthLabel,
   currentExport,
   finalized,
-  draftBuilt,
   blockerCount,
   warningCount,
   rowsInDraft,
@@ -35,7 +34,6 @@ export function PrefaceFinalizeSection({
   monthLabel: string;
   currentExport: ReceiptExport | null;
   finalized: boolean;
-  draftBuilt: boolean;
   blockerCount: number;
   warningCount: number;
   rowsInDraft: number;
@@ -62,7 +60,7 @@ export function PrefaceFinalizeSection({
         month={month}
         monthLabel={monthLabel}
         finalized={finalized}
-        draftBuilt={draftBuilt}
+        operatorMessage={currentExport?.operator_message ?? null}
         blockerCount={blockerCount}
         warningCount={warningCount}
         rowsInDraft={rowsInDraft}
