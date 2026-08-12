@@ -269,8 +269,13 @@ const RESUMEABLE_STATES = [ATTEMPT_STATE.PENDING, ATTEMPT_STATE.AMBIGUOUS] as co
  *  The 24h idempotency window is IRRELEVANT here — resumability is about whether
  *  Resend will dedupe a retry of the SAME pack; this is a different pack, so
  *  window state does not change whether the accountant already got mail. Derived
- *  from {@link RESUMEABLE_STATES} + SENT rather than spelling the set out again. */
-const MAY_HAVE_REACHED_RECIPIENT_STATES = [...RESUMEABLE_STATES, ATTEMPT_STATE.SENT] as const;
+ *  from {@link RESUMEABLE_STATES} + SENT rather than spelling the set out again.
+ *
+ *  Exported because it is also the doctrine for sealed-export DELETION: a month
+ *  whose pack may have reached the accountant (any of these states) must not be
+ *  deletable — deleting destroys the only record of what was sent. The next
+ *  consumer reuses the constant rather than re-spelling the set. */
+export const MAY_HAVE_REACHED_RECIPIENT_STATES = [...RESUMEABLE_STATES, ATTEMPT_STATE.SENT] as const;
 
 /** Is `d` a resumeable attempt for the CURRENT revision — pending or ambiguous,
  *  for this export, still inside Resend's 24h idempotency window? A resume

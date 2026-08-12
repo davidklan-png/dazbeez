@@ -261,4 +261,58 @@ Idempotent + resumable: by default it selects only receipts WITHOUT a
 seeded local demo (no production access), use `--local` against `cf:dev` (see
 `scripts/receipts-consumer/fixtures/seed-local.sql`).
 
+## Deleting a sealed export (test-seal cleanup)
+
+Sealing locks edits. Deletion is the one hole in that guarantee, and the only
+sanctioned way through it is `scripts/delete-sealed-export.ts`. The refusal
+logic lives in the pure, unit-tested `lib/receipts/export-deletion.ts`; the
+script is the thin I/O wrapper (D1 + R2 via wrangler) and is **dry-run by
+default**. Until this script existed, sealed-export deletion had no code-review
+surface — 2026-06 revs 1 & 2 were removed out-of-band on 2026-07-22 and recorded
+with non-union audit actions. That path is closed: use this script.
+
+```
+npx tsx scripts/delete-sealed-export.ts \
+  --export-id <uuid> --month <YYYY-MM> --reason "<legal-hold exception>"
+# dry-run prints the R2 objects + D1 deletes it WOULD do.
+# add  --write --confirm-delete <same-id>  to actually delete.
+```
+
+**Legitimate uses** — rare, operator-authorized:
+- Removing a **test seal** created against production before close (the
+  2026-07-22 case: smoke-test drafts sealed to verify a flow, then cleaned up).
+- Removing a **superseded never-delivered draft/revision** when a newer revision
+  is the one that shipped and the old one would confuse history.
+
+**Never legitimate (the script refuses outright):**
+- Anything **delivered** — if the export has any `export_deliveries` row in
+  state `sent`, the script refuses. A delivered month's seal is not deletable by
+  this tool at all; that is a different conversation with a different
+  authorization.
+- Without an explicit **legal-hold exception** string (`--reason`). `legal_hold`
+  defaults to 1, so deleting a sealed export is always a retention exception —
+  the operator must state why, in their own words; it is recorded verbatim in the
+  `export.deleted` audit entry.
+- Without naming the exact **export id AND month** — no wildcards, no "all
+  drafts."
+
+`receipt_export_items` cascade with the parent (0017 FK); `export_deliveries`
+rows are deleted explicitly (no FK). The script asserts exactly one
+`receipt_exports` row changed before writing the audit, so a partial delete
+cannot go unrecorded. The R2 objects removed (3 sealed keys stored on the row +
+7 derived) are listed in the dry-run and recorded in the audit's
+`removedR2Objects`.
+
+**Deliveries:** the tool refuses if any delivery row is in a state where the pack
+**may have reached the accountant** — `sent` (delivered), `pending` (in flight),
+or `ambiguous` (false-negative — may have been accepted). This is the same
+doctrine that requires explicit confirmation before *sending* a second pack
+(#171), and it applies more forcefully to *deleting*: if the pack may have
+landed, deleting destroys the only record of what the accountant was sent. Only
+a definitively `failed` delivery (never accepted ⇒ nothing delivered) permits
+deletion. The refusal message distinguishes `sent` ("already delivered") from
+`pending`/`ambiguous` ("may have been delivered") so you are never told a pack
+was delivered when the evidence is uncertain. This is decided, not a judgment
+call for each deletion.
+
 
