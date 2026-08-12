@@ -1012,6 +1012,68 @@ export async function createAttendeeDirectoryEntry(
   return entry;
 }
 
+/**
+ * Update an attendee directory entry's company/title. The name (the identity /
+ * join key) is deliberately NOT editable here: receipt_attendees stores attendee
+ * names as free text with no FK, so renaming would orphan every receipt still
+ * holding the old string AND change what resolveAttendeeNames returns for future
+ * builds (a sealed-vs-unsealed drift). Company/title edits are safe — they
+ * change what FUTURE bundles resolve, but sealed CSV bytes in R2 are immutable
+ * (built at seal time; no re-seal-from-directory path), so a correction does not
+ * propagate backwards into a sealed month. Not subject to export-lock (directory
+ * rows are not receipt_records / receipt_exports).
+ */
+export async function updateAttendeeDirectoryEntry(
+  id: number,
+  input: { company: string; title: string },
+  actor: string,
+): Promise<ReceiptAttendeeDirectoryEntry> {
+  const company = input.company.trim();
+  const title = input.title.trim();
+  if (!company || !title) {
+    throw new Error("company and title are all required (non-empty).");
+  }
+  const db = getReceiptsDb();
+  const now = nowIso();
+  const updated = await db
+    .prepare(
+      `UPDATE attendee_directory SET company = ?, title = ?, updated_at = ?
+       WHERE id = ?
+       RETURNING id, name, company, title`,
+    )
+    .bind(company, title, now, id)
+    .first<ReceiptAttendeeDirectoryEntry>();
+  if (!updated) {
+    throw new Error(`Attendee directory entry ${id} not found.`);
+  }
+  await createAuditEntry(db, {
+    actor,
+    action: "attendee_directory.updated",
+    objectType: "attendee_directory",
+    objectId: String(updated.id),
+    newValueJson: stringifyJson({ name: updated.name, company: updated.company, title: updated.title }),
+  });
+  return updated;
+}
+
+/**
+ * receipt_attendees name → distinct-receipt count (the directory screen's
+ * "how many receipts reference each entry" + the source of `attendee_unresolved`
+ * at finalize — names present here but NOT in the directory are the unregistered
+ * names the gate blocks on). Exact-string match, same as resolveAttendeeNames.
+ */
+export async function listAttendeeNameReferenceCounts(): Promise<Map<string, number>> {
+  const db = getReceiptsDb();
+  const result = await db
+    .prepare(
+      `SELECT attendee_name, COUNT(DISTINCT receipt_id) AS n
+       FROM receipt_attendees
+       GROUP BY attendee_name`,
+    )
+    .all<{ attendee_name: string; n: number }>();
+  return new Map((result.results ?? []).map((r) => [r.attendee_name, r.n]));
+}
+
 // ─── AMEX statement lines ─────────────────────────────────────────────────────
 
 export async function importAmexLines(
