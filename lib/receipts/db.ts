@@ -3386,8 +3386,8 @@ export async function listDeliveriesForMonth(
 export async function markDeliverySent(
   id: string,
   providerMessageId: string,
+  db: D1Database = getReceiptsDb(),
 ): Promise<void> {
-  const db = getReceiptsDb();
   const now = nowIso();
   await db.batch([
     db
@@ -3412,8 +3412,11 @@ export async function markDeliverySent(
  * export's delivery_state='sealed_undelivered' (retryable; month NOT closed)
  * in one transaction. The seal is untouched — only the reporting state moves.
  */
-export async function markDeliveryFailed(id: string, error: string): Promise<void> {
-  const db = getReceiptsDb();
+export async function markDeliveryFailed(
+  id: string,
+  error: string,
+  db: D1Database = getReceiptsDb(),
+): Promise<void> {
   const now = nowIso();
   await db.batch([
     db
@@ -3440,8 +3443,11 @@ export async function markDeliveryFailed(id: string, error: string): Promise<voi
  * deduplicates), and the month's delivery_state is sealed_undelivered (not
  * closed). The seal is untouched. Counterpart to {@link markDeliveryFailed}
  * (which is for definitive 4xx rejections, terminal). */
-export async function markDeliveryAmbiguous(id: string, error: string): Promise<void> {
-  const db = getReceiptsDb();
+export async function markDeliveryAmbiguous(
+  id: string,
+  error: string,
+  db: D1Database = getReceiptsDb(),
+): Promise<void> {
   const now = nowIso();
   await db.batch([
     db
