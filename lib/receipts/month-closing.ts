@@ -1,6 +1,6 @@
-import { getCategoryByCode, requiresAttendees } from "@/lib/receipts/categories";
+import { getCategoryByCode } from "@/lib/receipts/categories";
 import type { ReceiptAttendeeDirectoryEntry } from "@/lib/receipts/attendee-directory";
-import { resolveAttendeeNames } from "@/lib/receipts/attendee-directory";
+import { evaluateAttendeeRequirement } from "@/lib/receipts/attendee-requirement";
 import {
   getExport,
   getFinalizedReconciliationForMonth,
@@ -456,21 +456,25 @@ export function validateMonthReadyForExportCoreDetailed(
         message: `Receipt ${receipt.id}: missing expense category`,
       });
     }
-    if (requiresAttendees(receipt.expense_category_code)) {
-      const attendees = bundle.attendeeMap.get(receipt.id) ?? [];
-      if (attendees.length === 0) {
-        blockers.push({ code: "attendees_required", message: `Receipt ${label}: requires attendees` });
-      } else {
-        // Attendees present → every name must resolve to a directory entry
-        // (company/title). Unresolved names block finalize (business-manager
-        // review: every 会議費/接待交際費 attendee must show company + title).
-        const { unresolved } = resolveAttendeeNames(attendees, bundle.attendeeDirectory);
-        for (const name of unresolved) {
-          blockers.push({
-            code: "attendee_unresolved",
-            message: `Receipt ${label}: attendee "${name}" is not registered in the attendee directory (company/title required)`,
-          });
-        }
+    // Attendee requirement — single-sourced in evaluateAttendeeRequirement
+    // (backlog #6), shared with evaluateAmexLineSignoff so the gate (CASH/DIGITAL
+    // receipts) and the AMEX-line checker cannot drift.
+    const att = evaluateAttendeeRequirement(
+      receipt.expense_category_code,
+      bundle.attendeeMap.get(receipt.id) ?? [],
+      bundle.attendeeDirectory,
+    );
+    if (att.required && !att.attendeesPresent) {
+      blockers.push({ code: "attendees_required", message: `Receipt ${label}: requires attendees` });
+    } else if (att.required) {
+      // Attendees present → every name must resolve to a directory entry
+      // (company/title). Unresolved names block finalize (business-manager
+      // review: every 会議費/接待交際費 attendee must show company + title).
+      for (const name of att.unresolved) {
+        blockers.push({
+          code: "attendee_unresolved",
+          message: `Receipt ${label}: attendee "${name}" is not registered in the attendee directory (company/title required)`,
+        });
       }
     }
   }
