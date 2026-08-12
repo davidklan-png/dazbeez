@@ -6,11 +6,13 @@ import { useState } from "react";
 import { Btn } from "@/components/ui/btn";
 import { Card } from "@/components/ui/card";
 import { Pill } from "@/components/ui/pill";
+import { MonthPipeline } from "@/components/receipts/export/month-pipeline";
+import { NextActionCard } from "@/components/receipts/export/next-action-card";
+import type { MonthStage } from "@/lib/receipts/month-stage";
 import {
   ArrowRightIcon,
   DownloadIcon,
   FileTextIcon,
-  LockIcon,
 } from "@/components/ui/icons";
 import type { ReceiptExport, ReceiptRecord } from "@/lib/receipts/types";
 import type { Blocker } from "@/lib/receipts/blockers";
@@ -47,6 +49,10 @@ export interface ExportScreenProps {
    *  "awaiting statement" bucket is retired — a dated receipt is always
    *  assignable under the calendar rule.) */
   unassignableReceipts: ReceiptRecord[];
+  /** The server-derived month-close stages (deriveMonthStage). Drives the shared
+   *  MonthPipeline + NextActionCard — the one wayfinding authority across the
+   *  export, review, and send surfaces (docs/export-workflow-ux-plan.md §4). */
+  stages: MonthStage[];
 }
 
 /** ADR 0008: cash/digital receipts not yet in any export-month bundle — both
@@ -99,7 +105,6 @@ export function ExportScreen(props: ExportScreenProps) {
 
   const finalized = props.currentExport?.status === "finalized";
   const draftBuilt = Boolean(props.currentExport);
-  const blockerCount = props.blockers.reduce((s, b) => s + b.count, 0);
 
   async function rebuildDraft() {
     setBusy("build");
@@ -143,11 +148,8 @@ export function ExportScreen(props: ExportScreenProps) {
         onRebuild={rebuildDraft}
         busy={busy === "build"}
       />
-      <Pipeline
-        blockerCount={blockerCount}
-        finalized={finalized}
-        draftBuilt={draftBuilt}
-      />
+      <MonthPipeline stages={props.stages} />
+      <NextActionCard stages={props.stages} />
 
       {error && (
         <div className="mx-8 mt-4 rounded-lg border border-red-200 bg-red-50 px-4 py-2.5 text-sm text-red-700">
@@ -155,7 +157,7 @@ export function ExportScreen(props: ExportScreenProps) {
         </div>
       )}
 
-      <div className="grid grid-cols-1 gap-6 px-8 py-6 lg:grid-cols-[minmax(0,1fr)_380px]">
+      <div className="space-y-6 px-8 py-6">
         <div className="space-y-6">
           {!finalized && (
             <BlockerTriage blockers={props.blockers} warnings={props.warnings} />
@@ -201,14 +203,6 @@ export function ExportScreen(props: ExportScreenProps) {
             currentMonth={props.month}
           />
         </div>
-
-        <ReviewLinkCard
-          month={props.month}
-          monthLabel={props.monthLabel}
-          finalized={finalized}
-          draftBuilt={draftBuilt}
-          blockerCount={blockerCount}
-        />
       </div>
     </div>
   );
@@ -260,93 +254,6 @@ function TopBar({
           {busy ? "Building…" : builtAt ? "Rebuild draft" : "Build draft"}
         </Btn>
       )}
-    </div>
-  );
-}
-
-// ─── Pipeline ─────────────────────────────────────────────────────
-
-function Pipeline({
-  blockerCount,
-  finalized,
-  draftBuilt,
-}: {
-  blockerCount: number;
-  finalized: boolean;
-  draftBuilt: boolean;
-}) {
-  const stepIndex = finalized ? 3 : draftBuilt && blockerCount === 0 ? 2 : draftBuilt ? 2 : 1;
-
-  const steps = [
-    { label: "Reconcile", sub: "AMEX lines matched", done: true, current: false },
-    {
-      label: "Draft",
-      sub: draftBuilt ? "Built · staged in R2" : "Not yet built",
-      done: draftBuilt,
-      current: stepIndex === 1 || (stepIndex === 2 && !finalized && blockerCount > 0),
-    },
-    {
-      label: "Review",
-      sub: blockerCount === 0 ? "Clear to finalize" : `${blockerCount} blockers`,
-      done: draftBuilt && blockerCount === 0,
-      current: stepIndex === 2,
-    },
-    {
-      label: "Finalize",
-      sub: finalized ? "Sealed · immutable" : "Awaiting signoff",
-      done: finalized,
-      current: stepIndex === 3,
-    },
-    {
-      label: "Archived",
-      sub: "7-year retention",
-      done: finalized,
-      current: false,
-    },
-  ];
-
-  return (
-    <div className="flex items-stretch border-b border-gray-200 bg-white px-8 py-4">
-      {steps.map((s, i) => {
-        const future = !s.done && !s.current;
-        return (
-          <div key={s.label} className="flex flex-1 items-center gap-3">
-            <div
-              className={[
-                "flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[13px] font-bold",
-                s.done
-                  ? "bg-green-500 text-white"
-                  : s.current
-                    ? "bg-amber-500 text-white shadow-[0_4px_12px_rgba(217,119,6,0.3)]"
-                    : "border-[1.5px] border-gray-200 text-gray-400",
-              ].join(" ")}
-            >
-              {s.done ? "✓" : i + 1}
-            </div>
-            <div className="min-w-0">
-              <div
-                className={[
-                  "text-[13px] font-semibold",
-                  future ? "text-gray-400" : "text-gray-900",
-                ].join(" ")}
-              >
-                {s.label}
-              </div>
-              <div
-                className={[
-                  "mt-0.5 text-[11.5px]",
-                  future ? "text-gray-400" : "text-gray-500",
-                ].join(" ")}
-              >
-                {s.sub}
-              </div>
-            </div>
-            {i < steps.length - 1 && (
-              <div className="ml-auto h-px w-12 self-center bg-gray-200" />
-            )}
-          </div>
-        );
-      })}
     </div>
   );
 }
@@ -651,66 +558,6 @@ function ExportHistory({
         </>
       )}
     </Card>
-  );
-}
-
-// ─── Finalize panel ───────────────────────────────────────────────
-
-function ReviewLinkCard({
-  month,
-  monthLabel,
-  finalized,
-  draftBuilt,
-  blockerCount,
-}: {
-  month: string;
-  monthLabel: string;
-  finalized: boolean;
-  draftBuilt: boolean;
-  blockerCount: number;
-}) {
-  return (
-    <div className="sticky top-6 self-start">
-      <Card pad={20}>
-        <div className="flex items-center gap-2.5">
-          <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-gray-900 text-white">
-            <LockIcon size={14} className="text-white" />
-          </div>
-          <div className="flex-1">
-            <div className="text-[13.5px] font-semibold text-gray-900">
-              {finalized ? `Sealed: ${monthLabel}` : `Finalize ${monthLabel}`}
-            </div>
-            <div className="text-[11.5px] text-gray-500">
-              {finalized
-                ? "This export is immutable."
-                : "Review the bundle, then seal on the review page."}
-            </div>
-          </div>
-        </div>
-        <Link
-          href={withWorkMonth(`/receipts/export/${month}/review`, month)}
-          className="mt-4 flex items-center justify-center gap-1.5 rounded-lg bg-gray-900 px-4 py-2.5 text-[13px] font-semibold text-white hover:bg-gray-800"
-        >
-          {finalized ? "View review" : "Review & finalize"}
-          <ArrowRightIcon size={14} className="text-white" />
-        </Link>
-        {!finalized && !draftBuilt && (
-          <div className="mt-2 text-center text-[11px] text-gray-400">
-            Build the draft first
-          </div>
-        )}
-        {!finalized && draftBuilt && blockerCount > 0 && (
-          <div className="mt-2 text-center text-[11px] text-red-600">
-            {blockerCount} blocker{blockerCount === 1 ? "" : "s"} to resolve first
-          </div>
-        )}
-        {!finalized && draftBuilt && blockerCount === 0 && (
-          <div className="mt-2 text-center text-[11px] text-green-600">
-            Clear to finalize
-          </div>
-        )}
-      </Card>
-    </div>
   );
 }
 

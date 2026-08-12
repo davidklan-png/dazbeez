@@ -4,6 +4,8 @@ import { composeDelivery, NoSealedExportError } from "@/lib/receipts/delivery-co
 import { assertReceiptsPageAccess } from "@/lib/receipts/auth-request";
 import { formatMonthJa } from "@/lib/receipts/format";
 import { DeliveryComposer } from "@/components/receipts/export/delivery-composer";
+import { deriveMonthStage } from "@/lib/receipts/month-stage";
+import { MonthPipeline } from "@/components/receipts/export/month-pipeline";
 
 export const dynamic = "force-dynamic";
 
@@ -33,17 +35,26 @@ export default async function SendPage({ params }: { params: Params }) {
     throw error;
   }
 
+  // The shared map (docs/export-workflow-ux-plan.md §4). On /send the Send stage
+  // is current; the composer's own send button is this stage's primary action, so
+  // NextActionCard is not mounted here (its "送信する" would link circularly to
+  // this same page). The pipeline still renders so the map stays consistent.
+  const stages = await deriveMonthStage(month);
+
   return (
-    <div className="px-8 py-8">
-      <div className="mb-5">
-        <Link
-          href={`/receipts/export?month=${month}`}
-          className="text-[12px] font-medium text-gray-500 hover:text-amber-700"
-        >
-          ‹ {formatMonthJa(month)} のエクスポートに戻る
-        </Link>
+    <>
+      <MonthPipeline stages={stages} />
+      <div className="px-8 py-8">
+        <div className="mb-5">
+          <Link
+            href={`/receipts/export?month=${month}`}
+            className="text-[12px] font-medium text-gray-500 hover:text-amber-700"
+          >
+            ‹ {formatMonthJa(month)} のエクスポートに戻る
+          </Link>
+        </div>
+        <DeliveryComposer composed={composed} monthLabel={formatMonthJa(month)} />
       </div>
-      <DeliveryComposer composed={composed} monthLabel={formatMonthJa(month)} />
-    </div>
+    </>
   );
 }

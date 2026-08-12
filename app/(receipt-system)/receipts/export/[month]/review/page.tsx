@@ -24,6 +24,7 @@ import { deriveStatementWindow } from "@/lib/receipts/statement-window";
 import { formatMonth } from "@/lib/receipts/format";
 import { listCategoryRules } from "@/lib/receipts/category-rules";
 import { getReceiptsDb } from "@/lib/cloudflare-runtime";
+import { deriveMonthStage } from "@/lib/receipts/month-stage";
 import { ReviewScreen } from "@/components/receipts/export/review-screen";
 
 export const dynamic = "force-dynamic";
@@ -40,7 +41,7 @@ export default async function ReviewPage({ params }: { params: Params }) {
   // receipts (never month-scoped receipts for line-category resolution — see
   // PR #72). monthReceipts (membership in-scope: bundle ∪ UNKNOWN-in-window)
   // feeds only the tile's pending / unreviewed / unknown counts.
-  const [bundle, currentExport, reconciliation, monthLines, unknownInScope, tripReports] =
+  const [bundle, currentExport, reconciliation, monthLines, unknownInScope, tripReports, stages] =
     await Promise.all([
       buildExportBundle(month),
       getExport(month),
@@ -48,6 +49,7 @@ export default async function ReviewPage({ params }: { params: Params }) {
       listAmexLines(month),
       listUnknownInScopeReceipts(month),
       listBusinessTripReports(month),
+      deriveMonthStage(month),
     ]);
   // ADR 0006 (PR #2): tile counting set = in-scope receipts for M = the bundle
   // (matched AMEX + CASH/DIGITAL assigned to M) ∪ UNKNOWN in M's natural window
@@ -126,6 +128,7 @@ export default async function ReviewPage({ params }: { params: Params }) {
       categoryRules={categoryRules}
       prefaceNoticeInput={prefaceNoticeInput}
       prefaceNames={prefaceNames}
+      stages={stages}
     />
   );
 }

@@ -2,14 +2,8 @@ import { NextResponse } from "next/server";
 import { requireReceiptsActor } from "@/lib/receipts/auth";
 import {
   getExport,
-  finalizeExport,
   createExportRevision,
 } from "@/lib/receipts/db";
-import {
-  buildExportBundle,
-  validateMonthReadyForExport,
-  computeEarlierOpenMonthWarnings,
-} from "@/lib/receipts/month-closing";
 
 type RouteContext = { params: Promise<{ month: string }> };
 
@@ -71,66 +65,18 @@ export async function POST(request: Request, { params }: RouteContext) {
       }
     }
 
-    const exportRecord = await getExport(month);
-    if (!exportRecord) {
-      return NextResponse.json({ error: "Export not found." }, { status: 404 });
-    }
-
-    if (exportRecord.status === "finalized") {
-      return NextResponse.json(
-        { error: `Export for ${month} is already finalized.` },
-        { status: 409 },
-      );
-    }
-
-    if (!exportRecord.archive_r2_key || !exportRecord.manifest_r2_key || !exportRecord.archive_sha256) {
-      return NextResponse.json(
-        { error: "Export bundle has not been generated yet. POST to /api/receipts/export/month first." },
-        { status: 400 },
-      );
-    }
-
-    // validateMonthReadyForExport is the single authority — it includes the
-    // finalized-reconciliation precondition. The redundant pre-check that
-    // used to live here was dropped to keep both finalize paths identical.
-    // Build the bundle once so the gate consumes it (avoids an internal rebuild).
-    const bundle = await buildExportBundle(month);
-    const blockers = await validateMonthReadyForExport(month, bundle);
-    if (blockers.length > 0) {
-      return NextResponse.json(
-        { error: "Export blocked — resolve these issues first.", blockers },
-        { status: 422 },
-      );
-    }
-
-    await finalizeExport(
-      exportRecord.id,
-      exportRecord.archive_r2_key,
-      exportRecord.manifest_r2_key,
-      exportRecord.archive_sha256,
-      actor,
-      exportRecord.manifest_sha256 ?? null,
-      exportRecord.proofs_r2_key ?? null,
-      exportRecord.proofs_sha256 ?? null,
-      exportRecord.payment_due_date ?? null,
-      exportRecord.operator_message ?? null,
-    );
-
-    // A7: non-blocking warning when finalizing month M while an earlier
-    // statement month is still open. A late cash/digital receipt dated in
-    // that earlier month will cost a revision once it lands — operators
-    // should know that before they walk away thinking the month is "done."
-    const warnings = await computeEarlierOpenMonthWarnings(month);
-
-    // Phase B (D1/D2): finalize SEALS. It no longer sends any email — delivery
-    // is the operator's explicit POST /api/receipts/export/{month}/send (see
-    // lib/receipts/delivery-state.ts + the send route). A freshly finalized
-    // month therefore has delivery_state NULL (never attempted), distinct from
-    // sealed_undelivered (attempted + failed). Nothing here closes the month
-    // for reporting; that waits on a successful delivery.
+    // The seal-only finalize branch is RETIRED (decision 3, one-shot finalize).
+    // There is now exactly one way to seal a month: POST /api/receipts/export/month
+    // with { month, finalize: true, operatorMessage } — it builds, stages, gates,
+    // and seals the SAME bundle in one request, closing the staleness gap where
+    // this old path gated a fresh build but sealed the last-staged row keys. The
+    // `?correction=true` revision branch above is unaffected (it never sealed).
     return NextResponse.json(
-      { ok: true, month, finalized: true, warnings },
-      { status: 200 },
+      {
+        error:
+          "Seal-only finalize is retired. Use POST /api/receipts/export/month with { month, finalize: true, operatorMessage } (one-shot: builds, gates, and seals the same bundle). ?correction=true on this route still creates a revision.",
+      },
+      { status: 410 },
     );
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("Unauthorized")) {

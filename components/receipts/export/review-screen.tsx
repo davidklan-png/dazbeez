@@ -27,6 +27,9 @@ import type { PackNoticeInput } from "@/lib/receipts/proofs";
 import type { PackNames } from "@/lib/receipts/pack-naming";
 import { withWorkMonth } from "@/lib/receipts/work-month";
 import { PrefaceFinalizeSection } from "@/components/receipts/export/preface-finalize-section";
+import { MonthPipeline } from "@/components/receipts/export/month-pipeline";
+import { NextActionCard } from "@/components/receipts/export/next-action-card";
+import type { MonthStage } from "@/lib/receipts/month-stage";
 
 export interface ReviewScreenProps {
   month: string;
@@ -51,6 +54,9 @@ export interface ReviewScreenProps {
   /** Pack names for the preview, from the single naming authority. null when the
    *  AMEX payment-due date is unavailable (preview hidden). */
   prefaceNames: PackNames | null;
+  /** Server-derived month-close stages — drives the shared MonthPipeline +
+   *  NextActionCard mounted on every surface (docs/export-workflow-ux-plan.md). */
+  stages: MonthStage[];
 }
 
 export function ReviewScreen(props: ReviewScreenProps) {
@@ -68,6 +74,9 @@ export function ReviewScreen(props: ReviewScreenProps) {
 
   return (
     <div className="bg-gray-50 pb-16">
+      <MonthPipeline stages={props.stages} />
+      <NextActionCard stages={props.stages} />
+
       <ReviewHeader
         monthLabel={props.monthLabel}
         month={props.month}
@@ -126,7 +135,6 @@ export function ReviewScreen(props: ReviewScreenProps) {
         monthLabel={props.monthLabel}
         currentExport={props.currentExport}
         finalized={finalized}
-        draftBuilt={Boolean(props.currentExport)}
         blockerCount={props.gateBlockers.length}
         warningCount={props.warnings.reduce((s, w) => s + w.count, 0)}
         rowsInDraft={props.rows.length}

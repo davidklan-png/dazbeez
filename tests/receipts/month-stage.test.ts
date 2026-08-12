@@ -46,11 +46,65 @@ test("nothing done ⇒ Reconcile is current (the entry stage), rest pending", ()
   assert.equal(s.closed.status, "pending");
 });
 
-test("reconciled only ⇒ Draft current; Reconcile done", () => {
+test("reconciled only (no draft, no blockers) ⇒ Finalize reachable WITHOUT a draft; Draft is OPTIONAL, not a prerequisite", () => {
+  // Architect ruling on the one-shot finalize: building a draft is a preview
+  // affordance, not a gate. The one-shot path builds + seals in one request, so
+  // a month with reconciliation done and a clean gate must reach Finalize even
+  // when no draft has ever been built. Draft reads `pending` (available, not
+  // required) — never `current`/`blocked` — and carries a preview side-action.
   const s = byKey(derive(input({ reconciled: true })));
   assert.equal(s.reconcile.status, "done");
-  assert.equal(s.draft.status, "current");
-  assert.equal(s.review.status, "pending");
+  assert.equal(s.draft.status, "pending", "an unbuilt draft is optional — it must NOT gate Review/Finalize");
+  assert.equal(s.review.status, "done", "no blockers ⇒ review-clean ⇒ done");
+  assert.equal(s.finalize.status, "current", "Finalize is reachable without building a draft first");
+  assert.equal(s.finalize.primaryAction?.label, "確定する");
+  assert.ok(s.draft.secondaryAction, "Draft carries a preview side-action even though it is not the active stage");
+  assert.equal(s.draft.secondaryAction?.kind, "secondary");
+});
+
+// ─── Optional Draft (architect ruling): Draft is a preview, not a gate ────────
+
+test("optional Draft: no draft + Review blockers ⇒ Review is the active BLOCKED stage (Draft does not gate it)", () => {
+  // The load-bearing change. Previously an unbuilt draft made Draft the active
+  // stage, blocking Review. Now Review is reachable (and blockable) directly —
+  // the operator clears review blockers without first building a draft.
+  const s = byKey(
+    derive(input({ reconciled: true, draftBuilt: false, reviewBlockers: [blocker("receipt_unreviewed")] })),
+  );
+  assert.equal(s.draft.status, "pending", "Draft optional + unbuilt ⇒ pending, never the active stage");
+  assert.equal(s.draft.secondaryAction?.label, "ドラフトを作成", "preview side-action still offered");
+  assert.equal(s.review.status, "blocked", "Review is the active blocked stage even with no draft built");
+  assert.equal(s.finalize.status, "pending");
+});
+
+test("optional Draft: built & fresh ⇒ done; message_stale still blocks it (the one exception)", () => {
+  const fresh = byKey(derive(input({ reconciled: true, draftBuilt: true })));
+  assert.equal(fresh.draft.status, "done", "built & fresh ⇒ done");
+  assert.equal(
+    fresh.draft.secondaryAction?.label,
+    "ドラフトを再作成",
+    "a built draft still offers rebuild-to-preview as a side-action",
+  );
+  // message_stale is the one case where Draft genuinely gates: the action that
+  // clears it (Rebuild) IS a Draft control, so a stale message blocks Draft.
+  const stale = byKey(
+    derive(input({ reconciled: true, draftBuilt: true, reviewBlockers: [blocker("message_stale")] })),
+  );
+  assert.equal(stale.draft.status, "blocked", "message_stale blocks Draft (the exception)");
+  assert.equal(stale.review.status, "pending", "Review waits behind the stale Draft");
+});
+
+test("optional Draft: a finalized month offers no Draft preview side-action (the pack is sealed)", () => {
+  // Once sealed, "preview before sealing" is meaningless. Draft carries no
+  // secondaryAction on a finalized month (delivered or not).
+  const sealedUndelivered = byKey(
+    derive(input({ reconciled: true, draftBuilt: true, finalized: true, delivered: false })),
+  );
+  assert.equal(sealedUndelivered.draft.secondaryAction, undefined);
+  const closed = byKey(
+    derive(input({ reconciled: true, draftBuilt: true, finalized: true, delivered: true })),
+  );
+  assert.equal(closed.draft.secondaryAction, undefined);
 });
 
 test("reconciled + draft built, no blockers ⇒ Review is DONE (a clean gate), Finalize current", () => {

@@ -65,6 +65,11 @@ export interface MonthStage {
   blockers?: ExportBlocker[];
   /** Present only on the active (current/blocked) stage. */
   primaryAction?: MonthStageAction;
+  /** An optional, non-blocking affordance that is NOT the active stage's primary
+   *  action — currently the Draft preview (build/rebuild), which is available on
+   *  any non-sealed month even when Draft is not the active stage (architect
+   *  ruling: Draft is a preview, not a gate). */
+  secondaryAction?: MonthStageAction;
 }
 
 /** Pure-core input — the resolved facts about a month. Each is derivable from
@@ -94,11 +99,21 @@ export interface MonthStageInput {
  * Unit-testable without D1.
  *
  * The active stage is the FIRST not-done stage (stages are monotonic in
- * practice: the finalize gate enforces reconcile → build → review → finalize →
- * send, so the facts never skip ahead). All stages before it are `done`; the
- * active stage itself is `blocked` if it carries blockers, else `current`; all
- * after are `pending`. A fully-delivered month has no active stage ⇒ all `done`
- * (Closed included).
+ * practice: the finalize gate enforces reconcile → review → finalize → send, so
+ * the facts never skip ahead). All stages before it are `done`; the active stage
+ * itself is `blocked` if it carries blockers, else `current`; all after are
+ * `pending`. A fully-delivered month has no active stage ⇒ all `done` (Closed
+ * included).
+ *
+ * Draft is OPTIONAL (architect ruling on the one-shot finalize): building a
+ * draft is a preview affordance, not a gate, because the one-shot path builds +
+ * seals in one request. An unbuilt, non-stale draft is therefore TRANSPARENT to
+ * the progression — it never becomes the active stage and never holds up
+ * Review/Finalize. It reads `pending` (available preview) and carries a
+ * `secondaryAction` (build/rebuild) on any non-sealed month. The ONE exception
+ * is `message_stale`: the action that clears it IS Rebuild, a Draft control, so
+ * a stale message genuinely blocks Draft (and only then does Draft gate the
+ * stages after it).
  *
  * Blocker PLACEMENT follows the stage whose action clears them, not the gate
  * number: `reconciliation_not_finalized` → Reconcile, `message_stale` → Draft
@@ -131,13 +146,28 @@ export function deriveMonthStageCore(input: MonthStageInput): MonthStage[] {
   // gate on (e.g. reconciled=false with no export row ⇒ reconcileBlockers empty
   // but Reconcile is still not done). Combined with the partitioned blockers:
   const reconcileDone = reconciled && reconcileBlockers.length === 0;
-  const draftDone = draftBuilt && draftBlockers.length === 0; // built AND not stale
+
+  // Draft is OPTIONAL (architect ruling): an unbuilt draft is a transparent
+  // preview, not a gate. `draftDone` is the DISPLAY flag (built AND fresh);
+  // `draftProgressionDone` is the PROGRESSION flag — only message_stale can make
+  // Draft the active stage that gates the rest. This is what lets a month reach
+  // Review/Finalize without ever building a draft (the one-shot path builds +
+  // seals in one request).
+  const draftBlocked = draftBlockers.length > 0; // message_stale
+  const draftDone = draftBuilt && !draftBlocked; // built AND fresh
+  const draftProgressionDone = !draftBlocked; // only stale blocks progression
+
   const reviewDone = reviewStageBlockers.length === 0;
 
   type Raw = {
     key: MonthStageKey;
     label: string;
+    /** Display done — drives `status` for stages before the active one. Draft
+     *  uses `draftDone`; the others are monotonic (progressionDone ⇒ done). */
     done: boolean;
+    /** Progression done — false only on the stage that should be active. Draft
+     *  is transparent here unless stale (the one case that gates progression). */
+    progressionDone: boolean;
     href: string;
     /** Label for the active stage's primary action (undefined ⇒ no action). */
     primaryLabel?: string;
@@ -151,6 +181,7 @@ export function deriveMonthStageCore(input: MonthStageInput): MonthStage[] {
       key: "reconcile",
       label: "Reconcile",
       done: reconcileDone,
+      progressionDone: reconcileDone,
       href: `/receipts/reconcile?month=${month}`,
       primaryLabel: reconcileDone ? undefined : "Reconcile を開く",
       blockers: reconcileBlockers.length > 0 ? reconcileBlockers : undefined,
@@ -159,18 +190,19 @@ export function deriveMonthStageCore(input: MonthStageInput): MonthStage[] {
       key: "draft",
       label: "Draft",
       done: draftDone,
+      progressionDone: draftProgressionDone,
       href: `/receipts/export?month=${month}`,
-      primaryLabel: draftDone
-        ? undefined
-        : draftBuilt
-          ? "ドラフトを再作成"
-          : "ドラフトを作成",
+      // Draft's primary action only fires when it is the ACTIVE stage, i.e. the
+      // message_stale case (Rebuild is then the one thing to do). When Draft is
+      // merely an optional unbuilt/built preview, it carries a secondaryAction.
+      primaryLabel: draftBlocked ? "ドラフトを再作成" : undefined,
       blockers: draftBlockers.length > 0 ? draftBlockers : undefined,
     },
     {
       key: "review",
       label: "Review",
       done: reviewDone,
+      progressionDone: reviewDone,
       href: reviewHref,
       primaryLabel: reviewDone ? undefined : "確認して確定へ",
       blockers: reviewStageBlockers.length > 0 ? reviewStageBlockers : undefined,
@@ -179,6 +211,7 @@ export function deriveMonthStageCore(input: MonthStageInput): MonthStage[] {
       key: "finalize",
       label: "Finalize",
       done: finalized,
+      progressionDone: finalized,
       href: reviewHref,
       primaryLabel: finalized ? undefined : "確定する",
     },
@@ -186,6 +219,7 @@ export function deriveMonthStageCore(input: MonthStageInput): MonthStage[] {
       key: "send",
       label: "Send",
       done: delivered,
+      progressionDone: delivered,
       href: `/receipts/export/${month}/send`,
       primaryLabel: delivered ? undefined : "送信する",
     },
@@ -193,17 +227,24 @@ export function deriveMonthStageCore(input: MonthStageInput): MonthStage[] {
       key: "closed",
       label: "Closed",
       done: delivered,
+      progressionDone: delivered,
       href: `/receipts/export?month=${month}`,
     },
   ];
 
-  const activeIdx = raw.findIndex((r) => !r.done);
+  const activeIdx = raw.findIndex((r) => !r.progressionDone);
 
   return raw.map((r, i): MonthStage => {
     let status: StageStatus;
     let primaryAction: MonthStageAction | undefined;
-    if (activeIdx === -1 || i < activeIdx) {
+    let secondaryAction: MonthStageAction | undefined;
+    if (activeIdx === -1) {
       status = "done";
+    } else if (i < activeIdx) {
+      // Before the active stage. The optional Draft is the one stage that can
+      // legitimately sit here without being done (an unbuilt, non-stale draft) —
+      // it reads `pending` (available preview), never a false green `done`.
+      status = r.done ? "done" : "pending";
     } else if (i === activeIdx) {
       const blocked = (r.blockers?.length ?? 0) > 0;
       status = blocked ? "blocked" : "current";
@@ -213,9 +254,19 @@ export function deriveMonthStageCore(input: MonthStageInput): MonthStage[] {
     } else {
       status = "pending";
     }
+    // Draft's optional preview side-action: available on any non-sealed,
+    // non-closed month whenever Draft is not itself the active (stale) stage.
+    // A built draft offers rebuild-to-preview; an unbuilt one offers create.
+    if (r.key === "draft" && !finalized && activeIdx !== -1 && i !== activeIdx) {
+      secondaryAction = {
+        label: draftBuilt ? "ドラフトを再作成" : "ドラフトを作成",
+        kind: "secondary",
+      };
+    }
     const stage: MonthStage = { key: r.key, label: r.label, status, href: r.href };
     if (r.blockers && r.blockers.length > 0) stage.blockers = r.blockers;
     if (primaryAction) stage.primaryAction = primaryAction;
+    if (secondaryAction) stage.secondaryAction = secondaryAction;
     return stage;
   });
 }

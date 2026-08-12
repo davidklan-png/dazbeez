@@ -10,13 +10,14 @@ screen's blocker tile mirrors it via shared predicates.
 1. **Reconcile** — `/receipts/reconcile?month=YYYY-MM`: match AMEX statement lines to captured receipts, categorize every line, resolve missing-receipt reasons.
 2. **Review orphans & cash** — `/receipts/review`: mark captured receipts reviewed; classify any `payment_path=UNKNOWN` receipts as AMEX/CASH/DIGITAL.
 3. **Sign off reconciliation** — `/receipts/reconcile` → finalize reconciliation (seals the statement match).
-4. **Rebuild draft** — `/receipts/export?month=YYYY-MM` → "Rebuild draft" (stages the receipts CSV + manifest + summary + README + **proofs ZIP** in R2, writes `bundle_built_at`).
-5. **Pre-finalize review** — click "Review & finalize" → `/receipts/export/YYYY-MM/review`: summary, side-by-side reconciliation, additional charges (cash/digital), business trips, and the gate verdict at the top.
-6. **Finalize** — bottom of the review page: type the month label, click Finalize. Irreversible.
+4. **Pre-finalize review** — the pipeline's primary action takes you to `/receipts/export/YYYY-MM/review`: summary, side-by-side reconciliation, additional charges (cash/digital), business trips, and the gate verdict at the top. (Building a draft is an **optional preview** on the export page — "Build draft" / "Rebuild draft" — not a prerequisite; the one-shot finalize builds + seals in a single step.)
+5. **Finalize** — bottom of the review page: type the month label, click Finalize. One-shot — it builds, gates, and seals the same bundle in one irreversible action.
+6. **Send** — `/receipts/export/YYYY-MM/send`: review the composed email, click Send. This is what closes the month for reporting (sealing ≠ closing).
 
-The export page (`/receipts/export`) is the status/blockers hub; the review
-page is where you actually seal. Finalize is operator-only — no automated
-path calls `finalize=true`.
+A shared month-close pipeline (Reconcile → Draft → Review → Finalize → Send →
+Closed) and a single primary action render on the export page, the review page,
+and the send page, so the map stays consistent as you advance. Finalize is
+operator-only — no automated path calls `finalize=true`.
 
 ## The statement month vs transaction dates
 
@@ -53,22 +54,28 @@ rule definitions. If the tile shows a blocker, the gate will enforce it.
 
 ## Rebuild vs finalize
 
-- **Rebuild draft** (export screen) is safe to repeat: regenerates the CSV +
-  manifest + summary + README + **proofs ZIP** in R2, replaces `receipt_export_items`,
-  advances "Last draft built" (`bundle_built_at`), and writes an `export.generated`
-  audit entry. It does NOT change receipts/lines, so it cannot change blocker counts.
+- **Rebuild draft** (export screen) is an OPTIONAL PREVIEW, not a prerequisite
+  for finalize. It is safe to repeat: regenerates the CSV + manifest + summary +
+  README + **proofs ZIP** in R2, replaces `receipt_export_items`, advances "Last
+  draft built" (`bundle_built_at`), and writes an `export.generated` audit entry.
+  It does NOT change receipts/lines, so it cannot change blocker counts. Use it
+  to preview the pack before sealing; the one-shot finalize does its own build.
 
 Once finalized, the five artifacts download from the export page (no wrangler
 needed): Receipts CSV, Manifest, Summary, README, and 領収書ZIP (proofs) — via
 `GET /api/receipts/export/<month>/download?file=<name>`.
-- **Finalize** (review page) is irreversible: sets the export to `finalized`,
-  locks the receipts to read-only, marks the AMEX statement reconciled, stamps
-  `exported_month` on shipped receipts, writes `export.finalized` + per-receipt
-  `receipt.exported` audit entries.
+- **Finalize** (review page) is one-shot and irreversible: it builds, stages,
+  gates, and seals the SAME bundle in a single request (`POST
+  /api/receipts/export/month` with `finalize:true`), sets the export to
+  `finalized`, locks the receipts to read-only, marks the AMEX statement
+  reconciled, stamps `exported_month` on shipped receipts, and writes
+  `export.finalized` + per-receipt `receipt.exported` audit entries. The old
+  seal-only finalize (`POST /api/receipts/export/[month]`) is retired — it
+  returns 410 and seals nothing; only `?correction=true` on that route still
+  works (to create a revision).
 
-If finalize 400s with "Export bundle has not been generated yet", you haven't
-rebuilt since the last deploy — click Rebuild first (it persists the archive
-keys the finalize route checks).
+The "finalize 400s — rebuild first" trap is gone: the one-shot path always
+builds fresh, so there is no separate Rebuild step to forget.
 
 ## Membership states & override (ADR 0008)
 

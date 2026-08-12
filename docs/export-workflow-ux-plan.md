@@ -93,11 +93,23 @@ tells them what stage they're in and what remains.
 | Stage | Done when | Primary action | Blocked when |
 |---|---|---|---|
 | Reconcile | reconciliation `finalized` for the month | Go to Reconcile | `reconciliation_not_finalized` (unmatched/unconfirmed lines) |
-| Draft | `bundle_built_at` set AND not stale | Build / Rebuild draft | `message_stale` (cleared by Rebuild draft) |
+| Draft (optional) | `bundle_built_at` set AND not stale | Preview side-action (Build / Rebuild) — **not a prerequisite** | `message_stale` (cleared by Rebuild draft) — the one case where Draft gates |
 | Review | no Review-stage blockers | Review & finalize | `message_not_reviewed` + receipt / attendee / compliance blockers |
 | Finalize | export `status='finalized'` | Finalize | — (blockers live on earlier stages) |
 | Send | delivery state `delivered` | Send | preflight failure, missing To, config errors |
 | Closed | delivered | — (retention shown as metadata) | — |
+
+**Draft is optional (architect ruling, 2026-08-12).** Decision 4 of the one-shot
+finalize prompt (`prompts/WORKER-PROMPT-one-shot-finalize-ui.md`) was absorbed
+into this model in substance, superseded in form: building a draft is a preview
+affordance, not a gate. The one-shot path builds + seals in one request, so a
+month with reconciliation done and a clean gate reaches Review & Finalize
+without ever building a draft — the pipeline never renders "build the draft
+first" as a prerequisite. Draft shows as an available side-action ("preview the
+pack before sealing") and is `done` only when `bundle_built_at` is set and not
+stale. `message_stale` stays on Draft per the placement rule below — a stale
+message still requires a rebuild, so Draft is genuinely blocking in that one
+case; that is the exception, and it is correct.
 
 **Blocker placement — the organising rule.** A blocker sits on the stage whose
 *action* clears it, not on the gate number that emits it:
