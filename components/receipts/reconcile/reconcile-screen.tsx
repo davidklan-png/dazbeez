@@ -103,6 +103,12 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
   const [activeId, setActiveId] = useState<string | null>(
     () => props.amexLines[0]?.id ?? null,
   );
+  // §3: after marking a line "no receipt expected", drop the operator into the
+  // reason field so supplying it is the obvious next keystroke. Set here (both
+  // the `n` shortcut and the button route through reconcile); consumed below once
+  // the refreshed row mounts its reason input. The operator can press Enter to
+  // leave it blank (the n-through-a-list flow is not blocked — see §1/§2).
+  const [reasonFocusId, setReasonFocusId] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("lines");
   const [busy, setBusy] = useState<string | null>(null);
   const [signoffBusy, setSignoffBusy] = useState(false);
@@ -111,6 +117,11 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
     total: number;
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // §4: structured sign-off blockers — each carries the line id so the banner can
+  // link to the line (select it in the rail) instead of naming it as flat text.
+  const [signoffBlockers, setSignoffBlockers] = useState<
+    { lineId: string | null; message: string }[] | null
+  >(null);
   // Audit finding A2: finalize cleanup warnings (e.g. R2 archive-object
   // delete failed post-commit). Persistent across router.refresh() so the
   // operator sees the banner even after the page reloads the new state.
@@ -179,6 +190,11 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
 
   const counts = useMemo(() => {
     const confirmed = props.amexLines.filter((l) => isSettled(l)).length;
+    // A no_receipt line with no reason is incomplete (§1) — surface the count so
+    // the operator sees the work before pressing sign-off, not after the gate.
+    const needsReason = props.amexLines.filter(
+      (l) => l.match_status === "no_receipt" && !isSettled(l),
+    ).length;
     const obvious = linesWithBand.filter(
       (l) => l.band === "obvious" && !isSettled(l.line),
     ).length;
@@ -190,6 +206,7 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
     return {
       total: props.amexLines.length,
       confirmed,
+      needsReason,
       obvious,
       likely,
       review,
@@ -212,6 +229,7 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
       if (locked) return;
       setBusy(amexLineId);
       setError(null);
+      if (matchStatus === "no_receipt") setReasonFocusId(amexLineId);
       try {
         const res = await fetch("/api/receipts/reconcile", {
           method: "POST",
@@ -234,6 +252,18 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
     },
     [locked, router],
   );
+
+  // Focus the just-marked line's reason input once the refreshed row has mounted
+  // it. Deps include props.amexLines so this re-runs after router.refresh() lands
+  // (the row becomes no_receipt → NoReceiptFields mounts → the input exists).
+  useEffect(() => {
+    if (!reasonFocusId) return;
+    const el = document.getElementById(`missing-reason-${reasonFocusId}`);
+    if (el) {
+      el.focus();
+      setReasonFocusId(null);
+    }
+  }, [reasonFocusId, props.amexLines]);
 
   const updateCategory = useCallback(
     async (lineId: string, code: string) => {
@@ -341,6 +371,7 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
     if (confirmType.toLowerCase().trim() !== props.month.toLowerCase()) return;
     setSignoffBusy(true);
     setError(null);
+    setSignoffBlockers(null);
     try {
       const res = await fetch("/api/receipts/reconcile/finalize", {
         method: "POST",
@@ -349,15 +380,18 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
       });
       const json = (await res.json().catch(() => ({}))) as {
         error?: string;
-        blockers?: string[];
+        blockers?: { lineId: string | null; message: string }[];
         warnings?: string[];
       };
       if (!res.ok) {
-        setError(
-          json.blockers?.length
-            ? `${json.error ?? "Blocked"}: ${json.blockers.join("; ")}`
-            : json.error ?? "Sign-off failed.",
-        );
+        if (json.blockers && json.blockers.length > 0) {
+          // Structured blockers — show as a clickable banner on the main screen
+          // (each links to its line), not a flattened error string in the modal.
+          setSignoffBlockers(json.blockers);
+          setShowFinalizeModal(false);
+        } else {
+          setError(json.error ?? "Sign-off failed.");
+        }
         // Audit finding A2: surface R2 cleanup failures even when the
         // request itself failed (race-loser case). Without this the
         // operator could finalize-successfully later and never know an
@@ -440,6 +474,11 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
           <span className="text-[13px] font-semibold tabular-nums text-gray-900">
             {counts.confirmed} of {counts.total} confirmed
           </span>
+          {counts.needsReason > 0 && (
+            <span className="text-[12px] font-medium tabular-nums text-amber-700">
+              {counts.needsReason} need{counts.needsReason === 1 ? "" : "s"} a reason
+            </span>
+          )}
           <div className="flex h-2 max-w-[320px] flex-1 overflow-hidden rounded bg-gray-100">
             <div
               className="bg-green-500"
@@ -519,6 +558,30 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
       {error && (
         <div className="border-b border-red-200 bg-red-50 px-8 py-2 text-sm text-red-700">
           {error}
+        </div>
+      )}
+
+      {signoffBlockers && signoffBlockers.length > 0 && (
+        <div className="border-b border-red-200 bg-red-50 px-8 py-2.5 text-[13px] text-red-700">
+          <div className="font-semibold">Cannot sign off — resolve these issues first:</div>
+          <ul className="mt-1 space-y-0.5">
+            {signoffBlockers.map((b, i) => (
+              <li key={i} className="flex items-start gap-1.5">
+                <span aria-hidden>•</span>
+                {b.lineId ? (
+                  <button
+                    type="button"
+                    onClick={() => setActiveId(b.lineId)}
+                    className="text-left text-red-700 underline decoration-red-300 underline-offset-2 hover:text-red-900"
+                  >
+                    {b.message}
+                  </button>
+                ) : (
+                  <span>{b.message}</span>
+                )}
+              </li>
+            ))}
+          </ul>
         </div>
       )}
 
@@ -925,11 +988,16 @@ function LineRow({
               needs category
             </span>
           )}
-          {noReceipt && (
-            <Pill tone="gray" size="sm">
-              no receipt expected
-            </Pill>
-          )}
+          {noReceipt &&
+            (line.receipt_missing_reason?.trim() ? (
+              <Pill tone="gray" size="sm">
+                no receipt expected
+              </Pill>
+            ) : (
+              <Pill tone="amber" size="sm">
+                needs a reason
+              </Pill>
+            ))}
           {confirmed && !noReceipt && (
             <Pill tone="green" size="sm">
               confirmed
@@ -1611,6 +1679,7 @@ function NoReceiptFields({
       </Field>
       <Field label="Missing receipt reason" required>
         <TextInput
+          id={`missing-reason-${line.id}`}
           disabled={locked}
           value={missingReasonDraft}
           onChange={(e) => setMissingReasonDraft(e.target.value)}

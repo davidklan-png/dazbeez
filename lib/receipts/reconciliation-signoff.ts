@@ -346,14 +346,28 @@ export function crossMonthAmbiguousReceiptIds(
  * must show company + title). Directory rows enforce company/title NOT NULL, so
  * resolution alone proves completeness.
  */
-export function validateAmexLinesForSignoff(
+/** A sign-off blocker with the line it belongs to. `lineId` is null for
+ *  multi-line (consolidated) blockers — those are not clickable to one line. The
+ *  reconcile sign-off banner uses `lineId` to select the line in the rail so a
+ *  blocker links to the control that clears it (the ExportBlocker.href doctrine
+ *  applied to reconciliation), rather than the operator reading a merchant name
+ *  out of an error string and hunting for it. */
+export interface AmexSignoffBlocker {
+  lineId: string | null;
+  message: string;
+}
+
+/** Detailed sign-off validation — the single source. Returns one entry per
+ *  blocker message, tagged with its line id (null for consolidated mismatches).
+ *  Pure. */
+export function validateAmexLinesForSignoffDetailed(
   amexLines: AmexStatementLine[],
   amexAttendees: Record<string, string[]>,
   receiptAttendeeMap: Map<string, string[]>,
   receiptMap: Map<string, ReceiptRecord>,
   attendeeDirectory: ReceiptAttendeeDirectoryEntry[],
-): string[] {
-  const blockers: string[] = [];
+): AmexSignoffBlocker[] {
+  const blockers: AmexSignoffBlocker[] = [];
 
   for (const line of amexLines) {
     const receipt = line.matched_receipt_id
@@ -370,14 +384,35 @@ export function validateAmexLinesForSignoff(
       receiptAttendees,
       attendeeDirectory,
     );
-    blockers.push(...formatAmexLineSignoffMessages(line, result));
+    for (const message of formatAmexLineSignoffMessages(line, result)) {
+      blockers.push({ lineId: line.id, message });
+    }
   }
 
   for (const m of collectConsolidatedMismatches(amexLines, receiptMap)) {
-    blockers.push(
-      `Consolidated receipt ${m.label}: ${m.lineCount} confirmed lines sum to ${m.sum} but receipt total is ${m.total}`,
-    );
+    blockers.push({
+      lineId: null,
+      message: `Consolidated receipt ${m.label}: ${m.lineCount} confirmed lines sum to ${m.sum} but receipt total is ${m.total}`,
+    });
   }
 
   return blockers;
+}
+
+export function validateAmexLinesForSignoff(
+  amexLines: AmexStatementLine[],
+  amexAttendees: Record<string, string[]>,
+  receiptAttendeeMap: Map<string, string[]>,
+  receiptMap: Map<string, ReceiptRecord>,
+  attendeeDirectory: ReceiptAttendeeDirectoryEntry[],
+): string[] {
+  // Project the detailed blockers to the original string[] contract (the export
+  // gate consumes string[]). The detailed variant is the single rule source.
+  return validateAmexLinesForSignoffDetailed(
+    amexLines,
+    amexAttendees,
+    receiptAttendeeMap,
+    receiptMap,
+    attendeeDirectory,
+  ).map((b) => b.message);
 }
