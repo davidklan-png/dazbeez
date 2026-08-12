@@ -136,3 +136,44 @@ test("fail-then-pass: a new-only extractor FAILS the old layout (the dual-layout
   // …while the real extractor gets it right.
   assert.equal(extractOperatorMessageFromNotice(oldNotice), MSG);
 });
+
+// ─── adversarial: operator text containing the marker phrase ─────────────────
+// The operator's real 2026-06 message used the same register as the generated
+// machine line. A discriminator that scans the whole document for the marker
+// would land on their text. The fix anchors on the line AFTER the heading +
+// matches the generated verb form (お送りします。), which the operator's prose
+// does not replicate.
+
+const ADVERSARIAL = "前回の領収証憑一式をお送りした際に不足がございました。追加いたします。";
+
+test("adversarial: NEW layout with marker in the PREFACE ⇒ classified new, preface extracted, check #19 passes", () => {
+  const notice = buildPackNotice({ ...BASE, operatorMessage: ADVERSARIAL }, NAMES);
+  // The discriminator must NOT be fooled by the marker in the preface — it
+  // checks the line AFTER the heading (the generated machine line ending in
+  // お送りします。), not the preface.
+  assert.equal(extractOperatorMessageFromNotice(notice), ADVERSARIAL);
+});
+
+test("adversarial: OLD layout with marker in the MESSAGE ⇒ classified old, message extracted, check #19 passes", () => {
+  const notice = oldLayoutNotice(ADVERSARIAL);
+  assert.equal(extractOperatorMessageFromNotice(notice), ADVERSARIAL);
+});
+
+test("fail-then-pass: the OLD document-wide findIndex discriminator FAILS the adversarial new-layout case", () => {
+  // The previous discriminator scanned ALL lines for the marker. In the new
+  // layout the preface (lines[0]) contains the marker ⇒ machineIdx=0 <
+  // headingIdx=2 ⇒ misclassified as "old" ⇒ extractor returns the machine line,
+  // not the preface ⇒ check #19 BLOCKS THE SEND.
+  function oldDiscriminator(lines: string[]): "new" | "old" | "none" {
+    const headingIdx = lines.findIndex((l) => l.startsWith("【今月のご連絡】"));
+    if (headingIdx === -1) return "none";
+    const machineIdx = lines.findIndex((l) => l.includes("の領収証憑一式を"));
+    return machineIdx > headingIdx ? "new" : "old";
+  }
+  const notice = buildPackNotice({ ...BASE, operatorMessage: ADVERSARIAL }, NAMES);
+  const lines = notice.split(/\r?\n/);
+  // The old discriminator misclassifies (the preface's marker trips it)…
+  assert.equal(oldDiscriminator(lines), "old");
+  // …while the real extractor gets the preface right (proving "new" classification).
+  assert.equal(extractOperatorMessageFromNotice(notice), ADVERSARIAL);
+});

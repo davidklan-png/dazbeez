@@ -335,24 +335,29 @@ function noticeFilenames(noticeText: string): string[] {
   return (noticeText.match(re) ?? []).map((t) => t);
 }
 
-/** Discriminate the notice layout by the machine line's position relative to
- *  【今月のご連絡】 — the `の領収証憑一式を` marker occurs exactly once:
- *  - "new"  — machine line AFTER the heading (backlog #25 onward): the operator
- *             preface is the lines BEFORE the heading.
- *  - "old"  — machine line BEFORE the heading (pre-#25): the message is the lines
- *             BETWEEN the heading and 【この資料について】.
- *  - "none" — no 【今月のご連絡】 heading (old layout, empty message).
+/** Discriminate the notice layout — see the four combinations below.
  *
- *  Preflight runs at SEND time, not seal time, so packs sealed before #25
- *  (2026-06, 2026-07) carry the old layout permanently and MUST keep parsing —
- *  hence both branches everywhere below. The marker position is a stronger
- *  discriminator than the heading alone (the heading is always present in the new
- *  layout, even when the message is empty). */
+ *  Do NOT scan the whole document for the marker (`の領収証憑一式を`). The
+ *  operator writes arbitrary Japanese and may legitimately use that phrase in
+ *  their own preface or message (observed: the operator's real 2026-06 message
+ *  used the same register). A document-wide `findIndex` would land on their
+ *  line, not the generated one.
+ *
+ *  Instead, anchor on the line IMMEDIATELY AFTER 【今月のご連絡】 — a position
+ *  the generator fully controls: in the new layout buildPackNotice pushes the
+ *  heading then the machine line adjacently (no blank between). Match the
+ *  GENERATED machine line's specific shape (the marker + the polite closing
+ *  お送りします。) at that one position — the operator's prose does not replicate
+ *  the generator's exact verb form. */
 function noticeMessageLayout(lines: string[]): "new" | "old" | "none" {
   const headingIdx = lines.findIndex((l) => l.startsWith("【今月のご連絡】"));
   if (headingIdx === -1) return "none";
-  const machineIdx = lines.findIndex((l) => l.includes("の領収証憑一式を"));
-  return machineIdx > headingIdx ? "new" : "old";
+  // In the new layout the generated machine line sits directly after the heading
+  // and ends with お送りします。. In the old layout the line after the heading is
+  // the operator message (different verb form). This positional + shape check is
+  // robust against operator text that happens to contain the marker phrase.
+  const next = lines[headingIdx + 1] ?? "";
+  return /^.*の領収証憑一式を.*お送りします。$/.test(next) ? "new" : "old";
 }
 
 /** Remove the operator's free text from a notice, so preflight checks scan only
