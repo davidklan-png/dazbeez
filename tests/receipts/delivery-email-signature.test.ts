@@ -29,9 +29,11 @@ test("buildDeliveryEmail: the null-case output is pinned (catches accidental dri
   const { subject, text, html } = buildDeliveryEmail(BASE_OPTS);
   assert.equal(subject, "【領収証憑】2026年6月分");
   // The sealed body ends at the closing line — no signature, no trailing blank.
+  // Backlog #25: opens at 【今月のご連絡】 + the machine line (the preface is
+  // omitted when the message is empty — the inverse of the old layout).
   assert.equal(
     text,
-    "2026年6月 の領収証憑一式を添付にてお送りします。\r\n\r\nご不明な点があればお知らせください。",
+    "【今月のご連絡】\r\n2026年6月 の領収証憑一式を添付にてお送りします。\r\n\r\nご不明な点があればお知らせください。",
   );
   // HTML is the pre-wrap div over the escaped text; unchanged by the signature
   // feature when no signature is supplied.
@@ -50,7 +52,7 @@ test("buildDeliveryEmail: a signature is appended after the closing line, blank-
   // The signature follows the closing line, separated by a blank line. Trimmed.
   assert.equal(
     text,
-    "2026年6月 の領収証憑一式を添付にてお送りします。\r\n\r\n" +
+    "【今月のご連絡】\r\n2026年6月 の領収証憑一式を添付にてお送りします。\r\n\r\n" +
       "ご不明な点があればお知らせください。\r\n\r\n" +
       "山田 太郎\nDazbeez合同会社",
   );

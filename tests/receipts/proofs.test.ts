@@ -134,18 +134,28 @@ test("buildPackNotice: missing-receipt section surfaces recorded reasons", () =>
   assert.ok(!/[0-9a-f]{8}-[0-9a-f]{4}/.test(txt), "no UUIDs surfaced to the accountant");
 });
 
-test("buildPackNotice: 【今月のご連絡】 omitted when operatorMessage empty, present when set", () => {
+test("buildPackNotice: 【今月のご連絡】 always heads the machine line; preface omitted when message empty (backlog #25)", () => {
+  // New layout: the heading is ALWAYS present (it heads the machine line); the
+  // PREFACE is what's omitted when the message is empty — the inverse of the old
+  // layout (which omitted the heading). Pin the order: preface BEFORE the
+  // heading, machine line AFTER — the heading introduces the business content.
   const empty = buildPackNotice(baseNotice, names);
-  assert.ok(!empty.includes("【今月のご連絡】"), "section omitted when message empty");
+  assert.ok(empty.includes("【今月のご連絡】"), "heading always present (heads the machine line)");
+  assert.ok(!empty.includes("リモートワーク"), "no preface when the message is empty");
+  assert.ok(
+    empty.indexOf("【今月のご連絡】") < empty.indexOf("の領収証憑一式を"),
+    "machine line sits under the heading",
+  );
+
   const withMsg = buildPackNotice(
     { ...baseNotice, operatorMessage: "今月はリモートワーク関連経費が増加しています。" },
     names,
   );
-  assert.ok(withMsg.includes("【今月のご連絡】"), "section present when message set");
-  assert.ok(
-    withMsg.includes("リモートワーク関連経費"),
-    "operator message text included verbatim",
-  );
+  const prefaceIdx = withMsg.indexOf("リモートワーク関連経費");
+  const headingIdx = withMsg.indexOf("【今月のご連絡】");
+  const machineIdx = withMsg.indexOf("の領収証憑一式を");
+  assert.ok(prefaceIdx < headingIdx, "the preface opens the letter (before the heading)");
+  assert.ok(headingIdx < machineIdx, "the machine line is under the heading (after it)");
 });
 
 test("buildPackNotice: cash/digital-only pack (hasAmex=false) names the cash list, never the AMEX CSV", () => {

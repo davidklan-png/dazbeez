@@ -122,15 +122,19 @@ export function buildPackNotice(input: PackNoticeInput, names: PackNames): strin
   const hasCash = input.hasCash ?? true;
   const hasDigital = input.hasDigital ?? false;
   const lines: string[] = [];
-  lines.push(`${input.monthLabel} の領収証憑一式をお送りします。`);
-  lines.push("");
-
+  // Japanese business-letter order (backlog #25): the operator preface opens
+  // the letter; 【今月のご連絡】 heads the machine line so it introduces the
+  // business content rather than labelling the greeting. The heading is now
+  // ALWAYS present (it heads the machine line); the PREFACE is what's omitted
+  // when the message is empty — the inverse of the old layout.
   const operatorMessage = input.operatorMessage?.trim() ?? "";
   if (operatorMessage.length > 0) {
-    lines.push("【今月のご連絡】");
     lines.push(operatorMessage);
     lines.push("");
   }
+  lines.push("【今月のご連絡】");
+  lines.push(`${input.monthLabel} の領収証憑一式をお送りします。`);
+  lines.push("");
 
   lines.push("【この資料について】");
   // Name EVERY 照合CSV that ships in this pack — AMEX, CASH, DIGITAL — each by
