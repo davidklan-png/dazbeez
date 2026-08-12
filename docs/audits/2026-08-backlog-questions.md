@@ -245,3 +245,49 @@ T1-5 (`delivery_state` same-batch write), T1-6 ("failed send never touches the
 seal"), T1-9 (`finalizeExport` refuses to run twice). All are the same shape
 (documented invariant, prose-only safety) and would fall to the same
 injected-DB / structural-assertion test technique.
+
+---
+
+## §6 priority 4 (added 2026-08-12) — remaining Tier-1 invariants promoted agent-reported → VERIFIED
+
+Continuing the ranking, deepest blast radius first (a silent failure that makes
+a **sealed or delivered month** wrong). All five below were re-read in source;
+each is documented in a comment/JSDoc, **true in the code today**, and
+**untested** (zero `grep` hits in `tests/`). Report, not fix — the architect
+picks which to pin. The same injected-DB / structural-assertion technique that
+landed T1-7 applies to all of them.
+
+### Correction first: T1-7 is now TESTED
+
+§5 promoted T1-7 to VERIFIED but still called it untested. It is no longer:
+`tests/receipts/exhaustive-read-throw-at-cap.test.ts` (PR #177, merged) pins the
+throw-at-cap for both `listAllReceiptsInMonth` and `listAmexReceiptsForReconcile`
+via the `opts.db` / `opts.hardCap` injection seam, with cases for the
+mid-window throw and the post-union-with-undated throw. T1-7 is closed.
+
+### Ranked — deepest sealed/delivered blast radius first
+
+| # | ID | Verdict (VERIFIED) | Blast radius if it silently broke |
+|---|----|--------------------|-----------------------------------|
+| 1 | **T1-6** | "A failed send never touches the seal" — `markDeliverySent`/`markDeliveryFailed`/`markDeliveryAmbiguous` (`db.ts:3386-3462`) each run one `db.batch([...])` whose two statements touch only `export_deliveries.state` + `receipt_exports.delivery_state`, never a sealed column. Section comment at `db.ts:3277-3280`; per-fn JSDoc at `:3413`, `:3442`. **Untested** (delivery-state.test.ts tests only the pure derivation). | Worst of the five: a future edit that re-stamps `finalization_hash`/`archive_sha256` on a send would silently mutate the sealed bundle's identity on a *delivery failure* — downloaded pack ≠ audited hash, permanent on the 10-year record. |
+| 2 | **T1-9** | `finalizeExport` refuses to run twice — `UPDATE … WHERE id=? AND status='draft'` then `if (changes===0) throw` (`db.ts:3191-3207`). **Untested** (no runtime call to `finalizeExport`; export-revision-flow.test.ts is D1-integration-gated and asserts byte-identity, not the throw). | Dropping the `status='draft'` predicate → re-finalize re-writes `finalization_hash`/`finalized_at` on a sealed row + re-runs receipt promotion. Sealed immutability broken; two `export.finalized` events on one row. Narrower than T1-6 (the route guards re-entry), but the receipt-promotion UPDATE has its own `status IN (...)` guard limiting blast. |
+| 3 | **T1-2** | `buildExportBundle` "a matched receipt appears once, never twice" — dedup via `matchedReceiptMap` filter (`month-closing.ts:106-118`) + `seenReceiptIds` Set (`:140, 179-182`). Documented at `:50-52`. **Untested** (no test imports `buildExportBundle`). | A receipt both matched to a month-M AMEX line AND in month-M's `listReceiptsByExportStatementMonth` set → two rows → double-counted amount in the sealed CSV/ZIP + two `receipt_export_items`. **Correction to the audit's framing**: under ADR 0008 the overlap is *not* "AMEX-and-CASH/DIGITAL" (a matched receipt is `payment_path='AMEX'`) — it is "an AMEX receipt whose calendar month equals the statement month," i.e. the **normal** case. The dedup is load-bearing on every sealed pack, not an edge. |
+| 4 | **T1-10** | Cross-month sealed-claim guard *inside* `updateAmexReconciliation` (`db.ts:1479-1508`) — a `SELECT … JOIN amex_reconciliations WHERE status='finalized' … AND statement_month != ?` that throws if the receipt is already confirmed in a *different finalized* month. Defense-in-depth below `rejectIfFinalized` (`:1452`), which only checks the target line's month. **Untested** — `updateAmexReconciliation` has zero test refs; `cross-month-claims.test.ts` tests only the pure page helper. | Removing the in-function SELECT → a receipt claimed by finalized month A could be re-linked from open month B, and `updateAmexReconciliation` would mutate its merchant/date/status → finalized-month immutability for A. Two further layers (`rejectIfFinalized` + the export gate's `cross_month` blocker) make a silent break less likely than T1-6/T1-9. |
+| 5 | **T1-5** | `delivery_state` written in the SAME `db.batch([...])` as the attempt row — all four wrappers (`createDelivery:3301-3334`, `markDeliverySent:3386-3408`, `markDeliveryFailed:3415-3434`, `markDeliveryAmbiguous:3443-3462`) are single `db.batch` arrays. Documented at `db.ts:3277-3280`. **Untested** (no test asserts the two writes are one batch). | Lowest of the five. The audit's "re-send a delivered month" framing overstates it: the pill reads `delivery_state` directly, but `decideSendAction`/`findRevisionSendBlocker` (heavily tested) key off the **attempt rows**, not the pill — so a stale pill is a confusing label, not an automatic re-send. Real but recoverable. |
+
+### Cross-cutting
+
+T1-6, T1-9, T1-10, and the T1-5 batch claim are all in D1-coupled `db.ts`
+functions with **no fake-DB harness** — the same blocker §5 noted for T1-2/T1-7.
+The `opts.db` injection seam (proven by `softDeleteReceipt`, `unfinalizeReconciliation`,
+and now the T1-7 test) is the established convention. Adding it to the delivery
+wrappers, `finalizeExport`, and `updateAmexReconciliation` would unlock T1-5,
+T1-6, T1-9, and T1-10 with one harness each — the cheapest highest-leverage next
+batch of test adds after T1-7.
+
+No agent claim was materially wrong on these five (the only imprecision was
+T1-2's trigger framing under ADR 0008, corrected above). All five documented
+invariants are **true in the code today** and **all five are untested**.
+
+**Verification:** personally re-read each cited line; confirmed zero `tests/`
+coverage via grep. No code or data was modified.
