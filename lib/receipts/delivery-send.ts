@@ -168,14 +168,17 @@ export function buildDeliveryEmail(opts: {
 }): DeliveryEmail {
   const monthLabel = opts.summary?.monthLabel ?? `${opts.month.slice(0, 4)}年${Number(opts.month.slice(5, 7))}月`;
   const lines: string[] = [];
-  lines.push(`${monthLabel} の領収証憑一式を添付にてお送りします。`);
-  lines.push("");
+  // Japanese business-letter order (backlog #25): operator preface opens the
+  // letter; 【今月のご連絡】 heads the machine line. Heading is ALWAYS present;
+  // the preface is what's omitted when the message is empty.
   const msg = opts.operatorMessage?.trim() ?? "";
   if (msg.length > 0) {
-    lines.push("【今月のご連絡】");
     lines.push(msg);
     lines.push("");
   }
+  lines.push("【今月のご連絡】");
+  lines.push(`${monthLabel} の領収証憑一式を添付にてお送りします。`);
+  lines.push("");
   if (opts.summary && opts.summary.categoryTotals.length > 0) {
     lines.push("【勘定科目別集計】");
     for (const t of opts.summary.categoryTotals) {

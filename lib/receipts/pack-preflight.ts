@@ -13,6 +13,7 @@
 
 import { dueDateCode } from "@/lib/receipts/pack-naming";
 import { circledNumber } from "@/lib/receipts/reconciliation-files";
+import { isPackNoticeMachineLine } from "@/lib/receipts/proofs";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -335,20 +336,53 @@ function noticeFilenames(noticeText: string): string[] {
   return (noticeText.match(re) ?? []).map((t) => t);
 }
 
-/** Remove the 【今月のご連絡】 section (operator free text) from a notice, so
- *  preflight checks scan only the GENERATED structure — not the operator's own
- *  words. The operator may legitimately write anything (a D17 re-delivery
- *  supersession note naming previous-pack files; a D9 attendee retention note;
- *  改訂/出席者/manifest references). Without stripping, every notice check
+/** Discriminate the notice layout — see the four combinations below.
+ *
+ *  Do NOT scan the whole document for the marker (`の領収証憑一式を`). The
+ *  operator writes arbitrary Japanese and may legitimately use that phrase in
+ *  their own preface or message (observed: the operator's real 2026-06 message
+ *  used the same register). A document-wide `findIndex` would land on their
+ *  line, not the generated one.
+ *
+ *  Instead, anchor on the line IMMEDIATELY AFTER 【今月のご連絡】 — a position
+ *  the generator fully controls: in the new layout buildPackNotice pushes the
+ *  heading then the machine line adjacently (no blank between). Match the
+ *  GENERATED machine line's specific shape (the marker + the polite closing
+ *  お送りします。) at that one position — the operator's prose does not replicate
+ *  the generator's exact verb form. */
+function noticeMessageLayout(lines: string[]): "new" | "old" | "none" {
+  const headingIdx = lines.findIndex((l) => l.startsWith("【今月のご連絡】"));
+  if (headingIdx === -1) return "none";
+  // In the new layout the generated machine line sits directly after the heading.
+  // In the old layout the line after the heading is the operator message (which
+  // does not match the generated shape). The predicate is the single source of
+  // truth for the machine line's identity — it and buildPackNotice share one
+  // constant, so a copy edit updates both by construction (no parallel regex).
+  const next = lines[headingIdx + 1] ?? "";
+  return isPackNoticeMachineLine(next) ? "new" : "old";
+}
+
+/** Remove the operator's free text from a notice, so preflight checks scan only
+ *  the GENERATED structure — not the operator's own words. The operator may
+ *  legitimately write anything (a D17 re-delivery supersession note naming
+ *  previous-pack files; a D9 attendee retention note; 改訂/出席者/manifest
+ *  references; a bracketed 【注意】 line). Without stripping, every notice check
  *  operates on the operator's prose and blocks legitimate sends.
  *
- *  Anchors on 【この資料について】 — the generated heading that ALWAYS follows
- *  the operator section (buildPackNotice emits it next) — NOT on any bracketed
- *  token. This way an operator typing 【注意】 or 【重要】 inside their note does
- *  NOT prematurely end the strip. No-op when the section is absent (operator
- *  message omitted). */
+ *  Handles BOTH layouts (see {@link noticeMessageLayout}): new-layout preface
+ *  (above the heading) is dropped, keeping the generated heading onward; old-
+ *  layout message (between the headings) is stripped, anchoring the end on
+ *  【この資料について】 — the generated heading, not any 【 the operator typed. */
 export function stripOperatorMessageSection(noticeText: string): string {
   const lines = noticeText.split(/\r?\n/);
+  const layout = noticeMessageLayout(lines);
+  if (layout === "none") return noticeText;
+  const headingIdx = lines.findIndex((l) => l.startsWith("【今月のご連絡】"));
+  if (layout === "new") {
+    // Preface sits above the (generated) heading — keep the heading onward.
+    return lines.slice(headingIdx).join("\r\n");
+  }
+  // OLD layout: strip lines between the two headings.
   const out: string[] = [];
   let skipping = false;
   for (const line of lines) {
@@ -365,15 +399,22 @@ export function stripOperatorMessageSection(noticeText: string): string {
   return out.join("\r\n");
 }
 
-/** Extract the operator's free text from a notice's 【今月のご連絡】 section —
- *  the lines between 【今月のご連絡】 and 【この資料について】, trimmed. Returns ""
- *  when the section is absent (no operator message). Used by the O7 invariant
- *  check to compare the sealed notice's content against the stored
- *  operator_message. Anchors on 【この資料について】 (the generated heading),
- *  not any bracketed token, for the same robustness reason as
- *  {@link stripOperatorMessageSection}. */
+/** Extract the operator's free text from a notice, trimmed. Returns "" when
+ *  there is no operator message. Used by the O7 invariant (check #19) to compare
+ *  the sealed notice's content against the stored operator_message. Handles BOTH
+ *  layouts (see {@link noticeMessageLayout}): new-layout preface = lines before
+ *  the heading; old-layout message = lines between the heading and
+ *  【この資料について】 (anchored on the generated heading, not any bracket token). */
 export function extractOperatorMessageFromNotice(noticeText: string): string {
   const lines = noticeText.split(/\r?\n/);
+  const layout = noticeMessageLayout(lines);
+  if (layout === "none") return "";
+  const headingIdx = lines.findIndex((l) => l.startsWith("【今月のご連絡】"));
+  if (layout === "new") {
+    // Preface is the lines above the heading.
+    return lines.slice(0, headingIdx).join("\n").trim();
+  }
+  // OLD layout: message between the heading and 【この資料について】.
   let capturing = false;
   const out: string[] = [];
   for (const line of lines) {
@@ -730,8 +771,13 @@ const checks: { key: string; run: Check }[] = [
         (n, files) => n + files.length,
         0,
       );
-      const noticeRows = noticeText.match(/明細行数:\s*(\d+)/);
-      const noticeFiles = noticeText.match(/証憑ファイル数:\s*(\d+)/);
+      // Scan stripped text (generated structure only) for consistency with the
+      // other notice checks — operator prose is removed first. The counts live
+      // in the generated 【今月の内容】 section, so stripping does not change
+      // them; this is a consistency hardening, not a fix.
+      const stripped = stripOperatorMessageSection(noticeText);
+      const noticeRows = stripped.match(/明細行数:\s*(\d+)/);
+      const noticeFiles = stripped.match(/証憑ファイル数:\s*(\d+)/);
       const problems: string[] = [];
       if (noticeRows && Number(noticeRows[1]) !== rowCount) {
         problems.push(`明細行数: notice ${noticeRows[1]} vs pack ${rowCount}`);
