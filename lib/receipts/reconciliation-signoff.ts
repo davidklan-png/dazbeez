@@ -1,7 +1,6 @@
 import type { AmexStatementLine, ReceiptRecord } from "@/lib/receipts/types";
 import type { ReceiptAttendeeDirectoryEntry } from "@/lib/receipts/attendee-directory";
-import { resolveAttendeeNames } from "@/lib/receipts/attendee-directory";
-import { requiresAttendees } from "@/lib/receipts/categories";
+import { evaluateAttendeeRequirement } from "@/lib/receipts/attendee-requirement";
 import { resolveLineCategory } from "@/lib/receipts/line-classification";
 import { isUncategorizedLine } from "@/lib/receipts/blockers";
 
@@ -170,17 +169,19 @@ export function evaluateAmexLineSignoff(
   }
 
   const unresolvedAttendeeNames: string[] = [];
-  if (requiresAttendees(resolvedCategory)) {
-    const names = [...receiptAttendees, ...lineAttendees];
-    if (names.length === 0) {
-      codes.push("attendees_required");
-    } else {
-      const { unresolved } = resolveAttendeeNames(names, attendeeDirectory);
-      if (unresolved.length > 0) {
-        codes.push("attendee_unresolved");
-        unresolvedAttendeeNames.push(...unresolved);
-      }
-    }
+  // Attendee requirement — single-sourced in evaluateAttendeeRequirement
+  // (backlog #6), shared with the finalize gate so the AMEX-line checker and the
+  // gate cannot drift.
+  const att = evaluateAttendeeRequirement(
+    resolvedCategory,
+    [...receiptAttendees, ...lineAttendees],
+    attendeeDirectory,
+  );
+  if (att.required && !att.attendeesPresent) {
+    codes.push("attendees_required");
+  } else if (att.required && att.unresolved.length > 0) {
+    codes.push("attendee_unresolved");
+    unresolvedAttendeeNames.push(...att.unresolved);
   }
 
   if (line.business_trip_status === "candidate") {
