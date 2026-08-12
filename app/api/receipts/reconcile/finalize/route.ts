@@ -14,7 +14,7 @@ import {
 } from "@/lib/receipts/db";
 import { RECEIPT_BULK_LIMIT, hasReceiptBulkOverflow } from "@/lib/receipts/list-policy";
 import { hashCsvContent } from "@/lib/receipts/export";
-import { buildReconciliationManifestCsv, validateAmexLinesForSignoff } from "@/lib/receipts/reconciliation-signoff";
+import { buildReconciliationManifestCsv, validateAmexLinesForSignoffDetailed } from "@/lib/receipts/reconciliation-signoff";
 import { deriveStatementWindow, isReceiptInWindow } from "@/lib/receipts/statement-window";
 import { archiveManifest, deleteArchiveObject } from "@/lib/receipts/storage";
 import type { ReceiptRecord } from "@/lib/receipts/types";
@@ -103,7 +103,10 @@ export async function POST(request: Request) {
       if (entry) receiptAttendeeMap.set(entry[0], entry[1]);
     }
 
-    const blockers = validateAmexLinesForSignoff(
+    // Detailed blockers carry the line id so the sign-off banner can link each
+    // to its line (select it in the rail) — not flat text the operator must hunt
+    // for. lineId is null for consolidated (multi-line) blockers.
+    const blockers = validateAmexLinesForSignoffDetailed(
       amexLines,
       amexAttendees,
       receiptAttendeeMap,

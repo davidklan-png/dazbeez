@@ -8,61 +8,71 @@ import {
 import type { AmexStatementLine, AmexMatchStatus } from "@/lib/receipts/types";
 import type { ConfidenceBand } from "@/lib/receipts/confidence";
 
-// groupLinesByStatus reads only line.match_status (via isSettled) and the
-// wrapper's band, so a minimal stub is sufficient and stays readable.
+// groupLinesByStatus reads only line.match_status (via isSettled), the line's
+// receipt_missing_reason (via isSettled), and the wrapper's band — so a minimal
+// stub is sufficient and stays readable.
+function line(
+  id: string,
+  match_status: AmexMatchStatus,
+  receipt_missing_reason: string | null = null,
+): AmexStatementLine {
+  return { id, match_status, receipt_missing_reason } as AmexStatementLine;
+}
 function banded(
   id: string,
   match_status: AmexMatchStatus,
   band: ConfidenceBand,
+  receipt_missing_reason: string | null = null,
 ): LineWithBand {
-  return { line: { id, match_status } as AmexStatementLine, band, match: undefined };
+  return { line: line(id, match_status, receipt_missing_reason), band, match: undefined };
 }
 
-test("isSettled: confirmed and no_receipt are terminal; matched/unmatched are not", () => {
-  assert.equal(isSettled({ match_status: "confirmed" } as AmexStatementLine), true);
-  assert.equal(isSettled({ match_status: "no_receipt" } as AmexStatementLine), true);
-  assert.equal(isSettled({ match_status: "matched" } as AmexStatementLine), false);
-  assert.equal(isSettled({ match_status: "unmatched" } as AmexStatementLine), false);
+// ─── §1: isSettled — no_receipt is settled ONLY with a reason ────────────────
+
+test("isSettled: confirmed is settled; matched/unmatched are not", () => {
+  assert.equal(isSettled(line("c", "confirmed")), true);
+  assert.equal(isSettled(line("m", "matched")), false);
+  assert.equal(isSettled(line("u", "unmatched")), false);
 });
 
-test("groupLinesByStatus: a no_receipt line is settled, not 'needs attention'", () => {
-  // June-2026 shape: a no_receipt line carries no auto-match, so bandForLine
-  // gives it band "none" — exactly what the old groupReview filter caught,
-  // producing the phantom "Needs attention · 3" next to "32 of 32 confirmed".
-  const lines: LineWithBand[] = [
+test("isSettled: no_receipt is settled ONLY with a non-empty trimmed reason", () => {
+  assert.equal(isSettled(line("nr-reason", "no_receipt", "annual fee")), true);
+  // null / empty / whitespace ⇒ NOT settled (incomplete — needs a reason).
+  assert.equal(isSettled(line("nr-null", "no_receipt", null)), false);
+  assert.equal(isSettled(line("nr-empty", "no_receipt", "")), false);
+  assert.equal(isSettled(line("nr-ws", "no_receipt", "   ")), false);
+});
+
+// ─── grouping + count follow from isSettled alone (single source) ────────────
+
+test("groupLinesByStatus: a no_receipt WITH a reason settles (confirmed); WITHOUT it lands in Needs attention", () => {
+  const groups = groupLinesByStatus([
     banded("confirmed-1", "confirmed", "obvious"),
-    banded("no-receipt-1", "no_receipt", "none"),
-    banded("no-receipt-2", "no_receipt", "none"),
-    banded("no-receipt-3", "no_receipt", "none"),
+    banded("nr-with-reason", "no_receipt", "none", "card annual fee"),
+    banded("nr-no-reason-1", "no_receipt", "none"), // reasonless → needs attention
+    banded("nr-no-reason-2", "no_receipt", "none"),
     banded("unmatched-1", "unmatched", "none"),
-  ];
-  const groups = groupLinesByStatus(lines);
+  ]);
 
-  // The three settled no_receipt lines must NOT appear under "Needs attention".
-  assert.equal(groups.review.length, 1);
-  assert.deepEqual(
-    groups.review.map((g) => g.line.id),
-    ["unmatched-1"],
-  );
-
-  // They ARE counted as confirmed (settled) — the rail shows "5 of 5", not
-  // "2 of 5" alongside a phantom "Needs attention · 3".
-  assert.equal(groups.confirmed.length, 4);
+  // Confirmed section = confirmed + the reasoned no_receipt only.
   assert.deepEqual(
     groups.confirmed.map((g) => g.line.id),
-    ["confirmed-1", "no-receipt-1", "no-receipt-2", "no-receipt-3"],
+    ["confirmed-1", "nr-with-reason"],
+  );
+  // Needs attention = unmatched + the two reasonless no_receipt lines. The
+  // header count (confirmed.length) excludes them automatically.
+  assert.deepEqual(
+    groups.review.map((g) => g.line.id).sort(),
+    ["nr-no-reason-1", "nr-no-reason-2", "unmatched-1"],
   );
   assert.equal(groups.likely.length, 0);
   assert.equal(groups.obvious.length, 0);
 });
 
-test("groupLinesByStatus: a no_receipt line with an obvious/likely suggestion still settles", () => {
-  // Operator overrode a suggested match with "no receipt expected". It is
-  // settled regardless of the suggestion band — and excluded from the
-  // bulk-confirm-obvious candidates (which now key on !isSettled).
+test("groupLinesByStatus: a no_receipt line WITH a reason overrides an obvious/likely suggestion and settles", () => {
   const groups = groupLinesByStatus([
-    banded("nr-obvious", "no_receipt", "obvious"),
-    banded("nr-likely", "no_receipt", "likely"),
+    banded("nr-obvious", "no_receipt", "obvious", "settled reason"),
+    banded("nr-likely", "no_receipt", "likely", "settled reason"),
   ]);
   assert.equal(groups.obvious.length, 0);
   assert.equal(groups.likely.length, 0);

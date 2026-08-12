@@ -15,12 +15,22 @@
 import type { AmexStatementLine, ReconciliationMatch } from "@/lib/receipts/types";
 import type { ConfidenceBand } from "@/lib/receipts/confidence";
 
-/** A line the operator has settled — either matched-and-confirmed or
- *  explicitly marked "no receipt expected". Both are terminal; neither
- *  needs attention. Single source of truth for the header count and the rail
- *  grouping, which had drifted apart (see module header). */
+/** A line the operator has settled — terminal AND complete.
+ *
+ *  `confirmed` is settled unconditionally. `no_receipt` is settled ONLY when it
+ *  carries a non-empty `receipt_missing_reason`: a reasonless `no_receipt` is
+ *  incomplete (the finalize gate's evaluateAmexLineSignoff emits `missing_reason`
+ *  for it — "missing receipt requires a reason"), so it stays in Needs attention
+ *  until the operator supplies one. This keeps such lines out of the confirmed
+ *  count and visible, instead of wearing a gray "done" pill that the sign-off
+ *  gate then rejects. Single source of truth for the header count and the rail
+ *  grouping (see module header). */
 export function isSettled(line: AmexStatementLine): boolean {
-  return line.match_status === "confirmed" || line.match_status === "no_receipt";
+  if (line.match_status === "confirmed") return true;
+  if (line.match_status === "no_receipt") {
+    return !!line.receipt_missing_reason?.trim();
+  }
+  return false;
 }
 
 export interface LineWithBand {
