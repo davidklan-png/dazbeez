@@ -182,3 +182,36 @@ test("one-shot message_stale: deriveMonthStage does NOT set bundleRebuiltInReque
     "deriveMonthStage reads the gate WITHOUT the option so message_stale surfaces as a Draft advisory, not a block",
   );
 });
+
+test("one-shot coupling (required before #179 merge): review/page sets bundleRebuiltInRequest:true ONLY because FinalizeCard POSTs finalize:true to the one-shot route — pin both halves together", () => {
+  // A load-bearing coupling between two files, currently held only by a comment.
+  // review/page.tsx drops message_stale from its displayed verdict because the
+  // FinalizeCard on that page POSTs the ONE-SHOT route with finalize:true, which
+  // rebuilds in-request (so message_stale is inapplicable). If FinalizeCard is
+  // ever repointed at a different endpoint — or finalized without finalize:true —
+  // the review page's "gate clear" becomes a LIE: it would stop counting
+  // message_stale while the endpoint it posts to still enforces it, and the
+  // operator would get a confusing 422 from a screen that said "clear". This is
+  // the documented-invariant-with-no-test class that broke the
+  // operator_message_updated_at lockstep (#175 sweep). Pin both halves; they
+  // must move together.
+  const card = stripComments(
+    readFileSync("components/receipts/export/finalize-card.tsx", "utf8"),
+  );
+  assert.ok(
+    /\/api\/receipts\/export\/month/.test(card),
+    "FinalizeCard POSTs the one-shot route (/api/receipts/export/month)",
+  );
+  assert.ok(
+    /finalize:\s*true/.test(card),
+    "FinalizeCard POSTs with finalize:true — the property that makes the route rebuild in-request",
+  );
+
+  const review = stripComments(
+    readFileSync("app/(receipt-system)/receipts/export/[month]/review/page.tsx", "utf8"),
+  );
+  assert.ok(
+    /bundleRebuiltInRequest:\s*true/.test(review),
+    "review/page.tsx sets bundleRebuiltInRequest:true — valid ONLY because the half above holds",
+  );
+});
