@@ -77,21 +77,28 @@ test("optional Draft: no draft + Review blockers ⇒ Review is the active BLOCKE
   assert.equal(s.finalize.status, "pending");
 });
 
-test("optional Draft: built & fresh ⇒ done; message_stale still blocks it (the one exception)", () => {
+test("optional Draft: built ⇒ done; message_stale is an ADVISORY (preview freshness), never a blocker", () => {
   const fresh = byKey(derive(input({ reconciled: true, draftBuilt: true })));
   assert.equal(fresh.draft.status, "done", "built & fresh ⇒ done");
+  assert.equal(fresh.draft.advisories, undefined, "no advisory when fresh");
   assert.equal(
     fresh.draft.secondaryAction?.label,
     "ドラフトを再作成",
     "a built draft still offers rebuild-to-preview as a side-action",
   );
-  // message_stale is the one case where Draft genuinely gates: the action that
-  // clears it (Rebuild) IS a Draft control, so a stale message blocks Draft.
+  // Fix (a): the one-shot finalize path rebuilds in-request, so message_stale no
+  // longer gates anything. A built-but-stale draft is still `done`; staleness
+  // surfaces as a Draft advisory (rebuild refreshes the preview), never a block.
   const stale = byKey(
     derive(input({ reconciled: true, draftBuilt: true, reviewBlockers: [blocker("message_stale")] })),
   );
-  assert.equal(stale.draft.status, "blocked", "message_stale blocks Draft (the exception)");
-  assert.equal(stale.review.status, "pending", "Review waits behind the stale Draft");
+  assert.notEqual(stale.draft.status, "blocked", "message_stale never blocks Draft");
+  assert.equal(stale.draft.status, "done", "a stale draft is still built ⇒ done");
+  assert.ok(
+    stale.draft.advisories?.some((b) => b.code === "message_stale"),
+    "the stale preview surfaces as a Draft advisory",
+  );
+  assert.equal(stale.draft.blockers, undefined, "message_stale is NOT a blocker on Draft");
 });
 
 test("optional Draft: a finalized month offers no Draft preview side-action (the pack is sealed)", () => {
@@ -127,23 +134,22 @@ test("Review with gate blockers ⇒ Review BLOCKED, carries the blockers", () =>
 
 // ─── §2 blocker placement: a blocker sits on the stage whose ACTION clears it ──
 
-test("§2: message_stale blocks DRAFT (Rebuild draft), NOT Review/Finalize — the 2026-06 trap fixed", () => {
-  // The remedy for a stale message is Rebuild draft, a Draft-stage control on
-  // the export page. Placing it on Review/Finalize would put the blocker on a
-  // different page from the button that clears it. Here Draft is built but
-  // stale ⇒ Draft is the blocked active stage; Review reads pending (not done),
-  // never blocked.
+test("§2: message_stale is a Draft ADVISORY (rebuild refreshes the preview), never a blocker — it never gates Review/Finalize", () => {
+  // Fix (a): the one-shot finalize path rebuilds in-request, so a stale preview
+  // no longer gates anything. Draft surfaces message_stale as an advisory; it
+  // never reads `blocked`, and Review/Finalize proceed normally.
   const s = byKey(
     derive(input({ reconciled: true, draftBuilt: true, reviewBlockers: [blocker("message_stale")] })),
   );
-  assert.equal(s.draft.status, "blocked", "message_stale blocks Draft");
+  assert.notEqual(s.draft.status, "blocked", "message_stale never blocks Draft");
   assert.ok(
-    s.draft.blockers?.some((b) => b.code === "message_stale"),
-    "Draft carries the message_stale blocker",
+    s.draft.advisories?.some((b) => b.code === "message_stale"),
+    "Draft carries the message_stale advisory",
   );
-  assert.equal(s.review.status, "pending", "Review is pending behind the blocked Draft, not blocked itself");
+  assert.equal(s.draft.blockers, undefined, "message_stale is not a blocker on Draft");
+  assert.equal(s.review.status, "done", "Review is NOT held behind a stale Draft");
   assert.equal(s.review.blockers, undefined, "message_stale does NOT leak onto Review");
-  assert.equal(s.draft.primaryAction?.label, "ドラフトを再作成", "primary action is rebuild, not create");
+  assert.equal(s.draft.primaryAction, undefined, "Draft never carries a primary action — it never gates");
 });
 
 test("§2: reconciliation_not_finalized blocks RECONCILE (cleared by reconciliation signoff)", () => {
@@ -162,10 +168,10 @@ test("§2: message_not_reviewed blocks REVIEW (cleared by the preface decision)"
   assert.ok(s.review.blockers?.some((b) => b.code === "message_not_reviewed"));
 });
 
-test("§2: message_stale + a Review-stage blocker together ⇒ Draft blocked (Draft is earlier); Review pending", () => {
-  // The active stage is the FIRST not-done. Draft (stale) comes before Review,
-  // so Draft is the blocked active stage even when Review also has a blocker;
-  // Review reads pending until the draft is rebuilt.
+test("§2: message_stale + a Review-stage blocker ⇒ Review is the active blocked stage; Draft carries the advisory, not a block", () => {
+  // message_stale no longer gates Draft, so a Review-stage blocker makes Review
+  // the active blocked stage. Draft still surfaces the stale-preview advisory but
+  // does not block — Review is where the operator acts.
   const s = byKey(
     derive(
       input({
@@ -175,8 +181,12 @@ test("§2: message_stale + a Review-stage blocker together ⇒ Draft blocked (Dr
       }),
     ),
   );
-  assert.equal(s.draft.status, "blocked");
-  assert.equal(s.review.status, "pending");
+  assert.notEqual(s.draft.status, "blocked", "Draft is not blocked by message_stale");
+  assert.ok(
+    s.draft.advisories?.some((b) => b.code === "message_stale"),
+    "Draft carries the advisory",
+  );
+  assert.equal(s.review.status, "blocked", "Review is the active blocked stage");
 });
 
 test("review clean, not finalized ⇒ Finalize current (the action is 確定する)", () => {

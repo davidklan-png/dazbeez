@@ -44,6 +44,15 @@ function subFor(s: MonthStage): string {
   }
 }
 
+/** Advisory wording for a stage-level notice. The gate's `message_stale` prose
+ *  says "Rebuild the draft before finalizing" — correct as a BLOCKER, wrong as
+ *  an advisory (fix (a): it no longer blocks). Render advisory wording instead:
+ *  the preview is out of date, a rebuild refreshes it. Never "blocks finalizing." */
+function advisoryText(a: { code: string; message: string }): string {
+  if (a.code === "message_stale") return "Preview out of date — rebuild to refresh";
+  return a.message;
+}
+
 export function MonthPipeline({ stages }: { stages: MonthStage[] }) {
   return (
     <div className="flex items-stretch border-b border-gray-200 bg-white px-8 py-4">
@@ -85,6 +94,11 @@ export function MonthPipeline({ stages }: { stages: MonthStage[] }) {
               <div className={subClass}>{subFor(s)}</div>
               {s.status === "blocked" && s.blockers && s.blockers.length > 0 && (
                 <div className="mt-0.5 text-[11px] text-red-600">{s.blockers[0].message}</div>
+              )}
+              {s.advisories && s.advisories.length > 0 && (
+                <div className="mt-0.5 text-[11px] text-amber-700">
+                  {advisoryText(s.advisories[0])}
+                </div>
               )}
               {s.secondaryAction && (
                 <Link

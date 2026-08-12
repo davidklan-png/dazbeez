@@ -66,10 +66,19 @@ export default async function ReviewPage({ params }: { params: Params }) {
   // Authoritative gate verdict — pass the prebuilt bundle + reconciliation so
   // the gate doesn't re-fetch them. Detailed (ExportBlocker[]) so the review
   // screen can render gate 1 as a link to Reconcile instead of dead prose.
+  //
+  // bundleRebuiltInRequest: this page IS the one-shot finalize surface — the
+  // FinalizeCard POSTs /api/receipts/export/month with finalize:true, which
+  // rebuilds in-request. So message_stale (gate 1.5) is inapplicable here: if it
+  // were counted, blockerCount would include it and the FinalizeCard would
+  // disable Finalize — the exact prerequisite fix (a) removes — even though the
+  // one-shot would succeed. The staleness still surfaces, as an advisory, via the
+  // shared MonthPipeline (deriveMonthStage reads the gate WITHOUT this option).
   const gateBlockers = await validateMonthReadyForExportDetailed(
     month,
     bundle,
     reconciliation ?? null,
+    { bundleRebuiltInRequest: true },
   );
   const tileBlockers = computeExportBlockers(
     monthReceipts,

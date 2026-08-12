@@ -203,10 +203,18 @@ export async function POST(request: Request) {
     // with no side effects. The rebuild path (finalize:false) is unchanged.
     if (body.finalize) {
       await updateExportOperatorMessage(exportId, operatorMessage);
+      // bundleRebuiltInRequest is a property of THIS code path, not a client
+      // preference: the one-shot rebuilds + seals within the same POST (the
+      // build/stage runs below, after this gate), so message_stale — whose remedy
+      // is a rebuild — is inapplicable (the message is re-baked into the bytes
+      // that get sealed). Set here, at the one finalize call site; every other
+      // gate still runs, and the rebuild-only path (finalize:false) does not call
+      // this gate at all.
       const blockers = await validateMonthReadyForExport(
         month,
         bundle,
         reconciliation,
+        { bundleRebuiltInRequest: true },
       );
       if (blockers.length > 0) {
         return NextResponse.json(

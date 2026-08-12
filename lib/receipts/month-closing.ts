@@ -278,6 +278,22 @@ export interface ValidateMonthReadyInput {
    *  bundleBuiltAt, emit `message_stale`. null/undefined when there is no draft
    *  or nothing is built yet — no staleness check (matches pre-E3 behaviour). */
   exportBuild?: { bundleBuiltAt: string | null; operatorMessageUpdatedAt: string | null } | null;
+  /** Set ONLY by a caller that guarantees a fresh bundle build within the same
+   *  request — the one-shot finalize path rebuilds AFTER this gate, inside the
+   *  same POST. When true, gate 1.5 (`message_stale`) is skipped: its purpose is
+   *  to force a rebuild so the sealed bytes match the edited message, and a path
+   *  that rebuilds in-request satisfies that by construction — a stale
+   *  `bundle_built_at` cannot survive to the seal. This asserts a property of the
+   *  CODE PATH, not a client preference, so it is set at the one finalize call
+   *  site, never derived from the request body. Every other gate still runs;
+   *  `message_not_reviewed` (1.6) is unaffected. Default false. */
+  bundleRebuiltInRequest?: boolean;
+}
+
+/** Options threaded from a caller to {@link validateMonthReadyForExportCoreDetailed}
+ *  via the async wrappers. See {@link ValidateMonthReadyInput.bundleRebuiltInRequest}. */
+export interface ValidateMonthOptions {
+  bundleRebuiltInRequest?: boolean;
 }
 
 /**
@@ -357,8 +373,15 @@ export function validateMonthReadyForExportCoreDetailed(
   // (operator_message_updated_at is no longer re-synced to bundle_built_at at
   // build — see recordExportBundle — but advancing bundle_built_at past the save
   // timestamp still clears this gate, so "rebuild after edit" works as before.)
+  //
+  // SKIPPED on a path that rebuilds within the same request
+  // (input.bundleRebuiltInRequest): the one-shot finalize path rebuilds after
+  // this gate, so the message is re-baked into the very bytes that get sealed —
+  // staleness cannot survive to the seal. message_not_reviewed (1.6) is NOT
+  // skipped: the decision write still precedes validation there.
   const build = input.exportBuild;
   if (
+    !input.bundleRebuiltInRequest &&
     build?.bundleBuiltAt &&
     build?.operatorMessageUpdatedAt &&
     build.operatorMessageUpdatedAt > build.bundleBuiltAt
@@ -533,6 +556,7 @@ export async function validateMonthReadyForExportDetailed(
   month: string,
   prebuiltBundle?: ExportBundle,
   preloadedReconciliation?: AmexReconciliation | null,
+  opts: ValidateMonthOptions = {},
 ): Promise<ExportBlocker[]> {
   // (1) Statement-sealed gate. Callers that already fetched the reconciliation
   // (e.g. /api/receipts/export/month to populate the manifest pointer) may
@@ -626,6 +650,7 @@ export async function validateMonthReadyForExportDetailed(
     crossMonthMatchedLines: matchedLineMonths.results ?? [],
     receiptFileCounts,
     exportBuild,
+    bundleRebuiltInRequest: opts.bundleRebuiltInRequest ?? false,
   });
 }
 
@@ -638,11 +663,13 @@ export async function validateMonthReadyForExport(
   month: string,
   prebuiltBundle?: ExportBundle,
   preloadedReconciliation?: AmexReconciliation | null,
+  opts: ValidateMonthOptions = {},
 ): Promise<string[]> {
   return (await validateMonthReadyForExportDetailed(
     month,
     prebuiltBundle,
     preloadedReconciliation,
+    opts,
   )).map((b) => b.message);
 }
 
