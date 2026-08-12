@@ -138,6 +138,9 @@ export default async function ReviewPage({ params }: { params: Params }) {
       prefaceNoticeInput={prefaceNoticeInput}
       prefaceNames={prefaceNames}
       stages={stages}
+      attendeeMap={bundle.attendeeMap}
+      amexAttendees={bundle.amexAttendees}
+      attendeeDirectory={bundle.attendeeDirectory}
     />
   );
 }

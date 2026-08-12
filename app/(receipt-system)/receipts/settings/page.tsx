@@ -83,6 +83,24 @@ export default async function ReceiptsSettingsPage() {
             <span className="text-sm text-amber-700">Manage →</span>
           </Link>
         </li>
+        <li>
+          <Link
+            href="/receipts/settings/attendee-directory"
+            className="flex items-center justify-between p-4 transition-colors hover:bg-amber-50"
+          >
+            <div>
+              <p className="text-sm font-semibold text-gray-900">
+                Attendee directory
+              </p>
+              <p className="mt-1 text-xs text-gray-500">
+                The company/title lookup behind the 参加者一覧 roster. Browse,
+                correct company/title, and spot stale or unregistered names.
+                Editing does not change already-sealed months.
+              </p>
+            </div>
+            <span className="text-sm text-amber-700">Manage →</span>
+          </Link>
+        </li>
       </ul>
     </div>
   );

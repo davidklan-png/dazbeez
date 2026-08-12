@@ -661,6 +661,41 @@ starts. Design consequences:
     doctrine: sealing locks edits — the deletion path is the one hole in
     that guarantee and it currently has no code review surface.
 
+27. **Attendee roster has no confirmation surface — it only exists as a
+    sealed CSV.** NOT STARTED. Raised by the operator 2026-08-12: "where is
+    the attendee list now, how can it be confirmed each month without
+    sending to the accountant?" The answer today is: you cannot, until
+    after you seal.
+    **Current state.** `参加者一覧` is built by `buildAttendeesExportCsv`
+    (`export.ts:305`) into `exports/{month}/{exportId}-attendees.csv` — a
+    sealed, per-revision artifact containing name/company/title for the
+    attendees referenced by that month's rows. Per D9 (2026-08-07, the
+    accountant's written request) it is NOT in the delivered ZIP and the
+    会議-出席者ID column was removed from the delivered 照合CSVs; only 人数
+    ships. It is downloadable by the operator from the sealed-bundle panel.
+    The directory behind it is `receipt_attendee_directory` via
+    `/api/receipts/attendee-directory`, populated per-receipt through
+    `attendee-editor.tsx` in the review form.
+    **Gap 1 — no pre-seal review.** `review-screen.tsx` has NO attendee
+    section (zero matches). The roster first materialises at seal time, so
+    the only way to inspect the month's attendees is to finalize and
+    download the CSV — confirmation after the irreversible step. The
+    finalize gate already blocks on `attendees_required` /
+    `attendee_unresolved`, so the data to show is already computed; it just
+    is not rendered anywhere the operator can act on it in time.
+    **Gap 2 — no directory surface.** The API exists; nothing renders it.
+    D9 makes this worse, not better: `reconciliation-files.ts:13` states
+    "retention now matters MORE — we are the only copy." A tax-relevant
+    roster that is the only copy has no browse, correct, or audit screen.
+    **Fix shape.** (1) An attendee section on the export review screen
+    listing, for the month, each referenced attendee with company/title and
+    the receipts they appear on, unresolved names flagged inline against
+    the existing gate codes — confirmation belongs at Review, alongside
+    everything else about the month. (2) A directory management screen
+    (browse / correct / merge duplicates). Consider whether the roster
+    should be an explicit month-close acknowledgement like the operator
+    message decision (`message_not_reviewed`), rather than passive display.
+
 19. **Never-enqueued receipts are undetectable — wire a pipeline health
     surface.** NOT DISPATCHED — same prompt as #18, Part A (do it FIRST).
     `getExtractionHealth` (`lib/receipts/extraction-state.ts:69`) is written

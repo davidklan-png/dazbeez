@@ -26,6 +26,11 @@ import type { CategoryRule } from "@/lib/receipts/category-rules";
 import type { PackNoticeInput } from "@/lib/receipts/proofs";
 import type { PackNames } from "@/lib/receipts/pack-naming";
 import { withWorkMonth } from "@/lib/receipts/work-month";
+import { resolveRowAttendees } from "@/lib/receipts/export";
+import {
+  resolveAttendeeNames,
+  type ReceiptAttendeeDirectoryEntry,
+} from "@/lib/receipts/attendee-directory";
 import { PrefaceFinalizeSection } from "@/components/receipts/export/preface-finalize-section";
 import { MonthPipeline } from "@/components/receipts/export/month-pipeline";
 import { NextActionCard } from "@/components/receipts/export/next-action-card";
@@ -57,6 +62,14 @@ export interface ReviewScreenProps {
   /** Server-derived month-close stages — drives the shared MonthPipeline +
    *  NextActionCard mounted on every surface (docs/export-workflow-ux-plan.md). */
   stages: MonthStage[];
+  /** bundle.attendeeMap — receipt-id → attendee names. Drives the Attendees
+   *  section's roster (参加者一覧) at Review, before sealing. */
+  attendeeMap: Map<string, string[]>;
+  /** bundle.amexAttendees — AMEX-line-id → attendee names (line-level). */
+  amexAttendees: Record<string, string[]>;
+  /** bundle.attendeeDirectory — the company/title lookup the roster + the
+   *  finalize gate resolve against (single source — never recompute). */
+  attendeeDirectory: ReceiptAttendeeDirectoryEntry[];
 }
 
 export function ReviewScreen(props: ReviewScreenProps) {
@@ -123,6 +136,13 @@ export function ReviewScreen(props: ReviewScreenProps) {
           candidateRows={amexRows.filter(
             (r) => r.businessTripStatus === "candidate",
           )}
+        />
+        <AttendeesSection
+          rows={props.rows}
+          receipts={props.receipts}
+          attendeeMap={props.attendeeMap}
+          amexAttendees={props.amexAttendees}
+          attendeeDirectory={props.attendeeDirectory}
         />
       </div>
 
@@ -722,6 +742,113 @@ function BusinessTripsSection({
 }
 
 // ─── Shared bits ──────────────────────────────────────────────────────────
+
+// Backlog #27 Part A: the month's attendee roster (参加者一覧) at Review, before
+// sealing. The names source is resolveRowAttendees over the bundle rows — the
+// SAME source buildAttendeesExportCsv uses for the sealed CSV and the SAME
+// attendee sets the finalize gate resolves — so this cannot drift from either.
+// Resolution reuses resolveAttendeeNames (shared with the gate); it is NOT
+// recomputed here. Unresolved names use the gate's own attendee_unresolved
+// wording so the two surfaces agree.
+function AttendeesSection({
+  rows,
+  receipts,
+  attendeeMap,
+  amexAttendees,
+  attendeeDirectory,
+}: {
+  rows: ExportRow[];
+  receipts: ReceiptRecord[];
+  attendeeMap: Map<string, string[]>;
+  amexAttendees: Record<string, string[]>;
+  attendeeDirectory: ReceiptAttendeeDirectoryEntry[];
+}) {
+  const names = [
+    ...new Set(rows.flatMap((r) => resolveRowAttendees(r, attendeeMap, amexAttendees))),
+  ].sort();
+  const { entries } = resolveAttendeeNames(names, attendeeDirectory); // entries[i] ↔ names[i]
+  const unresolvedCount = entries.filter((e) => !e).length;
+
+  // name → receipt ids they appear on (for the "appears on" column).
+  const receiptsByName = new Map<string, string[]>();
+  for (const r of rows) {
+    const rid = r.receiptId;
+    if (!rid) continue;
+    for (const name of resolveRowAttendees(r, attendeeMap, amexAttendees)) {
+      const list = receiptsByName.get(name) ?? [];
+      if (!list.includes(rid)) list.push(rid);
+      receiptsByName.set(name, list);
+    }
+  }
+  const receiptMap = new Map(receipts.map((r) => [r.id, r]));
+
+  const sub =
+    names.length === 0
+      ? "No attendees referenced this month"
+      : `${names.length} attendee${names.length === 1 ? "" : "s"}` +
+        (unresolvedCount > 0 ? ` · ${unresolvedCount} unresolved` : "");
+
+  return (
+    <div>
+      <SectionTitle title="Attendees (参加者一覧)" sub={sub} />
+      {names.length === 0 ? (
+        <Card pad={20}>
+          <p className="text-[13px] text-gray-600">
+            No attendees are referenced by this month&apos;s receipts. The 参加者一覧
+            is built only from attendee-bearing rows (会議費/交際費) that carry names.
+          </p>
+        </Card>
+      ) : (
+        <Card pad={0}>
+          <ul className="divide-y divide-gray-100">
+            {names.map((name, i) => {
+              const entry = entries[i];
+              const rids = receiptsByName.get(name) ?? [];
+              return (
+                <li key={name} className="px-5 py-3">
+                  <div className="flex items-baseline justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="text-[13.5px] font-semibold text-gray-900">
+                        {name}
+                      </div>
+                      {entry ? (
+                        <div className="mt-0.5 text-[12px] text-gray-500">
+                          {entry.company}
+                          {entry.title ? ` · ${entry.title}` : ""}
+                        </div>
+                      ) : (
+                        <div className="mt-0.5 text-[12px] font-medium text-amber-700">
+                          attendee &ldquo;{name}&rdquo; is not registered in the
+                          attendee directory (company/title required)
+                        </div>
+                      )}
+                    </div>
+                    <div className="shrink-0 text-right text-[11.5px] text-gray-500">
+                      {rids.length > 0 ? (
+                        rids.map((rid) => {
+                          const r = receiptMap.get(rid);
+                          if (!r) return null;
+                          return (
+                            <div key={rid}>
+                              {r.merchant ?? r.id.slice(0, 8)}
+                              {r.transaction_date ? ` · ${r.transaction_date}` : ""}
+                            </div>
+                          );
+                        })
+                      ) : (
+                        <span className="text-gray-400">AMEX line</span>
+                      )}
+                    </div>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        </Card>
+      )}
+    </div>
+  );
+}
 
 function SectionTitle({ title, sub }: { title: string; sub: string }) {
   return (

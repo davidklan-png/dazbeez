@@ -166,6 +166,7 @@ export type AuditAction =
   // Attendee directory (migration 0022): a new entry registered from the
   // review UI. Attended identity = directory name; company/title NOT NULL.
   | "attendee_directory.created"
+  | "attendee_directory.updated"
   // Business trips as first-class entities (ADR 0010). The trip screen owns
   // the lifecycle; detection only suggests ('candidate').
   | "business_trip.created"
