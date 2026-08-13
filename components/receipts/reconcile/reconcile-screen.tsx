@@ -1684,11 +1684,6 @@ function NoReceiptFields({
           value={missingReasonDraft}
           onChange={(e) => setMissingReasonDraft(e.target.value)}
           onBlur={saveMissingReason}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") {
-              e.currentTarget.blur();
-            }
-          }}
           placeholder="e.g. card fee, online charge, receipt lost"
         />
       </Field>
