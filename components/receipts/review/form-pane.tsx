@@ -142,12 +142,6 @@ export function FormPane(props: FormPaneProps) {
   const [businessPurpose, setBusinessPurpose] = useState(
     receipt.business_purpose ?? "",
   );
-  // WebKit can interrupt a native Japanese IME conversion when a render that
-  // refreshes the route lands mid-composition. Keep this separate from the
-  // field value: React still displays every composing character, but autosave
-  // waits until the IME commits the final text.
-  const [isBusinessPurposeComposing, setIsBusinessPurposeComposing] =
-    useState(false);
   const [attendees, setAttendees] = useState<string[]>(
     props.initialAttendees.map((a) => a.attendee_name),
   );
@@ -246,9 +240,6 @@ export function FormPane(props: FormPaneProps) {
   const initialRenderRef = useRef(true);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const inFlightRef = useRef<AbortController | null>(null);
-  // A ref is needed in the async save path, where state from a previous render
-  // could otherwise permit router.refresh() while the IME is composing.
-  const businessPurposeComposingRef = useRef(false);
 
   const triggerSave = useCallback(
     (markReviewed: boolean) => {
@@ -305,12 +296,10 @@ export function FormPane(props: FormPaneProps) {
           }
           setApiWarnings(json.warnings ?? []);
           setSave({ kind: "saved", at: Date.now() });
-          // Refresh server-rendered CompliancePanel without manual reload.
-          // router.refresh() preserves client state (focused input, useState
-          // field values) — React reconciles rather than replacing the DOM.
-          // Do not run it in the middle of a native Japanese IME composition:
-          // Safari can drop the input's focus before the conversion commits.
-          if (!businessPurposeComposingRef.current) router.refresh();
+          // Do not refresh the route after ordinary field autosaves. A refresh
+          // can interrupt an active WebKit IME conversion and steal focus from
+          // any text field; the local form state is already authoritative for
+          // the editor. Explicit actions and navigation still refresh normally.
         } catch (error) {
           if ((error as DOMException | undefined)?.name === "AbortError") return;
           setSave({ kind: "error", message: "Network error" });
@@ -328,7 +317,6 @@ export function FormPane(props: FormPaneProps) {
       currency,
       businessPurpose,
       attendees,
-      router,
     ],
   );
 
@@ -371,7 +359,7 @@ export function FormPane(props: FormPaneProps) {
     // Sealed receipt: never fire the autosave debounce. The fields are disabled
     // so they can't change, but this guards against programmatic state changes
     // and is the explicit "suppress entirely" the lock requires.
-    if (isLocked || isBusinessPurposeComposing) return;
+    if (isLocked) return;
     triggerSave(false);
   }, [
     paymentPath,
@@ -383,26 +371,8 @@ export function FormPane(props: FormPaneProps) {
     businessPurpose,
     attendees,
     isLocked,
-    isBusinessPurposeComposing,
     triggerSave,
   ]);
-
-  const handleBusinessPurposeCompositionStart = useCallback(() => {
-    businessPurposeComposingRef.current = true;
-    setIsBusinessPurposeComposing(true);
-    // A save scheduled just before composition began could still refresh the
-    // route midway through conversion, so cancel it (and any active request).
-    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-    inFlightRef.current?.abort();
-  }, []);
-
-  const handleBusinessPurposeCompositionEnd = useCallback((value: string) => {
-    businessPurposeComposingRef.current = false;
-    // Some WebKit IME sequences deliver the final value with compositionend;
-    // keeping it here makes the subsequent autosave use the committed text.
-    setBusinessPurpose(value);
-    setIsBusinessPurposeComposing(false);
-  }, []);
 
   // ─── keyboard shortcuts ─────────────────────────────────────────────
   const onMarkReviewed = useCallback(() => {
@@ -773,10 +743,6 @@ export function FormPane(props: FormPaneProps) {
             <TextInput
               value={businessPurpose}
               onChange={(e) => setBusinessPurpose(e.target.value)}
-              onCompositionStart={handleBusinessPurposeCompositionStart}
-              onCompositionEnd={(e) =>
-                handleBusinessPurposeCompositionEnd(e.currentTarget.value)
-              }
               disabled={isLocked}
               placeholder="e.g. Client dinner — Acme product review"
             />
