@@ -1,6 +1,6 @@
 "use client";
 
-import type { ReactNode, InputHTMLAttributes } from "react";
+import type { ReactNode, InputHTMLAttributes, Ref } from "react";
 
 export function Field({
   label,
@@ -54,6 +54,7 @@ export interface TextInputProps
   prefix?: ReactNode;
   suffix?: ReactNode;
   containerClassName?: string;
+  inputRef?: Ref<HTMLInputElement>;
 }
 
 export function TextInput({
@@ -62,6 +63,7 @@ export function TextInput({
   suffix,
   className = "",
   containerClassName = "",
+  inputRef,
   readOnly,
   ...rest
 }: TextInputProps) {
@@ -78,6 +80,7 @@ export function TextInput({
     >
       {prefix && <span className="text-[13px] text-gray-400">{prefix}</span>}
       <input
+        ref={inputRef}
         readOnly={readOnly}
         className={[
           "min-w-0 flex-1 bg-transparent text-sm text-gray-900 outline-none tabular-nums placeholder:text-gray-400",

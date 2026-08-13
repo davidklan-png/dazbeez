@@ -31,28 +31,31 @@ test("review autosave never refreshes the route while an operator is typing", ()
   assert.doesNotMatch(autosave, /router\.refresh\(/);
 });
 
-test("Business purpose remains a plain controlled input without IME-time state updates", () => {
-  // PR #189 added composition-start state updates to this controlled input.
-  // On Sonoma WebKit that render can write React's previous value over the
-  // browser's uncommitted marked text, making the field appear not to accept
-  // input at all. Do not restore that field-specific lifecycle.
-  assert.doesNotMatch(
+test("Business purpose is DOM-owned and its composition guard is ref-only", () => {
+  // Both state at compositionstart and a controlled value during later renders
+  // have broken Sonoma WebKit IME. The DOM owns marked text until commit.
+  assert.match(
     reviewForm,
-    /isBusinessPurposeComposing|businessPurposeComposingRef/,
+    /const businessPurposeComposingRef = useRef\(false\)/,
   );
+  assert.doesNotMatch(reviewForm, /isBusinessPurposeComposing/);
+  assert.doesNotMatch(reviewForm, /setBusinessPurpose/);
+  const compositionStart = section(
+    reviewForm,
+    "const handleBusinessPurposeCompositionStart",
+    "const handleBusinessPurposeCompositionEnd",
+  );
+  assert.doesNotMatch(compositionStart, /\bset[A-Z]\w*\(/);
+  assert.match(compositionStart, /businessPurposeComposingRef\.current = true/);
   const documentationField = section(
     reviewForm,
     'label="Business purpose"',
     'label="Attendees"',
   );
-  assert.doesNotMatch(
-    documentationField,
-    /onCompositionStart|onCompositionEnd/,
-  );
-  assert.match(
-    documentationField,
-    /onChange=\{\(e\) => setBusinessPurpose\(e\.target\.value\)\}/,
-  );
+  assert.match(documentationField, /onCompositionStart=/);
+  assert.match(documentationField, /onCompositionEnd=/);
+  assert.match(documentationField, /defaultValue=/);
+  assert.doesNotMatch(documentationField, /\svalue=\{/);
 });
 
 test("IME Enter does not blur the Missing receipt reason field", () => {

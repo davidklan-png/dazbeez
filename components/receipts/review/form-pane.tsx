@@ -139,9 +139,11 @@ export function FormPane(props: FormPaneProps) {
     formatAmountInput(receipt.amount_minor, receipt.currency),
   );
   const [currency, setCurrency] = useState(receipt.currency || "JPY");
-  const [businessPurpose, setBusinessPurpose] = useState(
-    receipt.business_purpose ?? "",
-  );
+  // Keep this one input DOM-owned. Sonoma WebKit loses native Japanese marked
+  // text when React writes a controlled `value` during composition.
+  const businessPurposeValueRef = useRef(receipt.business_purpose ?? "");
+  const businessPurposeComposingRef = useRef(false);
+  const businessPurposeInputRef = useRef<HTMLInputElement | null>(null);
   const [attendees, setAttendees] = useState<string[]>(
     props.initialAttendees.map((a) => a.attendee_name),
   );
@@ -200,8 +202,11 @@ export function FormPane(props: FormPaneProps) {
       setAmountDisplay(formatAmountInput(ex.amountMinor, ex.currency ?? currency));
       filled++;
     }
-    if (ex.businessPurpose && !businessPurpose) {
-      setBusinessPurpose(ex.businessPurpose);
+    if (ex.businessPurpose && !businessPurposeValueRef.current) {
+      businessPurposeValueRef.current = ex.businessPurpose;
+      if (businessPurposeInputRef.current) {
+        businessPurposeInputRef.current.value = ex.businessPurpose;
+      }
       filled++;
     }
     return filled;
@@ -245,6 +250,9 @@ export function FormPane(props: FormPaneProps) {
     (markReviewed: boolean) => {
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
       saveTimerRef.current = setTimeout(async () => {
+        // A composition may have started after this timer was scheduled. Do
+        // not update SaveBadge or any other React state until WebKit commits.
+        if (businessPurposeComposingRef.current) return;
         inFlightRef.current?.abort();
         const ctrl = new AbortController();
         inFlightRef.current = ctrl;
@@ -270,7 +278,7 @@ export function FormPane(props: FormPaneProps) {
               merchant: merchant.trim() || null,
               amountMinor,
               currency,
-              businessPurpose: businessPurpose.trim() || null,
+              businessPurpose: businessPurposeValueRef.current.trim() || null,
               attendees: attendees.map((a) => a.trim()).filter(Boolean),
               // Audit 2026-07-21 Phase 1: ordinary autosaves NEVER send status —
               // a stale client value must not be able to overwrite a lifecycle
@@ -287,6 +295,9 @@ export function FormPane(props: FormPaneProps) {
             error?: string;
             warnings?: string[];
           };
+          // Abort normally wins when composition begins during a request, but
+          // a response can already be resolving. Avoid its state updates too.
+          if (businessPurposeComposingRef.current) return;
           if (!res.ok) {
             setSave({
               kind: "error",
@@ -315,9 +326,23 @@ export function FormPane(props: FormPaneProps) {
       merchant,
       amountDisplay,
       currency,
-      businessPurpose,
       attendees,
     ],
+  );
+
+  const handleBusinessPurposeCompositionStart = useCallback(() => {
+    businessPurposeComposingRef.current = true;
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    inFlightRef.current?.abort();
+  }, []);
+
+  const handleBusinessPurposeCompositionEnd = useCallback(
+    (value: string) => {
+      businessPurposeValueRef.current = value;
+      businessPurposeComposingRef.current = false;
+      triggerSave(false);
+    },
+    [triggerSave],
   );
 
   // ADR 0006 §D6: discretionary export_statement_month override. Explicit (not
@@ -359,7 +384,7 @@ export function FormPane(props: FormPaneProps) {
     // Sealed receipt: never fire the autosave debounce. The fields are disabled
     // so they can't change, but this guards against programmatic state changes
     // and is the explicit "suppress entirely" the lock requires.
-    if (isLocked) return;
+    if (isLocked || businessPurposeComposingRef.current) return;
     triggerSave(false);
   }, [
     paymentPath,
@@ -368,7 +393,6 @@ export function FormPane(props: FormPaneProps) {
     merchant,
     amountDisplay,
     currency,
-    businessPurpose,
     attendees,
     isLocked,
     triggerSave,
@@ -400,7 +424,7 @@ export function FormPane(props: FormPaneProps) {
             merchant: merchant.trim() || null,
             amountMinor,
             currency,
-            businessPurpose: businessPurpose.trim() || null,
+            businessPurpose: businessPurposeValueRef.current.trim() || null,
             attendees: attendees.map((a) => a.trim()).filter(Boolean),
             // Promote to reviewed only when still in a pre-review state. For an
             // already-reviewed/reconciled/exported/archived receipt the server
@@ -441,7 +465,6 @@ export function FormPane(props: FormPaneProps) {
     merchant,
     amountDisplay,
     currency,
-    businessPurpose,
     attendees,
     nextReceiptId,
     queryParams,
@@ -741,8 +764,21 @@ export function FormPane(props: FormPaneProps) {
             hint={needsAttendees ? "Required" : "Optional"}
           >
             <TextInput
-              value={businessPurpose}
-              onChange={(e) => setBusinessPurpose(e.target.value)}
+              inputRef={businessPurposeInputRef}
+              defaultValue={receipt.business_purpose ?? ""}
+              onChange={(e) => {
+                businessPurposeValueRef.current = e.currentTarget.value;
+                if (!businessPurposeComposingRef.current) triggerSave(false);
+              }}
+              onCompositionStart={handleBusinessPurposeCompositionStart}
+              onCompositionEnd={(e) =>
+                handleBusinessPurposeCompositionEnd(e.currentTarget.value)
+              }
+              onBlur={(e) => {
+                businessPurposeValueRef.current = e.currentTarget.value;
+                businessPurposeComposingRef.current = false;
+                triggerSave(false);
+              }}
               disabled={isLocked}
               placeholder="e.g. Client dinner — Acme product review"
             />
