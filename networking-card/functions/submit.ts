@@ -35,7 +35,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       cf_city: cf?.city ?? null,
       user_agent: context.request.headers.get('user-agent'),
     });
-  } catch {
+  } catch (error) {
+    console.error('[submit] saveContact failed', error);
     return flowErrorResponse(
       'Could not save your details',
       'Your information could not be saved right now. Please try again from the card or contact David directly.',
