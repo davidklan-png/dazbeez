@@ -73,7 +73,7 @@ tables in one maintenance window; deliver via `d1 execute --file` — **never
 | 24 | non mi | n.mise@sekia.net | 2026-06-11 07:09 | Google sign-in → "Your details could not be saved" — but their info WAS saved |
 | 25 | Jatin Lalit | jatinlalit9@gmail.com | 2026-06-30 05:15 | same |
 
-David is following up personally. See
+David contacted both visitors on 2026-08-26 — follow-up closed. See
 `docs/incidents/2026-08-26-nfc-orphan-contact-followup.md`.
 
 ## Additional findings recorded during close-out (not acted on)

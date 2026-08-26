@@ -1,5 +1,8 @@
 # Follow-up: two visitors hit the broken NFC capture (for David to act on)
 
+> **CLOSED 2026-08-26 — David contacted both visitors.** No further action;
+> kept for the record.
+
 Context: `docs/incidents/2026-08-26-nfc-ghost-fk.md`. Between 2026-05-20 and
 2026-08-26 every card capture showed the visitor an error screen. Their data
 WAS actually saved (the contact row is written before the failing statement) —
