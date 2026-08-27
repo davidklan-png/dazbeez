@@ -29,6 +29,16 @@ test('saved sheet lists the contact fields and destination hints', () => {
   assert.match(sheet, /Downloads folder as david-klan\.vcf/);
 });
 
+test('saved sheet guides instead of asserting a download that may not have happened', () => {
+  const sheet = renderVCardSavedSheet();
+
+  // No reliable cross-browser download-success signal exists; the sheet must
+  // not claim one. (In-app browsers drop downloads silently.)
+  assert.ok(!sheet.includes('was downloaded'));
+  assert.match(sheet, /Check that the card saved/);
+  assert.match(sheet, /block downloads entirely/);
+});
+
 test('normalizeContactCardProfile cleans editable values', () => {
   const profile = normalizeContactCardProfile({
     fileName: ' David Klan Contact ',

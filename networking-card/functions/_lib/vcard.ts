@@ -100,9 +100,9 @@ export function renderVCardSavedSheet(
     <div id="vcard-sheet" class="sheet-backdrop" hidden aria-hidden="true">
       <div class="sheet-panel" role="dialog" aria-modal="true" aria-labelledby="vcard-sheet-title">
         <div class="sheet-pill" aria-hidden="true"></div>
-        <p class="sheet-eyebrow">Saved Contact</p>
-        <h2 id="vcard-sheet-title">${escapeHtml(normalized.fullName)}&apos;s contact card was downloaded</h2>
-        <p class="sheet-copy">Your device usually saves this as a <strong>${escapeHtml(normalized.fileName)}</strong> file and may also open a contacts import sheet right away.</p>
+        <p class="sheet-eyebrow">Contact card</p>
+        <h2 id="vcard-sheet-title">Check that the card saved</h2>
+        <p class="sheet-copy">Tapping the button should start a download, but browsers save files silently — and some in-app browsers (LINE, X, Facebook) block downloads entirely. Here is where the <strong>${escapeHtml(normalized.fileName)}</strong> file usually lands:</p>
 
         <div class="sheet-section">
           <h3>What is in the card</h3>
@@ -129,7 +129,7 @@ export function renderVCardSavedSheet(
           </ul>
         </div>
 
-        <p class="sheet-note">If nothing opened automatically, check your Downloads folder and open the file from there.</p>
+        <p class="sheet-note">Nothing arrived? Open this page in your regular browser (Safari or Chrome) and tap &ldquo;Save David&rsquo;s contact&rdquo; again.</p>
         <button type="button" class="btn btn-amber sheet-close" data-vcard-sheet-close>Continue</button>
       </div>
     </div>`;

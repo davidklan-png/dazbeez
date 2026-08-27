@@ -36,8 +36,8 @@ test('admin contacts route returns contacts and per-card metrics', async () => {
     },
   );
   dbState.taps.push(
-    { id: 1, token: 'card-1', cf_country: 'JP', cf_city: 'Tokyo', user_agent: 'UA-1' },
-    { id: 2, token: 'card-1', cf_country: 'JP', cf_city: 'Tokyo', user_agent: 'UA-2' },
+    { id: 1, token: 'card-1', cf_country: 'JP', cf_city: 'Tokyo', user_agent: 'UA-1', as_organization: 'NTT Communications' },
+    { id: 2, token: 'card-1', cf_country: 'JP', cf_city: 'Tokyo', user_agent: 'UA-2', as_organization: null },
   );
 
   const env = createEnv({

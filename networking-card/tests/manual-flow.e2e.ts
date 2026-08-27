@@ -171,7 +171,8 @@ async function main() {
           await page.locator('.g_id_signin').waitFor({ state: 'attached' });
         });
 
-        await page.getByRole('button', { name: 'Or enter your info manually' }).click();
+        // Manual form is the default path and visible on load (cycle 1, B1)
+        // — no toggle to click.
         await page.getByLabel('Name').fill('E2E Manual Tester');
         await page.getByLabel('Email').fill('e2e.manual@example.com');
         await page.getByLabel('Company (optional)').fill('Dazbeez QA');

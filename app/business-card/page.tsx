@@ -139,7 +139,7 @@ export default function BusinessCardPage() {
             </p>
             <div className="mt-8 flex flex-col gap-3 sm:flex-row">
               <Link
-                href="https://hi.dazbeez.com/hi/jKR9S31l"
+                href="https://hi.dazbeez.com/hi/Dn7UtNCb"
                 className="inline-flex items-center justify-center rounded-full bg-amber-500 px-6 py-3 text-sm font-semibold text-white transition-colors hover:bg-amber-600"
               >
                 Open a live example
@@ -374,7 +374,7 @@ export default function BusinessCardPage() {
             </p>
             <div className="mt-8 flex flex-col gap-3 sm:flex-row sm:justify-center">
               <Link
-                href="https://hi.dazbeez.com/hi/jKR9S31l"
+                href="https://hi.dazbeez.com/hi/Dn7UtNCb"
                 className="inline-flex items-center justify-center rounded-full bg-gray-900 px-6 py-3 text-sm font-semibold text-white transition-colors hover:bg-gray-800"
               >
                 Try the card flow

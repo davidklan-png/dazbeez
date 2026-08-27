@@ -15,12 +15,13 @@ export async function logTap(
   country: string | null,
   city: string | null,
   userAgent: string | null,
+  asOrganization: string | null,
 ): Promise<void> {
   await db
     .prepare(
-      'INSERT INTO taps (token, cf_country, cf_city, user_agent) VALUES (?, ?, ?, ?)',
+      'INSERT INTO taps (token, cf_country, cf_city, user_agent, as_organization) VALUES (?, ?, ?, ?, ?)',
     )
-    .bind(token, country, city, userAgent)
+    .bind(token, country, city, userAgent, asOrganization)
     .run();
 }
 
