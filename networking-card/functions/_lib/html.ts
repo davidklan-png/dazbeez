@@ -35,14 +35,6 @@ export function page(title: string, body: string): string {
       justify-content: center;
       font-size: 1.5rem;
     }
-    .eyebrow {
-      color: #fbbf24;
-      font-size: 0.75rem;
-      font-weight: 700;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-      margin-bottom: 0.875rem;
-    }
     h1 { font-size: 1.375rem; font-weight: 700; margin-bottom: 0.375rem; }
     h2 { font-size: 1rem; font-weight: 700; margin-bottom: 0.375rem; }
     .pitch { color: #9ca3af; margin-bottom: 1rem; font-size: 0.9375rem; line-height: 1.5; }
@@ -68,7 +60,6 @@ export function page(title: string, body: string): string {
       transition: color 0.15s;
     }
     .footer-links a:hover { color: #fbbf24; }
-    .subcopy { color: #d1d5db; margin: 0.875rem 0 1.125rem; font-size: 0.8125rem; line-height: 1.5; }
     .btn {
       display: block; width: 100%;
       padding: 0.75rem 1.25rem;
@@ -87,6 +78,7 @@ export function page(title: string, body: string): string {
     }
     .btn-google { background: #fff; color: #374151; }
     .btn-linkedin { background: #0a66c2; color: #fff; }
+    .btn-quiet { background: #374151; color: #f9fafb; }
     .btn-amber { background: #f59e0b; color: #111827; }
     .google-signin-shell {
       display: flex;
@@ -135,7 +127,7 @@ export function page(title: string, body: string): string {
       line-height: 1.5;
       margin-bottom: 0.875rem;
     }
-    .privacy { font-size: 0.6875rem; color: #9ca3af; margin-top: 1.5rem; line-height: 1.5; }
+    .privacy { font-size: 0.6875rem; color: #9ca3af; margin: 0.375rem 0 0; line-height: 1.5; }
     #manual-form { margin-top: 0.5rem; }
     .thanks-icon { font-size: 2.5rem; margin-bottom: 0.75rem; }
     .links { margin-top: 1.5rem; display: flex; gap: 0.75rem; justify-content: center; flex-wrap: wrap; }

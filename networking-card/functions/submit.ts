@@ -9,7 +9,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
   const name = (form.get('name') as string)?.trim();
   const email = (form.get('email') as string)?.trim();
   const company = (form.get('company') as string)?.trim() || undefined;
-  const linkedinUrl = (form.get('linkedin_url') as string)?.trim() || undefined;
 
   if (!token || !name || !email) {
     return new Response('Missing required fields', { status: 400 });
@@ -30,7 +29,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       email,
       source: 'manual',
       company,
-      linkedin_url: linkedinUrl,
       cf_country: cf?.country ?? null,
       cf_city: cf?.city ?? null,
       user_agent: context.request.headers.get('user-agent'),
@@ -54,7 +52,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     source: 'manual',
     name,
     email,
-    linkedinUrl: linkedinUrl ?? null,
     followUpUrl: `${origin}/hi/${token}`,
   });
 

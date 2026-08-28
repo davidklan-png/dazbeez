@@ -178,8 +178,12 @@ async function main() {
         await assert.doesNotReject(async () => {
           await page.getByRole('link', { name: 'Save my contact' }).waitFor();
         });
+        // Cycle 2: exploration is footer links now — actions are buttons.
         await assert.doesNotReject(async () => {
-          await page.getByRole('link', { name: 'What I do' }).waitFor();
+          await page.getByRole('link', { name: 'Dazbeez' }).waitFor();
+        });
+        await assert.doesNotReject(async () => {
+          await page.getByRole('link', { name: 'Kinokoholic' }).waitFor();
         });
 
         const dbOutput = await runCommand([

@@ -90,7 +90,6 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
   const html = page(
     'Hi from David',
     `
-    <p class="eyebrow">Tap. Save. Connect.</p>
     <div class="photo">\ud83d\udc1d</div>
     <h1>David Klan</h1>
     <p class="pitch">Let&rsquo;s swap details.</p>
@@ -114,22 +113,19 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
         <label for="company">Company (optional)</label>
         <input type="text" id="company" name="company" autocomplete="organization">
       </div>
-      <div class="form-group">
-        <label for="linkedin_url">LinkedIn URL (optional)</label>
-        <input type="url" id="linkedin_url" name="linkedin_url" autocomplete="url" placeholder="https://linkedin.com/in/...">
-      </div>
       <button type="submit" class="btn btn-amber">Send</button>
+      <p class="privacy">Your info goes to David only. Never shared.</p>
     </form>
 
     ${googleSignIn}
 
+    <!-- Visual rule for this page family: actions are buttons, exploration
+         is footer links. Two identity labels, two destinations. -->
     <div class="footer-links">
-      <a href="https://dazbeez.com/services">What I do</a>
-      <a href="https://dazbeez.com/contact">Start an inquiry</a>
-      <a href="https://dazbeez.com/business-card">About this card</a>
+      <a href="https://dazbeez.com">Dazbeez</a>
+      <a href="https://kinokoholic.com">Kinokoholic</a>
     </div>
 
-    <p class="privacy">Your info goes to David only. Never shared.</p>
     ${renderVCardSavedSheet(vcardProfile)}`,
   );
 
