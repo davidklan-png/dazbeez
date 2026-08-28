@@ -81,8 +81,43 @@ test('hi route degrades cleanly when a provider is not configured', async () => 
   assert.doesNotMatch(html, /client_id=undefined/);
   assert.match(
     html,
-    /Google sign-in is temporarily unavailable\. You can still use the manual form below\./,
+    /Google sign-in is temporarily unavailable — the form above saves your details just the same\./,
   );
+});
+
+test('hi route gives before it takes and shows the manual form without JavaScript', async () => {
+  const dbState = createFakeDbState([{ token: 'card-1', label: 'card-1' }]);
+  const env = createEnv({
+    DB: createFakeD1Database(dbState),
+  });
+  const { context, waitUntilCalls } = createPagesContext({
+    url: 'https://hi.dazbeez.com/hi/card-1',
+    params: { token: 'card-1' },
+    env,
+  });
+
+  const response = await hiRoute(context as never);
+  const html = await response.text();
+
+  // No-JS first: the manual form is server-rendered and needs no toggle.
+  // (Evidenced 2026-08-27: Firefox-on-iOS visitor, page rendered, no
+  // submission — the reveal-on-click path was one silent dead end too many.)
+  assert.ok(html.includes('<form id="manual-form"'));
+  assert.ok(html.includes('autocomplete="name"'));
+  assert.ok(html.includes('autocomplete="email"'));
+  assert.ok(!html.includes('manual-toggle'));
+
+  // Give before take: vCard + LinkedIn render above the capture form.
+  const giveIndex = html.indexOf('Save David&rsquo;s contact');
+  const linkedinIndex = html.indexOf('Connect with David on LinkedIn');
+  const formIndex = html.indexOf('<form id="manual-form"');
+  assert.ok(giveIndex !== -1 && giveIndex < formIndex);
+  assert.ok(linkedinIndex !== -1 && linkedinIndex < formIndex);
+
+  await Promise.all(waitUntilCalls);
+  // The tap records the visitor network, the human-vs-crawler signal.
+  assert.equal(dbState.taps.length, 1);
+  assert.equal(dbState.taps[0].as_organization, 'NTT Communications');
 });
 
 test('manual submit stores the contact and redirects to thanks', async () => {

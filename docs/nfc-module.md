@@ -213,11 +213,89 @@ Set via `npx wrangler pages secret put <SECRET> -p dazbeez-networking-card`.
 | `DISCORD_WEBHOOK_URL` | Yes | Real-time contact notifications |
 | `ADMIN_API_KEY` | Recommended | Shared secret for the admin contacts API |
 
-D1 database binding: `DB` (configured in `wrangler.toml`).
+D1 database binding: `DB` (configured in `wrangler.jsonc`).
+
+### Migration rules for `dazbeez-networking` (learned 2026-08-26 — see the ghost-FK incident)
+
+> **Any migration that renames a table MUST first enumerate that table's
+> referrers and rebuild them too.** Since SQLite 3.25, `ALTER TABLE … RENAME
+> TO` rewrites `REFERENCES` clauses in other tables to follow the rename.
+> `PRAGMA foreign_keys = OFF` does not suppress this — only
+> `legacy_alter_table = ON` does. A subsequent `DROP` then leaves a ghost FK
+> pointing at a table that no longer exists.
+>
+> **`PRAGMA foreign_key_check` does NOT detect this.** It validates rows, not
+> schema targets, so a database full of NULL child keys looks perfectly
+> clean. To detect ghosts, compare every `PRAGMA foreign_key_list(<table>)`
+> target against `sqlite_master`.
+>
+> **This database's migrations are hand-applied via `d1 execute --file`.
+> Never run `wrangler d1 migrations apply` against it.** `CRM_DB` declares no
+> `migrations_dir`; a managed replay re-runs 0002's live `DELETE` and
+> 0007/0009's rename-rebuild-drops against real data. This has already
+> happened once — see the incident record — and it is what caused the outage.
 
 Operational notes:
 - Contacts are deduplicated per `token + email`.
 - Every registration is also logged to `contact_events`, so Google, manual, and any legacy LinkedIn submissions remain visible even when they resolve to the same contact row.
+
+#### KNOWN SCHEMA DEBT — shim table `batch_cards_old_fk_repair` (2026-08-26)
+
+Production D1 (`dazbeez-networking`) contains an **empty shim table**:
+
+```sql
+CREATE TABLE IF NOT EXISTS batch_cards_old_fk_repair (id INTEGER PRIMARY KEY);
+```
+
+Why it exists: migration `0009` renamed `batch_cards` to rebuild it, which (SQLite ≥3.25
+`ALTER TABLE … RENAME` semantics) retargeted the `REFERENCES batch_cards(id)` FKs in
+`contact_events` and `business_card_images` at the repair-named table, then dropped it —
+leaving ghost FKs. From 2026-05-20 every capture failed at the `contact_events` INSERT
+(`no such table: main.batch_cards_old_fk_repair`, 503 on Google/LinkedIn/manual) while the
+`contacts` row still saved. The shim makes the FK resolvable again; nothing in the live
+capture path ever writes a non-NULL `batch_card_id`, so the shim is never read.
+
+**Do not delete this table** until migration 0013 rebuilds `contact_events` and
+`business_card_images` with the ghost FKs actually removed (architect plan of record:
+`prompts/WORKER-PROMPT-nfc-ghost-fk-fix.md` §3). Dropping it first re-breaks all capture.
+Convention: apply with `wrangler d1 execute --file`, never `d1 migrations apply`.
+Also note `0012_mobile_capture.sql` is present in the repo but NOT applied to prod.
+
+### Deploying the card (the real invocation — documented 2026-08-28)
+
+The card deploys by **direct upload** (this Pages project has no git
+integration; `origin/master` merges do NOT touch it). From
+`networking-card/`:
+
+```bash
+npm run deploy
+# = wrangler pages deploy --project-name dazbeez-networking-card \
+#     --branch main --commit-dirty=true
+```
+
+- `--branch main` targets the **production** deployment (any other branch
+  string creates a preview deployment and leaves production untouched).
+- `--commit-dirty=true` is required in practice: this working tree always
+  carries untracked files, and without the flag an interactive prompt blocks
+  non-interactive deploys.
+- No `--config`, no positional directory: `wrangler.jsonc` in the package
+  dir supplies `pages_build_output_dir = "public"`. (Pages commands reject
+  `--config`, and dropping it while a `wrangler.toml` name is used makes
+  config discovery load the MONOREPO ROOT's `wrangler.jsonc` — the file must
+  be named `wrangler.jsonc` so same-type-nearest-wins resolves ours. Proven
+  2026-08-28; see `wrangler.jsonc`'s header comment.)
+
+**Proof status of this command (as of 2026-08-28):** arg parsing, config
+resolution, asset/function discovery from this directory, and API auth are
+proven live (dev server + e2e run on the same discovery path; `pages project
+list` authenticates and shows the project). The upload step itself is **not**
+dry-runnable (`pages deploy` has no `--dry-run`) — the first execution was
+left to the operator's deploy step, watched, per the cycle-1 go-ahead.
+
+**Deploy order when a change touches BOTH the main app and the card** (e.g.
+cycle 1's marketing token): tokens/D1 prerequisites first, then
+master merge (main app auto-deploys), then this command. See
+`prompts/WORKER-PROMPT-nfc-cycle-1.md` §4 for the concrete cycle-1 order.
 - Failed Discord/email deliveries are logged to `notification_failures`.
 - Admin API routes: `GET /admin/contacts` and `DELETE /admin/contacts/:id`.
 - Main-site admin UI: `GET /admin` on the Next.js app fetches the live NFC admin feed server-side and shows card metrics, recent contacts, registration activity, and delete controls for contact removal.

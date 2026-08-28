@@ -85,7 +85,8 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       cf_city: cf?.city ?? null,
       user_agent: context.request.headers.get('user-agent'),
     });
-  } catch {
+  } catch (error) {
+    console.error('[auth/linkedin/callback] saveContact failed', error);
     return oauthErrorResponse(
       'LinkedIn sign-in issue',
       'Your details could not be saved right now. Please try again or use the manual form instead.',

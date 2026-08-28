@@ -32,19 +32,25 @@ npm install
 npx wrangler d1 create dazbeez-networking
 ```
 
-Copy the `database_id` from the output into `wrangler.toml`.
+Copy the `database_id` from the output into `wrangler.jsonc`.
 
 ### 3. Run migrations
 
 ```bash
 # Local development
 npm run db:migrate:local
-
-# Production
-npm run db:migrate:remote
 ```
 
 These scripts now include `migrations/0006_known_attendees.sql`, which creates the table used by the personalized post-tap flow.
+
+**Production schema changes are hand-applied — there is deliberately no
+one-command remote migration script.** The `db:migrate:remote` scripts were
+removed (2026-08-27): they chain-replayed `0009`'s rename-rebuild against
+production, the exact operation class that caused the 2026-05-20 → 2026-08-26
+capture outage. To change the production schema, follow the **Migration rules**
+in `docs/nfc-module.md`: apply one numbered file at a time with
+`wrangler d1 execute dazbeez-networking --remote --file=migrations/NNNN_….sql`,
+after rehearsal. Never `wrangler d1 migrations apply` against this database.
 
 ### 3a. Seed event personalization (optional)
 
@@ -112,8 +118,8 @@ npm run seed -- 50 https://hi.dazbeez.com
 This creates `seed.sql` and `cards.csv`. Apply the SQL:
 
 ```bash
-npx wrangler --config wrangler.toml d1 execute dazbeez-networking --local  --file=seed.sql
-npx wrangler --config wrangler.toml d1 execute dazbeez-networking --remote --file=seed.sql
+npx wrangler d1 execute dazbeez-networking --local  --file=seed.sql
+npx wrangler d1 execute dazbeez-networking --remote --file=seed.sql
 ```
 
 Use `cards.csv` to generate QR codes or program NFC tags.
@@ -167,6 +173,22 @@ This project runs as a Cloudflare Pages project. To route `dazbeez.com/hi/*` tra
 
 **Option B — Path-based routing:**
 - Use a Cloudflare Worker with a route on `dazbeez.com/hi/*` that proxies to the Pages project
+
+## Weekly heartbeat
+
+The instrument for "did the card do anything this week — and would I notice
+if it silently stopped?" (The 2026-05-20 → 2026-08-26 capture outage was
+invisible for three months because answering that question required going to
+look.)
+
+```bash
+npm run stats:week    # prints this week's taps + captures, test card excluded
+```
+
+Deliberately a command, not a daemon: if running it by hand ever feels like
+a habit worth automating, that is the evidence to add a push (the script's
+`--post` flag pings the Discord webhook from `.dev.vars` — kept for that
+day, installed nowhere today).
 
 ## Privacy
 

@@ -91,11 +91,9 @@ async function main() {
 
   await withTemporaryDevVars(devVars, async () => {
     await rm(localPersistPath, { recursive: true, force: true });
-    for (const migration of ['migrations/0001_init.sql', 'migrations/0002_hardening.sql', 'migrations/0003_contact_methods.sql', 'migrations/0004_contact_events.sql', 'migrations/0005_vcard_profile.sql', 'migrations/0006_known_attendees.sql']) {
+    for (const migration of ['migrations/0001_init.sql', 'migrations/0002_hardening.sql', 'migrations/0003_contact_methods.sql', 'migrations/0004_contact_events.sql', 'migrations/0005_vcard_profile.sql', 'migrations/0006_known_attendees.sql', 'migrations/0007_bespoke_crm.sql', 'migrations/0015_taps_as_organization.sql']) {
       await runCommand([
         'wrangler',
-        '--config',
-        'wrangler.toml',
         'd1',
         'execute',
         'DB',
@@ -108,8 +106,6 @@ async function main() {
     }
     await runCommand([
       'wrangler',
-      '--config',
-      'wrangler.toml',
       'd1',
       'execute',
       'DB',
@@ -127,7 +123,7 @@ async function main() {
 
     const devServer = spawn(
       'npx',
-      ['wrangler', '--config', 'wrangler.toml', 'pages', 'dev', 'public', '--port', '8788', '--persist-to', localPersistPath],
+      ['wrangler', 'pages', 'dev', '--port', '8788', '--persist-to', localPersistPath],
       {
         cwd,
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -171,7 +167,8 @@ async function main() {
           await page.locator('.g_id_signin').waitFor({ state: 'attached' });
         });
 
-        await page.getByRole('button', { name: 'Or enter your info manually' }).click();
+        // Manual form is the default path and visible on load (cycle 1, B1)
+        // — no toggle to click.
         await page.getByLabel('Name').fill('E2E Manual Tester');
         await page.getByLabel('Email').fill('e2e.manual@example.com');
         await page.getByLabel('Company (optional)').fill('Dazbeez QA');
@@ -187,8 +184,6 @@ async function main() {
 
         const dbOutput = await runCommand([
           'wrangler',
-          '--config',
-          'wrangler.toml',
           'd1',
           'execute',
           'DB',

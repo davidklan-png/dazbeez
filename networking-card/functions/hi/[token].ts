@@ -17,7 +17,12 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     return new Response('Not found', { status: 404 });
   }
 
-  // Log tap asynchronously
+  // Log tap asynchronously. asOrganization (the visitor's network — e.g.
+  // "NTT Docomo" vs a hosting provider) is the human-vs-crawler signal;
+  // cf_city is CGNAT-noisy and must not be trusted as a location.
+  // The catch is permanent, same rule as the saveContact paths: a tap-logging
+  // failure must announce itself in the logs, not silently stop the instrument
+  // (e.g. if this ever deploys ahead of the taps ALTER).
   const cf = context.request.cf as Record<string, string> | undefined;
   const ua = context.request.headers.get('user-agent');
   context.waitUntil(
@@ -27,7 +32,8 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       cf?.country ?? null,
       cf?.city ?? null,
       ua,
-    ),
+      cf?.asOrganization ?? null,
+    ).catch((error) => console.error('[hi/:token] logTap failed', error)),
   );
 
   const vcardProfile = await getVCardProfile(context.env.DB);
@@ -40,6 +46,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
 
   const googleSignIn = context.env.GOOGLE_CLIENT_ID
     ? `
+    <p class="divider-label">or one tap with Google</p>
     <script src="https://accounts.google.com/gsi/client" async defer></script>
     <script>
       function handleGisResponse(response) {
@@ -77,7 +84,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
         data-width="320"></div>
     </div>`
     : renderProviderNote(
-        'Google sign-in is temporarily unavailable. You can still use the manual form below.',
+        'Google sign-in is temporarily unavailable \u2014 the form above saves your details just the same.',
       );
 
   const html = page(
@@ -88,9 +95,11 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     <h1>David Klan</h1>
     <p class="pitch">Let&rsquo;s swap details.</p>
 
-    ${googleSignIn}
-    <button id="manual-toggle" type="button" class="btn btn-manual" aria-expanded="false" aria-controls="manual-form">Or enter your info manually</button>
+    <p class="divider-label">Save my details</p>
+    <a href="/vcard/${token}" class="btn btn-amber" download="${vcardProfile.fileName}" data-vcard-download>Save David&rsquo;s contact</a>
+    <a href="https://www.linkedin.com/in/david-klan" target="_blank" rel="noopener" class="btn btn-linkedin">Connect with David on LinkedIn</a>
 
+    <p class="divider-label">Share yours</p>
     <form id="manual-form" method="POST" action="/submit">
       <input type="hidden" name="token" value="${token}">
       <div class="form-group">
@@ -112,33 +121,16 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       <button type="submit" class="btn btn-amber">Send</button>
     </form>
 
-    <p class="divider-label">Take mine too</p>
-    <a href="/vcard/${token}" class="btn btn-amber" download="${vcardProfile.fileName}" data-vcard-download>Save David&rsquo;s contact</a>
-    <a href="https://www.linkedin.com/in/david-klan" target="_blank" rel="noopener" class="btn btn-linkedin">Connect with David on LinkedIn</a>
+    ${googleSignIn}
 
     <div class="footer-links">
       <a href="https://dazbeez.com/services">What I do</a>
-      <a href="https://dazbeez.com/inquiry">Start an inquiry</a>
+      <a href="https://dazbeez.com/contact">Start an inquiry</a>
       <a href="https://dazbeez.com/business-card">About this card</a>
     </div>
 
     <p class="privacy">Your info goes to David only. Never shared.</p>
-    ${renderVCardSavedSheet(vcardProfile)}
-    <script>
-      (function () {
-        var toggle = document.getElementById('manual-toggle');
-        var form = document.getElementById('manual-form');
-        if (!toggle || !form) return;
-        var openLabel = 'Or enter your info manually';
-        var closeLabel = 'Hide manual form';
-        toggle.addEventListener('click', function () {
-          var isOpen = form.style.display === 'block';
-          form.style.display = isOpen ? 'none' : 'block';
-          toggle.setAttribute('aria-expanded', isOpen ? 'false' : 'true');
-          toggle.textContent = isOpen ? openLabel : closeLabel;
-        });
-      })();
-    </script>`,
+    ${renderVCardSavedSheet(vcardProfile)}`,
   );
 
   return new Response(html, {

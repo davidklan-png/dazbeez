@@ -18,6 +18,7 @@ interface FakeTapRow {
   cf_country: string | null;
   cf_city: string | null;
   user_agent: string | null;
+  as_organization: string | null;
 }
 
 interface FakeNotificationFailureRow {
@@ -216,6 +217,7 @@ export function createFakeD1Database(state: FakeDbState): D1Database {
                   cf_country: (params[1] as string | null) ?? null,
                   cf_city: (params[2] as string | null) ?? null,
                   user_agent: (params[3] as string | null) ?? null,
+                  as_organization: (params[4] as string | null) ?? null,
                 });
 
                 return { meta: { last_row_id: state.taps.length, changes: 1 } };
@@ -380,6 +382,7 @@ export function createPagesContext({
   (request as Request & { cf?: Record<string, string> }).cf = {
     country: 'JP',
     city: 'Tokyo',
+    asOrganization: 'NTT Communications',
   };
 
   const waitUntilCalls: Promise<unknown>[] = [];

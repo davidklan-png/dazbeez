@@ -80,9 +80,13 @@ export function page(title: string, body: string): string {
       transition: opacity 0.15s;
     }
     .btn:hover { opacity: 0.9; }
+    .btn:focus-visible,
+    .footer-links a:focus-visible {
+      outline: 2px solid #fbbf24;
+      outline-offset: 2px;
+    }
     .btn-google { background: #fff; color: #374151; }
     .btn-linkedin { background: #0a66c2; color: #fff; }
-    .btn-manual { background: #374151; color: #f9fafb; }
     .btn-amber { background: #f59e0b; color: #111827; }
     .google-signin-shell {
       display: flex;
@@ -131,8 +135,8 @@ export function page(title: string, body: string): string {
       line-height: 1.5;
       margin-bottom: 0.875rem;
     }
-    .privacy { font-size: 0.6875rem; color: #6b7280; margin-top: 1.5rem; line-height: 1.5; }
-    #manual-form { display: none; margin-top: 1.25rem; }
+    .privacy { font-size: 0.6875rem; color: #9ca3af; margin-top: 1.5rem; line-height: 1.5; }
+    #manual-form { margin-top: 0.5rem; }
     .thanks-icon { font-size: 2.5rem; margin-bottom: 0.75rem; }
     .links { margin-top: 1.5rem; display: flex; gap: 0.75rem; justify-content: center; flex-wrap: wrap; }
     body.modal-open { overflow: hidden; }
