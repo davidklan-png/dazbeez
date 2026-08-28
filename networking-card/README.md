@@ -32,7 +32,7 @@ npm install
 npx wrangler d1 create dazbeez-networking
 ```
 
-Copy the `database_id` from the output into `wrangler.toml`.
+Copy the `database_id` from the output into `wrangler.jsonc`.
 
 ### 3. Run migrations
 
@@ -118,8 +118,8 @@ npm run seed -- 50 https://hi.dazbeez.com
 This creates `seed.sql` and `cards.csv`. Apply the SQL:
 
 ```bash
-npx wrangler --config wrangler.toml d1 execute dazbeez-networking --local  --file=seed.sql
-npx wrangler --config wrangler.toml d1 execute dazbeez-networking --remote --file=seed.sql
+npx wrangler d1 execute dazbeez-networking --local  --file=seed.sql
+npx wrangler d1 execute dazbeez-networking --remote --file=seed.sql
 ```
 
 Use `cards.csv` to generate QR codes or program NFC tags.
@@ -182,22 +182,13 @@ invisible for three months because answering that question required going to
 look.)
 
 ```bash
-npm run stats:week                          # print this week's taps + captures
-./scripts/weekly-heartbeat.sh --post        # also ping the Discord webhook
+npm run stats:week    # prints this week's taps + captures, test card excluded
 ```
 
-Both exclude the test card token (`NFC_TEST_TOKEN`, default `mT7JWcIv`) so
-verification traffic never pollutes the number. To get the weekly figure
-without going looking, install the launchd job:
-
-```bash
-cp scripts/com.dklan.nfc-heartbeat.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.dklan.nfc-heartbeat.plist
-```
-
-It posts the two numbers to Discord every Monday morning (output in
-`/tmp/nfc-heartbeat.out`). Delete the plist if the ping becomes noise — the
-`stats:week` command keeps working either way.
+Deliberately a command, not a daemon: if running it by hand ever feels like
+a habit worth automating, that is the evidence to add a push (the script's
+`--post` flag pings the Discord webhook from `.dev.vars` — kept for that
+day, installed nowhere today).
 
 ## Privacy
 

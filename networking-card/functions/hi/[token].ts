@@ -20,6 +20,9 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
   // Log tap asynchronously. asOrganization (the visitor's network — e.g.
   // "NTT Docomo" vs a hosting provider) is the human-vs-crawler signal;
   // cf_city is CGNAT-noisy and must not be trusted as a location.
+  // The catch is permanent, same rule as the saveContact paths: a tap-logging
+  // failure must announce itself in the logs, not silently stop the instrument
+  // (e.g. if this ever deploys ahead of the taps ALTER).
   const cf = context.request.cf as Record<string, string> | undefined;
   const ua = context.request.headers.get('user-agent');
   context.waitUntil(
@@ -30,7 +33,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       cf?.city ?? null,
       ua,
       cf?.asOrganization ?? null,
-    ),
+    ).catch((error) => console.error('[hi/:token] logTap failed', error)),
   );
 
   const vcardProfile = await getVCardProfile(context.env.DB);

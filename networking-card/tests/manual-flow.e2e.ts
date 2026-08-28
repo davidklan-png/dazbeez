@@ -91,11 +91,9 @@ async function main() {
 
   await withTemporaryDevVars(devVars, async () => {
     await rm(localPersistPath, { recursive: true, force: true });
-    for (const migration of ['migrations/0001_init.sql', 'migrations/0002_hardening.sql', 'migrations/0003_contact_methods.sql', 'migrations/0004_contact_events.sql', 'migrations/0005_vcard_profile.sql', 'migrations/0006_known_attendees.sql']) {
+    for (const migration of ['migrations/0001_init.sql', 'migrations/0002_hardening.sql', 'migrations/0003_contact_methods.sql', 'migrations/0004_contact_events.sql', 'migrations/0005_vcard_profile.sql', 'migrations/0006_known_attendees.sql', 'migrations/0007_bespoke_crm.sql', 'migrations/0015_taps_as_organization.sql']) {
       await runCommand([
         'wrangler',
-        '--config',
-        'wrangler.toml',
         'd1',
         'execute',
         'DB',
@@ -108,8 +106,6 @@ async function main() {
     }
     await runCommand([
       'wrangler',
-      '--config',
-      'wrangler.toml',
       'd1',
       'execute',
       'DB',
@@ -127,7 +123,7 @@ async function main() {
 
     const devServer = spawn(
       'npx',
-      ['wrangler', '--config', 'wrangler.toml', 'pages', 'dev', 'public', '--port', '8788', '--persist-to', localPersistPath],
+      ['wrangler', 'pages', 'dev', '--port', '8788', '--persist-to', localPersistPath],
       {
         cwd,
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -188,8 +184,6 @@ async function main() {
 
         const dbOutput = await runCommand([
           'wrangler',
-          '--config',
-          'wrangler.toml',
           'd1',
           'execute',
           'DB',

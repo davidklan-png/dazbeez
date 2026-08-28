@@ -213,7 +213,7 @@ Set via `npx wrangler pages secret put <SECRET> -p dazbeez-networking-card`.
 | `DISCORD_WEBHOOK_URL` | Yes | Real-time contact notifications |
 | `ADMIN_API_KEY` | Recommended | Shared secret for the admin contacts API |
 
-D1 database binding: `DB` (configured in `wrangler.toml`).
+D1 database binding: `DB` (configured in `wrangler.jsonc`).
 
 ### Migration rules for `dazbeez-networking` (learned 2026-08-26 — see the ghost-FK incident)
 
@@ -260,6 +260,42 @@ capture path ever writes a non-NULL `batch_card_id`, so the shim is never read.
 `prompts/WORKER-PROMPT-nfc-ghost-fk-fix.md` §3). Dropping it first re-breaks all capture.
 Convention: apply with `wrangler d1 execute --file`, never `d1 migrations apply`.
 Also note `0012_mobile_capture.sql` is present in the repo but NOT applied to prod.
+
+### Deploying the card (the real invocation — documented 2026-08-28)
+
+The card deploys by **direct upload** (this Pages project has no git
+integration; `origin/master` merges do NOT touch it). From
+`networking-card/`:
+
+```bash
+npm run deploy
+# = wrangler pages deploy --project-name dazbeez-networking-card \
+#     --branch main --commit-dirty=true
+```
+
+- `--branch main` targets the **production** deployment (any other branch
+  string creates a preview deployment and leaves production untouched).
+- `--commit-dirty=true` is required in practice: this working tree always
+  carries untracked files, and without the flag an interactive prompt blocks
+  non-interactive deploys.
+- No `--config`, no positional directory: `wrangler.jsonc` in the package
+  dir supplies `pages_build_output_dir = "public"`. (Pages commands reject
+  `--config`, and dropping it while a `wrangler.toml` name is used makes
+  config discovery load the MONOREPO ROOT's `wrangler.jsonc` — the file must
+  be named `wrangler.jsonc` so same-type-nearest-wins resolves ours. Proven
+  2026-08-28; see `wrangler.jsonc`'s header comment.)
+
+**Proof status of this command (as of 2026-08-28):** arg parsing, config
+resolution, asset/function discovery from this directory, and API auth are
+proven live (dev server + e2e run on the same discovery path; `pages project
+list` authenticates and shows the project). The upload step itself is **not**
+dry-runnable (`pages deploy` has no `--dry-run`) — the first execution was
+left to the operator's deploy step, watched, per the cycle-1 go-ahead.
+
+**Deploy order when a change touches BOTH the main app and the card** (e.g.
+cycle 1's marketing token): tokens/D1 prerequisites first, then
+master merge (main app auto-deploys), then this command. See
+`prompts/WORKER-PROMPT-nfc-cycle-1.md` §4 for the concrete cycle-1 order.
 - Failed Discord/email deliveries are logged to `notification_failures`.
 - Admin API routes: `GET /admin/contacts` and `DELETE /admin/contacts/:id`.
 - Main-site admin UI: `GET /admin` on the Next.js app fetches the live NFC admin feed server-side and shows card metrics, recent contacts, registration activity, and delete controls for contact removal.
