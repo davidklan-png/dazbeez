@@ -49,7 +49,7 @@ export const onRequestGet: PagesFunction<{ DB: D1Database }> = async (context) =
   }
 
   const backToCardLink = safeToken
-    ? `<a href="/hi/${safeToken}" class="btn btn-outline">Back to David&rsquo;s card</a>`
+    ? `<a href="/hi/${safeToken}" class="btn btn-quiet">Back to David&rsquo;s card</a>`
     : '';
 
   // Default pitch — only rendered when we don't have a personalized opener.
@@ -65,16 +65,20 @@ export const onRequestGet: PagesFunction<{ DB: D1Database }> = async (context) =
     ${thanksBody.openerHtml}
     ${defaultPitch}
 
+    <!-- Visual rule for this page family: actions are full-width buttons,
+         exploration is footer links. -->
     <div class="links">
       ${thanksBody.ctaHtml}
       ${backToCardLink}
       <a href="/vcard/${contactIdParam}" class="btn btn-amber" download="${vcardProfile.fileName}" data-vcard-download>Save my contact</a>
       <a href="https://www.linkedin.com/in/david-klan" target="_blank" rel="noopener" class="btn btn-linkedin">Connect with me on LinkedIn</a>
-      <a href="https://dazbeez.com/services" class="btn btn-outline">What I do</a>
-      <a href="https://dazbeez.com/contact" class="btn btn-outline">Start an inquiry</a>
     </div>
 
-    <p class="subcopy">A later tap can take you straight back into services, questions, follow-up, or my LinkedIn profile when the need is clearer.</p>
+    <div class="footer-links">
+      <a href="https://dazbeez.com">Dazbeez</a>
+      <a href="https://kinokoholic.com">Kinokoholic</a>
+    </div>
+
     ${renderVCardSavedSheet(vcardProfile)}`,
   );
 
