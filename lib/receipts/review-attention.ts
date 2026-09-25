@@ -24,9 +24,11 @@
 // crossMonthAmbiguousReceiptIds (reconciliation-signoff), isPendingProcessing /
 // isUnreviewedReceipt / isUnknownPathReceipt / isReceiptMissingProofFile /
 // isIcCardTopUpCandidate / groupDuplicateReceipts (blockers, extraction-state),
-// and the open-compliance-check set (compliance).
+// findAmexDuplicateCandidates (amex-duplicates), and the open-compliance-check
+// set (compliance).
 
 import { getReceiptsDb } from "@/lib/cloudflare-runtime";
+import { findAmexDuplicateCandidates } from "@/lib/receipts/amex-duplicates";
 import { requiresAttendees } from "@/lib/receipts/categories";
 import { resolveAttendeeNames } from "@/lib/receipts/attendee-directory";
 import type { ReceiptAttendeeDirectoryEntry } from "@/lib/receipts/attendee-directory";
@@ -119,7 +121,8 @@ export interface ClosingAttentionInput {
  *     consolidated-line total mismatch (`amex_total_mismatch`);
  *   - (7) matched to AMEX lines in more than one statement month (cross-month
  *     ambiguity);
- *   - (8) a member of a possible-duplicate CASH/DIGITAL cluster;
+ *   - (8) a member of a possible-duplicate cluster (CASH/DIGITAL clustering, or
+ *     an AMEX pair found by findAmexDuplicateCandidates);
  *   - (9) a likely IC-card top-up candidate.
  *
  * Issues that live only on an AMEX line with no matched receipt cannot appear
@@ -179,6 +182,18 @@ export function computeClosingAttentionReasons(
   const duplicateIds = new Set<string>();
   for (const cluster of groupDuplicateReceipts(receipts)) {
     for (const id of cluster.ids) duplicateIds.add(id);
+  }
+  // groupDuplicateReceipts gates on CASH/DIGITAL, so AMEX re-capture pairs
+  // (same canonical merchant + amount + date) are invisible to it — they were
+  // only caught on Reconcile, weeks later, after the statement import. Run the
+  // AMEX-aware finder here with subjects = pool = the AMEX receipts, so each
+  // member of a pair flags the other at review time.
+  const amexReceipts = receipts.filter((r) => r.payment_path === "AMEX");
+  const amexMatchedIds = new Set(
+    amexLines.flatMap((l) => (l.matched_receipt_id ? [l.matched_receipt_id] : [])),
+  );
+  for (const id of findAmexDuplicateCandidates(amexReceipts, amexReceipts, amexMatchedIds).keys()) {
+    duplicateIds.add(id);
   }
 
   for (const r of receipts) {

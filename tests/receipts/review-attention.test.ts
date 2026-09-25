@@ -315,6 +315,51 @@ test("attention: every receipt in a possible-duplicate CASH/DIGITAL cluster is i
   assert.equal(set.has("dup2"), true);
 });
 
+test("attention: both members of an AMEX same-merchant/amount/date pair get possible_duplicate", () => {
+  // Mirrors the live Giotto pair: ¥13,035 captured twice on Aug 14.
+  const a = makeReceipt({ id: "am1", payment_path: "AMEX", merchant: "Giotto", amount_minor: 13035, transaction_date: "2026-08-14" });
+  const b = makeReceipt({ id: "am2", payment_path: "AMEX", merchant: "Giotto", amount_minor: 13035, transaction_date: "2026-08-14" });
+  const map = reasonsFor([a, b], {
+    receiptFileCounts: new Map([["am1", 1], ["am2", 1]]),
+  });
+  assert.deepEqual(map.get("am1"), ["possible_duplicate"]);
+  assert.deepEqual(map.get("am2"), ["possible_duplicate"]);
+});
+
+test("attention: AMEX near pair (same amount/date, OCR-garbled merchant text) is flagged", () => {
+  // Mirrors the live Palette pair: "palette814" vs "palefetel", ¥11,110 Aug 15.
+  const a = makeReceipt({ id: "near1", payment_path: "AMEX", merchant: "palette814", amount_minor: 11110, transaction_date: "2026-08-15" });
+  const b = makeReceipt({ id: "near2", payment_path: "AMEX", merchant: "palefetel", amount_minor: 11110, transaction_date: "2026-08-15" });
+  const map = reasonsFor([a, b], {
+    receiptFileCounts: new Map([["near1", 1], ["near2", 1]]),
+  });
+  assert.deepEqual(map.get("near1"), ["possible_duplicate"]);
+  assert.deepEqual(map.get("near2"), ["possible_duplicate"]);
+});
+
+test("attention: same-merchant AMEX pair one day apart is NOT flagged (round-trip carve-out)", () => {
+  // Two legit same-venue charges on consecutive days (e.g. a JR round-trip)
+  // share merchant text — the finder's near rule requires merchant text to
+  // differ, so neither flags.
+  const a = makeReceipt({ id: "rt1", payment_path: "AMEX", merchant: "えきねっと", amount_minor: 4280, transaction_date: "2026-08-01" });
+  const b = makeReceipt({ id: "rt2", payment_path: "AMEX", merchant: "えきねっと", amount_minor: 4280, transaction_date: "2026-08-02" });
+  const set = attentionFor([a, b], {
+    receiptFileCounts: new Map([["rt1", 1], ["rt2", 1]]),
+  });
+  assert.equal(set.has("rt1"), false);
+  assert.equal(set.has("rt2"), false);
+});
+
+test("attention: an AMEX duplicate pair with one member deleted is NOT flagged", () => {
+  const a = makeReceipt({ id: "del1", payment_path: "AMEX", merchant: "Giotto", amount_minor: 13035, transaction_date: "2026-08-14" });
+  const b = makeReceipt({ id: "del2", payment_path: "AMEX", merchant: "Giotto", amount_minor: 13035, transaction_date: "2026-08-14", deleted_at: "2026-08-20T00:00:00Z" });
+  const set = attentionFor([a, b], {
+    receiptFileCounts: new Map([["del1", 1], ["del2", 1]]),
+  });
+  assert.equal(set.has("del1"), false);
+  assert.equal(set.has("del2"), false);
+});
+
 // ─── IC-card top-up candidate ───────────────────────────────────────────────
 
 test("attention: an IC-card top-up candidate is included", () => {
