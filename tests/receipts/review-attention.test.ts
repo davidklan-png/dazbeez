@@ -430,3 +430,15 @@ test("reasons: AMEX sign-off maps to an amex_ code; the same code from two lines
   );
   assert.deepEqual(map.get("ax"), ["amex_re_review_needed"]);
 });
+
+test("attention: CASH pair with merchant-text drift (not just AMEX) gets possible_duplicate", () => {
+  // Live 2026-09-30 shape: 千串屋 vs 千串屋 東中野店, ¥11,781 Sep 12, both CASH —
+  // the near rule must not be AMEX-only.
+  const a = makeReceipt({ id: "cash1", payment_path: "CASH", merchant: "千串屋", amount_minor: 11781, transaction_date: "2026-09-12" });
+  const b = makeReceipt({ id: "cash2", payment_path: "CASH", merchant: "千串屋 東中野店", amount_minor: 11781, transaction_date: "2026-09-12" });
+  const map = reasonsFor([a, b], {
+    receiptFileCounts: new Map([["cash1", 1], ["cash2", 1]]),
+  });
+  assert.deepEqual(map.get("cash1"), ["possible_duplicate"]);
+  assert.deepEqual(map.get("cash2"), ["possible_duplicate"]);
+});

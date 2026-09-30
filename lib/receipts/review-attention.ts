@@ -183,16 +183,18 @@ export function computeClosingAttentionReasons(
   for (const cluster of groupDuplicateReceipts(receipts)) {
     for (const id of cluster.ids) duplicateIds.add(id);
   }
-  // groupDuplicateReceipts gates on CASH/DIGITAL, so AMEX re-capture pairs
-  // (same canonical merchant + amount + date) are invisible to it — they were
-  // only caught on Reconcile, weeks later, after the statement import. Run the
-  // AMEX-aware finder here with subjects = pool = the AMEX receipts, so each
-  // member of a pair flags the other at review time.
-  const amexReceipts = receipts.filter((r) => r.payment_path === "AMEX");
+  // groupDuplicateReceipts gates on CASH/DIGITAL and needs an EXACT canonical
+  // merchant match, so two populations were invisible to it: AMEX re-capture
+  // pairs (only caught on Reconcile, weeks after statement import) and
+  // merchant-text-drift pairs on ANY path ("千串屋" vs "千串屋 東中野店",
+  // same ¥/date — CASH, 2026-09-30). The finder is path-agnostic and adds the
+  // near rule (same amount + date, differing merchant text); run it over ALL
+  // receipts so every drifted pair flags at review time. Overlap with the
+  // exact clusters above is harmless — both push the same code.
   const amexMatchedIds = new Set(
     amexLines.flatMap((l) => (l.matched_receipt_id ? [l.matched_receipt_id] : [])),
   );
-  for (const id of findAmexDuplicateCandidates(amexReceipts, amexReceipts, amexMatchedIds).keys()) {
+  for (const id of findAmexDuplicateCandidates(receipts, receipts, amexMatchedIds).keys()) {
     duplicateIds.add(id);
   }
 

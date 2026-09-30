@@ -632,3 +632,11 @@ test("findDuplicatePartnerId: no duplicate → null; unknown id → null", () =>
   assert.equal(findDuplicatePartnerId([a, b], "solo"), null);
   assert.equal(findDuplicatePartnerId([a, b], "missing-id"), null);
 });
+
+test("findDuplicatePartnerId: CASH pair with merchant-text drift (branch suffix) resolves", () => {
+  // Live 2026-09-30 shape: 千串屋 vs 千串屋 東中野店, ¥11,781 Sep 12, both CASH.
+  const a = makeReceipt({ id: "sk-1", payment_path: "CASH", merchant: "千串屋", amount_minor: 11781, transaction_date: "2026-09-12" });
+  const b = makeReceipt({ id: "sk-2", payment_path: "CASH", merchant: "千串屋 東中野店", amount_minor: 11781, transaction_date: "2026-09-12" });
+  assert.equal(findDuplicatePartnerId([a, b], "sk-1"), "sk-2");
+  assert.equal(findDuplicatePartnerId([a, b], "sk-2"), "sk-1");
+});
