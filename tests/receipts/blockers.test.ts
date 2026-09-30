@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   buildDuplicateBadgeMap,
+  findDuplicatePartnerId,
   computeExportBlockers,
   computeDuplicateReceiptWarnings,
   computeIcCardTopUpWarnings,
@@ -601,4 +602,33 @@ test("computeDuplicateReceiptWarnings: card behavior unchanged after refactor", 
   assert.equal(w[0]!.count, 4);
   assert.equal(w[0]!.label, "Possible duplicate cash/digital receipts");
   assert.equal(w[0]!.href, "/receipts/review/c-0");
+});
+
+// ─── findDuplicatePartnerId ────────────────────────────────────────────────
+
+test("findDuplicatePartnerId: AMEX strong pair resolves both directions", () => {
+  const a = makeReceipt({ id: "d-1", payment_path: "AMEX", merchant: "giotto", amount_minor: 13035, transaction_date: "2026-08-14" });
+  const b = makeReceipt({ id: "d-2", payment_path: "AMEX", merchant: "giotto", amount_minor: 13035, transaction_date: "2026-08-14" });
+  assert.equal(findDuplicatePartnerId([a, b], "d-1"), "d-2");
+  assert.equal(findDuplicatePartnerId([a, b], "d-2"), "d-1");
+});
+
+test("findDuplicatePartnerId: AMEX near pair (OCR-garbled merchant) resolves", () => {
+  const a = makeReceipt({ id: "n-1", payment_path: "AMEX", merchant: "palette814", amount_minor: 11110, transaction_date: "2026-08-15" });
+  const b = makeReceipt({ id: "n-2", payment_path: "AMEX", merchant: "palefetel", amount_minor: 11110, transaction_date: "2026-08-15" });
+  assert.equal(findDuplicatePartnerId([a, b], "n-1"), "n-2");
+  assert.equal(findDuplicatePartnerId([a, b], "n-2"), "n-1");
+});
+
+test("findDuplicatePartnerId: CASH/DIGITAL cluster member resolves", () => {
+  const a = makeReceipt({ id: "c-1", payment_path: "CASH", merchant: "セブン-イレブン", amount_minor: 10000, transaction_date: "2026-06-02" });
+  const b = makeReceipt({ id: "c-2", payment_path: "CASH", merchant: "セブンーエレブン 中野店", amount_minor: 10000, transaction_date: "2026-06-02" });
+  assert.equal(findDuplicatePartnerId([a, b], "c-1"), "c-2");
+});
+
+test("findDuplicatePartnerId: no duplicate → null; unknown id → null", () => {
+  const a = makeReceipt({ id: "solo", payment_path: "AMEX" });
+  const b = makeReceipt({ id: "other", payment_path: "AMEX", amount_minor: 999, transaction_date: "2026-09-01" });
+  assert.equal(findDuplicatePartnerId([a, b], "solo"), null);
+  assert.equal(findDuplicatePartnerId([a, b], "missing-id"), null);
 });

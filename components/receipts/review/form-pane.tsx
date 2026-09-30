@@ -48,6 +48,15 @@ export interface FormPaneProps {
   initialAttendees: ReceiptAttendee[];
   queueIndex: number | null; // 1-based for "3 of 23"; null when not in the working set
   queueTotal: number;
+  /** Another receipt this one possibly duplicates (cluster member or AMEX
+   *  strong/near pair) — rendered as a compare banner with a deep link.
+   *  null/undefined = no duplicate candidate. */
+  duplicatePartner?: {
+    id: string;
+    merchant: string | null;
+    amount_minor: number | null;
+    transaction_date: string | null;
+  } | null;
   /** "View in <its month>" target when the receipt is out of the working set
    *  because its transaction_date is in a different month (backlog #17). */
   switchToMonth?: string | null;
@@ -564,6 +573,28 @@ export function FormPane(props: FormPaneProps) {
           )}
         </div>
       </header>
+
+      {props.duplicatePartner && (
+        <div className="mx-6 mt-3 flex flex-wrap items-center gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+          <span className="font-semibold">Possible duplicate</span>
+          <span className="truncate">
+            of{" "}
+            {props.duplicatePartner.merchant?.trim() || "an unnamed receipt"}
+            {props.duplicatePartner.amount_minor != null
+              ? ` ¥${props.duplicatePartner.amount_minor.toLocaleString("ja-JP")}`
+              : ""}
+            {props.duplicatePartner.transaction_date
+              ? ` · ${props.duplicatePartner.transaction_date}`
+              : ""}
+          </span>
+          <Link
+            href={`/receipts/review/${props.duplicatePartner.id}`}
+            className="ml-auto shrink-0 font-semibold text-amber-700 underline-offset-2 hover:text-amber-800 hover:underline"
+          >
+            Compare →
+          </Link>
+        </div>
+      )}
 
       {isLocked && (
         <div className="mx-6 mt-3 flex items-start gap-2 rounded-lg border border-gray-300 bg-gray-100 px-3 py-2 text-xs text-gray-700">

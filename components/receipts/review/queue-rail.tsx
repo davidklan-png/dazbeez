@@ -67,7 +67,16 @@ export function QueueRail({
             All caught up. Nothing left to review.
           </div>
         ) : (
-          items.map((item) => (
+          items.map((item) => {
+            // possible_duplicate gets its OWN always-visible chip — it is the
+            // last-pushed code, so the shared first-code chip below would bury
+            // it behind "unreviewed +2" and the operator would never see that
+            // a receipt was captured twice.
+            const otherCodes = item.attentionCodes.filter(
+              (c) => c !== "possible_duplicate",
+            );
+            const isDup = item.attentionCodes.includes("possible_duplicate");
+            return (
             <Link
               key={item.id}
               href={`/receipts/review/${item.id}${queryParams}`}
@@ -99,17 +108,23 @@ export function QueueRail({
                   <span className="h-[3px] w-[3px] rounded-full bg-gray-300" />
                   <span className="truncate">{item.categoryLabel}</span>
                 </div>
-                {item.attentionCodes.length > 0 && !item.locked && (
+                {otherCodes.length > 0 && !item.locked && (
                   <span
                     className="mt-1 inline-block rounded bg-amber-100 px-1.5 py-px text-[10px] font-semibold text-amber-700"
                     title={item.attentionCodes
                       .map((c) => CLOSING_ATTENTION_LABELS[c])
                       .join(" · ")}
                   >
-                    {CLOSING_ATTENTION_LABELS[item.attentionCodes[0]]}
-                    {item.attentionCodes.length > 1
-                      ? ` +${item.attentionCodes.length - 1}`
-                      : ""}
+                    {CLOSING_ATTENTION_LABELS[otherCodes[0]]}
+                    {otherCodes.length > 1 ? ` +${otherCodes.length - 1}` : ""}
+                  </span>
+                )}
+                {isDup && !item.locked && (
+                  <span
+                    className="mt-1 inline-block rounded bg-amber-200 px-1.5 py-px text-[10px] font-semibold text-amber-900"
+                    title="Shares merchant + amount + date with another receipt — compare the two captures and delete one if it is an accidental double-shot."
+                  >
+                    possible duplicate
                   </span>
                 )}
                 {item.stuck && (
@@ -146,7 +161,8 @@ export function QueueRail({
                 )}
               </div>
             </Link>
-          ))
+            );
+          })
         )}
       </div>
 

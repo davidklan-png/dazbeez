@@ -17,6 +17,7 @@ import { listOpenExportMonths, naturalMonthForDate } from "@/lib/receipts/member
 import { transactionMonthOf } from "@/lib/receipts/month-lock";
 import { getReceiptLocks, UNLOCKED_RECEIPT } from "@/lib/receipts/receipt-locks";
 import { collectClosingAttentionReasons } from "@/lib/receipts/review-attention";
+import { findDuplicatePartnerId } from "@/lib/receipts/blockers";
 import { loadClosingScopeWorkingSet } from "@/lib/receipts/review-scope";
 import { DEFAULT_SORT, sortQueueItems } from "@/lib/receipts/queue-sort";
 import {
@@ -148,6 +149,15 @@ async function renderReceiptPage(
 
   const attentionReasons = await collectClosingAttentionReasons(workingReceipts);
   const attentionIds = new Set(attentionReasons.keys());
+  // Possible-duplicate twin of the OPEN receipt (CASH/DIGITAL cluster or AMEX
+  // strong/near pair) — drives the compare banner in the form pane.
+  const duplicatePartnerRecord = attentionReasons
+    .get(id)
+    ?.includes("possible_duplicate")
+    ? workingReceipts.find(
+        (r) => r.id === findDuplicatePartnerId(workingReceipts, id),
+      ) ?? null
+    : null;
   const queue = filterReviewQueue(workingReceipts, filter, {
     statusFilter,
     paymentPathFilter,
@@ -247,6 +257,16 @@ async function renderReceiptPage(
             prevReceiptId={prevReceiptId}
             hasAmexMatch={activeFlags?.hasMatch ?? false}
             reReviewNeeded={activeFlags?.reReviewNeeded ?? false}
+            duplicatePartner={
+              duplicatePartnerRecord && duplicatePartnerRecord.id !== id
+                ? {
+                    id: duplicatePartnerRecord.id,
+                    merchant: duplicatePartnerRecord.merchant,
+                    amount_minor: duplicatePartnerRecord.amount_minor,
+                    transaction_date: duplicatePartnerRecord.transaction_date,
+                  }
+                : null
+            }
             overrideTargetMonths={overrideTargetMonths}
             naturalStatementMonth={naturalStatementMonth}
             lock={activeLock}

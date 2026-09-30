@@ -13,6 +13,7 @@
 import { requiresAttendees } from "@/lib/receipts/categories";
 import { isPendingProcessing } from "@/lib/receipts/extraction-state";
 import { resolveLineCategory } from "@/lib/receipts/line-classification";
+import { findAmexDuplicateCandidates } from "@/lib/receipts/amex-duplicates";
 import { canonicalMerchantComparisonKey, detectMerchantChain } from "@/lib/receipts/merchant";
 import type { AmexStatementLine, ReceiptRecord } from "@/lib/receipts/types";
 
@@ -384,6 +385,31 @@ export function buildDuplicateBadgeMap(
     for (const r of c.receipts) map.set(r.id, { firstId, count });
   }
   return map;
+}
+
+/**
+ * The id of another receipt this one possibly duplicates (CASH/DIGITAL cluster
+ * member, or an AMEX strong/near pair via findAmexDuplicateCandidates), or
+ * null. Powers the review detail-pane "possible duplicate — compare" deep
+ * link: accidental double-captures are common (same paper receipt shot twice),
+ * so the operator needs one click from a receipt to its twin before deleting
+ * one. matchedReceiptIds is empty here — it only drives the finder's
+ * "other matched" label, not candidacy.
+ */
+export function findDuplicatePartnerId(
+  receipts: ReceiptRecord[],
+  id: string,
+): string | null {
+  for (const c of clusterDuplicates(receipts)) {
+    if (!c.receipts.some((r) => r.id === id)) continue;
+    const other = c.receipts.find((r) => r.id !== id);
+    if (other) return other.id;
+  }
+  const amex = receipts.filter((r) => r.payment_path === "AMEX");
+  const target = amex.find((r) => r.id === id);
+  if (!target) return null;
+  return findAmexDuplicateCandidates([target], amex, new Set())
+    .get(id)?.[0]?.otherReceiptId ?? null;
 }
 
 /**
