@@ -447,11 +447,16 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
   }
 
   // ─── Months nav ─────────────────────────────────────────────────────
+  // A month with no imported statement (e.g. the current month before the
+  // CSV lands) is not in monthsAvailable → findIndex is -1. Treat that as
+  // one-past-the-end so the prev arrow still reaches the latest statement
+  // month instead of dying (2026-09-30: Sep reconcile was a dead end).
   const monthIdx = props.monthsAvailable.findIndex((m) => m.month === props.month);
-  const prevMonth = monthIdx > 0 ? props.monthsAvailable[monthIdx - 1]!.month : null;
+  const navIdx = monthIdx === -1 ? props.monthsAvailable.length : monthIdx;
+  const prevMonth = navIdx > 0 ? props.monthsAvailable[navIdx - 1]!.month : null;
   const nextMonth =
-    monthIdx >= 0 && monthIdx < props.monthsAvailable.length - 1
-      ? props.monthsAvailable[monthIdx + 1]!.month
+    navIdx >= 0 && navIdx < props.monthsAvailable.length - 1
+      ? props.monthsAvailable[navIdx + 1]!.month
       : null;
 
   return (

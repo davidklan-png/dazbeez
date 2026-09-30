@@ -40,11 +40,15 @@ export function MonthSwitcher({ months, activeMonth, basePath }: MonthSwitcherPr
     );
   }
 
+  // Not-in-list active month (no statement imported) behaves as one-past-
+  // the-end: prev still reaches the latest statement month, next is null.
+  // Same trap fixed in reconcile-screen.tsx's own arrows — keep in sync.
   const activeIndex = months.findIndex((m) => m.month === activeMonth);
-  const prevMonth = activeIndex > 0 ? months[activeIndex - 1]!.month : null;
+  const navIndex = activeIndex === -1 ? months.length : activeIndex;
+  const prevMonth = navIndex > 0 ? months[navIndex - 1]!.month : null;
   const nextMonth =
-    activeIndex >= 0 && activeIndex < months.length - 1
-      ? months[activeIndex + 1]!.month
+    navIndex >= 0 && navIndex < months.length - 1
+      ? months[navIndex + 1]!.month
       : null;
 
   const isActiveInList = activeIndex >= 0;
