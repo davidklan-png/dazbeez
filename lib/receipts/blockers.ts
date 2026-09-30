@@ -388,9 +388,10 @@ export function buildDuplicateBadgeMap(
 }
 
 /**
- * The id of another receipt this one possibly duplicates (CASH/DIGITAL cluster
- * member, or an AMEX strong/near pair via findAmexDuplicateCandidates), or
- * null. Powers the review detail-pane "possible duplicate — compare" deep
+ * The id of another receipt this one possibly duplicates (CASH/DIGITAL exact
+ * cluster member, or any-path strong/near pair via findAmexDuplicateCandidates
+ * — the near rule catches merchant-text drift like "千串屋" vs "千串屋 東中野店"),
+ * or null. Powers the review detail-pane "possible duplicate — compare" deep
  * link: accidental double-captures are common (same paper receipt shot twice),
  * so the operator needs one click from a receipt to its twin before deleting
  * one. matchedReceiptIds is empty here — it only drives the finder's
@@ -405,10 +406,9 @@ export function findDuplicatePartnerId(
     const other = c.receipts.find((r) => r.id !== id);
     if (other) return other.id;
   }
-  const amex = receipts.filter((r) => r.payment_path === "AMEX");
-  const target = amex.find((r) => r.id === id);
+  const target = receipts.find((r) => r.id === id);
   if (!target) return null;
-  return findAmexDuplicateCandidates([target], amex, new Set())
+  return findAmexDuplicateCandidates([target], receipts, new Set())
     .get(id)?.[0]?.otherReceiptId ?? null;
 }
 
