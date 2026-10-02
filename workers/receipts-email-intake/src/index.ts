@@ -26,6 +26,7 @@ import {
   extractAuthVerdicts,
   pickRawHeadersSubset,
   staleCutoffIso,
+  staleRejectReason,
   capBody,
 } from "../../../lib/receipts/email-parse";
 import { parseRfcFromMailbox, resolveBlockedSenderIdentity } from "./sender-identity";
@@ -268,10 +269,14 @@ async function readRaw(
 // ADR 0011 §6: delete the R2 object (the disposable part) for intake rows that
 // are rejected OR stale pending_triage (> INTAKE_STALE_DAYS old). The ROW is
 // kept for audit history with attachment_r2_key nulled. We do NOT auto-flip
-// stale pending_triage → rejected: the ADR only deletes the object, and a stale
-// row with a null key is already functionally unpromotable (assertPromotable
-// refuses it), so a status change would be redundant. Batched to keep the query
-// bounded (cron runs daily; a backlog drains over a few days).
+// stale pending_triage → rejected: the ADR only deletes the object. A null-key
+// row is NOT unpromotable, though — since Phase B a human can Promote it as a
+// body-only receipt (explicit operator override), while AUTO-promote is
+// excluded separately by the attachment_filename gate (isAutoPromoteEligible
+// never auto-promotes a row whose email arrived with an attachment). For rows
+// still pending with no reason, we stamp a display-only reject_reason so the
+// inbox shows why the attachment is gone (does not gate Promote). Batched to
+// keep the query bounded (cron runs daily; a backlog drains over a few days).
 
 async function cleanupStaleIntake(env: Env): Promise<void> {
   const db = env.RECEIPTS_DB;
@@ -280,7 +285,7 @@ async function cleanupStaleIntake(env: Env): Promise<void> {
 
   const result = await db
     .prepare(
-      `SELECT id, attachment_r2_key
+      `SELECT id, attachment_r2_key, status, reject_reason
          FROM email_receipt_intake
         WHERE attachment_r2_key IS NOT NULL
           AND (
@@ -291,7 +296,12 @@ async function cleanupStaleIntake(env: Env): Promise<void> {
         LIMIT ?`,
     )
     .bind(cutoff, CLEANUP_BATCH_LIMIT)
-    .all<{ id: string; attachment_r2_key: string }>();
+    .all<{
+      id: string;
+      attachment_r2_key: string;
+      status: string;
+      reject_reason: string | null;
+    }>();
 
   const rows = result.results ?? [];
   let deleted = 0;
@@ -308,11 +318,19 @@ async function cleanupStaleIntake(env: Env): Promise<void> {
       });
     }
     try {
+      // Reject-reason is display-only: staleRejectReason returns the
+      // explanation only for still-pending reason-less rows; everything else
+      // binds its existing value back unchanged (rejected rows keep the real
+      // reason they were rejected with).
+      const reason =
+        staleRejectReason(row.status, row.reject_reason) ?? row.reject_reason;
       await db
         .prepare(
-          `UPDATE email_receipt_intake SET attachment_r2_key = NULL WHERE id = ?`,
+          `UPDATE email_receipt_intake
+              SET attachment_r2_key = NULL, reject_reason = ?
+            WHERE id = ?`,
         )
-        .bind(row.id)
+        .bind(reason, row.id)
         .run();
     } catch (err) {
       console.error("[receipts-email-intake] intake row update failed", {

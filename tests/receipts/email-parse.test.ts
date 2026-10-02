@@ -281,7 +281,8 @@ test("parseTrustedIntakeSenders: null/undefined/blank → []", () => {
 // ─── isAutoPromoteEligible (ADR 0011 Phase B auto-promote gate) ─────────────
 // The compensating control for receipts@ being a public, unauthenticated
 // address: only an allowlisted sender with passing SPF AND DKIM and NO valid
-// attachment gets auto-promoted with no operator click.
+// attachment — original or current — gets auto-promoted with no operator
+// click.
 
 test("isAutoPromoteEligible: allowlisted + SPF+DKIM + body-only + timestamps → true", () => {
   assert.equal(
@@ -290,6 +291,7 @@ test("isAutoPromoteEligible: allowlisted + SPF+DKIM + body-only + timestamps →
       spfPass: true,
       dkimPass: true,
       hasValidAttachment: false,
+      hadOriginalAttachment: false,
       trustedSenders: ["david@gmail.com", "other@x.com"],
       receivedAt: "2026-08-01T00:00:00.000Z",
       trustedCreatedAt: "2026-07-01T00:00:00.000Z",
@@ -305,6 +307,7 @@ test("isAutoPromoteEligible: non-allowlisted sender → false even with SPF+DKIM
       spfPass: true,
       dkimPass: true,
       hasValidAttachment: false,
+      hadOriginalAttachment: false,
       trustedSenders: ["david@gmail.com"],
     }),
     false,
@@ -315,6 +318,7 @@ test("isAutoPromoteEligible: SPF or DKIM fail → false even if allowlisted", ()
   const base = {
     fromAddress: "david@gmail.com",
     hasValidAttachment: false,
+    hadOriginalAttachment: false,
     trustedSenders: ["david@gmail.com"],
   } as const;
   assert.equal(isAutoPromoteEligible({ ...base, spfPass: false, dkimPass: true }), false);
@@ -328,9 +332,49 @@ test("isAutoPromoteEligible: a valid attachment → false (attachments stay manu
       spfPass: true,
       dkimPass: true,
       hasValidAttachment: true,
+      hadOriginalAttachment: false,
       trustedSenders: ["david@gmail.com"],
     }),
     false,
+  );
+});
+
+// ─── isAutoPromoteEligible: original-attachment gate (2026-09-22 incident) ──
+// The 30-day intake cleanup nulls attachment_r2_key on stale pending rows
+// but attachment_filename survives. A row that ARRIVED with an attachment
+// must never be auto-promoted as body — the body is not the receipt (the
+// incident: a Cloudflare invoice PDF was destroyed and the "Your invoice is
+// attached" body became the evidence for a $5.50 charge).
+
+test("isAutoPromoteEligible: original attachment (filename survives cleanup) → false", () => {
+  assert.equal(
+    isAutoPromoteEligible({
+      fromAddress: "david@gmail.com",
+      spfPass: true,
+      dkimPass: true,
+      hasValidAttachment: false, // R2 object already deleted by cleanup
+      hadOriginalAttachment: true, // but the email arrived WITH one
+      trustedSenders: ["david@gmail.com"],
+      receivedAt: "2026-08-01T00:00:00.000Z",
+      trustedCreatedAt: "2026-07-01T00:00:00.000Z",
+    }),
+    false,
+  );
+});
+
+test("isAutoPromoteEligible: truly body-only (no original attachment) → true (pins the gate)", () => {
+  assert.equal(
+    isAutoPromoteEligible({
+      fromAddress: "david@gmail.com",
+      spfPass: true,
+      dkimPass: true,
+      hasValidAttachment: false,
+      hadOriginalAttachment: false,
+      trustedSenders: ["david@gmail.com"],
+      receivedAt: "2026-08-01T00:00:00.000Z",
+      trustedCreatedAt: "2026-07-01T00:00:00.000Z",
+    }),
+    true,
   );
 });
 
@@ -341,6 +385,7 @@ test("isAutoPromoteEligible: from_address matched case-insensitively", () => {
       spfPass: true,
       dkimPass: true,
       hasValidAttachment: false,
+      hadOriginalAttachment: false,
       trustedSenders: ["david@gmail.com"],
       receivedAt: "2026-08-01T00:00:00.000Z",
       trustedCreatedAt: "2026-07-01T00:00:00.000Z",
@@ -358,6 +403,7 @@ test("isAutoPromoteEligible: blocked sender → false even if also trusted + SPF
       spfPass: true,
       dkimPass: true,
       hasValidAttachment: false,
+      hadOriginalAttachment: false,
       trustedSenders: ["david@gmail.com"],
       blockedSenders: ["david@gmail.com"],
     }),
@@ -372,6 +418,7 @@ test("isAutoPromoteEligible: prospective — older intake → false", () => {
       spfPass: true,
       dkimPass: true,
       hasValidAttachment: false,
+      hadOriginalAttachment: false,
       trustedSenders: ["david@gmail.com"],
       receivedAt: "2026-06-01T00:00:00.000Z",
       trustedCreatedAt: "2026-07-01T00:00:00.000Z",
@@ -387,6 +434,7 @@ test("isAutoPromoteEligible: prospective — equal timestamp → true", () => {
       spfPass: true,
       dkimPass: true,
       hasValidAttachment: false,
+      hadOriginalAttachment: false,
       trustedSenders: ["david@gmail.com"],
       receivedAt: "2026-07-01T00:00:00.000Z",
       trustedCreatedAt: "2026-07-01T00:00:00.000Z",
@@ -402,6 +450,7 @@ test("isAutoPromoteEligible: prospective — newer intake → true", () => {
       spfPass: true,
       dkimPass: true,
       hasValidAttachment: false,
+      hadOriginalAttachment: false,
       trustedSenders: ["david@gmail.com"],
       receivedAt: "2026-08-01T00:00:00.000Z",
       trustedCreatedAt: "2026-07-01T00:00:00.000Z",
@@ -417,6 +466,7 @@ test("isAutoPromoteEligible: malformed received_at → false", () => {
       spfPass: true,
       dkimPass: true,
       hasValidAttachment: false,
+      hadOriginalAttachment: false,
       trustedSenders: ["david@gmail.com"],
       receivedAt: "not-a-date",
       trustedCreatedAt: "2026-07-01T00:00:00.000Z",
@@ -432,6 +482,7 @@ test("isAutoPromoteEligible: malformed trusted_created_at → false", () => {
       spfPass: true,
       dkimPass: true,
       hasValidAttachment: false,
+      hadOriginalAttachment: false,
       trustedSenders: ["david@gmail.com"],
       receivedAt: "2026-08-01T00:00:00.000Z",
       trustedCreatedAt: "garbage",
@@ -447,6 +498,7 @@ test("isAutoPromoteEligible: missing trustedCreatedAt → false (mandatory)", ()
       spfPass: true,
       dkimPass: true,
       hasValidAttachment: false,
+      hadOriginalAttachment: false,
       trustedSenders: ["david@gmail.com"],
       receivedAt: "2026-08-01T00:00:00.000Z",
     }),
@@ -461,6 +513,7 @@ test("isAutoPromoteEligible: missing receivedAt → false (mandatory)", () => {
       spfPass: true,
       dkimPass: true,
       hasValidAttachment: false,
+      hadOriginalAttachment: false,
       trustedSenders: ["david@gmail.com"],
       trustedCreatedAt: "2026-07-01T00:00:00.000Z",
     }),
@@ -475,6 +528,7 @@ test("isAutoPromoteEligible: null trustedCreatedAt → false (mandatory)", () =>
       spfPass: true,
       dkimPass: true,
       hasValidAttachment: false,
+      hadOriginalAttachment: false,
       trustedSenders: ["david@gmail.com"],
       receivedAt: "2026-08-01T00:00:00.000Z",
       trustedCreatedAt: null,

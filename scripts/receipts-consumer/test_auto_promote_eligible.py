@@ -1,7 +1,8 @@
 """Tests for consumer.is_auto_promote_eligible (ADR 0011 Phase B + follow-up).
 
-Covers: empty allowlist, trusted+SPF+DKIM, attachment gate, SPF/DKIM gate,
-case-insensitive, blocked sender, prospective trust (older/equal/newer/malformed).
+Covers: empty allowlist, trusted+SPF+DKIM, attachment gate (current AND
+original — the 2026-09-22 incident), SPF/DKIM gate, case-insensitive,
+blocked sender, prospective trust (older/equal/newer/malformed).
 
 Run:
   cd scripts/receipts-consumer && \\
@@ -29,39 +30,59 @@ TRUSTED = {"david@gmail.com": "2000-01-01T00:00:00Z", "other@x.com": "2000-01-01
 class IsAutoPromoteEligibleTests(unittest.TestCase):
     def test_empty_senders_nothing_eligible(self):
         self.assertFalse(
-            is_auto_promote_eligible("david@gmail.com", True, True, False, {}, set())
+            is_auto_promote_eligible("david@gmail.com", True, True, False, False, {}, set())
         )
 
     def test_trusted_body_only_spf_dkim_is_eligible(self):
         self.assertTrue(
             is_auto_promote_eligible(
-                "david@gmail.com", True, True, False, TRUSTED, set(),
+                "david@gmail.com", True, True, False, False, TRUSTED, set(),
                 received_at="2026-08-01T00:00:00Z",
             )
         )
 
     def test_attachment_never_auto_promoted(self):
         self.assertFalse(
-            is_auto_promote_eligible("david@gmail.com", True, True, True, TRUSTED, set())
+            is_auto_promote_eligible("david@gmail.com", True, True, True, False, TRUSTED, set())
+        )
+
+    # ── Original-attachment gate (2026-09-22 incident) ──
+    # The 30-day intake cleanup nulls attachment_r2_key but attachment_filename
+    # survives — a row that ARRIVED with an attachment is never body-eligible.
+
+    def test_original_attachment_never_auto_promoted(self):
+        self.assertFalse(
+            is_auto_promote_eligible(
+                "david@gmail.com", True, True, False, True, TRUSTED, set(),
+                received_at="2026-08-01T00:00:00Z",
+            )
+        )
+
+    def test_truly_body_only_is_eligible(self):
+        self.assertTrue(
+            is_auto_promote_eligible(
+                "david@gmail.com", True, True, False, False, TRUSTED, set(),
+                received_at="2026-08-01T00:00:00Z",
+            )
         )
 
     def test_spf_or_dkim_fail_not_eligible(self):
         self.assertFalse(
-            is_auto_promote_eligible("david@gmail.com", False, True, False, TRUSTED, set())
+            is_auto_promote_eligible("david@gmail.com", False, True, False, False, TRUSTED, set())
         )
         self.assertFalse(
-            is_auto_promote_eligible("david@gmail.com", True, False, False, TRUSTED, set())
+            is_auto_promote_eligible("david@gmail.com", True, False, False, False, TRUSTED, set())
         )
 
     def test_non_trusted_sender_not_eligible(self):
         self.assertFalse(
-            is_auto_promote_eligible("stranger@evil.com", True, True, False, TRUSTED, set())
+            is_auto_promote_eligible("stranger@evil.com", True, True, False, False, TRUSTED, set())
         )
 
     def test_case_insensitive_vs_lowercase_stored(self):
         self.assertTrue(
             is_auto_promote_eligible(
-                "DAVID@Gmail.com", True, True, False, TRUSTED, set(),
+                "DAVID@Gmail.com", True, True, False, False, TRUSTED, set(),
                 received_at="2026-08-01T00:00:00Z",
             )
         )
@@ -71,14 +92,14 @@ class IsAutoPromoteEligibleTests(unittest.TestCase):
     def test_blocked_sender_not_eligible_even_if_trusted(self):
         blocked = {"david@gmail.com"}
         self.assertFalse(
-            is_auto_promote_eligible("david@gmail.com", True, True, False, TRUSTED, blocked)
+            is_auto_promote_eligible("david@gmail.com", True, True, False, False, TRUSTED, blocked)
         )
 
     def test_prospective_older_intake_not_eligible(self):
         trusted_new = {"david@gmail.com": "2026-07-01T00:00:00Z"}
         self.assertFalse(
             is_auto_promote_eligible(
-                "david@gmail.com", True, True, False, trusted_new, set(),
+                "david@gmail.com", True, True, False, False, trusted_new, set(),
                 received_at="2026-06-01T00:00:00Z",
             )
         )
@@ -87,7 +108,7 @@ class IsAutoPromoteEligibleTests(unittest.TestCase):
         trusted = {"david@gmail.com": "2026-07-01T00:00:00Z"}
         self.assertTrue(
             is_auto_promote_eligible(
-                "david@gmail.com", True, True, False, trusted, set(),
+                "david@gmail.com", True, True, False, False, trusted, set(),
                 received_at="2026-07-01T00:00:00Z",
             )
         )
@@ -96,7 +117,7 @@ class IsAutoPromoteEligibleTests(unittest.TestCase):
         trusted = {"david@gmail.com": "2026-07-01T00:00:00Z"}
         self.assertTrue(
             is_auto_promote_eligible(
-                "david@gmail.com", True, True, False, trusted, set(),
+                "david@gmail.com", True, True, False, False, trusted, set(),
                 received_at="2026-08-01T00:00:00Z",
             )
         )
@@ -105,7 +126,7 @@ class IsAutoPromoteEligibleTests(unittest.TestCase):
         trusted = {"david@gmail.com": "2026-07-01T00:00:00Z"}
         self.assertFalse(
             is_auto_promote_eligible(
-                "david@gmail.com", True, True, False, trusted, set(),
+                "david@gmail.com", True, True, False, False, trusted, set(),
                 received_at="not-a-date",
             )
         )
@@ -114,7 +135,7 @@ class IsAutoPromoteEligibleTests(unittest.TestCase):
         trusted = {"david@gmail.com": "garbage"}
         self.assertFalse(
             is_auto_promote_eligible(
-                "david@gmail.com", True, True, False, trusted, set(),
+                "david@gmail.com", True, True, False, False, trusted, set(),
                 received_at="2026-08-01T00:00:00Z",
             )
         )
@@ -123,7 +144,7 @@ class IsAutoPromoteEligibleTests(unittest.TestCase):
         """Missing received_at is ineligible (mandatory for prospective trust)."""
         self.assertFalse(
             is_auto_promote_eligible(
-                "david@gmail.com", True, True, False, TRUSTED, set(),
+                "david@gmail.com", True, True, False, False, TRUSTED, set(),
                 received_at=None,
             )
         )
@@ -133,7 +154,7 @@ class IsAutoPromoteEligibleTests(unittest.TestCase):
         trusted_no_date = {"david@gmail.com": None}
         self.assertFalse(
             is_auto_promote_eligible(
-                "david@gmail.com", True, True, False, trusted_no_date, set(),
+                "david@gmail.com", True, True, False, False, trusted_no_date, set(),
                 received_at="2026-08-01T00:00:00Z",
             )
         )

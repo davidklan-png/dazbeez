@@ -57,6 +57,10 @@ export async function POST(
         spfPass: intake.spf_pass === 1,
         dkimPass: intake.dkim_pass === 1,
         hasValidAttachment: !!intake.attachment_r2_key,
+        // attachment_filename survives the 30-day stale cleanup that nulls
+        // attachment_r2_key — it marks "this email arrived with an attachment"
+        // and keeps such rows out of body-only auto-promotion.
+        hadOriginalAttachment: !!intake.attachment_filename,
         trustedSenders: trusted.map((t) => t.email),
         blockedSenders: blocked.map((b) => b.email),
         receivedAt: intake.received_at,

@@ -136,6 +136,23 @@ export function staleCutoffIso(nowMs: number, days: number): string {
   return new Date(nowMs - days * 24 * 60 * 60 * 1000).toISOString();
 }
 
+/**
+ * Display-only reject_reason for a still-pending intake row whose attachment
+ * R2 object the scheduled cleanup just deleted. Only pending_triage rows with
+ * no reason yet get it; rejected rows and rows that already carry a reason
+ * keep theirs. Pure; does NOT change status and does NOT gate Promote (human
+ * promotion of the body stays an explicit operator override).
+ */
+export function staleRejectReason(
+  status: string,
+  current: string | null,
+): string | null {
+  if (status === "pending_triage" && current === null) {
+    return "attachment expired — R2 object deleted after 30 days pending";
+  }
+  return null;
+}
+
 // ─── Body capture: cap + link extraction (ADR 0011 Phase A) ──────────────────
 
 /**
@@ -236,6 +253,12 @@ export function isAutoPromoteEligible(args: {
   dkimPass: boolean;
   /** true if the email has at least one VALID receipt attachment. */
   hasValidAttachment: boolean;
+  /**
+   * true if the email ARRIVED with an attachment — attachment_filename is set,
+   * even if attachment_r2_key has since been nulled by the stale cleanup.
+   * Never auto-promote those as body (production incident 2026-09-22).
+   */
+  hadOriginalAttachment: boolean;
   trustedSenders: readonly string[];
   /** Blocked sender set (normalized lowercase). */
   blockedSenders?: readonly string[];
@@ -249,8 +272,11 @@ export function isAutoPromoteEligible(args: {
   // Blocked wins defensively (mutual-exclusion safety net).
   if (args.blockedSenders?.includes(normalized)) return false;
 
-  // Attachments use the normal manual triage path regardless of sender.
-  if (args.hasValidAttachment) return false;
+  // Attachments use the normal manual triage path regardless of sender. The
+  // 30-day intake cleanup nulls attachment_r2_key on stale pending rows;
+  // attachment_filename survives and marks "this email arrived with an
+  // attachment" — never auto-promote those as body.
+  if (args.hasValidAttachment || args.hadOriginalAttachment) return false;
   if (!args.spfPass || !args.dkimPass) return false;
   if (!args.trustedSenders.includes(normalized)) return false;
 

@@ -787,19 +787,23 @@ def is_auto_promote_eligible(
     spf_pass: int | bool | None,
     dkim_pass: int | bool | None,
     has_attachment: bool,
+    has_original_attachment: bool,
     trusted_senders: dict[str, str],
     blocked_senders: set[str],
     received_at: str | None = None,
 ) -> bool:
     """Mirror of lib/receipts/email-parse.ts isAutoPromoteEligible. Blocked
     wins defensively. Attachments use the manual triage path regardless of
-    sender; body-only + a trusted sender + SPF and DKIM pass → eligible. ADR
-    0011 follow-up: prospective trust — received_at must be >= the trusted
-    sender's created_at. Malformed timestamps → ineligible (safe default)."""
+    sender — including emails that merely ARRIVED with one (the 30-day intake
+    cleanup nulls attachment_r2_key but attachment_filename survives; never
+    auto-promote those as body). Body-only + a trusted sender + SPF and DKIM
+    pass → eligible. ADR 0011 follow-up: prospective trust — received_at must
+    be >= the trusted sender's created_at. Malformed timestamps → ineligible
+    (safe default)."""
     normalized = (from_address or "").strip().lower()
     if normalized in blocked_senders:
         return False
-    if has_attachment:
+    if has_attachment or has_original_attachment:
         return False
     if not (spf_pass and dkim_pass):
         return False
@@ -857,12 +861,14 @@ def pull_auto_promote_candidates(
     blocked_senders: set[str],
     only_id: str | None = None,
 ) -> list[dict[str, Any]]:
-    """pending_triage body-only intakes (no attachment) with a captured body,
-    that pass the auto-promote gate (trusted + not blocked + prospective)."""
+    """pending_triage body-only intakes (no attachment key AND no attachment
+    filename — the filename survives the 30-day stale cleanup that nulls the
+    R2 key) with a captured body, that pass the auto-promote gate (trusted +
+    not blocked + prospective)."""
     where_id = f" AND id = {_sql_escape(only_id)}" if only_id else ""
     rows = _d1_query(
         "SELECT id, from_address, spf_pass, dkim_pass, "
-        "attachment_r2_key, body_text, body_html, received_at "
+        "attachment_r2_key, attachment_filename, body_text, body_html, received_at "
         "FROM email_receipt_intake "
         "WHERE status = 'pending_triage'"
         + where_id + ";"
@@ -871,12 +877,14 @@ def pull_auto_promote_candidates(
         r
         for r in rows
         if not r.get("attachment_r2_key")
+        and not r.get("attachment_filename")
         and (r.get("body_text") or r.get("body_html"))
         and is_auto_promote_eligible(
             r.get("from_address", ""),
             r.get("spf_pass"),
             r.get("dkim_pass"),
             bool(r.get("attachment_r2_key")),
+            bool(r.get("attachment_filename")),
             trusted_senders,
             blocked_senders,
             r.get("received_at"),
