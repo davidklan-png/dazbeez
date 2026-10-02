@@ -1076,6 +1076,50 @@ export async function listAttendeeNameReferenceCounts(): Promise<Map<string, num
 
 // ─── AMEX statement lines ─────────────────────────────────────────────────────
 
+// Single source of truth for the importAmexLines INSERT shape. The "!" suffix
+// marks the one literal-valued column (match_status = 'unmatched'); every other
+// column is a bound "?" and MUST appear in the binds.push(...) argument list at
+// the same position. Column list, placeholder string, and binds are all derived
+// from / must match this order — they diverged once (25 placeholder slots for
+// 26 columns, TASK-034) and every chunked INSERT failed silently behind a
+// 'parsed' artifact row. tests/receipts/amex-import-contract.test.ts pins it.
+export const AMEX_LINE_INSERT_COLUMNS = [
+  "id",
+  "statement_month",
+  "transaction_date",
+  "posting_date",
+  "merchant",
+  "amount_minor",
+  "currency",
+  "amex_reference",
+  "match_status!",
+  "receipt_status",
+  "receipt_missing_reason",
+  "raw_json",
+  "statement_artifact_id",
+  "cardholder_name",
+  "cardholder_flag",
+  "payment_type",
+  "prepayment_flag",
+  "memo",
+  "foreign_amount_minor",
+  "foreign_currency",
+  "foreign_exchange_rate",
+  "memo_currency_parse_status",
+  "raw_csv_line_number",
+  "source_file_sha256",
+  "imported_at",
+  "created_at",
+] as const;
+
+export const AMEX_LINE_INSERT_COLUMN_LIST = AMEX_LINE_INSERT_COLUMNS.map((c) =>
+  c.endsWith("!") ? c.slice(0, -1) : c,
+);
+
+export const AMEX_LINE_ROW_PLACEHOLDER = `(${AMEX_LINE_INSERT_COLUMNS.map((c) =>
+  c === "match_status!" ? "'unmatched'" : "?",
+).join(", ")})`;
+
 export async function importAmexLines(
   rows: ImportAmexLineInput[],
   actor: string,
@@ -1168,19 +1212,20 @@ export async function importAmexLines(
   // ── Chunked INSERT … ON CONFLICT DO UPDATE (with amex_reference) ────────
   const withRef = rows.filter((r) => !!r.amexReference);
   const withoutRef = rows.filter((r) => !r.amexReference);
-  // Each row binds 25 params (match_status is the SQL literal 'unmatched').
+  // Each row has 26 columns but binds 25 params (match_status is the SQL
+  // literal 'unmatched'); both derive from AMEX_LINE_INSERT_COLUMNS.
   // receipt_status / receipt_missing_reason are set on first insert only
   // (parser-flagged no-receipt-required lines, e.g. undated annual fees) —
   // re-imports never overwrite them; see ON CONFLICT below.
   // 25 × 3 = 75 < 100 (D1 bind-variable ceiling).
   const CHUNK_SIZE = 3;
-  const rowPlaceholder =
-    "(?, ?, ?, ?, ?, ?, ?, ?, 'unmatched', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
   for (let i = 0; i < withRef.length; i += CHUNK_SIZE) {
     const chunk = withRef.slice(i, i + CHUNK_SIZE);
-    const placeholders = chunk.map(() => rowPlaceholder).join(",");
+    const placeholders = chunk.map(() => AMEX_LINE_ROW_PLACEHOLDER).join(",");
     const binds: unknown[] = [];
+    // Arg order MUST match AMEX_LINE_INSERT_COLUMNS exactly (one arg per
+    // non-"!" column, in order) — the placeholder is derived from it.
     for (const row of chunk) {
       binds.push(
         newUuid(),
@@ -1213,12 +1258,7 @@ export async function importAmexLines(
     await db
       .prepare(
         `INSERT INTO amex_statement_lines
-          (id, statement_month, transaction_date, posting_date, merchant,
-           amount_minor, currency, amex_reference, match_status, receipt_status,
-           receipt_missing_reason, raw_json, statement_artifact_id, cardholder_name,
-           cardholder_flag, payment_type, prepayment_flag, memo, foreign_amount_minor,
-           foreign_currency, foreign_exchange_rate, memo_currency_parse_status,
-           raw_csv_line_number, source_file_sha256, imported_at, created_at)
+          (${AMEX_LINE_INSERT_COLUMN_LIST.join(", ")})
          VALUES ${placeholders}
          ON CONFLICT (statement_month, amex_reference, cardholder_name) DO UPDATE SET
            transaction_date = excluded.transaction_date,
@@ -1253,8 +1293,10 @@ export async function importAmexLines(
   // ── Upsert for rows without amex_reference (rare edge case) ───
   for (let i = 0; i < withoutRef.length; i += CHUNK_SIZE) {
     const chunk = withoutRef.slice(i, i + CHUNK_SIZE);
-    const placeholders = chunk.map(() => rowPlaceholder).join(",");
+    const placeholders = chunk.map(() => AMEX_LINE_ROW_PLACEHOLDER).join(",");
     const binds: unknown[] = [];
+    // Arg order MUST match AMEX_LINE_INSERT_COLUMNS exactly — same contract as
+    // the withRef loop above.
     for (const row of chunk) {
       binds.push(
         newUuid(),
@@ -1287,12 +1329,7 @@ export async function importAmexLines(
     await db
       .prepare(
         `INSERT INTO amex_statement_lines
-          (id, statement_month, transaction_date, posting_date, merchant,
-           amount_minor, currency, amex_reference, match_status, receipt_status,
-           receipt_missing_reason, raw_json, statement_artifact_id, cardholder_name,
-           cardholder_flag, payment_type, prepayment_flag, memo, foreign_amount_minor,
-           foreign_currency, foreign_exchange_rate, memo_currency_parse_status,
-           raw_csv_line_number, source_file_sha256, imported_at, created_at)
+          (${AMEX_LINE_INSERT_COLUMN_LIST.join(", ")})
          VALUES ${placeholders}
          ON CONFLICT (statement_month, transaction_date, amount_minor, merchant, cardholder_name)
            WHERE amex_reference IS NULL
@@ -1799,12 +1836,47 @@ export async function getAmexArtifactBySha256(
     .first<AmexStatementArtifact>();
 }
 
+// True iff the artifact claims a successful parse (import_status='parsed',
+// transaction_count > 0) yet zero amex_statement_lines reference it — a
+// half-completed import (e.g. the TASK-034 placeholder bug: every chunked
+// INSERT failed after the artifact row was already labeled 'parsed'). Such a
+// row must not be treated as a healthy duplicate: the import route checks
+// this before returning duplicate:true, and purgeFailedAmexArtifactsByHash
+// mirrors the same predicate in SQL so re-uploading the file can heal it.
+export function isBrokenParsedArtifact(
+  artifact: Pick<AmexStatementArtifact, "import_status" | "transaction_count">,
+  lineCount: number,
+): boolean {
+  return (
+    artifact.import_status === "parsed" &&
+    (artifact.transaction_count ?? 0) > 0 &&
+    lineCount === 0
+  );
+}
+
+export async function countAmexLinesByArtifactId(
+  db: D1Database,
+  artifactId: string,
+): Promise<number> {
+  const row = await db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM amex_statement_lines WHERE statement_artifact_id = ?`,
+    )
+    .bind(artifactId)
+    .first<{ n: number }>();
+  return row?.n ?? 0;
+}
+
 // Purge stale failed/replaced artifact rows for a given file hash so a fresh
 // INSERT with the same sha256_hash can succeed. The application-layer dedup
 // check (getAmexArtifactBySha256) excludes these rows, but the DB-level
 // UNIQUE constraint on sha256_hash (db/receipts/0005_amex_extended.sql:31)
 // still fires on INSERT because the row physically exists. Purging right
-// before createAmexArtifact() closes that gap.
+// before createAmexArtifact() closes that gap. Also purges "broken parsed"
+// artifacts (the SQL mirror of isBrokenParsedArtifact above): rows labeled
+// 'parsed' with transaction_count > 0 but zero imported lines — keeping such
+// a half-completed row blocks the sha UNIQUE constraint exactly like a
+// failed one.
 //
 // Non-fatal R2 cleanup: each row's R2 object is deleted best-effort. R2
 // failures are logged but do not block the DB cleanup — same "non-fatal,
@@ -1824,7 +1896,18 @@ export async function purgeFailedAmexArtifactsByHash(
   const stale = await db
     .prepare(
       `SELECT id, r2_key FROM amex_statement_artifacts
-       WHERE sha256_hash = ? AND import_status IN ('failed', 'replaced')`,
+       WHERE sha256_hash = ?
+         AND (
+           import_status IN ('failed', 'replaced')
+           OR (
+             import_status = 'parsed'
+             AND COALESCE(transaction_count, 0) > 0
+             AND NOT EXISTS (
+               SELECT 1 FROM amex_statement_lines
+               WHERE statement_artifact_id = amex_statement_artifacts.id
+             )
+           )
+         )`,
     )
     .bind(sha256)
     .all<{ id: string; r2_key: string }>();

@@ -8,9 +8,11 @@ import {
 import {
   importAmexLines,
   createAmexArtifact,
+  countAmexLinesByArtifactId,
   getAmexArtifactBySha256,
   getAmexArtifactByMonth,
   getFinalizedReconciliationForMonth,
+  isBrokenParsedArtifact,
   markPreviousArtifactsReplaced,
   purgeFailedAmexArtifactsByHash,
   updateAmexArtifactStatus,
@@ -108,22 +110,38 @@ export async function POST(request: Request) {
     // ── Duplicate file detection ────────────────────────────────────────────
     const existingBySha = await getAmexArtifactBySha256(sha256);
     if (existingBySha) {
-      return NextResponse.json(
-        {
-          ok: true,
-          duplicate: true,
-          artifactId: existingBySha.id,
-          statementMonth: existingBySha.statement_month,
-          message: "This AMEX statement file has already been uploaded.",
-          inserted: 0,
-          updated: 0,
-          unchanged: 0,
-          transactionCount: existingBySha.transaction_count ?? 0,
-          statementTotalCents: existingBySha.statement_total_amount_cents,
-          cardName: existingBySha.card_name,
-          paymentDueDate: existingBySha.payment_due_date,
-        },
-        { status: 200 },
+      // A 'parsed' artifact with transactions but zero imported lines is a
+      // half-completed import, not a duplicate — returning duplicate:true here
+      // would mask it forever (the sha dedup short-circuits before the import
+      // that would heal it). Fall through to the normal flow;
+      // purgeFailedAmexArtifactsByHash (below) deletes the broken row so the
+      // fresh artifact INSERT clears the sha256 UNIQUE constraint.
+      const lineCount = await countAmexLinesByArtifactId(
+        getReceiptsDb(),
+        existingBySha.id,
+      );
+      if (!isBrokenParsedArtifact(existingBySha, lineCount)) {
+        return NextResponse.json(
+          {
+            ok: true,
+            duplicate: true,
+            artifactId: existingBySha.id,
+            statementMonth: existingBySha.statement_month,
+            message: "This AMEX statement file has already been uploaded.",
+            inserted: 0,
+            updated: 0,
+            unchanged: 0,
+            transactionCount: existingBySha.transaction_count ?? 0,
+            statementTotalCents: existingBySha.statement_total_amount_cents,
+            cardName: existingBySha.card_name,
+            paymentDueDate: existingBySha.payment_due_date,
+          },
+          { status: 200 },
+        );
+      }
+      console.warn(
+        `[amex/import] artifact ${existingBySha.id} (${existingBySha.statement_month}) is parsed with ` +
+          `${existingBySha.transaction_count} transactions but 0 statement lines — treating as broken, re-importing`,
       );
     }
 
