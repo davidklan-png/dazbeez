@@ -354,6 +354,18 @@ starts. Design consequences:
     (PR #65 completed #9(a) consumer failed-state marking). Every failure
     path from the audit now surfaces or dies visibly. C-class accepted
     as documented.
+    RECURRENCE (2026-10-02, third): AMEX statement imports silently
+    failed from 5a270ea (2026-07-19) — 25-slot placeholder vs 26-column
+    INSERT threw on every importAmexLines call, but the artifact row was
+    pre-labeled 'parsed' with transaction counts and the sha-dedup branch
+    answered retries "already uploaded ✓". SAISON_2609/2610 sat
+    unimported for 6+ weeks; September had nothing to reconcile. Fixed
+    ae6411d + 419e9d2: INSERT shape single-sourced + source-reading
+    contract test (amex-import-contract), artifact created 'uploaded' and
+    only flipped to 'parsed' after lines commit, re-upload detects
+    incomplete artifacts and heals instead of masking. Same pattern as
+    #5/#22: a path that shipped after the theme closed. The badge must be
+    earned by committed state, not pre-labeled by intent.
 13. **Multi-page PDF handling.** IMPLEMENTED (code complete; Mac consumer
     restart + surgical re-extraction still required). Real-world case:
     5608427143.pdf (5c1ab53f…) has 2 pages; the old consumer rendered page 0
