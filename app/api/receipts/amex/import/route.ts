@@ -12,7 +12,7 @@ import {
   getAmexArtifactBySha256,
   getAmexArtifactByMonth,
   getFinalizedReconciliationForMonth,
-  isBrokenParsedArtifact,
+  isIncompleteArtifact,
   markPreviousArtifactsReplaced,
   purgeFailedAmexArtifactsByHash,
   updateAmexArtifactStatus,
@@ -110,17 +110,25 @@ export async function POST(request: Request) {
     // ── Duplicate file detection ────────────────────────────────────────────
     const existingBySha = await getAmexArtifactBySha256(sha256);
     if (existingBySha) {
-      // A 'parsed' artifact with transactions but zero imported lines is a
-      // half-completed import, not a duplicate — returning duplicate:true here
-      // would mask it forever (the sha dedup short-circuits before the import
-      // that would heal it). Fall through to the normal flow;
-      // purgeFailedAmexArtifactsByHash (below) deletes the broken row so the
-      // fresh artifact INSERT clears the sha256 UNIQUE constraint.
+      // An artifact labeled 'parsed' (or still 'uploaded') with zero imported
+      // lines is a half-completed import, not a duplicate — returning
+      // duplicate:true here would mask it forever (the sha dedup
+      // short-circuits before the import that would heal it). Fall through
+      // to the normal flow; purgeFailedAmexArtifactsByHash (below) deletes
+      // the broken row so the fresh artifact INSERT clears the sha256
+      // UNIQUE constraint.
       const lineCount = await countAmexLinesByArtifactId(
         getReceiptsDb(),
         existingBySha.id,
       );
-      if (!isBrokenParsedArtifact(existingBySha, lineCount)) {
+      if (!isIncompleteArtifact(existingBySha, lineCount)) {
+        // Complete but still 'uploaded': the import finished, yet the final
+        // status flip was lost (the Worker died between importAmexLines and
+        // updateAmexArtifactStatus). Heal in place so a finished import
+        // doesn't wear 'uploaded' forever.
+        if (existingBySha.import_status === "uploaded") {
+          await updateAmexArtifactStatus(existingBySha.id, "parsed");
+        }
         return NextResponse.json(
           {
             ok: true,
@@ -140,8 +148,9 @@ export async function POST(request: Request) {
         );
       }
       console.warn(
-        `[amex/import] artifact ${existingBySha.id} (${existingBySha.statement_month}) is parsed with ` +
-          `${existingBySha.transaction_count} transactions but 0 statement lines — treating as broken, re-importing`,
+        `[amex/import] artifact ${existingBySha.id} (${existingBySha.statement_month}) is ` +
+          `${existingBySha.import_status} with ${existingBySha.transaction_count} transactions ` +
+          `and ${lineCount} statement lines — treating as incomplete, re-importing`,
       );
     }
 
@@ -170,7 +179,12 @@ export async function POST(request: Request) {
       rowCount,
     } = parseAmexNetanswer(buffer, statementMonth);
 
-    const importStatus = validationErrors.length > 0 ? "failed" : "parsed";
+    // The artifact must not claim 'parsed' until lines are committed — if the
+    // import step dies after this INSERT, 'parsed' over zero lines is the
+    // green-badge lie TASK-035 fixed. 'uploaded' is the honest transient
+    // state; the post-import updateAmexArtifactStatus(..., "parsed") is what
+    // earns the badge. The 422 path keeps 'failed'.
+    const importStatus = validationErrors.length > 0 ? "failed" : "uploaded";
 
     // ── Upload artifact to R2 ───────────────────────────────────────────────
     const artifactId = crypto.randomUUID();

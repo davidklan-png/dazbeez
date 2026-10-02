@@ -1836,21 +1836,28 @@ export async function getAmexArtifactBySha256(
     .first<AmexStatementArtifact>();
 }
 
-// True iff the artifact claims a successful parse (import_status='parsed',
-// transaction_count > 0) yet zero amex_statement_lines reference it — a
-// half-completed import (e.g. the TASK-034 placeholder bug: every chunked
-// INSERT failed after the artifact row was already labeled 'parsed'). Such a
-// row must not be treated as a healthy duplicate: the import route checks
-// this before returning duplicate:true, and purgeFailedAmexArtifactsByHash
-// mirrors the same predicate in SQL so re-uploading the file can heal it.
-export function isBrokenParsedArtifact(
+// True iff the artifact's import never completed, either way it can happen:
+//  - import_status='parsed' with transaction_count > 0 yet zero
+//    amex_statement_lines referencing it — the TASK-034 shape (pre-labeled
+//    'parsed', then the chunked INSERTs all failed);
+//  - import_status='uploaded' with zero lines — the import step died after
+//    the route stopped pre-labeling 'parsed' (artifacts are created
+//    'uploaded' and only the post-import updateAmexArtifactStatus earns
+//    'parsed'; transaction_count is irrelevant here — even a 0-transaction
+//    'uploaded' row never finished importing).
+// Such a row must not be treated as a healthy duplicate: the import route
+// checks this before returning duplicate:true, and
+// purgeFailedAmexArtifactsByHash mirrors the same predicate in SQL so
+// re-uploading the file can heal it.
+export function isIncompleteArtifact(
   artifact: Pick<AmexStatementArtifact, "import_status" | "transaction_count">,
   lineCount: number,
 ): boolean {
   return (
-    artifact.import_status === "parsed" &&
-    (artifact.transaction_count ?? 0) > 0 &&
-    lineCount === 0
+    (artifact.import_status === "parsed" &&
+      (artifact.transaction_count ?? 0) > 0 &&
+      lineCount === 0) ||
+    (artifact.import_status === "uploaded" && lineCount === 0)
   );
 }
 
@@ -1872,10 +1879,11 @@ export async function countAmexLinesByArtifactId(
 // check (getAmexArtifactBySha256) excludes these rows, but the DB-level
 // UNIQUE constraint on sha256_hash (db/receipts/0005_amex_extended.sql:31)
 // still fires on INSERT because the row physically exists. Purging right
-// before createAmexArtifact() closes that gap. Also purges "broken parsed"
-// artifacts (the SQL mirror of isBrokenParsedArtifact above): rows labeled
-// 'parsed' with transaction_count > 0 but zero imported lines — keeping such
-// a half-completed row blocks the sha UNIQUE constraint exactly like a
+// before createAmexArtifact() closes that gap. Also purges incomplete
+// artifacts (the SQL mirror of isIncompleteArtifact above): rows labeled
+// 'parsed' with transaction_count > 0 but zero imported lines, and rows
+// still at 'uploaded' with zero lines (import died mid-flight) — keeping
+// such a half-completed row blocks the sha UNIQUE constraint exactly like a
 // failed one.
 //
 // Non-fatal R2 cleanup: each row's R2 object is deleted best-effort. R2
@@ -1902,6 +1910,13 @@ export async function purgeFailedAmexArtifactsByHash(
            OR (
              import_status = 'parsed'
              AND COALESCE(transaction_count, 0) > 0
+             AND NOT EXISTS (
+               SELECT 1 FROM amex_statement_lines
+               WHERE statement_artifact_id = amex_statement_artifacts.id
+             )
+           )
+           OR (
+             import_status = 'uploaded'
              AND NOT EXISTS (
                SELECT 1 FROM amex_statement_lines
                WHERE statement_artifact_id = amex_statement_artifacts.id

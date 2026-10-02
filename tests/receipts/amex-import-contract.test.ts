@@ -19,7 +19,7 @@ import { readFileSync } from "node:fs";
 import {
   AMEX_LINE_INSERT_COLUMNS,
   AMEX_LINE_ROW_PLACEHOLDER,
-  isBrokenParsedArtifact,
+  isIncompleteArtifact,
 } from "@/lib/receipts/db";
 
 const DB_SRC_PATH = "lib/receipts/db.ts";
@@ -191,32 +191,53 @@ test("fixture: the shipped 25-slot placeholder (the TASK-034 bug) fails the slot
   );
 });
 
-// ─── isBrokenParsedArtifact ───────────────────────────────────────────────────
+// ─── isIncompleteArtifact ───────────────────────────────────────────────────
 
-test("isBrokenParsedArtifact: parsed + transactions + zero lines == broken", () => {
+test("isIncompleteArtifact: parsed + transactions + zero lines == incomplete", () => {
   assert.equal(
-    isBrokenParsedArtifact({ import_status: "parsed", transaction_count: 21 }, 0),
+    isIncompleteArtifact({ import_status: "parsed", transaction_count: 21 }, 0),
     true,
   );
 });
 
-test("isBrokenParsedArtifact: parsed + transactions + lines == healthy duplicate", () => {
+test("isIncompleteArtifact: parsed + transactions + lines == healthy duplicate", () => {
   assert.equal(
-    isBrokenParsedArtifact({ import_status: "parsed", transaction_count: 21 }, 21),
+    isIncompleteArtifact({ import_status: "parsed", transaction_count: 21 }, 21),
     false,
   );
 });
 
-test("isBrokenParsedArtifact: failed artifacts keep existing purge behavior", () => {
+test("isIncompleteArtifact: failed artifacts keep existing purge behavior", () => {
   assert.equal(
-    isBrokenParsedArtifact({ import_status: "failed", transaction_count: 21 }, 0),
+    isIncompleteArtifact({ import_status: "failed", transaction_count: 21 }, 0),
     false,
   );
 });
 
-test("isBrokenParsedArtifact: parsed with zero transactions is not broken", () => {
+test("isIncompleteArtifact: parsed with zero transactions is not incomplete", () => {
   assert.equal(
-    isBrokenParsedArtifact({ import_status: "parsed", transaction_count: 0 }, 0),
+    isIncompleteArtifact({ import_status: "parsed", transaction_count: 0 }, 0),
+    false,
+  );
+});
+
+test("isIncompleteArtifact: uploaded + transactions + zero lines == incomplete (crashed mid-import)", () => {
+  assert.equal(
+    isIncompleteArtifact({ import_status: "uploaded", transaction_count: 21 }, 0),
+    true,
+  );
+});
+
+test("isIncompleteArtifact: uploaded + zero transactions + zero lines == incomplete", () => {
+  assert.equal(
+    isIncompleteArtifact({ import_status: "uploaded", transaction_count: 0 }, 0),
+    true,
+  );
+});
+
+test("isIncompleteArtifact: uploaded + lines == complete (heal-in-place duplicate)", () => {
+  assert.equal(
+    isIncompleteArtifact({ import_status: "uploaded", transaction_count: 21 }, 21),
     false,
   );
 });
