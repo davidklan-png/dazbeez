@@ -107,7 +107,18 @@ export default async function AmexPage({
                   <tr key={a.id} className="hover:bg-gray-50">
                     <td className="px-3 py-2 font-medium text-gray-900">{a.statement_month}</td>
                     <td className="max-w-[160px] truncate px-3 py-2 text-gray-600">
-                      {a.original_filename ?? "—"}
+                      {a.original_filename ? (
+                        <a
+                          href={`/api/receipts/amex/artifacts/${a.id}`}
+                          target="_blank"
+                          rel="noopener"
+                          className="hover:underline"
+                        >
+                          {a.original_filename}
+                        </a>
+                      ) : (
+                        "—"
+                      )}
                     </td>
                     <td className="px-3 py-2 text-gray-700">{a.transaction_count ?? "—"}</td>
                     <td className="px-3 py-2 text-gray-700">

@@ -540,16 +540,30 @@ export function isExportDownloadFile(
  * `filename*=UTF-8''…` parameter, which modern clients prefer and render with
  * the correct Unicode name.
  */
-export function contentDispositionAttachment(filename: string): string {
+function contentDisposition(
+  type: "inline" | "attachment",
+  filename: string,
+): string {
   if (/^[\x20-\x7E]+$/.test(filename)) {
-    return `attachment; filename="${filename}"`;
+    return `${type}; filename="${filename}"`;
   }
   const asciiFallback = filename.replace(/[^\x20-\x7E]+/g, "_").replace(/"/g, "");
   const utf8 = encodeURIComponent(filename).replace(
     /['()*]/g,
     (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase(),
   );
-  return `attachment; filename="${asciiFallback}"; filename*=UTF-8''${utf8}`;
+  return `${type}; filename="${asciiFallback}"; filename*=UTF-8''${utf8}`;
+}
+
+export function contentDispositionAttachment(filename: string): string {
+  return contentDisposition("attachment", filename);
+}
+
+/** `Content-Disposition: inline` variant of the same encoding — for viewing a
+ *  stored artifact in the browser (the AMEX statement CSV) rather than
+ *  downloading it. Same ByteString/RFC 5987 rules as the attachment form. */
+export function contentDispositionInline(filename: string): string {
+  return contentDisposition("inline", filename);
 }
 
 /** AMEX 照合CSV download filename for a revision: the pack name dated by the

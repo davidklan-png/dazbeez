@@ -1892,6 +1892,16 @@ export async function getAmexArtifactByMonth(
     .first<AmexStatementArtifact>();
 }
 
+export async function getAmexArtifactById(
+  db: D1Database,
+  id: string,
+): Promise<AmexStatementArtifact | null> {
+  return db
+    .prepare(`SELECT * FROM amex_statement_artifacts WHERE id = ? LIMIT 1`)
+    .bind(id)
+    .first<AmexStatementArtifact>();
+}
+
 export async function listAmexArtifacts(): Promise<AmexStatementArtifact[]> {
   const db = getReceiptsDb();
   const result = await db
