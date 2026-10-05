@@ -9,6 +9,7 @@ import {
   importAmexLines,
   createAmexArtifact,
   countAmexLinesByArtifactId,
+  countCrossMonthDuplicateLines,
   getAmexArtifactBySha256,
   getAmexArtifactByMonth,
   getFinalizedReconciliationForMonth,
@@ -276,13 +277,29 @@ export async function POST(request: Request) {
       sha256,
     );
 
+    // TASK-037: a charge never appears on two AMEX statement months — incoming
+    // tuples already imported under a DIFFERENT month mean this file was
+    // probably slotted into the wrong month (the 2610 double import). Advisory
+    // only; runs against other months, so it is unaffected by the import below.
+    let businessTripCandidatesCount = 0;
+    const warnings: string[] = [];
+    const crossMonth = await countCrossMonthDuplicateLines(importInputs, statementMonth);
+    if (crossMonth.count > 0) {
+      warnings.push(
+        `${crossMonth.count} incoming charge(s) match lines already imported under ` +
+          `statement month(s) ${crossMonth.months.join(", ")} — verify this file ` +
+          `belongs to ${statementMonth}.`,
+      );
+    }
+
     const { inserted, updated, unchanged } = await importAmexLines(importInputs, actor);
 
     await updateAmexArtifactStatus(savedArtifactId, "parsed");
 
     // ── Mark previous artifact replaced (after successful import) ──────────
+    // Also deletes the replaced artifact's superseded lines (TASK-037).
     if (previousArtifact) {
-      await markPreviousArtifactsReplaced(statementMonth, savedArtifactId);
+      await markPreviousArtifactsReplaced(statementMonth, savedArtifactId, actor);
     }
 
     // ── Business trip candidate detection ───────────────────────────────────
@@ -290,8 +307,6 @@ export async function POST(request: Request) {
     // import still succeeds (statement lines are already committed), but
     // the operator needs to know detection didn't run so they can re-check
     // manually or retry the import.
-    let businessTripCandidatesCount = 0;
-    const warnings: string[] = [];
     try {
       const db = getReceiptsDb();
       const inserted = await db

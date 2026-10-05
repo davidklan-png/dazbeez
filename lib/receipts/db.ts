@@ -1367,6 +1367,55 @@ export async function importAmexLines(
   return { inserted, updated, unchanged };
 }
 
+// TASK-037: operator rule — a charge NEVER appears on two AMEX statement
+// months, so an incoming tuple that already exists under a DIFFERENT month is
+// always an import artifact (the 2610 CSV was first mis-slotted into 2026-09).
+// Counts distinct incoming tuples (transaction_date, merchant, amount_minor,
+// cardholder_name — the fallback dedup key, minus the month) that match lines
+// in other statement months, and returns those months. Same-month matches are
+// the normal re-import dedup and do NOT count. Pure advisory: the import
+// route surfaces this as a non-blocking warning.
+export async function countCrossMonthDuplicateLines(
+  rows: ImportAmexLineInput[],
+  month: string,
+  opts: { db?: D1Database } = {},
+): Promise<{ count: number; months: string[] }> {
+  if (rows.length === 0) return { count: 0, months: [] };
+  const db = opts.db ?? getReceiptsDb();
+
+  const incomingKeys = new Set(
+    rows.map(
+      (r) => `${r.transactionDate}|${r.merchant}|${r.amountMinor}|${r.cardholderName ?? ""}`,
+    ),
+  );
+
+  const existing = await db
+    .prepare(
+      `SELECT DISTINCT statement_month, transaction_date, merchant, amount_minor, cardholder_name
+       FROM amex_statement_lines
+       WHERE statement_month != ?`,
+    )
+    .bind(month)
+    .all<{
+      statement_month: string;
+      transaction_date: string;
+      merchant: string;
+      amount_minor: number;
+      cardholder_name: string | null;
+    }>();
+
+  const months = new Set<string>();
+  const matched = new Set<string>();
+  for (const row of existing.results ?? []) {
+    const key = `${row.transaction_date}|${row.merchant}|${row.amount_minor}|${row.cardholder_name ?? ""}`;
+    if (incomingKeys.has(key)) {
+      matched.add(key);
+      months.add(row.statement_month);
+    }
+  }
+  return { count: matched.size, months: [...months].sort() };
+}
+
 export async function listAmexLines(
   month: string,
 ): Promise<AmexStatementLine[]> {
@@ -1900,18 +1949,57 @@ export async function countAmexLinesByArtifactId(
 // the re-upload that caused the purge. receipt_audit_log rows for the
 // purged artifacts are intentionally NOT deleted (append-only, tax/
 // compliance retention).
+// TASK-037: the failed/replaced branch now carries the same NOT EXISTS
+// lines-guard as the parsed/uploaded branches. It didn't, and that was the
+// 2026-10-02 orphaning mechanism: a 'replaced' artifact whose lines had not
+// been superseded was deleted here, leaving ghost lines behind. An artifact
+// that still owns lines is NOT purged — it is logged loudly (console.error,
+// backlog #12/#22 fail-loud doctrine) and skipped; a bookkeeping purge must
+// never delete reconciliation-bearing lines.
 export async function purgeFailedAmexArtifactsByHash(
   sha256: string,
   actor: string,
+  opts: { db?: D1Database } = {},
 ): Promise<void> {
-  const db = getReceiptsDb();
+  const db = opts.db ?? getReceiptsDb();
+
+  // Diagnostic read (NOT part of the purge predicate): failed/replaced rows
+  // for this hash WITH their line counts, so line-bearing ones can be named
+  // in the loud skip log instead of vanishing into the WHERE clause.
+  const failedReplaced = await db
+    .prepare(
+      `SELECT id,
+              (SELECT COUNT(*) FROM amex_statement_lines
+                WHERE statement_artifact_id = amex_statement_artifacts.id) AS line_count
+       FROM amex_statement_artifacts
+       WHERE sha256_hash = ? AND import_status IN ('failed', 'replaced')`,
+    )
+    .bind(sha256)
+    .all<{ id: string; line_count: number }>();
+  for (const row of failedReplaced.results ?? []) {
+    if (row.line_count > 0) {
+      console.error(
+        `[purgeFailedAmexArtifactsByHash] REFUSING to purge artifact ${row.id} ` +
+          `(${sha256.slice(0, 12)}…): import_status is failed/replaced but it still ` +
+          `owns ${row.line_count} statement line(s) — skipping. This is the orphaning ` +
+          `shape of the 2026-10-02 incident; the lines must be superseded or repaired ` +
+          `(scripts/purge-orphan-amex-lines.ts) before this artifact can be purged.`,
+      );
+    }
+  }
 
   const stale = await db
     .prepare(
       `SELECT id, r2_key FROM amex_statement_artifacts
        WHERE sha256_hash = ?
          AND (
-           import_status IN ('failed', 'replaced')
+           (
+             import_status IN ('failed', 'replaced')
+             AND NOT EXISTS (
+               SELECT 1 FROM amex_statement_lines
+               WHERE statement_artifact_id = amex_statement_artifacts.id
+             )
+           )
            OR (
              import_status = 'parsed'
              AND COALESCE(transaction_count, 0) > 0
@@ -2028,19 +2116,74 @@ export async function updateAmexArtifactStatus(
     .run();
 }
 
+// TASK-037: superseding an artifact must supersede its LINES too. The old
+// version only flipped import_status='replaced' and left the lines in place;
+// the follow-up purgeFailedAmexArtifactsByHash then deleted the artifact row
+// (its failed/replaced branch had no lines-exist guard, now fixed) and the
+// lines became ghosts pointing at a missing artifact — the 2026-10-02 2610
+// double-import left 23 of them in month 2026-09.
+//
+// Safety of the DELETE: callers run this AFTER importAmexLines, whose ON
+// CONFLICT DO UPDATE re-homes every surviving row to the new artifact
+// (statement_artifact_id = excluded.statement_artifact_id) BEFORE this flip.
+// Lines still pointing at a replaced artifact after the import are therefore
+// exactly the superseded leftovers (charges absent from the new CSV).
+//
+// Flipped artifact ids and their deleted line counts are recorded in ONE
+// audit entry (amex_statement.replaced_artifact_lines_deleted).
 export async function markPreviousArtifactsReplaced(
   statementMonth: string,
   exceptId: string,
+  actor: string,
+  opts: { db?: D1Database } = {},
 ): Promise<void> {
-  const db = getReceiptsDb();
-  await db
+  const db = opts.db ?? getReceiptsDb();
+
+  const previous = await db
     .prepare(
-      `UPDATE amex_statement_artifacts
-       SET import_status = 'replaced', updated_at = ?
+      `SELECT id,
+              (SELECT COUNT(*) FROM amex_statement_lines
+                WHERE statement_artifact_id = amex_statement_artifacts.id) AS line_count
+       FROM amex_statement_artifacts
        WHERE statement_month = ? AND id != ? AND import_status NOT IN ('failed','replaced')`,
     )
-    .bind(nowIso(), statementMonth, exceptId)
-    .run();
+    .bind(statementMonth, exceptId)
+    .all<{ id: string; line_count: number }>();
+
+  const replaced = previous.results ?? [];
+  if (replaced.length === 0) return;
+
+  const replacedIds = replaced.map((r) => r.id);
+  const placeholders = replacedIds.map(() => "?").join(", ");
+
+  // Single transaction: line delete and status flip commit together, so a
+  // crash can never leave a 'replaced' artifact still owning lines.
+  await db.batch([
+    db
+      .prepare(
+        `DELETE FROM amex_statement_lines WHERE statement_artifact_id IN (${placeholders})`,
+      )
+      .bind(...replacedIds),
+    db
+      .prepare(
+        `UPDATE amex_statement_artifacts
+         SET import_status = 'replaced', updated_at = ?
+         WHERE statement_month = ? AND id != ? AND import_status NOT IN ('failed','replaced')`,
+      )
+      .bind(nowIso(), statementMonth, exceptId),
+  ]);
+
+  await createAuditEntry(db, {
+    actor,
+    action: "amex_statement.replaced_artifact_lines_deleted",
+    objectType: "amex_statement_artifact",
+    objectId: replacedIds.join(","),
+    newValueJson: JSON.stringify({
+      statementMonth,
+      supersededBy: exceptId,
+      replacedArtifacts: replaced.map((r) => ({ id: r.id, deletedLines: r.line_count })),
+    }),
+  });
 }
 
 // ─── AMEX line categorization ─────────────────────────────────────────────────

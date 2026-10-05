@@ -129,6 +129,12 @@ export type AuditAction =
   | "amex_statement.parsed"
   | "amex_statement.import_failed"
   | "amex_statement.failed_artifact_purged"
+  // TASK-037 (2026-10-05): a 'replaced'/'failed' artifact purge skipped rows
+  // that still own lines (the orphaning mechanism of the 2610 double import),
+  // and a supersede flipped an artifact to 'replaced' while deleting its
+  // superseded lines.
+  | "amex_statement.replaced_artifact_lines_deleted"
+  | "amex_statement.orphan_lines_purged"
   | "amex_statement.line_updated"
   | "amex_statement.line_reconciled"
   | "export.created"
