@@ -70,3 +70,9 @@ d1-backup-*.sql
 /accountant-encoding-probe/
 /receipts/
 /DazbeezCapture/
+
+# clerk configuration (can include secrets)
+/.clerk/
+
+# Cross-session task handoff (coordination, not product)
+handoff/
