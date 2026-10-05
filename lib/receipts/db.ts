@@ -1915,6 +1915,38 @@ export function isIncompleteArtifact(
   );
 }
 
+// TASK-038 F1: verdict for a re-uploaded file whose sha already has an
+// artifact row. Extends isIncompleteArtifact with two "heal" shapes:
+//  - 'uploaded' with lines > 0 — the import ran but the status flip was lost,
+//    OR the chunked import died partway (lines > 0 but < transaction_count);
+//  - 'parsed' with 0 < lines < transaction_count — the TASK-034 crash window
+//    after the pre-label fix: some chunks committed, then the Worker died.
+//
+// Partial imports are HEAL, not purge: existing lines carry reconciliation
+// state (matched_receipt_id, match_status, expense_category_code, …) —
+// purging them would reset a 10-year tax record's reconciliation. Re-import
+// is idempotent by the ON CONFLICT dedup contract (the import route's header
+// comment), so completing in place inserts only the missing chunks and
+// re-homes the survivors while preserving that state. Purge stays reserved
+// for the zero-lines case, where there is no reconciliation state to lose.
+export type ExistingArtifactVerdict = "incomplete" | "heal" | "duplicate";
+
+export function classifyExistingArtifact(
+  artifact: Pick<AmexStatementArtifact, "import_status" | "transaction_count">,
+  lineCount: number,
+): ExistingArtifactVerdict {
+  if (isIncompleteArtifact(artifact, lineCount)) return "incomplete";
+  if (artifact.import_status === "uploaded" && lineCount > 0) return "heal";
+  if (
+    artifact.import_status === "parsed" &&
+    lineCount > 0 &&
+    lineCount < (artifact.transaction_count ?? 0)
+  ) {
+    return "heal";
+  }
+  return "duplicate";
+}
+
 export async function countAmexLinesByArtifactId(
   db: D1Database,
   artifactId: string,

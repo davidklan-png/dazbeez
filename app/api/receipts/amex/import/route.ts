@@ -4,6 +4,7 @@ import {
   parseAmexNetanswer,
   netanswerLinesToImportInputs,
   detectBusinessTripCandidates,
+  statementMonthFitsPaymentDue,
 } from "@/lib/receipts/validation";
 import {
   importAmexLines,
@@ -13,7 +14,7 @@ import {
   getAmexArtifactBySha256,
   getAmexArtifactByMonth,
   getFinalizedReconciliationForMonth,
-  isIncompleteArtifact,
+  classifyExistingArtifact,
   markPreviousArtifactsReplaced,
   purgeFailedAmexArtifactsByHash,
   updateAmexArtifactStatus,
@@ -47,6 +48,67 @@ import { getComplianceSettings } from "@/lib/receipts/settings";
  */
 
 const MAX_CSV_BYTES = 5 * 1024 * 1024;
+
+// ── Business trip candidate detection ───────────────────────────────────────
+// Audit B3: trip-detection failure previously vanished silently. The
+// import still succeeds (statement lines are already committed), but
+// the operator needs to know detection didn't run so they can re-check
+// manually or retry the import. Shared by the fresh-import and heal
+// paths (TASK-038) so they can't drift.
+async function runBusinessTripDetection(
+  artifactId: string,
+  actor: string,
+  warnings: string[],
+): Promise<number> {
+  try {
+    const db = getReceiptsDb();
+    const inserted = await db
+      .prepare(
+        `SELECT id, cardholder_name, transaction_date, merchant, expense_category_code
+         FROM amex_statement_lines
+         WHERE statement_artifact_id = ?
+         ORDER BY raw_csv_line_number ASC`,
+      )
+      .bind(artifactId)
+      .all<{
+        id: string;
+        cardholder_name: string | null;
+        transaction_date: string;
+        merchant: string;
+        expense_category_code: string | null;
+      }>();
+
+    const realLines = (inserted.results ?? []).map((r) => ({
+      id: r.id,
+      cardholderName: r.cardholder_name,
+      transactionDate: r.transaction_date,
+      merchant: r.merchant,
+      expenseCategoryCode: r.expense_category_code,
+    }));
+
+    // ADR 0010 D3: homebase signals come from Settings → Compliance (was a
+    // hardcoded Tokyo list). Categories aren't set at first import, so the
+    // category-boost fires mainly on re-imports after the operator
+    // categorizes lines — which is also when the dedupe (createBusinessTripReports)
+    // matters most.
+    const homebaseSignals = (await getComplianceSettings()).homebase_signals;
+    const candidates = detectBusinessTripCandidates(realLines, homebaseSignals);
+    if (candidates.length > 0) {
+      await createBusinessTripReports(candidates, actor);
+      return candidates.length;
+    }
+    return 0;
+  } catch (tripErr) {
+    console.error(
+      "[amex/import] business trip detection failed (statement lines already committed)",
+      tripErr,
+    );
+    warnings.push(
+      "Statement lines imported, but business-trip candidate detection failed — re-check the month manually.",
+    );
+    return 0;
+  }
+}
 
 export async function POST(request: Request) {
   try {
@@ -111,48 +173,162 @@ export async function POST(request: Request) {
     // ── Duplicate file detection ────────────────────────────────────────────
     const existingBySha = await getAmexArtifactBySha256(sha256);
     if (existingBySha) {
-      // An artifact labeled 'parsed' (or still 'uploaded') with zero imported
-      // lines is a half-completed import, not a duplicate — returning
-      // duplicate:true here would mask it forever (the sha dedup
-      // short-circuits before the import that would heal it). Fall through
-      // to the normal flow; purgeFailedAmexArtifactsByHash (below) deletes
-      // the broken row so the fresh artifact INSERT clears the sha256
-      // UNIQUE constraint.
       const lineCount = await countAmexLinesByArtifactId(
         getReceiptsDb(),
         existingBySha.id,
       );
-      if (!isIncompleteArtifact(existingBySha, lineCount)) {
-        // Complete but still 'uploaded': the import finished, yet the final
-        // status flip was lost (the Worker died between importAmexLines and
-        // updateAmexArtifactStatus). Heal in place so a finished import
-        // doesn't wear 'uploaded' forever.
-        if (existingBySha.import_status === "uploaded") {
-          await updateAmexArtifactStatus(existingBySha.id, "parsed");
+      const verdict = classifyExistingArtifact(existingBySha, lineCount);
+
+      if (verdict === "incomplete") {
+        // Zero imported lines: a half-completed import, not a duplicate —
+        // returning duplicate:true here would mask it forever (the sha dedup
+        // short-circuits before the import that would heal it). Fall through
+        // to the normal flow; purgeFailedAmexArtifactsByHash (below) deletes
+        // the broken row so the fresh artifact INSERT clears the sha256
+        // UNIQUE constraint.
+        console.warn(
+          `[amex/import] artifact ${existingBySha.id} (${existingBySha.statement_month}) is ` +
+            `${existingBySha.import_status} with ${existingBySha.transaction_count} transactions ` +
+            `and ${lineCount} statement lines — treating as incomplete, re-importing`,
+        );
+      } else {
+        const warnings: string[] = [];
+        // TASK-038 F2: the file already lives under a DIFFERENT statement
+        // month (the 2610 mis-slot shape). A bare duplicate:true reads as
+        // "already imported here", which it is not — name both months.
+        if (existingBySha.statement_month !== statementMonth) {
+          warnings.push(
+            `This file was already imported under statement month ${existingBySha.statement_month}, not ${statementMonth} — the requested month was NOT imported. If it belongs here, the earlier import needs correcting first.`,
+          );
         }
+
+        if (verdict === "duplicate") {
+          return NextResponse.json(
+            {
+              ok: true,
+              duplicate: true,
+              artifactId: existingBySha.id,
+              statementMonth: existingBySha.statement_month,
+              message: "This AMEX statement file has already been uploaded.",
+              inserted: 0,
+              updated: 0,
+              unchanged: 0,
+              transactionCount: existingBySha.transaction_count ?? 0,
+              statementTotalCents: existingBySha.statement_total_amount_cents,
+              cardName: existingBySha.card_name,
+              paymentDueDate: existingBySha.payment_due_date,
+              warnings,
+            },
+            { status: 200 },
+          );
+        }
+
+        // verdict === "heal": the import never finished — complete-but-
+        // unflipped, or partial (chunks missing / an interrupted replace).
+        // Complete it in place rather than answering duplicate:true.
+        // Re-import is idempotent by the ON CONFLICT dedup contract above;
+        // partial is heal-not-purge because existing lines carry
+        // reconciliation state (see classifyExistingArtifact in db.ts).
+        // The heal runs under the ARTIFACT's own month — never the
+        // operator's requested month (which the F2 warning already flags
+        // when they differ) — so lines can't land under a month the
+        // artifact doesn't own. importAmexLines has no finalized-month
+        // guard of its own and the route's earlier check ran against the
+        // REQUESTED month, so re-check against the artifact's month here.
+        if (await getFinalizedReconciliationForMonth(existingBySha.statement_month)) {
+          return NextResponse.json(
+            {
+              ok: true,
+              duplicate: true,
+              artifactId: existingBySha.id,
+              statementMonth: existingBySha.statement_month,
+              message:
+                "A prior upload of this file was found unfinished, but its statement month is finalized — the heal was refused and nothing was changed.",
+              warnings,
+            },
+            { status: 200 },
+          );
+        }
+
+        const heal = parseAmexNetanswer(buffer, existingBySha.statement_month);
+        if (heal.validationErrors.length > 0) {
+          return NextResponse.json(
+            {
+              ok: true,
+              duplicate: true,
+              artifactId: existingBySha.id,
+              statementMonth: existingBySha.statement_month,
+              message:
+                "A prior upload of this file was found unfinished, but the file no longer parses cleanly — nothing was changed.",
+              warnings: [
+                ...warnings,
+                `Prior import found unfinished (import_status '${existingBySha.import_status}'), but re-parsing failed: ${heal.validationErrors[0]}`,
+              ],
+            },
+            { status: 200 },
+          );
+        }
+
+        const healInputs = netanswerLinesToImportInputs(
+          heal.lines,
+          existingBySha.statement_month,
+          existingBySha.id,
+          sha256,
+        );
+        const { inserted, updated, unchanged } = await importAmexLines(
+          healInputs,
+          actor,
+        );
+
+        // Completes an interrupted replace (no-op when nothing to
+        // supersede). Stays AFTER the import, same as the fresh path. But
+        // never supersede a NEWER statement: if a later, healthy import
+        // already owns this month, the artifact being healed is the OLD
+        // file (two different files crashed in the same month) — deleting
+        // the newer one's lines here would promote the older statement
+        // without the replace-confirm the fresh path would have shown.
+        const newestForMonth = await getAmexArtifactByMonth(
+          existingBySha.statement_month,
+        );
+        if (newestForMonth?.id === existingBySha.id) {
+          await markPreviousArtifactsReplaced(
+            existingBySha.statement_month,
+            existingBySha.id,
+            actor,
+          );
+        } else {
+          warnings.push(
+            `Healed the unfinished import, but a newer statement artifact for ${existingBySha.statement_month} was left untouched — if this file should own the month, replace the statement explicitly.`,
+          );
+        }
+
+        const businessTripCandidatesCount = await runBusinessTripDetection(
+          existingBySha.id,
+          actor,
+          warnings,
+        );
+        await updateAmexArtifactStatus(existingBySha.id, "parsed");
+
         return NextResponse.json(
           {
             ok: true,
             duplicate: true,
             artifactId: existingBySha.id,
             statementMonth: existingBySha.statement_month,
-            message: "This AMEX statement file has already been uploaded.",
-            inserted: 0,
-            updated: 0,
-            unchanged: 0,
-            transactionCount: existingBySha.transaction_count ?? 0,
+            message: `A prior upload of this file was found unfinished (import_status '${existingBySha.import_status}') and has been completed in place.`,
+            inserted,
+            updated,
+            unchanged,
+            transactionCount: heal.lines.length,
             statementTotalCents: existingBySha.statement_total_amount_cents,
             cardName: existingBySha.card_name,
             paymentDueDate: existingBySha.payment_due_date,
+            businessTripCandidates: businessTripCandidatesCount,
+            warnings,
           },
           { status: 200 },
         );
       }
-      console.warn(
-        `[amex/import] artifact ${existingBySha.id} (${existingBySha.statement_month}) is ` +
-          `${existingBySha.import_status} with ${existingBySha.transaction_count} transactions ` +
-          `and ${lineCount} statement lines — treating as incomplete, re-importing`,
-      );
     }
 
     // ── Replacement check ───────────────────────────────────────────────────
@@ -179,6 +355,20 @@ export async function POST(request: Request) {
       parsedTotalCents,
       rowCount,
     } = parseAmexNetanswer(buffer, statementMonth);
+
+    // TASK-038 F3: the CSV's payment due month should fall in the selected
+    // statement month (ground truth: 8/8 live artifacts agree). A misfit is
+    // the wrong-month signal — the 2026-10-02 2610→2026-09 mis-slot would
+    // have been caught here before the replace-confirm prompt. Non-blocking.
+    const warnings: string[] = [];
+    if (
+      statementMonthFitsPaymentDue(statementMonth, metadata.paymentDueDate) ===
+      false
+    ) {
+      warnings.push(
+        `The CSV's payment due date (${metadata.paymentDueDate}) does not fall in the selected statement month ${statementMonth} — check the month before replacing an existing statement.`,
+      );
+    }
 
     // The artifact must not claim 'parsed' until lines are committed — if the
     // import step dies after this INSERT, 'parsed' over zero lines is the
@@ -281,8 +471,6 @@ export async function POST(request: Request) {
     // tuples already imported under a DIFFERENT month mean this file was
     // probably slotted into the wrong month (the 2610 double import). Advisory
     // only; runs against other months, so it is unaffected by the import below.
-    let businessTripCandidatesCount = 0;
-    const warnings: string[] = [];
     const crossMonth = await countCrossMonthDuplicateLines(importInputs, statementMonth);
     if (crossMonth.count > 0) {
       warnings.push(
@@ -303,56 +491,11 @@ export async function POST(request: Request) {
     }
 
     // ── Business trip candidate detection ───────────────────────────────────
-    // Audit B3: trip-detection failure previously vanished silently. The
-    // import still succeeds (statement lines are already committed), but
-    // the operator needs to know detection didn't run so they can re-check
-    // manually or retry the import.
-    try {
-      const db = getReceiptsDb();
-      const inserted = await db
-        .prepare(
-          `SELECT id, cardholder_name, transaction_date, merchant, expense_category_code
-           FROM amex_statement_lines
-           WHERE statement_artifact_id = ?
-           ORDER BY raw_csv_line_number ASC`,
-        )
-        .bind(savedArtifactId)
-        .all<{
-          id: string;
-          cardholder_name: string | null;
-          transaction_date: string;
-          merchant: string;
-          expense_category_code: string | null;
-        }>();
-
-      const realLines = (inserted.results ?? []).map((r) => ({
-        id: r.id,
-        cardholderName: r.cardholder_name,
-        transactionDate: r.transaction_date,
-        merchant: r.merchant,
-        expenseCategoryCode: r.expense_category_code,
-      }));
-
-      // ADR 0010 D3: homebase signals come from Settings → Compliance (was a
-      // hardcoded Tokyo list). Categories aren't set at first import, so the
-      // category-boost fires mainly on re-imports after the operator
-      // categorizes lines — which is also when the dedupe (createBusinessTripReports)
-      // matters most.
-      const homebaseSignals = (await getComplianceSettings()).homebase_signals;
-      const candidates = detectBusinessTripCandidates(realLines, homebaseSignals);
-      if (candidates.length > 0) {
-        await createBusinessTripReports(candidates, actor);
-        businessTripCandidatesCount = candidates.length;
-      }
-    } catch (tripErr) {
-      console.error(
-        "[amex/import] business trip detection failed (statement lines already committed)",
-        tripErr,
-      );
-      warnings.push(
-        "Statement lines imported, but business-trip candidate detection failed — re-check the month manually.",
-      );
-    }
+    const businessTripCandidatesCount = await runBusinessTripDetection(
+      savedArtifactId,
+      actor,
+      warnings,
+    );
 
     // ADR 0008: AMEX import no longer touches CASH/DIGITAL membership. Under the
     // calendar-month rule a cash receipt's export month is fixed by its

@@ -70,3 +70,6 @@ d1-backup-*.sql
 /accountant-encoding-probe/
 /receipts/
 /DazbeezCapture/
+
+# Cross-session task handoff (coordination, not product)
+handoff/

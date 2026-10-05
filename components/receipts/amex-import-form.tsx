@@ -259,7 +259,14 @@ function ImportResultSummary({ result }: { result: ImportResult }) {
   if (result.duplicate) {
     return (
       <div className="rounded-xl border border-yellow-200 bg-yellow-50 px-4 py-3 text-sm text-yellow-800">
-        {result.message}
+        <p>{result.message}</p>
+        {(result.warnings?.length ?? 0) > 0 && (
+          <ul className="mt-1 list-disc pl-5">
+            {result.warnings!.map((w, i) => (
+              <li key={i}>{w}</li>
+            ))}
+          </ul>
+        )}
       </div>
     );
   }
