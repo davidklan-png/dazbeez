@@ -706,17 +706,24 @@ test("parseAmexNetanswer: continuation row without a rate memo leaves status par
 });
 
 test("parseAmexNetanswer: foreign refund inherits the line's negative sign", () => {
-  // 今回ご請求額 omitted so the total-mismatch check is skipped (its parser
-  // strips the sign, which would otherwise conflict with a negative net).
+  // Paired with an equal positive charge so the net (0) is expressible in
+  // 今回ご請求額 — its parser strips signs, so a negative net total can't be
+  // written there (and since TASK-038 F4 the row is mandatory).
   const csv = [
     "カード名称,TestCard",
+    "お支払日,2026/07/10",
+    "今回ご請求額,000000",
+    "",
     "利用日,ご利用店名及び商品名,本人・家族区分,支払区分名称,締前入金区分,利用金額,備考",
     ",ご利用者名:テスト 様,,,,,",
+    "2026/06/10,CLOUDFLARE,1,1回,,1918,現地通貨額:11.51 USD",
     "2026/06/11,CLOUDFLARE REFUND,1,1回,,-1918,現地通貨額:11.51 USD",
     ",(SAN FRANCISCO),1,1回,,,円換算レート:6/11 166.6377",
   ].join("\n");
   const result = parseAmexNetanswer(toBuffer(csv), "2026-07");
-  const line = result.lines[0]!;
+  assert.equal(result.validationErrors.length, 0);
+  const line = result.lines[1]!;
+  assert.equal(line.merchantName, "CLOUDFLARE REFUND");
   assert.equal(line.amountCents, -1918);
   assert.equal(line.memoCurrencyParseStatus, "parsed");
   // Sign inherited from amountCents: the memo magnitude 11.51 becomes -1151.
@@ -740,4 +747,182 @@ test("parseAmexNetanswer: ordinary JPY line (no foreign marker) has null foreign
   assert.equal(line.foreignAmountMinor, null);
   assert.equal(line.foreignCurrency, null);
   assert.equal(line.foreignExchangeRate, null);
+});
+
+// ─── TASK-038: import edge hardening ────────────────────────────────────────
+
+test("parseAmexNetanswer: UTF-8 BOM is stripped and the file parses", () => {
+  const csv =
+    "﻿" +
+    [
+      "カード名称,TestCard",
+      "お支払日,2026/05/07",
+      "今回ご請求額,001000",
+      "",
+      "利用日,ご利用店名及び商品名,本人・家族区分,支払区分名称,締前入金区分,利用金額,備考",
+      ",ご利用者名:テスト 様,,,,,",
+      "2026/05/01,コンビニ,1,1回,,1000,",
+    ].join("\n");
+  const result = parseAmexNetanswer(toBuffer(csv), "2026-05");
+  // A BOM surviving into col0 would corrupt the カード名称 match and, worse,
+  // make row 1's date column unparseable.
+  assert.equal(result.metadata.cardName, "TestCard");
+  assert.equal(result.lines.length, 1);
+  assert.equal(result.validationErrors.length, 0);
+});
+
+test("parseAmexNetanswer: CRLF line endings parse identically to LF", () => {
+  const rows = [
+    "カード名称,TestCard",
+    "お支払日,2026/05/07",
+    "今回ご請求額,003000",
+    "",
+    "利用日,ご利用店名及び商品名,本人・家族区分,支払区分名称,締前入金区分,利用金額,備考",
+    ",ご利用者名:テスト 様,,,,,",
+    "2026/03/12,HUB 東京オペラシティ店,1,1回,,1515,",
+    "2026/04/01,スターバックス 新宿店,1,1回,,1485,",
+  ];
+  const lf = parseAmexNetanswer(toBuffer(rows.join("\n")), "2026-05");
+  const crlf = parseAmexNetanswer(toBuffer(rows.join("\r\n")), "2026-05");
+  // A stray \r at end-of-line would end up inside the memo/amount fields.
+  assert.deepEqual(crlf.lines, lf.lines);
+  assert.deepEqual(crlf.metadata, lf.metadata);
+  assert.deepEqual(crlf.validationErrors, lf.validationErrors);
+});
+
+test("parseAmexNetanswer: missing 今回ご請求額 row fails closed (TASK-038 F4)", () => {
+  const csv = [
+    "カード名称,TestCard",
+    "お支払日,2026/05/07",
+    "",
+    "利用日,ご利用店名及び商品名,本人・家族区分,支払区分名称,締前入金区分,利用金額,備考",
+    ",ご利用者名:テスト 様,,,,,",
+    "2026/05/01,コンビニ,1,1回,,1000,",
+  ].join("\n");
+  const result = parseAmexNetanswer(toBuffer(csv), "2026-05");
+  // Without the statement total the parsed-total cross-check silently
+  // disables itself — the only net for column-shifted amounts. The import
+  // route gates on validationErrors, so this error means zero lines import.
+  assert.ok(
+    result.validationErrors.some((e) => /今回ご請求額|Statement total/.test(e)),
+    `expected the missing-total error, got: ${result.validationErrors.join(" | ")}`,
+  );
+});
+
+test("parseAmexNetanswer: impossible calendar dates are skipped loudly, not imported (TASK-038 F5)", () => {
+  const csv = [
+    "カード名称,TestCard",
+    "お支払日,2026/05/07",
+    "今回ご請求額,001000",
+    "",
+    "利用日,ご利用店名及び商品名,本人・家族区分,支払区分名称,締前入金区分,利用金額,備考",
+    ",ご利用者名:テスト 様,,,,,",
+    // 2026-02-30: regex-shaped, nonexistent. JS Date would normalize it to
+    // March 2 — it must not be imported verbatim.
+    "2026/02/30,HUB 東京オペラシティ店,1,1回,,1515,",
+    // 13/05/2026: month 13 in the MM/DD/YYYY branch must not become 2026-13-05.
+    "13/05/2026,スターバックス 新宿店,1,1回,,1485,",
+    "2026/05/01,コンビニ,1,1回,,1000,",
+  ].join("\n");
+  const result = parseAmexNetanswer(toBuffer(csv), "2026-05");
+  assert.equal(result.lines.length, 1);
+  assert.equal(result.lines[0]!.merchantName, "コンビニ");
+  assert.equal(result.skippedLines.length, 2);
+  for (const s of result.skippedLines) {
+    assert.match(s.reason, /unparseable date/);
+    assert.equal(s.benign, false);
+  }
+});
+
+test("parseAmexNetanswer: non-empty garbage col0 is NOT an undated charge (TASK-038 F5)", () => {
+  // The regression this pins: garbage in the date column used to fall into
+  // the undated-charge path and inherit noReceiptRequired — a real dated
+  // charge silently marked "no receipt applicable".
+  const csv = [
+    "カード名称,TestCard",
+    "お支払日,2026/05/07",
+    "今回ご請求額,001000",
+    "",
+    "利用日,ご利用店名及び商品名,本人・家族区分,支払区分名称,締前入金区分,利用金額,備考",
+    ",ご利用者名:テスト 様,,,,,",
+    "XX/99/2026,Some Merchant,1,1回,,1000,",
+  ].join("\n");
+  const result = parseAmexNetanswer(toBuffer(csv), "2026-05");
+  assert.equal(result.lines.length, 0);
+  assert.equal(result.skippedLines.length, 1);
+  assert.match(result.skippedLines[0]!.reason, /unparseable date: XX\/99\/2026/);
+  assert.equal(result.skippedLines[0]!.benign, false);
+  // The point: no line was created, so nothing was flagged noReceiptRequired.
+  assert.ok(
+    !result.lines.some((l) => l.noReceiptRequired),
+    "garbage-date row must not be imported as an undated charge",
+  );
+});
+
+test("parseAmexNetanswer: EMPTY col0 + amount stays the undated-charge path (noReceiptRequired)", () => {
+  // Pins the legitimate half of the F5 split — real undated charges (annual
+  // fees etc.) must keep importing as no_receipt_required.
+  const csv = [
+    "カード名称,TestCard",
+    "お支払日,2026/05/07",
+    "今回ご請求額,0033000",
+    "",
+    "利用日,ご利用店名及び商品名,本人・家族区分,支払区分名称,締前入金区分,利用金額,備考",
+    ",ご利用者名:テスト 様,,,,,",
+    "2026/05/01,コンビニ,1,1回,,1000,",
+    ",カード年会費(本会員),,,,32000,",
+  ].join("\n");
+  const result = parseAmexNetanswer(toBuffer(csv), "2026-05");
+  assert.equal(result.lines.length, 2);
+  assert.equal(result.validationErrors.length, 0);
+  const fee = result.lines.find((l) => l.merchantName === "カード年会費(本会員)")!;
+  assert.equal(fee.noReceiptRequired, true);
+  assert.ok(fee.noReceiptReason);
+  assert.equal(result.lines[0]!.noReceiptRequired, false);
+});
+
+test("parseAmexNetanswer: unquoted comma in memo shifts the amount → total mismatch error (TASK-038 F4 net)", () => {
+  // The rejoin path (fields.length > 7) takes fields[5..n-1] as the amount:
+  // a memo split by an unquoted comma merges its digits into the amount
+  // (1918 + "現地通貨額:11.51 USD" → 19181151). With a correct 今回ご請求額
+  // on the fixture, the parsed-total cross-check is the net that catches it.
+  const csv = [
+    "カード名称,TestCard",
+    "お支払日,2026/07/10",
+    "今回ご請求額,001918",
+    "",
+    "利用日,ご利用店名及び商品名,本人・家族区分,支払区分名称,締前入金区分,利用金額,備考",
+    ",ご利用者名:テスト 様,,,,,",
+    "2026/06/11,CLOUDFLARE,1,1回,,1918,現地通貨額:11.51 USD,REF-66",
+  ].join("\n");
+  const result = parseAmexNetanswer(toBuffer(csv), "2026-07");
+  assert.equal(result.parsedTotalCents, 19181151);
+  assert.ok(
+    result.validationErrors.some((e) => /does not match/i.test(e)),
+    "column-shifted amount must trip the total cross-check",
+  );
+});
+
+test("netanswerLinesToImportInputs: two rows sharing the no-ref fallback key both map (dedup is D1's job)", () => {
+  // Same statement_month + transaction_date + amount + merchant + cardholder
+  // → one fallback dedup key, two CSV rows (e.g. a same-day double charge).
+  // The parser emits both; the ON CONFLICT dedup in importAmexLines collapses
+  // them to one D1 row. classifyExistingArtifact deliberately tolerates the
+  // resulting lines < transaction_count by classifying "heal" — an
+  // idempotent re-import converges (nothing re-inserts). See the classifier
+  // matrix in amex-import-edges.test.ts.
+  const csv = [
+    "カード名称,TestCard",
+    "お支払日,2026/05/07",
+    "今回ご請求額,002000",
+    "",
+    "利用日,ご利用店名及び商品名,本人・家族区分,支払区分名称,締前入金区分,利用金額,備考",
+    ",ご利用者名:テスト 様,,,,,",
+    "2026/05/01,コンビニ,1,1回,,1000,",
+    "2026/05/01,コンビニ,1,1回,,1000,",
+  ].join("\n");
+  const { lines } = parseAmexNetanswer(toBuffer(csv), "2026-05");
+  assert.equal(lines.length, 2);
+  const inputs = netanswerLinesToImportInputs(lines, "2026-05", "artifact-1", "sha256abc");
+  assert.equal(inputs.length, 2);
 });

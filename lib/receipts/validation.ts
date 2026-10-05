@@ -42,19 +42,49 @@ export function validateCurrency(value: string): boolean {
 export function parseAmexDate(raw: string): string | null {
   const cleaned = raw.trim();
 
+  let normalized: string | null = null;
+
   // YYYY/MM/DD or YYYY-MM-DD
   if (/^\d{4}[/-]\d{2}[/-]\d{2}$/.test(cleaned)) {
-    return cleaned.replace(/\//g, "-");
+    normalized = cleaned.replace(/\//g, "-");
+  } else {
+    // MM/DD/YYYY (US format)
+    const mdy = cleaned.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+    if (mdy) {
+      const [, mm, dd, yyyy] = mdy;
+      normalized = `${yyyy}-${mm!.padStart(2, "0")}-${dd!.padStart(2, "0")}`;
+    }
   }
 
-  // MM/DD/YYYY (US format)
-  const mdy = cleaned.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-  if (mdy) {
-    const [, mm, dd, yyyy] = mdy;
-    return `${yyyy}-${mm!.padStart(2, "0")}-${dd!.padStart(2, "0")}`;
-  }
+  if (normalized === null) return null;
 
-  return null;
+  // TASK-038 F5: reject regex-shaped but impossible calendar dates
+  // (2026-02-30, month 13) via a round-trip component compare — JS Date
+  // silently normalizes them (Feb 30 → Mar 2), which would import a
+  // nonexistent date verbatim.
+  const [y, m, d] = normalized.split("-").map(Number);
+  const dt = new Date(Date.UTC(y!, m! - 1, d!));
+  if (
+    dt.getUTCFullYear() !== y ||
+    dt.getUTCMonth() !== m! - 1 ||
+    dt.getUTCDate() !== d
+  ) {
+    return null;
+  }
+  return normalized;
+}
+
+// TASK-038 F3: does the CSV's payment due date fall in the selected statement
+// month? Ground truth from live D1: 8/8 artifacts have due-date month ==
+// statement_month. Returns null when the due date is absent (no verdict —
+// e.g. a CSV whose お支払日 is itself unparseable); callers treat null as
+// "cannot check", false as a wrong-month signal worth a warning.
+export function statementMonthFitsPaymentDue(
+  statementMonth: string,
+  paymentDueDate: string | null,
+): boolean | null {
+  if (paymentDueDate === null) return null;
+  return paymentDueDate.slice(0, 7) === statementMonth;
 }
 
 export function parseCsvLine(line: string): string[] {
@@ -323,7 +353,20 @@ export function parseAmexNetanswer(
     // a description in col1 is a real charge; only fall back to skipping if
     // col1 is empty (blank/malformed row).
     const txDate = parseAmexDate(col0);
-    const isUndatedChargeLine = !txDate;
+    // TASK-038 F5: EMPTY col0 is the undated-charge shape above. NON-empty
+    // col0 that doesn't parse as a real calendar date is a corrupted date
+    // cell — previously it fell into the undated-charge path and inherited
+    // noReceiptRequired ("no receipt applicable" on a real dated charge).
+    // Skip it loudly instead.
+    if (col0 !== "" && txDate === null) {
+      skippedLines.push({
+        lineNumber: i + 1,
+        reason: `unparseable date: ${col0.slice(0, 30)}`,
+        benign: false,
+      });
+      continue;
+    }
+    const isUndatedChargeLine = txDate === null; // ⇔ col0 === ""
 
     const merchantName = col1;
     if (!merchantName) {
@@ -469,6 +512,17 @@ export function parseAmexNetanswer(
   if (!headerFound) {
     validationErrors.push(
       "Header row (利用日) not found. This may not be a Netアンサー CSV.",
+    );
+  }
+
+  // TASK-038 F4: without the 今回ご請求額 row the parsed-total cross-check
+  // below silently disables itself — the only net that catches
+  // column-shifted amounts (e.g. an unquoted comma in a memo merging memo
+  // digits into the amount on the fields.length > 7 rejoin path). Fail
+  // closed: the lines cannot be verified, so nothing is imported.
+  if (metadata.statementTotalCents === null) {
+    validationErrors.push(
+      "Statement total (今回ご請求額) not found or unparseable — parsed lines cannot be verified against the statement. The CSV layout may have changed; nothing was imported.",
     );
   }
 
