@@ -681,13 +681,18 @@ const RECONCILE_RECEIPT_COLUMNS =
   "extraction_r2_key, needs_render";
 
 /**
- * Exhaustive AMEX receipt read for the Reconcile candidate window — REPLACES
- * the old global newest-200 query (audit 2026-07-21 Phase 1, Part D). Returns
- * EVERY non-deleted AMEX receipt dated in [start, end] PLUS every non-deleted
- * AMEX receipt with a NULL transaction_date. Undated receipts (pending
- * extraction — the rows most needing review) are fetched in a SEPARATE query so
- * the dated BETWEEN clause keeps using the transaction_date index (and so undated
- * retrieval stays distinct from dated window candidates, per Part D).
+ * Exhaustive reconcile-candidate receipt read for the Reconcile window —
+ * REPLACES the old global newest-200 query (audit 2026-07-21 Phase 1, Part D).
+ * Returns EVERY non-deleted receipt dated in [start, end] PLUS every
+ * non-deleted receipt with a NULL transaction_date, where payment_path is
+ * AMEX or UNKNOWN. The pool includes UNKNOWN-payment receipts as tentative
+ * match candidates — every fresh capture sits at UNKNOWN until reviewed, and
+ * matchAmexToReceipts (reconciliation.ts) admits them as tentative only,
+ * capped below the obvious band, with the UI showing the "confirms as AMEX"
+ * pill on confirm. Undated receipts (pending extraction — the rows most
+ * needing review) are fetched in a SEPARATE query so the dated BETWEEN clause
+ * keeps using the transaction_date index (and so undated retrieval stays
+ * distinct from dated window candidates, per Part D).
  *
  * Never silently truncates: pages internally and THROWS if the combined set
  * reaches `hardCap` (default 5000), since a truncated reconcile view would hide
@@ -709,7 +714,7 @@ export async function listAmexReceiptsForReconcile(
     const page = await db
       .prepare(
         `SELECT ${RECONCILE_RECEIPT_COLUMNS} FROM receipt_records
-         WHERE deleted_at IS NULL AND payment_path = 'AMEX'
+         WHERE deleted_at IS NULL AND payment_path IN ('AMEX', 'UNKNOWN')
            AND transaction_date BETWEEN ? AND ?
          ORDER BY transaction_date ASC LIMIT ? OFFSET ?`,
       )
@@ -730,7 +735,7 @@ export async function listAmexReceiptsForReconcile(
   const undated = await db
     .prepare(
       `SELECT ${RECONCILE_RECEIPT_COLUMNS} FROM receipt_records
-       WHERE deleted_at IS NULL AND payment_path = 'AMEX'
+       WHERE deleted_at IS NULL AND payment_path IN ('AMEX', 'UNKNOWN')
          AND transaction_date IS NULL`,
     )
     .all<ReceiptRecord>();

@@ -62,7 +62,10 @@ function fakeDb(cfg: FakeCfg) {
 
   // `prepare` returns a bound statement; `.bind()` returns the same object so both
   // `.prepare(sql).all()` (undated query) and `.prepare(sql).bind(...).all()` work.
+  // Issued SQL strings are recorded so contract tests can pin WHERE shapes.
+  const queries: string[] = [];
   function prepare(sql: string) {
+    queries.push(sql);
     const bound = {
       bind(..._args: unknown[]) {
         return this;
@@ -88,7 +91,7 @@ function fakeDb(cfg: FakeCfg) {
     return bound;
   }
 
-  return { db: { prepare } as unknown as D1Database };
+  return { db: { prepare } as unknown as D1Database, queries };
 }
 
 // ─── listAllReceiptsInMonth ──────────────────────────────────────────────────
@@ -152,4 +155,40 @@ test("listAmexReceiptsForReconcile: returns dated + undated rows when under the 
     { db },
   );
   assert.equal(out.length, 3);
+});
+
+test("listAmexReceiptsForReconcile: BOTH pool queries admit UNKNOWN-payment receipts", async () => {
+  // TASK-036 (2026-10-05): matchAmexToReceipts has admitted UNKNOWN-payment
+  // receipts as tentative candidates since 3613c62, but the pool read filtered
+  // payment_path = 'AMEX' only — and every fresh capture sits at UNKNOWN until
+  // reviewed, so the tentative-match feature was unreachable from the page
+  // (live incident: statement-visible charges showed red "no match" and the
+  // operator re-uploaded the same receipts three times). Pin the WHERE shape of
+  // BOTH queries the way amex-import-contract pins the INSERT shape: narrowing
+  // the pool back to AMEX-only must fail here, not silently re-break the
+  // feature.
+  const { db, queries } = fakeDb({ datedPages: [[]], undatedRows: [] });
+  await listAmexReceiptsForReconcile(
+    { start: "2026-09-01", end: "2026-09-30" },
+    { db },
+  );
+  const dated = queries.filter((q) => /BETWEEN \? AND \?/i.test(q));
+  const undated = queries.filter((q) => /transaction_date IS NULL/i.test(q));
+  assert.equal(dated.length, 1, "exactly one dated-window query expected");
+  assert.equal(undated.length, 1, "exactly one undated query expected");
+  for (const [label, sql] of [
+    ["dated", dated[0]],
+    ["undated", undated[0]],
+  ] as const) {
+    assert.match(
+      sql,
+      /payment_path IN \('AMEX', 'UNKNOWN'\)/,
+      `${label} query must include UNKNOWN-payment receipts in the candidate pool`,
+    );
+    assert.doesNotMatch(
+      sql,
+      /payment_path = 'AMEX'/,
+      `${label} query narrowed back to AMEX-only — tentative matches unreachable again`,
+    );
+  }
 });
