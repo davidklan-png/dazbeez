@@ -368,8 +368,19 @@ export async function summarizeOpenChecksForExport(
        WHERE rcc.object_type = 'receipt'
          AND rcc.status = 'open'
          AND (rr.transaction_date LIKE ? OR rr.exported_month = ?)
-         AND rr.deleted_at IS NULL`,
+         AND rr.deleted_at IS NULL
+         AND rr.payment_path <> 'AMEX'`,
     )
+    // AMEX-path receipts are EXCLUDED from the calendar-month sweep: they
+    // ship by STATEMENT month (ADR 0008), so they enter a month's compliance
+    // scope only via extraReceiptIds (bundle membership = matched to that
+    // month's lines). The calendar filter over-blocked unmatched AMEX
+    // receipts into the wrong month — 2026-10's リカーBOSS line (charge
+    // 2026-08-18) vs its receipt extracted to 2026-09-08 blocked 2026-09's
+    // finalize; same class as izmicworld for 2026-08. An unmatched AMEX
+    // receipt is "upcoming" (backlog #8) — its own month gates it once
+    // matched. CASH/DIGITAL/UNKNOWN keep the calendar-month scope (that IS
+    // their shipping month).
     .bind(`${month}%`, month)
     .all<CheckRow>();
   for (const row of monthResult.results ?? []) rowsById.set(row.id, row);
