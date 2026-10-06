@@ -104,7 +104,7 @@ export function CreateRevisionButton({
         className="mt-2 w-full rounded-md border border-amber-300 bg-white px-2 py-1.5 text-[12.5px] text-gray-900 outline-none focus:border-amber-500 disabled:bg-gray-50"
       />
       <div className="mt-2 flex items-center gap-2">
-        <Btn kind="primary" size="sm" onClick={submit} disabled={busy}>
+        <Btn kind="primary" size="sm" onClick={submit} disabled={busy} busy={busy}>
           {busy ? "Creating…" : "Create revision"}
         </Btn>
         <button
