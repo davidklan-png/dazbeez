@@ -1,5 +1,6 @@
 import {
   listAmexLines,
+  listAmexLineAttendeeNamesByMonth,
   listExports,
   getExport,
   getLatestFinalizedExport,
@@ -108,6 +109,7 @@ export default async function ExportPage({
     latestFinalized,
     unassignable,
     stages,
+    lineAttendeeNames,
   ] = await Promise.all([
     buildExportBundle(month),
     listExports(),
@@ -117,6 +119,7 @@ export default async function ExportPage({
     getLatestFinalizedExport(month),
     listUnassignableReceipts(),
     deriveMonthStage(month),
+    listAmexLineAttendeeNamesByMonth(month),
   ]);
   // ADR 0006 (PR #2): tile counting set = in-scope receipts for M = the bundle
   // (matched AMEX + CASH/DIGITAL assigned to M) ∪ UNKNOWN in M's natural window
@@ -132,7 +135,12 @@ export default async function ExportPage({
   // tile over-reported "uncategorized" lines the gate accepted (2026-06's 27
   // were all matched to April/May receipts). monthReceipts (month-scoped) still
   // drives the pending / unreviewed / unknown counts.
-  const blockers = computeExportBlockers(monthReceipts, monthLines, bundle.receipts);
+  const blockers = computeExportBlockers(
+    monthReceipts,
+    monthLines,
+    bundle.receipts,
+    new Set(Object.keys(lineAttendeeNames)),
+  );
   const warnings = [
     ...computeExportWarnings(monthLines),
     ...computeDuplicateReceiptWarnings(monthReceipts),
