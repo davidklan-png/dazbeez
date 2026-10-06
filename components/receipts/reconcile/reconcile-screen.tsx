@@ -157,6 +157,7 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
   const [tab, setTab] = useState<Tab>("lines");
   const [busy, setBusy] = useState<string | null>(null);
   const [signoffBusy, setSignoffBusy] = useState(false);
+  const [unsealBusy, setUnsealBusy] = useState(false);
   const [bulkProgress, setBulkProgress] = useState<{
     current: number;
     total: number;
@@ -522,6 +523,39 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
     }
   }, [locked, linesWithBand, router, setError]);
 
+  // Reopen a sealed reconciliation for correction (operator decision
+  // 2026-07-20; the audited unfinalize API existed with no GUI surface). The
+  // correction flow: unfinalize → edit lines → re-sign-off → build a revised
+  // export → re-finalize → send. Prompt doubles as confirmation — an empty
+  // reason cancels (the API requires one and records it in the audit log).
+  const unfinalize = useCallback(async () => {
+    if (!locked) return;
+    const reason = window.prompt(
+      `Unfinalize the ${props.month} reconciliation?\n\nLines become editable and the sign-off seal is removed (audited). ` +
+        "After correcting, re-sign-off and build a REVISED export before delivering.\n\nReason (required, recorded in the audit log):",
+    );
+    if (!reason || !reason.trim()) return;
+    setUnsealBusy(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/receipts/reconcile/unfinalize", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ month: props.month, reason: reason.trim() }),
+      });
+      if (!res.ok) {
+        const json = (await res.json().catch(() => ({}))) as { error?: string };
+        setError(json.error ?? "Unfinalize failed.");
+        return;
+      }
+      router.refresh();
+    } catch {
+      setError("Network error.");
+    } finally {
+      setUnsealBusy(false);
+    }
+  }, [locked, props.month, router, setError]);
+
   const finalize = useCallback(async () => {
     if (locked) return;
     if (confirmType.toLowerCase().trim() !== props.month.toLowerCase()) return;
@@ -700,9 +734,21 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
           </Btn>
         )}
         {locked ? (
-          <Pill tone="green" size="md" dot>
-            Reconciled · locked
-          </Pill>
+          <div className="flex items-center gap-2">
+            <Pill tone="green" size="md" dot>
+              Reconciled · locked
+            </Pill>
+            <Btn
+              kind="ghost"
+              size="sm"
+              onClick={unfinalize}
+              disabled={unsealBusy}
+              busy={unsealBusy}
+              title="Reopen this reconciliation for correction (audited). Re-sign-off + a revised export are required before delivery."
+            >
+              Unfinalize…
+            </Btn>
+          </div>
         ) : (
           <Btn
             kind="dark"
