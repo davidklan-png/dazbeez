@@ -31,7 +31,7 @@ import {
   buildCashReconciliationKey,
   buildDigitalReconciliationKey,
 } from "@/lib/receipts/export";
-import { resolveOperatorMessageForRebuild, oneShotFinalizeDecision } from "@/lib/receipts/operator-message";
+import { resolveOperatorMessageForRebuild, oneShotFinalizeDecision, findGeneratedHeadingInOperatorMessage } from "@/lib/receipts/operator-message";
 import {
   buildEvidenceAssignments,
   buildAmexReconciliationCsv,
@@ -115,6 +115,21 @@ export async function POST(request: Request) {
           {
             error:
               "One-shot finalize requires an explicit message decision. Supply operatorMessage (the preface text), or operatorMessage: null / \"\" for 'no message this month'.",
+          },
+          { status: 400 },
+        );
+      }
+      // Same structural-token guard as the message PATCH route — a pasted
+      // generated heading would break the O7 preflight after sealing.
+      const offendingHeading = findGeneratedHeadingInOperatorMessage(
+        decision.operatorMessage,
+      );
+      if (offendingHeading) {
+        return NextResponse.json(
+          {
+            error:
+              `operatorMessage must not contain ${offendingHeading} — that heading is added ` +
+              "automatically. Delete it (and the generated line under it) and retry.",
           },
           { status: 400 },
         );

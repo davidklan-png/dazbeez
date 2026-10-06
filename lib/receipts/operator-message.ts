@@ -60,6 +60,30 @@ export function oneShotFinalizeDecision(
   return { ok: true, operatorMessage: resolveOperatorMessageForRebuild(operatorMessage, null) };
 }
 
+/** Generated structural headings that must never appear INSIDE the operator
+ *  message — the notice and delivery-email builders insert these themselves,
+ *  so a pasted copy of an old email/notice (2026-10-06: rev 2's message
+ *  embedded 【今月のご連絡】 + the machine line) duplicates them and breaks the
+ *  O7 extractor at send time, after the pack is already sealed. Enforced at
+ *  SAVE time so the operator finds out while typing, not at send. */
+const GENERATED_HEADINGS = [
+  "【今月のご連絡】",
+  "【この資料について】",
+  "【勘定科目別集計】",
+] as const;
+
+/** The offending generated heading embedded in `message`, or null when clean.
+ *  Pure; shared by the message PATCH route and the one-shot finalize path. */
+export function findGeneratedHeadingInOperatorMessage(
+  message: string | null,
+): string | null {
+  if (!message) return null;
+  for (const heading of GENERATED_HEADINGS) {
+    if (message.includes(heading)) return heading;
+  }
+  return null;
+}
+
 /**
  * Assert that a write affected exactly one row (A2-1). A D1 UPDATE that matches
  * zero rows returns `meta.changes === 0` with no error; before this guard, the
