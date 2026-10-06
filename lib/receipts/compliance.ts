@@ -371,7 +371,8 @@ export async function summarizeOpenChecksForExport(
          AND rr.deleted_at IS NULL
          AND rr.payment_path <> 'AMEX'`,
     )
-    // AMEX-path receipts are EXCLUDED from the calendar-month sweep: they
+    // AMEX-path receipts are EXCLUDED from the calendar-month sweep (ADR 0014,
+    // enforced by tests/receipts/month-membership-contract.test.ts): they
     // ship by STATEMENT month (ADR 0008), so they enter a month's compliance
     // scope only via extraReceiptIds (bundle membership = matched to that
     // month's lines). The calendar filter over-blocked unmatched AMEX
