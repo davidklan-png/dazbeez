@@ -55,6 +55,8 @@ import {
   type ConfidenceBand,
 } from "@/lib/receipts/confidence";
 import { isSettled, groupLinesByStatus } from "@/lib/receipts/reconcile-grouping";
+import { AttendeeEditor } from "@/components/receipts/attendee-editor";
+import type { ReceiptAttendeeDirectoryEntry } from "@/lib/receipts/attendee-directory";
 
 export interface ReconcileScreenProps {
   amexLines: AmexStatementLine[];
@@ -91,6 +93,11 @@ export interface ReconcileScreenProps {
   window: StatementWindow | null;
   receiptsInWindow: ReceiptRecord[];
   attendeesByReceiptId: Map<string, string[]>;
+  /** Line-direct attendees (amex_line_attendees) for the month's lines, keyed
+   *  by line id — what a no-receipt line's AttendeeEditor edits in place. */
+  attendeesByLineId: Record<string, string[]>;
+  /** Attendee directory (datalist + inline registration for the editor). */
+  attendeeDirectory: ReceiptAttendeeDirectoryEntry[];
   /** Active category pattern rules → live suggestion on unmatched, uncategorized
    *  AMEX lines (ADR: category-rules). */
   categoryRules: CategoryRule[];
@@ -326,6 +333,80 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
       }
     },
     [locked, router],
+  );
+
+  // ─── Line-direct attendees (no-receipt lines) ────────────────────────
+  // Edited in the detail pane's AttendeeEditor: optimistic local state + a
+  // debounced PATCH (same shape as the review form's autosave, same 450ms).
+  // Deliberately NO router.refresh() after attendee saves — a refresh clobbers
+  // WebKit IME composition and steals focus (PRs #190/#191). The optimistic
+  // value is the RAW list as typed, so the controlled input's value round-trips
+  // byte-identically through the rerender; the server normalizes on write.
+  const [lineAttendeeEdits, setLineAttendeeEdits] = useState<
+    Record<string, string[]>
+  >({});
+  const [attendeeDirectory, setAttendeeDirectory] = useState(
+    props.attendeeDirectory,
+  );
+  const attendeeSaveTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(
+    new Map(),
+  );
+
+  // Server-loaded line attendees overlaid with any optimistic edits.
+  const attendeesByLineId = useMemo(
+    () => ({ ...props.attendeesByLineId, ...lineAttendeeEdits }),
+    [props.attendeesByLineId, lineAttendeeEdits],
+  );
+
+  const registerAttendee = useCallback(
+    (entry: ReceiptAttendeeDirectoryEntry) => {
+      setAttendeeDirectory((prev) =>
+        prev.some((e) => e.id === entry.id) ? prev : [...prev, entry],
+      );
+    },
+    [],
+  );
+
+  const updateLineAttendees = useCallback(
+    (lineId: string, names: string[]) => {
+      if (locked) return;
+      setLineAttendeeEdits((prev) => ({ ...prev, [lineId]: names }));
+      // Per-line trailing debounce: keystrokes collapse into one PATCH, and
+      // each timer's closure carries that line's LATEST names, so an older
+      // in-flight save can never land after a newer one for the same line.
+      const timers = attendeeSaveTimers.current;
+      const existing = timers.get(lineId);
+      if (existing) clearTimeout(existing);
+      timers.set(
+        lineId,
+        setTimeout(() => {
+          timers.delete(lineId);
+          void (async () => {
+            setBusy(lineId);
+            setError(null);
+            try {
+              const res = await fetch(`/api/receipts/amex/lines/${lineId}`, {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ attendees: names }),
+              });
+              if (!res.ok) {
+                const json = (await res.json().catch(() => ({}))) as {
+                  error?: string;
+                };
+                setError(json.error ?? "Could not save attendees.");
+              }
+              // No router.refresh() here — see the comment above.
+            } catch {
+              setError("Network error.");
+            } finally {
+              setBusy(null);
+            }
+          })();
+        }, 450),
+      );
+    },
+    [locked],
   );
 
   const bulkConfirmObvious = useCallback(async () => {
@@ -651,6 +732,10 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
           receiptMap={receiptMap}
           confirmedLinesByReceipt={confirmedLinesByReceipt}
           attendeesByReceiptId={props.attendeesByReceiptId}
+          attendeesByLineId={attendeesByLineId}
+          attendeeDirectory={attendeeDirectory}
+          onRegisterAttendee={registerAttendee}
+          onUpdateLineAttendees={updateLineAttendees}
           month={props.month}
           locked={locked}
           busyLineId={busy}
@@ -1206,6 +1291,10 @@ function DetailPane({
   receiptMap,
   confirmedLinesByReceipt,
   attendeesByReceiptId,
+  attendeesByLineId,
+  attendeeDirectory,
+  onRegisterAttendee,
+  onUpdateLineAttendees,
   month,
   locked,
   busyLineId,
@@ -1225,6 +1314,10 @@ function DetailPane({
   receiptMap: Map<string, ReceiptRecord>;
   confirmedLinesByReceipt: Map<string, AmexStatementLine[]>;
   attendeesByReceiptId: Map<string, string[]>;
+  attendeesByLineId: Record<string, string[]>;
+  attendeeDirectory: ReceiptAttendeeDirectoryEntry[];
+  onRegisterAttendee: (entry: ReceiptAttendeeDirectoryEntry) => void;
+  onUpdateLineAttendees: (lineId: string, names: string[]) => void;
   /** Concrete work month, carried into the matched-receipt Review deep-links. */
   month: string;
   locked: boolean;
@@ -1266,6 +1359,14 @@ function DetailPane({
   const receiptAttendeeNames = receiptId
     ? attendeesByReceiptId.get(receiptId) ?? []
     : [];
+  // Line-direct attendee names + the "requires attendees" state for the
+  // no-receipt editor. Computed from the same (optimistic) line state the
+  // editor writes, so the hint clears as soon as names are entered.
+  const lineAttendeeNames = attendeesByLineId[line.id] ?? [];
+  const attendeesRequired =
+    !!line.expense_category_code &&
+    categoryRequiresAttendees(line.expense_category_code);
+  const attendeeCount = lineAttendeeNames.filter((n) => n.trim()).length;
   const color = BAND_DISPLAY[band];
   const busy = busyLineId === line.id;
   const showNoReceiptFields =
@@ -1572,27 +1673,39 @@ function DetailPane({
                   : "none on linked receipt"
               }
             >
-              <TextInput
-                value={receiptAttendeeNames.join(", ")}
-                readOnly
-                placeholder="No attendees on the linked receipt"
-              />
+              <div className="flex items-center gap-2">
+                <TextInput
+                  value={receiptAttendeeNames.join(", ")}
+                  readOnly
+                  placeholder="No attendees on the linked receipt"
+                  containerClassName="flex-1"
+                />
+                <Link
+                  href={withWorkMonth(`/receipts/review/${receipt.id}`, month)}
+                  className="shrink-0 whitespace-nowrap text-[12px] font-semibold text-gray-600 hover:text-gray-900"
+                >
+                  Edit on receipt →
+                </Link>
+              </div>
             </Field>
           ) : (
             <Field
               label="Attendees"
               hint={
-                line.expense_category_code &&
-                categoryRequiresAttendees(line.expense_category_code)
-                  ? "required"
+                attendeesRequired
+                  ? attendeeCount > 0
+                    ? `${attendeeCount} added`
+                    : "required"
                   : "not required for this category"
               }
             >
-              <div className="flex min-h-[38px] items-center gap-1.5 rounded-lg border border-dashed border-gray-300 px-2 py-2 text-[13px] text-gray-400">
-                <span className="flex-1">
-                  Edit attendees on the linked receipt
-                </span>
-              </div>
+              <AttendeeEditor
+                attendees={lineAttendeeNames}
+                onChange={(names) => onUpdateLineAttendees(line.id, names)}
+                directory={attendeeDirectory}
+                onRegister={onRegisterAttendee}
+                disabled={locked || busy}
+              />
             </Field>
           )}
         </div>

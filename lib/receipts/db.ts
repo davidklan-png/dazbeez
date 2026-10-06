@@ -2288,6 +2288,55 @@ export async function updateAmexLineCategory(
   });
 }
 
+/**
+ * Replace the line-direct attendee list (amex_line_attendees) for one AMEX
+ * statement line — the write side migration 0022's signoff union always
+ * expected but never had. Names arrive already normalized by the PATCH parser
+ * (trim / drop empties / dedupe). Sealed by the same finalized-month guard as
+ * updateAmexLineCategory, checked before any row is touched.
+ */
+export async function replaceAmexLineAttendees(
+  lineId: string,
+  names: string[],
+  actor: string,
+): Promise<void> {
+  const db = getReceiptsDb();
+
+  // Block edits if the month's reconciliation is finalized.
+  const lineMonth = await db
+    .prepare(`SELECT statement_month FROM amex_statement_lines WHERE id = ? LIMIT 1`)
+    .bind(lineId)
+    .first<{ statement_month: string }>();
+  if (lineMonth?.statement_month) {
+    await rejectIfFinalized(db, lineMonth.statement_month);
+  }
+
+  await db
+    .prepare(`DELETE FROM amex_line_attendees WHERE amex_statement_line_id = ?`)
+    .bind(lineId)
+    .run();
+
+  const now = nowIso();
+  for (const name of names) {
+    await db
+      .prepare(
+        `INSERT INTO amex_line_attendees
+          (id, amex_statement_line_id, attendee_name, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .bind(newUuid(), lineId, name, now, now)
+      .run();
+  }
+
+  await createAuditEntry(db, {
+    actor,
+    action: "amex.line_categorized",
+    objectType: "amex_line",
+    objectId: lineId,
+    newValueJson: stringifyJson({ attendees: names }),
+  });
+}
+
 // ─── Dashboard alert dismissals ───────────────────────────────────────────────
 
 export async function dismissAlert(

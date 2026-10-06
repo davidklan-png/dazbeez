@@ -58,10 +58,14 @@ export type AmexLinePatchBody = {
   receiptStatus?: string;
   receiptMissingReason?: string | null;
   businessTripStatus?: string;
+  /** Line-direct attendees (amex_line_attendees). Present-and-array → replace
+   *  the line's list ([] clears all); absent → untouched. Unknown so a JSON
+   *  null/non-array is a 400, not a silent no-op. */
+  attendees?: unknown;
 };
 
 export type AmexLinePatchResult =
-  | { ok: true; input: AmexLinePatchInput }
+  | { ok: true; input: AmexLinePatchInput & { attendees?: string[] } }
   | { ok: false; error: string };
 
 /**
@@ -114,10 +118,33 @@ export function parseAmexLinePatch(body: AmexLinePatchBody): AmexLinePatchResult
       ? body.receiptMissingReason.trim().slice(0, 500) || null
       : body.receiptMissingReason;
 
+  // Line-direct attendees: same normalization as the receipt-side editor
+  // (trim, drop empties, 120-char slice per name, dedupe) plus a hard cap of
+  // 20 stored names. >20 is rejected, not truncated — a tax-relevant roster
+  // must not lose attendee #21 silently.
+  let attendees: string[] | undefined;
+  if ("attendees" in body) {
+    if (!Array.isArray(body.attendees)) {
+      return { ok: false, error: "attendees must be an array of names." };
+    }
+    const names: string[] = [];
+    for (const entry of body.attendees) {
+      if (typeof entry !== "string") {
+        return { ok: false, error: "attendees must be an array of names." };
+      }
+      const name = entry.trim().slice(0, 120);
+      if (name && !names.includes(name)) names.push(name);
+    }
+    if (names.length > 20) {
+      return { ok: false, error: "attendees: at most 20 names per line." };
+    }
+    attendees = names;
+  }
+
   // Sparse: only include a key when present in the body. The DB layer uses
   // `"key" in input` for the nullable fields so an explicit null clears the
   // column — an always-present key with undefined would NULL siblings (#67).
-  const input: AmexLinePatchInput = {};
+  const input: AmexLinePatchInput & { attendees?: string[] } = {};
   if (body.expenseCategory !== undefined) {
     input.expenseCategory = body.expenseCategory as AmexExpenseCategory;
   }
@@ -135,6 +162,9 @@ export function parseAmexLinePatch(body: AmexLinePatchBody): AmexLinePatchResult
   }
   if (body.businessTripStatus !== undefined) {
     input.businessTripStatus = body.businessTripStatus as AmexBusinessTripStatus;
+  }
+  if (attendees !== undefined) {
+    input.attendees = attendees;
   }
   return { ok: true, input };
 }
