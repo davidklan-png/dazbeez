@@ -51,7 +51,16 @@ export function NextActionCard({ stages }: { stages: MonthStage[] }) {
             {blocked ? (
               <ul className="mt-1.5 space-y-0.5 text-[12px] text-red-700">
                 {blockers.map((b, i) => (
-                  <li key={`${b.code}-${i}`}>• {b.message}</li>
+                  <li key={`${b.code}-${i}`}>
+                    •{" "}
+                    {b.href ? (
+                      <Link href={b.href} className="underline decoration-amber-600/60 underline-offset-2 hover:text-amber-700">
+                        {b.message}
+                      </Link>
+                    ) : (
+                      b.message
+                    )}
+                  </li>
                 ))}
               </ul>
             ) : (

@@ -260,27 +260,47 @@ function GateVerdict({
       </div>
     );
   }
+  // Blocked: ONE red box. The warnings summary and the tile-parity note fold
+  // in as muted lines so the operator reads a single verdict, not a stack of
+  // boxes competing for attention (TASK-038). With zero gate blockers the
+  // layout below keeps today's separate amber box + parity note.
+  if (gateBlockers.length > 0) {
+    return (
+      <div className="mx-8 mt-6 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+        <b>Finalize gate blockers ({gateBlockers.length})</b> — from{" "}
+        <code>validateMonthReadyForExport</code>:
+        <ul className="mt-1.5 list-disc space-y-0.5 pl-5 text-[12.5px]">
+          {gateBlockers.map((b, i) => (
+            <li key={`${b.code}-${i}`}>
+              {b.href ? (
+                <Link href={b.href} className="underline decoration-amber-600/60 underline-offset-2 hover:text-amber-700">
+                  {b.message}
+                </Link>
+              ) : (
+                b.message
+              )}
+            </li>
+          ))}
+        </ul>
+        {warnings.length > 0 && (
+          <p className="mt-2 text-[12px] text-red-700/80">
+            <b>Warnings ({warnings.reduce((s, w) => s + w.count, 0)}):</b>{" "}
+            {warnings.map((w) => `${w.label} (${w.count})`).join("; ")}
+          </p>
+        )}
+        {/* Tile parity: if the tile (computeExportBlockers) disagrees with the
+          gate, surface it so the drift is visible. */}
+        {tileBlockers.length > 0 && (
+          <p className="mt-1 text-[11px] text-red-700/60">
+            Tile reports {tileBlockers.reduce((s, b) => s + b.count, 0)} blocker(s):{" "}
+            {tileBlockers.map((b) => `${b.label} (${b.count})`).join("; ")}
+          </p>
+        )}
+      </div>
+    );
+  }
   return (
     <div className="mx-8 mt-6 space-y-2">
-      {gateBlockers.length > 0 && (
-        <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
-          <b>Finalize gate blockers ({gateBlockers.length})</b> — from{" "}
-          <code>validateMonthReadyForExport</code>:
-          <ul className="mt-1.5 list-disc space-y-0.5 pl-5 text-[12.5px]">
-            {gateBlockers.map((b, i) => (
-              <li key={`${b.code}-${i}`}>
-                {b.href ? (
-                  <Link href={b.href} className="underline decoration-amber-600/60 underline-offset-2 hover:text-amber-700">
-                    {b.message}
-                  </Link>
-                ) : (
-                  b.message
-                )}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
       {warnings.length > 0 && (
         <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-2.5 text-[12.5px] text-amber-800">
           <b>Warnings ({warnings.reduce((s, w) => s + w.count, 0)}):</b>{" "}

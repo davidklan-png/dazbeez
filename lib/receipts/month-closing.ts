@@ -15,7 +15,10 @@ import {
   listUnknownInScopeReceipts,
 } from "@/lib/receipts/membership";
 import { getComplianceSettings } from "@/lib/receipts/settings";
-import { summarizeOpenChecksForExport } from "@/lib/receipts/compliance";
+import {
+  summarizeOpenChecksForExport,
+  type ComplianceBlockerReceipt,
+} from "@/lib/receipts/compliance";
 import { getReceiptsDb } from "@/lib/cloudflare-runtime";
 import { resolveLineCategory } from "@/lib/receipts/line-classification";
 import type {
@@ -262,8 +265,15 @@ export interface ValidateMonthReadyInput {
   unreviewedReceipts: ReceiptRecord[];
   /** Gate 4: attendees keyed by AMEX line id. */
   amexAttendees: Record<string, string[]>;
-  /** Gate 5: open compliance checks summary. */
-  complianceSummary: { blockers: number; warnings: number };
+  /** Gate 5: open compliance checks summary. `blockerReceipts` (per-receipt
+   *  blocker detail from summarizeOpenChecksForExport) is present on real
+   *  paths; when set the gate emits one linked blocker per receipt instead of
+   *  the aggregate count. Hand-built test inputs may omit it. */
+  complianceSummary: {
+    blockers: number;
+    warnings: number;
+    blockerReceipts?: ComplianceBlockerReceipt[];
+  };
   /** Gate 5: compliance settings. */
   complianceSettings: { export_block_on_warnings: boolean };
   /** Gate 6: raw (statement_month, matched_receipt_id) rows for cross-month
@@ -301,9 +311,12 @@ export interface ValidateMonthOptions {
  * destination that clears it. {@link validateMonthReadyForExportCoreDetailed}
  * returns these; the original string[] contract
  * ({@link validateMonthReadyForExportCore}) projects them to `.message`. Tests
- * assert on `code`, never on prose. `href` is set only where a concrete in-app
- * remedy exists (gate 1 → Reconcile); for every other blocker it is undefined —
- * do not guess destinations. `message_stale` is reserved for the editable-preface
+ * assert on `code`, never on prose. `href` is the NORM wherever a concrete
+ * remedy exists (TASK-038): every receipt-level blocker links to its review
+ * deep-link (`/receipts/review/${id}?month=${month}`), `amex_line` links to
+ * Reconcile, `message_not_reviewed` to the review page's preface anchor.
+ * Leave it undefined only when no single destination clears the blocker.
+ * `message_stale` is reserved for the editable-preface
  * staleness gate (E3); it is in the union now so the review screen can type it.
  */
 export interface ExportBlocker {
@@ -324,6 +337,14 @@ export interface ExportBlocker {
   /** In-app destination that lets the operator clear this blocker. */
   href?: string;
 }
+
+/**
+ * Review deep-link for a receipt-level blocker — the plain-string form of
+ * what `withWorkMonth` produces (`?month=YYYY-MM`). Built here directly
+ * because month-closing is a lib: no React/Next imports.
+ */
+const reviewHref = (receiptId: string, month: string): string =>
+  `/receipts/review/${receiptId}?month=${month}`;
 
 /**
  * Pure synchronous core of the export-finalize gate — DETAILED variant. Same
@@ -412,6 +433,9 @@ export function validateMonthReadyForExportCoreDetailed(
       code: "message_not_reviewed",
       message:
         "Decide the monthly message before finalizing: save a preface, or mark “no message this month”.",
+      // The decision is made in the preface/finalize block at the bottom of
+      // the review page — #preface anchors straight to it.
+      href: `/receipts/export/${month}/review#preface`,
     });
   }
 
@@ -421,6 +445,7 @@ export function validateMonthReadyForExportCoreDetailed(
     blockers.push({
       code: "payment_path_unknown",
       message: `Receipt ${label}: payment_path is UNKNOWN — classify as AMEX, CASH, or DIGITAL before export`,
+      href: reviewHref(row.id, month),
     });
   }
 
@@ -434,6 +459,7 @@ export function validateMonthReadyForExportCoreDetailed(
     blockers.push({
       code: "receipt_unreviewed",
       message: `Receipt ${label}: unreviewed (status='needs_review') — mark reviewed before exporting`,
+      href: reviewHref(r.id, month),
     });
   }
 
@@ -442,18 +468,19 @@ export function validateMonthReadyForExportCoreDetailed(
     if (receipt.payment_path === "AMEX") continue;
     const label = receipt.merchant ?? receipt.id;
     if (!receipt.transaction_date) {
-      blockers.push({ code: "receipt_field_missing", message: `Receipt ${receipt.id}: missing date` });
+      blockers.push({ code: "receipt_field_missing", message: `Receipt ${receipt.id}: missing date`, href: reviewHref(receipt.id, month) });
     }
     if (!receipt.merchant) {
-      blockers.push({ code: "receipt_field_missing", message: `Receipt ${receipt.id}: missing merchant` });
+      blockers.push({ code: "receipt_field_missing", message: `Receipt ${receipt.id}: missing merchant`, href: reviewHref(receipt.id, month) });
     }
     if (receipt.amount_minor === null) {
-      blockers.push({ code: "receipt_field_missing", message: `Receipt ${receipt.id}: missing amount` });
+      blockers.push({ code: "receipt_field_missing", message: `Receipt ${receipt.id}: missing amount`, href: reviewHref(receipt.id, month) });
     }
     if (!receipt.expense_category_code) {
       blockers.push({
         code: "receipt_field_missing",
         message: `Receipt ${receipt.id}: missing expense category`,
+        href: reviewHref(receipt.id, month),
       });
     }
     // Attendee requirement — single-sourced in evaluateAttendeeRequirement
@@ -465,7 +492,7 @@ export function validateMonthReadyForExportCoreDetailed(
       bundle.attendeeDirectory,
     );
     if (att.required && !att.attendeesPresent) {
-      blockers.push({ code: "attendees_required", message: `Receipt ${label}: requires attendees` });
+      blockers.push({ code: "attendees_required", message: `Receipt ${label}: requires attendees`, href: reviewHref(receipt.id, month) });
     } else if (att.required) {
       // Attendees present → every name must resolve to a directory entry
       // (company/title). Unresolved names block finalize (business-manager
@@ -474,6 +501,7 @@ export function validateMonthReadyForExportCoreDetailed(
         blockers.push({
           code: "attendee_unresolved",
           message: `Receipt ${label}: attendee "${name}" is not registered in the attendee directory (company/title required)`,
+          href: reviewHref(receipt.id, month),
         });
       }
     }
@@ -490,15 +518,34 @@ export function validateMonthReadyForExportCoreDetailed(
     receiptMap,
     bundle.attendeeDirectory,
   )) {
-    blockers.push({ code: "amex_line", message });
+    // Prose strings carry no per-line id — link the signoff surface itself.
+    blockers.push({
+      code: "amex_line",
+      message,
+      href: `/receipts/reconcile?month=${month}`,
+    });
   }
 
-  // (5) Compliance-engine gate.
+  // (5) Compliance-engine gate. With per-receipt detail (the real
+  // summarizeOpenChecksForExport output) each blocker names its receipt and
+  // deep-links it — the aggregate count named neither the receipt nor a
+  // destination. Hand-built inputs without detail keep the aggregate message.
   if (complianceSummary.blockers > 0) {
-    blockers.push({
-      code: "compliance",
-      message: `${complianceSummary.blockers} open compliance blocker(s) on receipts in ${month}`,
-    });
+    const detail = complianceSummary.blockerReceipts;
+    if (detail && detail.length > 0) {
+      for (const br of detail) {
+        blockers.push({
+          code: "compliance",
+          message: `Receipt ${br.merchant ?? br.receiptId}: ${br.checkTypes.length} open compliance check(s) — ${br.checkTypes.join(", ")}`,
+          href: reviewHref(br.receiptId, month),
+        });
+      }
+    } else {
+      blockers.push({
+        code: "compliance",
+        message: `${complianceSummary.blockers} open compliance blocker(s) on receipts in ${month}`,
+      });
+    }
   }
   if (complianceSettings.export_block_on_warnings && complianceSummary.warnings > 0) {
     blockers.push({
@@ -524,6 +571,7 @@ export function validateMonthReadyForExportCoreDetailed(
       blockers.push({
         code: "cross_month",
         message: `Receipt ${receiptId}: matched to AMEX lines in multiple statement months (${[...months].join(", ")}). Disambiguate before finalizing ${month} (other month(s): ${others}).`,
+        href: reviewHref(receiptId, month),
       });
     }
   }
@@ -537,6 +585,7 @@ export function validateMonthReadyForExportCoreDetailed(
     blockers.push({
       code: "missing_proof_file",
       message: `Receipt ${label}: no proof file on record (no original or proof_copy) — cannot build the proofs bundle`,
+      href: reviewHref(receipt.id, month),
     });
   }
 

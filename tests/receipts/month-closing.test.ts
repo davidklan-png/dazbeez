@@ -516,3 +516,175 @@ test("parity: clean fixture — neither tile nor gate flags the shared rules", (
   assert.ok(!gate.some((b) => b.includes("unreviewed")));
   assert.ok(!gate.some((b) => b.includes("payment_path is UNKNOWN")));
 });
+
+// ─── Blocker hrefs (TASK-038) ─────────────────────────────────────────────
+// Every blocker with a concrete remedy must link to it: receipt-level codes
+// deep-link the receipt's review page (same shape withWorkMonth produces),
+// amex_line links Reconcile, message_not_reviewed links the review page's
+// preface anchor. Messages are unchanged — href is additive.
+
+test("href: gate 2/2.5 blockers deep-link the receipt's review page", () => {
+  const blockers = validateMonthReadyForExportCoreDetailed(
+    makeInput({
+      unknownReceipts: [{ id: "r-unk", merchant: "DAISO" }],
+      unreviewedReceipts: [makeReceipt({ id: "r-needs", status: "needs_review", merchant: "LAWSON" })],
+    }),
+  );
+  assert.equal(
+    blockers.find((b) => b.code === "payment_path_unknown")?.href,
+    `/receipts/review/r-unk?month=${MONTH}`,
+  );
+  assert.equal(
+    blockers.find((b) => b.code === "receipt_unreviewed")?.href,
+    `/receipts/review/r-needs?month=${MONTH}`,
+  );
+});
+
+test("href: gate 3 field/attendee blockers deep-link the receipt's review page", () => {
+  // Two receipts: a null category fires receipt_field_missing, a meeting
+  // receipt with an unregistered attendee fires attendee_unresolved (a null
+  // category would skip the attendee check, so one receipt can't hit both).
+  const missingCategory = makeReceipt({
+    id: "r-field",
+    payment_path: "CASH",
+    expense_category_code: null,
+  });
+  const meeting = makeReceipt({
+    id: "r-cash",
+    payment_path: "CASH",
+    expense_category_code: "meeting",
+  });
+  const bundle = makeBundle({
+    receipts: [missingCategory, meeting],
+    attendeeMap: new Map([["r-cash", ["Ghost"]]]),
+    attendeeDirectory: ATTENDEE_DIR,
+  });
+  const blockers = validateMonthReadyForExportCoreDetailed(
+    makeInput({
+      bundle,
+      receiptFileCounts: new Map([
+        ["r-field", 1],
+        ["r-cash", 1],
+      ]),
+    }),
+  );
+  assert.equal(
+    blockers.find((b) => b.code === "receipt_field_missing")?.href,
+    `/receipts/review/r-field?month=${MONTH}`,
+  );
+  assert.equal(
+    blockers.find((b) => b.code === "attendee_unresolved")?.href,
+    `/receipts/review/r-cash?month=${MONTH}`,
+  );
+});
+
+test("href: attendees_required deep-links the receipt's review page", () => {
+  const receipt = makeReceipt({
+    id: "r-att",
+    payment_path: "CASH",
+    expense_category_code: "meeting",
+  });
+  const blockers = validateMonthReadyForExportCoreDetailed(
+    makeInput({
+      bundle: makeBundle({ receipts: [receipt] }),
+      receiptFileCounts: new Map([["r-att", 1]]),
+    }),
+  );
+  assert.equal(
+    blockers.find((b) => b.code === "attendees_required")?.href,
+    `/receipts/review/r-att?month=${MONTH}`,
+  );
+});
+
+test("href: gate 4 amex_line blockers link Reconcile for the month", () => {
+  const blockers = validateMonthReadyForExportCoreDetailed(
+    makeInput({
+      bundle: makeBundle({
+        amexLines: [makeLine({ match_status: "unmatched", merchant: "UNMATCHED CO" })],
+      }),
+    }),
+  );
+  assert.equal(
+    blockers.find((b) => b.code === "amex_line")?.href,
+    `/receipts/reconcile?month=${MONTH}`,
+  );
+});
+
+test("href: gate 6/7 blockers deep-link the receipt's review page", () => {
+  const blockers = validateMonthReadyForExportCoreDetailed(
+    makeInput({
+      crossMonthMatchedLines: [
+        { statement_month: "2026-06", matched_receipt_id: "r-x" },
+        { statement_month: "2026-07", matched_receipt_id: "r-x" },
+      ],
+      bundle: makeBundle({
+        receipts: [makeReceipt({ id: "r-no-files", merchant: "NoFile Merchant" })],
+      }),
+      receiptFileCounts: new Map(),
+    }),
+  );
+  assert.equal(
+    blockers.find((b) => b.code === "cross_month")?.href,
+    `/receipts/review/r-x?month=${MONTH}`,
+  );
+  assert.equal(
+    blockers.find((b) => b.code === "missing_proof_file")?.href,
+    `/receipts/review/r-no-files?month=${MONTH}`,
+  );
+});
+
+test("href: gate 1.6 message_not_reviewed links the review page's preface anchor", () => {
+  const blockers = validateMonthReadyForExportCoreDetailed(
+    makeInput({
+      exportBuild: { bundleBuiltAt: "2026-08-11T00:00:00Z", operatorMessageUpdatedAt: null },
+    }),
+  );
+  assert.equal(
+    blockers.find((b) => b.code === "message_not_reviewed")?.href,
+    `/receipts/export/${MONTH}/review#preface`,
+  );
+});
+
+// Gate 5 detail: per-receipt blockers with links when blockerReceipts is
+// present; the aggregate count (no link) only as a fallback when it isn't.
+test("gate 5: per-receipt detail replaces the aggregate count and links each receipt", () => {
+  const detail = [
+    { receiptId: "r-a", merchant: "izmicworld", checkTypes: ["missing_category", "missing_amount"] },
+    { receiptId: "r-b", merchant: null, checkTypes: ["missing_receipt"] },
+  ];
+  const blockers = validateMonthReadyForExportCoreDetailed(
+    makeInput({ complianceSummary: { blockers: 3, warnings: 0, blockerReceipts: detail } }),
+  );
+  const compliance = blockers.filter((b) => b.code === "compliance");
+  assert.equal(compliance.length, 2, `one blocker per receipt: ${JSON.stringify(compliance)}`);
+  assert.ok(
+    compliance.some(
+      (b) =>
+        // The gate echoes the detail's checkTypes verbatim; sorting is
+        // summarizeOpenChecksForExport's job (pinned in compliance.test.ts).
+        b.message ===
+        "Receipt izmicworld: 2 open compliance check(s) — missing_category, missing_amount" &&
+        b.href === `/receipts/review/r-a?month=${MONTH}`,
+    ),
+    `per-receipt message + deep-link: ${JSON.stringify(compliance)}`,
+  );
+  // merchant null → receipt id in the label.
+  assert.ok(
+    compliance.some(
+      (b) =>
+        b.message === "Receipt r-b: 1 open compliance check(s) — missing_receipt" &&
+        b.href === `/receipts/review/r-b?month=${MONTH}`,
+    ),
+    `null merchant falls back to the id: ${JSON.stringify(compliance)}`,
+  );
+});
+
+test("gate 5: without per-receipt detail the aggregate message still fires (no href)", () => {
+  const blockers = validateMonthReadyForExportCoreDetailed(
+    makeInput({ complianceSummary: { blockers: 2, warnings: 0, blockerReceipts: [] } }),
+  );
+  const compliance = blockers.filter((b) => b.code === "compliance");
+  assert.equal(compliance.length, 1);
+  assert.equal(compliance[0]!.message, "2 open compliance blocker(s) on receipts in 2026-06");
+  assert.equal(compliance[0]!.href, undefined);
+});

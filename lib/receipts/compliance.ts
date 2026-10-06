@@ -278,12 +278,53 @@ export async function listChecksForObject(
   return result.results ?? [];
 }
 
+/** One receipt's open BLOCKER-severity checks, grouped for deep-linking from
+ *  the finalize gate (instead of an aggregate count that names no receipt). */
+export interface ComplianceBlockerReceipt {
+  receiptId: string;
+  merchant: string | null;
+  checkTypes: string[];
+}
+
 export interface ComplianceSummary {
   blockers: number;
   warnings: number;
   info: number;
   total: number;
   byType: Record<string, number>;
+  /** Present (non-empty) only when open blocker-severity checks exist — see
+   *  {@link buildBlockerReceipts}. */
+  blockerReceipts?: ComplianceBlockerReceipt[];
+}
+
+/**
+ * Group open-check rows into per-receipt blocker summaries: BLOCKER severity
+ * only (warnings/info excluded), checkTypes deduped and sorted. Pure and
+ * exported so the grouping is unit-testable without D1.
+ * {@link summarizeOpenChecksForExport} calls this on its deduped row set.
+ */
+export function buildBlockerReceipts(
+  rows: Iterable<{
+    object_id: string;
+    merchant: string | null;
+    severity: ComplianceCheckSeverity;
+    check_type: string;
+  }>,
+): ComplianceBlockerReceipt[] {
+  const byReceipt = new Map<string, ComplianceBlockerReceipt>();
+  for (const row of rows) {
+    if (row.severity !== "blocker") continue;
+    let entry = byReceipt.get(row.object_id);
+    if (!entry) {
+      entry = { receiptId: row.object_id, merchant: row.merchant, checkTypes: [] };
+      byReceipt.set(row.object_id, entry);
+    }
+    if (!entry.checkTypes.includes(row.check_type)) entry.checkTypes.push(row.check_type);
+  }
+  return [...byReceipt.values()].map((e) => ({
+    ...e,
+    checkTypes: [...e.checkTypes].sort(),
+  }));
 }
 
 export async function summarizeOpenChecksForMonth(
@@ -310,12 +351,18 @@ export async function summarizeOpenChecksForExport(
   month: string,
   extraReceiptIds: string[],
 ): Promise<ComplianceSummary> {
-  type CheckRow = { id: string; severity: ComplianceCheckSeverity; check_type: string };
+  type CheckRow = {
+    id: string;
+    object_id: string;
+    merchant: string | null;
+    severity: ComplianceCheckSeverity;
+    check_type: string;
+  };
   const rowsById = new Map<string, CheckRow>();
 
   const monthResult = await db
     .prepare(
-      `SELECT rcc.id, rcc.severity, rcc.check_type
+      `SELECT rcc.id, rcc.object_id, rr.merchant, rcc.severity, rcc.check_type
        FROM receipt_compliance_checks rcc
        JOIN receipt_records rr ON rr.id = rcc.object_id
        WHERE rcc.object_type = 'receipt'
@@ -335,7 +382,7 @@ export async function summarizeOpenChecksForExport(
     const placeholders = chunk.map(() => "?").join(",");
     const idResult = await db
       .prepare(
-        `SELECT rcc.id, rcc.severity, rcc.check_type
+        `SELECT rcc.id, rcc.object_id, rr.merchant, rcc.severity, rcc.check_type
          FROM receipt_compliance_checks rcc
          JOIN receipt_records rr ON rr.id = rcc.object_id
          WHERE rcc.object_type = 'receipt'
@@ -362,6 +409,8 @@ export async function summarizeOpenChecksForExport(
     else summary.info++;
     summary.byType[row.check_type] = (summary.byType[row.check_type] ?? 0) + 1;
   }
+  const blockerReceipts = buildBlockerReceipts(rowsById.values());
+  if (blockerReceipts.length > 0) summary.blockerReceipts = blockerReceipts;
   return summary;
 }
 
