@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { requireReceiptsActor } from "@/lib/receipts/auth";
-import { updateAmexLineCategory } from "@/lib/receipts/db";
+import { updateAmexLineCategory, replaceAmexLineAttendees } from "@/lib/receipts/db";
 import { parseAmexLinePatch, type AmexLinePatchBody } from "@/lib/receipts/api/amex-line-patch";
 
 type RouteContext = { params: Promise<{ id: string }> };
@@ -18,6 +18,14 @@ export async function PATCH(request: Request, { params }: RouteContext) {
     const parsed = parseAmexLinePatch(body);
     if (!parsed.ok) {
       return NextResponse.json({ error: parsed.error }, { status: 400 });
+    }
+
+    // Line-direct attendees (amex_line_attendees): present → replace the
+    // line's list ([] clears all); absent → untouched (sparse contract).
+    // updateAmexLineCategory ignores the extra key and no-ops on an
+    // attendees-only PATCH.
+    if (parsed.input.attendees !== undefined) {
+      await replaceAmexLineAttendees(id, parsed.input.attendees, actor);
     }
 
     await updateAmexLineCategory(id, parsed.input, actor);

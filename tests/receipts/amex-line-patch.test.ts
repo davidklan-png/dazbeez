@@ -74,3 +74,56 @@ test("amex line PATCH: empty body → empty sparse input (no keys)", () => {
   assert.ok(r.ok);
   assert.deepEqual(r.input, {});
 });
+
+// Line-direct attendees (amex_line_attendees, migration 0022's missing write
+// side): present-and-array → normalized names; absent → key not present.
+
+test("amex line PATCH: attendees array → trimmed, empties dropped, sliced to 120, deduped", () => {
+  const r = parseAmexLinePatch({
+    attendees: ["  Alice  ", "", "Bob", "Alice", "x".repeat(200)],
+  });
+  assert.ok(r.ok);
+  assert.deepEqual(r.input.attendees, ["Alice", "Bob", "x".repeat(120)]);
+});
+
+test("amex line PATCH: attendees [] clears the list (key present)", () => {
+  const r = parseAmexLinePatch({ attendees: [] });
+  assert.ok(r.ok);
+  assert.deepEqual(r.input.attendees, []);
+});
+
+test("amex line PATCH: attendees absent → key not present (sparse)", () => {
+  const r = parseAmexLinePatch({ expenseCategory: "misc" });
+  assert.ok(r.ok);
+  assert.ok(!("attendees" in r.input));
+});
+
+test("amex line PATCH: attendees alongside category fields → both present", () => {
+  const r = parseAmexLinePatch({
+    expenseCategoryCode: "meeting",
+    attendees: ["Alice"],
+  });
+  assert.ok(r.ok);
+  assert.equal(r.input.expenseCategoryCode, "meeting");
+  assert.deepEqual(r.input.attendees, ["Alice"]);
+});
+
+test("amex line PATCH: attendees not an array → error", () => {
+  const r = parseAmexLinePatch({ attendees: "Alice" });
+  assert.ok(!r.ok);
+  assert.match(r.error, /attendees must be an array/);
+});
+
+test("amex line PATCH: attendee entry not a string → error", () => {
+  const r = parseAmexLinePatch({ attendees: ["Alice", 42] });
+  assert.ok(!r.ok);
+  assert.match(r.error, /attendees must be an array/);
+});
+
+test("amex line PATCH: more than 20 normalized names → error (no silent truncation)", () => {
+  const r = parseAmexLinePatch({
+    attendees: Array.from({ length: 21 }, (_, i) => `Person ${i}`),
+  });
+  assert.ok(!r.ok);
+  assert.match(r.error, /at most 20/);
+});

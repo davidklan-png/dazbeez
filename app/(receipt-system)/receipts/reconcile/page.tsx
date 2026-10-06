@@ -7,6 +7,8 @@ import {
   listReceiptRecordsByIds,
   listAmexLinesByMatchedReceiptIds,
   listAmexReceiptsForReconcile,
+  listAmexLineAttendeeNamesByMonth,
+  listAttendeeDirectory,
 } from "@/lib/receipts/db";
 import { matchAmexToReceipts } from "@/lib/receipts/reconciliation";
 import { deriveStatementWindow } from "@/lib/receipts/statement-window";
@@ -180,6 +182,14 @@ export default async function ReconcilePage({
     attendeeReceiptIds,
   );
 
+  // Line-direct attendees (amex_line_attendees) for the month's lines + the
+  // attendee directory — the no-receipt line's AttendeeEditor in the detail
+  // pane edits these names in place (migration 0022's write side).
+  const [attendeesByLineId, attendeeDirectory] = await Promise.all([
+    listAmexLineAttendeeNamesByMonth(month),
+    listAttendeeDirectory(),
+  ]);
+
   // Active category pattern rules → live suggestion on unmatched, uncategorized
   // AMEX lines (ADR: category-rules).
   const categoryRules = (await listCategoryRules(getReceiptsDb())).map((r) => ({
@@ -207,6 +217,8 @@ export default async function ReconcilePage({
       window={window}
       receiptsInWindow={windowedReceipts}
       attendeesByReceiptId={attendeesByReceiptId}
+      attendeesByLineId={attendeesByLineId}
+      attendeeDirectory={attendeeDirectory}
       categoryRules={categoryRules}
     />
   );
