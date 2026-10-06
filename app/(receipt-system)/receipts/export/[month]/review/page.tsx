@@ -9,6 +9,7 @@ import {
   getExport,
   getFinalizedReconciliationForMonth,
   listAmexLines,
+  listAmexLineAttendeeNamesByMonth,
   listAmexLinesForBusinessTripReports,
   listBusinessTripReports,
 } from "@/lib/receipts/db";
@@ -41,7 +42,7 @@ export default async function ReviewPage({ params }: { params: Params }) {
   // receipts (never month-scoped receipts for line-category resolution — see
   // PR #72). monthReceipts (membership in-scope: bundle ∪ UNKNOWN-in-window)
   // feeds only the tile's pending / unreviewed / unknown counts.
-  const [bundle, currentExport, reconciliation, monthLines, unknownInScope, tripReports, stages] =
+  const [bundle, currentExport, reconciliation, monthLines, unknownInScope, tripReports, stages, lineAttendeeNames] =
     await Promise.all([
       buildExportBundle(month),
       getExport(month),
@@ -50,6 +51,7 @@ export default async function ReviewPage({ params }: { params: Params }) {
       listUnknownInScopeReceipts(month),
       listBusinessTripReports(month),
       deriveMonthStage(month),
+      listAmexLineAttendeeNamesByMonth(month),
     ]);
   // ADR 0006 (PR #2): tile counting set = in-scope receipts for M = the bundle
   // (matched AMEX + CASH/DIGITAL assigned to M) ∪ UNKNOWN in M's natural window
@@ -84,6 +86,7 @@ export default async function ReviewPage({ params }: { params: Params }) {
     monthReceipts,
     monthLines,
     bundle.receipts,
+    new Set(Object.keys(lineAttendeeNames)),
   );
   const warnings = [
     ...computeExportWarnings(monthLines),

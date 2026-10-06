@@ -158,6 +158,33 @@ test("blockers: dangling match (receipt id set but receipt absent) falls back to
   assert.equal(uncategorizedCount(blockers), 0);
 });
 
+test("blockers: no-receipt attendee-requiring line — direct line attendees clear the tile blocker", () => {
+  // TASK-039 write side: amex_line_attendees satisfies the requirement the
+  // same way the signoff gate's union does. Without the set the tile kept
+  // flagging lines the gate had already cleared (2026-09: operator entered
+  // attendees, blocker persisted).
+  const line = makeLine({
+    match_status: "no_receipt",
+    receipt_status: "receipt_not_available",
+    expense_category_code: "meeting",
+  });
+  const attendeeCount = (bs: ReturnType<typeof computeExportBlockers>) =>
+    bs.find((b) => b.label === "Entertainment/meeting lines need attendees")?.count ?? 0;
+
+  // No direct attendees → flagged (pre-existing behavior).
+  assert.equal(attendeeCount(computeExportBlockers([], [line])), 1);
+  // Direct attendees recorded → cleared.
+  assert.equal(
+    attendeeCount(computeExportBlockers([], [line], [], new Set(["line-1"]))),
+    0,
+  );
+  // A different line's attendees don't clear this one.
+  assert.equal(
+    attendeeCount(computeExportBlockers([], [line], [], new Set(["other-line"]))),
+    1,
+  );
+});
+
 test("blockers: line matched to a receipt dated a DIFFERENT month resolves via matchedReceipts", () => {
   // The 2026-06 bug: the matched receipt is dated 2026-04, so it is absent
   // from the month-scoped `receipts` set the page used to pass alone. With the

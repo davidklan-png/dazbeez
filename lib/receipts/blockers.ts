@@ -162,6 +162,12 @@ export function computeExportBlockers(
   // counts below. Kept pure: callers do the DB fetch (listReceiptRecordsByIds
   // or reuse bundle.receipts); this function does no I/O.
   matchedReceipts: ReceiptRecord[] = [],
+  // Line ids that have ≥1 direct amex_line_attendees row — the write side
+  // TASK-039 added. A no-receipt attendee-requiring line with direct
+  // attendees does NOT need a receipt; without this set the tile kept
+  // flagging lines the signoff gate (which unions direct + receipt
+  // attendees) had already cleared.
+  lineAttendeeLineIds: ReadonlySet<string> = new Set(),
 ): Blocker[] {
   const blockers: Blocker[] = [];
 
@@ -241,14 +247,20 @@ export function computeExportBlockers(
   }
 
   const attendeesMissing = lines.filter(
-    (l) => requiresAttendees(l.expense_category_code) && !l.matched_receipt_id,
+    (l) =>
+      requiresAttendees(l.expense_category_code) &&
+      !l.matched_receipt_id &&
+      // Direct line attendees (amex_line_attendees) satisfy the requirement —
+      // same union the signoff gate applies. Only a line with NEITHER a
+      // matched receipt NOR direct attendees is missing them.
+      !lineAttendeeLineIds.has(l.id),
   ).length;
   if (attendeesMissing > 0) {
     blockers.push({
       severity: "blocker",
       count: attendeesMissing,
       label: "Entertainment/meeting lines need attendees",
-      detail: "Link a receipt that has attendees recorded.",
+      detail: "Record attendees on the line, or link a receipt that has them.",
       href: "/receipts/reconcile",
       ctaLabel: "Fix in Reconcile",
     });
