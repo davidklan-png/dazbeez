@@ -196,6 +196,7 @@ export function FinalizeCard({
               full
               className="mt-3.5"
               disabled={!canFinalize || busy}
+              busy={busy}
               onClick={finalize}
               rightIcon={<LockIcon size={14} className="text-white" />}
             >

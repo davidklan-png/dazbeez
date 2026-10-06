@@ -102,6 +102,9 @@ export function ExportScreen(props: ExportScreenProps) {
   const router = useRouter();
   const [busy, setBusy] = useState<"build" | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Transient "done" marker after a successful build — the page refresh swaps
+  // in the new draft, but an explicit ✓ closes the loop for the operator.
+  const [builtFlash, setBuiltFlash] = useState<string | null>(null);
 
   const finalized = props.currentExport?.status === "finalized";
   const draftBuilt = Boolean(props.currentExport);
@@ -127,6 +130,8 @@ export function ExportScreen(props: ExportScreenProps) {
         );
         return;
       }
+      setBuiltFlash(`✓ Draft built ${new Date().toLocaleTimeString()}`);
+      setTimeout(() => setBuiltFlash(null), 6000);
       router.refresh();
     } catch {
       setError("Network error.");
@@ -154,6 +159,11 @@ export function ExportScreen(props: ExportScreenProps) {
       {error && (
         <div className="mx-8 mt-4 rounded-lg border border-red-200 bg-red-50 px-4 py-2.5 text-sm text-red-700">
           {error}
+        </div>
+      )}
+      {builtFlash && !error && (
+        <div className="mx-8 mt-4 rounded-lg border border-green-200 bg-green-50 px-4 py-2.5 text-[12.5px] font-medium text-green-800">
+          {builtFlash}
         </div>
       )}
 
@@ -192,8 +202,9 @@ export function ExportScreen(props: ExportScreenProps) {
                   size="md"
                   onClick={rebuildDraft}
                   disabled={busy === "build" || finalized}
+                  busy={busy === "build"}
                 >
-                  Build draft
+                  {busy === "build" ? "Building…" : "Build draft"}
                 </Btn>
               </div>
             </Card>
@@ -250,7 +261,7 @@ function TopBar({
         </span>
       )}
       {!finalized && (
-        <Btn kind="ghost" size="md" onClick={onRebuild} disabled={busy}>
+        <Btn kind="ghost" size="md" onClick={onRebuild} disabled={busy} busy={busy}>
           {busy ? "Building…" : builtAt ? "Rebuild draft" : "Build draft"}
         </Btn>
       )}
