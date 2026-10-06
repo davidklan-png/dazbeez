@@ -76,3 +76,43 @@ test("updateExportOperatorMessage is the SOLE writer of operator_message_updated
     "operator_message_updated_at may be written only in db.ts (by updateExportOperatorMessage)",
   );
 });
+
+// ── Generated-heading guard (2026-10-06 rev-2 incident) ───────────────────
+// A pasted copy of an old delivery embedded 【今月のご連絡】 + the machine line
+// inside the operator message; the duplicated heading broke the O7 extractor
+// and the pack could only be corrected by a revision. The guard must reject
+// at SAVE time (PATCH) and at the one-shot finalize decision — asserted both
+// as pure behavior and as route wiring.
+
+import { findGeneratedHeadingInOperatorMessage } from "@/lib/receipts/operator-message";
+
+test("findGeneratedHeadingInOperatorMessage: detects each generated heading, null when clean", () => {
+  assert.equal(findGeneratedHeadingInOperatorMessage(null), null);
+  assert.equal(findGeneratedHeadingInOperatorMessage(""), null);
+  assert.equal(findGeneratedHeadingInOperatorMessage("お世話になります。\n9月分をお送りします。"), null);
+  assert.equal(
+    findGeneratedHeadingInOperatorMessage("ご挨拶\n【今月のご連絡】\n2026年9月 の領収証憑一式を…"),
+    "【今月のご連絡】",
+  );
+  assert.equal(
+    findGeneratedHeadingInOperatorMessage("x【この資料について】y"),
+    "【この資料について】",
+  );
+  assert.equal(
+    findGeneratedHeadingInOperatorMessage("x【勘定科目別集計】y"),
+    "【勘定科目別集計】",
+  );
+});
+
+test("both message write paths call the generated-heading guard (source contract)", () => {
+  const messageRoute = readFileSync(
+    "app/api/receipts/export/[month]/message/route.ts",
+    "utf8",
+  );
+  const monthRoute = readFileSync(
+    "app/api/receipts/export/month/route.ts",
+    "utf8",
+  );
+  assert.match(messageRoute, /findGeneratedHeadingInOperatorMessage/, "PATCH /message must reject embedded generated headings at save time");
+  assert.match(monthRoute, /findGeneratedHeadingInOperatorMessage/, "one-shot finalize must reject embedded generated headings before sealing");
+});

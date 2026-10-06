@@ -3,6 +3,7 @@ import { requireReceiptsActor } from "@/lib/receipts/auth";
 import { createAuditEntry } from "@/lib/receipts/audit";
 import { stringifyJson } from "@/lib/receipts/db-utils";
 import { getExport, updateExportOperatorMessage } from "@/lib/receipts/db";
+import { findGeneratedHeadingInOperatorMessage } from "@/lib/receipts/operator-message";
 import { getReceiptsDb } from "@/lib/cloudflare-runtime";
 
 type RouteContext = { params: Promise<{ month: string }> };
@@ -49,6 +50,20 @@ export async function PATCH(request: Request, { params }: RouteContext) {
       return NextResponse.json(
         {
           error: `Message is too long (max ${MAX_OPERATOR_MESSAGE_LENGTH} characters).`,
+        },
+        { status: 400 },
+      );
+    }
+    // Structural-token guard: the generated headings are added by the notice /
+    // email builders — a pasted copy of an old delivery duplicates them and
+    // breaks the O7 preflight after the pack is sealed. Reject at save time.
+    const offendingHeading = findGeneratedHeadingInOperatorMessage(trimmed);
+    if (offendingHeading) {
+      return NextResponse.json(
+        {
+          error:
+            `The message must not contain ${offendingHeading} — that heading is added ` +
+            "automatically. Delete it (and the generated line under it) from your text and save again.",
         },
         { status: 400 },
       );
