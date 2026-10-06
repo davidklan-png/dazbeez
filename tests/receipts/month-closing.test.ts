@@ -596,18 +596,37 @@ test("href: attendees_required deep-links the receipt's review page", () => {
   );
 });
 
-test("href: gate 4 amex_line blockers link Reconcile for the month", () => {
+test("href: gate 4 amex_line blockers deep-link their line in Reconcile", () => {
   const blockers = validateMonthReadyForExportCoreDetailed(
     makeInput({
       bundle: makeBundle({
-        amexLines: [makeLine({ match_status: "unmatched", merchant: "UNMATCHED CO" })],
+        amexLines: [
+          makeLine({ id: "line-9", match_status: "unmatched", merchant: "UNMATCHED CO" }),
+        ],
       }),
     }),
   );
   assert.equal(
     blockers.find((b) => b.code === "amex_line")?.href,
-    `/receipts/reconcile?month=${MONTH}`,
+    `/receipts/reconcile?month=${MONTH}&line=line-9`,
   );
+});
+
+test("href: gate 4 consolidated-sum blocker (no single line) links the month's Reconcile", () => {
+  // Two confirmed lines sharing one receipt whose total ≠ the line sum → the
+  // blocker belongs to no single line, so no &line= param.
+  const lineA = makeLine({ id: "line-a", matched_receipt_id: "r-hub", amount_minor: 2864 });
+  const lineB = makeLine({ id: "line-b", matched_receipt_id: "r-hub", amount_minor: 4185 });
+  const receipt = makeReceipt({ id: "r-hub", amount_minor: 9999 });
+  const blockers = validateMonthReadyForExportCoreDetailed(
+    makeInput({
+      bundle: makeBundle({ amexLines: [lineA, lineB], receipts: [receipt] }),
+    }),
+  );
+  const consolidated = blockers.find((b) => b.message.includes("Consolidated receipt"));
+  assert.ok(consolidated, `expected a consolidated blocker: ${JSON.stringify(blockers)}`);
+  assert.equal(consolidated?.code, "amex_line");
+  assert.equal(consolidated?.href, `/receipts/reconcile?month=${MONTH}`);
 });
 
 test("href: gate 6/7 blockers deep-link the receipt's review page", () => {

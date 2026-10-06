@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { validateAmexLinesForSignoff } from "@/lib/receipts/reconciliation-signoff";
+import { computeBlockingLineIds } from "@/components/receipts/reconcile/reconcile-screen";
 import type { AmexStatementLine, ReceiptRecord } from "@/lib/receipts/types";
 import type { ReceiptAttendeeDirectoryEntry } from "@/lib/receipts/attendee-directory";
 
@@ -314,4 +315,64 @@ test("signoff validator: unmatched line still blocks on missing receipt confirma
   const blockers = validateAmexLinesForSignoff([line], {}, new Map(), new Map(), EMPTY_DIR);
   // Should have at least: unresolved match status, missing receipt requires reason.
   assert.ok(blockers.length >= 2, `expected at least 2 blockers, got: ${JSON.stringify(blockers)}`);
+});
+
+// ─── Blocking marks for the reconcile rail (TASK-040) ──────────────────────
+// computeBlockingLineIds feeds the red "blocking" mark on reconcile rows: a
+// line with ANY sign-off code firing blocks the month's sign-off. The
+// attendeesByLineId input is the screen's OPTIMISTIC overlay — the mark must
+// clear as soon as line-direct attendees are entered, before any reload.
+
+test("blocking marks: uncategorized no-receipt line is blocking", () => {
+  const line = makeLine({
+    id: "line-uncat",
+    match_status: "no_receipt",
+    receipt_status: "no_receipt_required",
+    receipt_missing_reason: "lost",
+    expense_category_code: null,
+  });
+  const ids = computeBlockingLineIds([line], new Map(), {}, new Map(), EMPTY_DIR);
+  assert.ok(ids.has("line-uncat"), JSON.stringify([...ids]));
+});
+
+test("blocking marks: attendee-requiring line with direct attendees (optimistic overlay) is NOT blocking", () => {
+  const line = makeLine({
+    id: "line-att",
+    match_status: "no_receipt",
+    receipt_status: "no_receipt_required",
+    receipt_missing_reason: "lost",
+    expense_category_code: "meeting",
+  });
+  const ids = computeBlockingLineIds(
+    [line],
+    new Map(),
+    { "line-att": ["Alice", "Bob"] }, // optimistic overlay — typed, not yet reloaded
+    new Map(),
+    ATTENDEES_DIR,
+  );
+  assert.ok(!ids.has("line-att"), JSON.stringify([...ids]));
+});
+
+test("blocking marks: no-receipt line missing its reason is blocking", () => {
+  const line = makeLine({
+    id: "line-noreason",
+    match_status: "no_receipt",
+    receipt_status: "no_receipt_required",
+    receipt_missing_reason: null,
+    expense_category_code: "office_supplies",
+  });
+  const ids = computeBlockingLineIds([line], new Map(), {}, new Map(), EMPTY_DIR);
+  assert.ok(ids.has("line-noreason"), JSON.stringify([...ids]));
+});
+
+test("blocking marks: clean line is not blocking", () => {
+  const line = makeLine({
+    id: "line-clean",
+    match_status: "no_receipt",
+    receipt_status: "no_receipt_required",
+    receipt_missing_reason: "lost",
+    expense_category_code: "office_supplies",
+  });
+  const ids = computeBlockingLineIds([line], new Map(), {}, new Map(), EMPTY_DIR);
+  assert.equal(ids.size, 0, JSON.stringify([...ids]));
 });
