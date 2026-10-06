@@ -27,7 +27,7 @@ import type {
   ExportRow,
   ReceiptRecord,
 } from "@/lib/receipts/types";
-import { validateAmexLinesForSignoff } from "@/lib/receipts/reconciliation-signoff";
+import { validateAmexLinesForSignoffDetailed } from "@/lib/receipts/reconciliation-signoff";
 import { isUnreviewedReceipt, receiptsMissingProofFiles } from "@/lib/receipts/blockers";
 import { countReceiptFilesByObjectIds } from "@/lib/receipts/files";
 
@@ -507,22 +507,25 @@ export function validateMonthReadyForExportCoreDetailed(
     }
   }
 
-  // (4) AMEX-line checks. validateAmexLinesForSignoff returns prose strings;
-  // each is tagged with the gate-level code `amex_line`.
+  // (4) AMEX-line checks. validateAmexLinesForSignoffDetailed tags each
+  // blocker with its line id, so the href can deep-link that line in the
+  // reconcile rail (`&line=` selects + scrolls to it). Consolidated-sum
+  // blockers belong to no single line and link the month surface.
   const receiptMap = new Map<string, ReceiptRecord>();
   for (const r of bundle.receipts) receiptMap.set(r.id, r);
-  for (const message of validateAmexLinesForSignoff(
+  for (const b of validateAmexLinesForSignoffDetailed(
     bundle.amexLines,
     amexAttendees,
     bundle.attendeeMap,
     receiptMap,
     bundle.attendeeDirectory,
   )) {
-    // Prose strings carry no per-line id — link the signoff surface itself.
     blockers.push({
       code: "amex_line",
-      message,
-      href: `/receipts/reconcile?month=${month}`,
+      message: b.message,
+      href: b.lineId
+        ? `/receipts/reconcile?month=${month}&line=${b.lineId}`
+        : `/receipts/reconcile?month=${month}`,
     });
   }
 

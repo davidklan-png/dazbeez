@@ -35,6 +35,7 @@ import {
 } from "@/lib/receipts/categories";
 import { normalizeDescription } from "@/lib/receipts/reconciliation";
 import { resolveLineCategory } from "@/lib/receipts/line-classification";
+import { evaluateAmexLineSignoff } from "@/lib/receipts/reconciliation-signoff";
 import { findCategorySuggestion, type CategoryRule } from "@/lib/receipts/category-rules";
 import type {
   AmexBusinessTripStatus,
@@ -101,14 +102,51 @@ export interface ReconcileScreenProps {
   /** Active category pattern rules → live suggestion on unmatched, uncategorized
    *  AMEX lines (ADR: category-rules). */
   categoryRules: CategoryRule[];
+  /** Deep-link target from `?line=<id>` (already membership-checked by the
+   *  page against this month's lines). Selects + scrolls to the row once. */
+  initialLineId: string | null;
 }
 
 type Tab = "lines" | "orphans" | "trips";
 
+// ─── Blocking marks (TASK-040) ───────────────────────────────────────
+// A line is "blocking" when ANY sign-off code fires for it — the same
+// predicate the finalize gate applies (validateAmexLinesForSignoffDetailed),
+// so a red-marked row is exactly a row the month cannot sign off on. The
+// `attendeesByLineId` input is the screen's OPTIMISTIC overlay (server line
+// attendees + unsaved edits), so the mark clears live as the operator enters
+// line-direct attendees. Pure; exported for unit testing.
+
+export function computeBlockingLineIds(
+  lines: AmexStatementLine[],
+  receiptMap: Map<string, ReceiptRecord>,
+  attendeesByLineId: Record<string, string[]>,
+  attendeesByReceiptId: Map<string, string[]>,
+  attendeeDirectory: ReceiptAttendeeDirectoryEntry[],
+): Set<string> {
+  const blocking = new Set<string>();
+  for (const line of lines) {
+    const receipt = line.matched_receipt_id
+      ? receiptMap.get(line.matched_receipt_id)
+      : undefined;
+    const result = evaluateAmexLineSignoff(
+      line,
+      receipt,
+      attendeesByLineId[line.id] ?? [],
+      line.matched_receipt_id
+        ? attendeesByReceiptId.get(line.matched_receipt_id) ?? []
+        : [],
+      attendeeDirectory,
+    );
+    if (result.codes.length > 0) blocking.add(line.id);
+  }
+  return blocking;
+}
+
 export function ReconcileScreen(props: ReconcileScreenProps) {
   const router = useRouter();
   const [activeId, setActiveId] = useState<string | null>(
-    () => props.amexLines[0]?.id ?? null,
+    () => props.initialLineId ?? props.amexLines[0]?.id ?? null,
   );
   // §3: after marking a line "no receipt expected", drop the operator into the
   // reason field so supplying it is the obvious next keystroke. Set here (both
@@ -408,6 +446,43 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
     },
     [locked],
   );
+
+  // Blocking lines: any sign-off code firing on a row marks it red in EVERY
+  // match group (the mark never depends on the grouping). Recomputed against
+  // the optimistic attendee overlay + directory state, so entering attendees
+  // or registering a name clears the mark without a reload.
+  const blockingLineIds = useMemo(
+    () =>
+      computeBlockingLineIds(
+        props.amexLines,
+        receiptMap,
+        attendeesByLineId,
+        props.attendeesByReceiptId,
+        attendeeDirectory,
+      ),
+    [
+      props.amexLines,
+      receiptMap,
+      attendeesByLineId,
+      props.attendeesByReceiptId,
+      attendeeDirectory,
+    ],
+  );
+
+  // Deep-link arrival (?line=… from a blocker): scroll the linked row into
+  // view once after mount and flash it, so a long line list lands the
+  // operator on the offending line instead of leaving them to hunt for it.
+  const [flashLineId, setFlashLineId] = useState<string | null>(null);
+  const initialLineId = props.initialLineId;
+  useEffect(() => {
+    if (!initialLineId) return;
+    const el = document.getElementById(`line-${initialLineId}`);
+    if (!el) return;
+    el.scrollIntoView({ block: "center" });
+    setFlashLineId(initialLineId);
+    const t = setTimeout(() => setFlashLineId(null), 2500);
+    return () => clearTimeout(t);
+  }, [initialLineId]);
 
   const bulkConfirmObvious = useCallback(async () => {
     if (locked) return;
@@ -716,6 +791,8 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
           confirmedLinesByReceipt={confirmedLinesByReceipt}
           activeId={activeId}
           setActiveId={setActiveId}
+          blockingLineIds={blockingLineIds}
+          flashLineId={flashLineId}
           tab={tab}
           setTab={setTab}
           counts={counts}
@@ -792,6 +869,8 @@ function LinesPane({
   confirmedLinesByReceipt,
   activeId,
   setActiveId,
+  blockingLineIds,
+  flashLineId,
   tab,
   setTab,
   counts,
@@ -812,6 +891,10 @@ function LinesPane({
   confirmedLinesByReceipt: Map<string, AmexStatementLine[]>;
   activeId: string | null;
   setActiveId: (id: string) => void;
+  /** Lines with any sign-off code firing — red-marked in every group. */
+  blockingLineIds: Set<string>;
+  /** Deep-linked line id to flash once after mount (null = none). */
+  flashLineId: string | null;
   tab: Tab;
   setTab: (t: Tab) => void;
   counts: {
@@ -883,6 +966,8 @@ function LinesPane({
                 receiptMap={receiptMap}
                 confirmedLinesByReceipt={confirmedLinesByReceipt}
                 active={activeId === l.line.id}
+                blocking={blockingLineIds.has(l.line.id)}
+                flash={flashLineId === l.line.id}
                 onClick={() => setActiveId(l.line.id)}
               />
             ))}
@@ -896,6 +981,8 @@ function LinesPane({
                 receiptMap={receiptMap}
                 confirmedLinesByReceipt={confirmedLinesByReceipt}
                 active={activeId === l.line.id}
+                blocking={blockingLineIds.has(l.line.id)}
+                flash={flashLineId === l.line.id}
                 onClick={() => setActiveId(l.line.id)}
               />
             ))}
@@ -913,6 +1000,8 @@ function LinesPane({
                 receiptMap={receiptMap}
                 confirmedLinesByReceipt={confirmedLinesByReceipt}
                 active={activeId === l.line.id}
+                blocking={blockingLineIds.has(l.line.id)}
+                flash={flashLineId === l.line.id}
                 onClick={() => setActiveId(l.line.id)}
               />
             ))}
@@ -930,6 +1019,8 @@ function LinesPane({
                 receiptMap={receiptMap}
                 confirmedLinesByReceipt={confirmedLinesByReceipt}
                 active={activeId === l.line.id}
+                blocking={blockingLineIds.has(l.line.id)}
+                flash={flashLineId === l.line.id}
                 onClick={() => setActiveId(l.line.id)}
               />
             ))}
@@ -991,6 +1082,8 @@ function LineRow({
   receiptMap,
   confirmedLinesByReceipt,
   active,
+  blocking,
+  flash,
   onClick,
 }: {
   lwb: {
@@ -1001,6 +1094,10 @@ function LineRow({
   receiptMap: Map<string, ReceiptRecord>;
   confirmedLinesByReceipt: Map<string, AmexStatementLine[]>;
   active: boolean;
+  /** Any sign-off code fires on this line — the month cannot sign off. */
+  blocking: boolean;
+  /** Deep-link flash (fades out via the row's transition). */
+  flash: boolean;
   onClick: () => void;
 }) {
   const { line, band, match } = lwb;
@@ -1029,13 +1126,17 @@ function LineRow({
   return (
     <button
       type="button"
+      id={`line-${line.id}`}
       onClick={onClick}
       aria-current={active ? "true" : undefined}
       className={[
-        "flex w-full items-center gap-2.5 border-b border-gray-100 px-4 py-2.5 text-left transition-colors",
+        "flex w-full items-center gap-2.5 border-b border-gray-100 px-4 py-2.5 text-left transition-all",
         active
           ? "border-l-[3px] border-l-amber-500 bg-amber-50"
-          : "border-l-[3px] border-l-transparent hover:bg-gray-50",
+          : blocking
+            ? "border-l-[3px] border-l-red-500 hover:bg-gray-50"
+            : "border-l-[3px] border-l-transparent hover:bg-gray-50",
+        flash ? "ring-2 ring-red-500" : "",
       ].join(" ")}
     >
       <div className="flex min-w-[28px] flex-col items-center gap-0.5">
@@ -1069,6 +1170,11 @@ function LineRow({
           </span>
         </div>
         <div className="mt-0.5 flex items-center gap-1.5">
+          {blocking && (
+            <Pill tone="red" size="sm" dot>
+              blocking
+            </Pill>
+          )}
           {categoryCode ? (
             <span className="text-[11px] text-gray-500">
               {formatCategoryLabel(categoryCode)}

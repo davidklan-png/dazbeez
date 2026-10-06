@@ -43,6 +43,8 @@ export default async function ReconcilePage({
   const params = await searchParams;
   const requestedMonth =
     typeof params.month === "string" ? params.month : null;
+  const requestedLineId =
+    typeof params.line === "string" ? params.line : null;
 
   const [lineCountsByMonth, reconciliationStatusByMonth] = await Promise.all([
     listAmexLineCountsByMonth(),
@@ -68,6 +70,14 @@ export default async function ReconcilePage({
     listAmexLines(month),
     getReconciliationForMonth(month),
   ]);
+
+  // Deep-link target (blocker → reconcile): accept the `line` param only when
+  // it names one of the loaded month's lines (membership, not format) — a
+  // stale or foreign id falls back to the default selection.
+  const initialLineId =
+    requestedLineId && amexLines.some((l) => l.id === requestedLineId)
+      ? requestedLineId
+      : null;
 
   const finalized = reconciliation?.status === "finalized";
   const window =
@@ -220,6 +230,7 @@ export default async function ReconcilePage({
       attendeesByLineId={attendeesByLineId}
       attendeeDirectory={attendeeDirectory}
       categoryRules={categoryRules}
+      initialLineId={initialLineId}
     />
   );
 }
