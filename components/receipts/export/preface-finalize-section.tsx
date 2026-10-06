@@ -43,8 +43,10 @@ export function PrefaceFinalizeSection({
 }) {
   const [prefaceDirty, setPrefaceDirty] = useState(false);
 
+  // id="preface" anchors the finalize gate's message_not_reviewed blocker
+  // (`/receipts/export/${month}/review#preface`) onto this block.
   return (
-    <>
+    <div id="preface" className="scroll-mt-4">
       {currentExport && (
         <PrefaceEditor
           month={month}
@@ -67,6 +69,6 @@ export function PrefaceFinalizeSection({
         hasProofsZip={hasProofsZip}
         prefaceDirty={prefaceDirty}
       />
-    </>
+    </div>
   );
 }

@@ -1,8 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { computeReceiptChecks } from "@/lib/receipts/compliance";
+import { buildBlockerReceipts, computeReceiptChecks } from "@/lib/receipts/compliance";
 import { COMPLIANCE_DEFAULTS } from "@/lib/receipts/settings";
 import type {
+  ComplianceCheckSeverity,
   ComplianceSettings,
   ReceiptAttendee,
   ReceiptFile,
@@ -325,4 +326,50 @@ test("compliance: track_tax_breakdown=true warns on missing tax amount", () => {
     checks.find((c) => c.checkType === "missing_tax_rate"),
     undefined,
   );
+});
+
+// ─── buildBlockerReceipts (TASK-038) ───────────────────────────────────────
+// The per-receipt detail behind gate 5's linked compliance blockers: BLOCKER
+// severity only, checkTypes merged/deduped per receipt and sorted.
+
+function checkRow(
+  object_id: string,
+  severity: ComplianceCheckSeverity,
+  check_type: string,
+  merchant: string | null = "M",
+) {
+  return { object_id, severity, check_type, merchant };
+}
+
+test("compliance: buildBlockerReceipts groups blocker-severity checks per receipt", () => {
+  const rows = [
+    checkRow("r-a", "blocker", "missing_category", "izmicworld"),
+    checkRow("r-a", "blocker", "missing_amount", "izmicworld"),
+    checkRow("r-a", "warning", "missing_tax_rate", "izmicworld"),
+    checkRow("r-a", "info", "note", "izmicworld"),
+    checkRow("r-b", "blocker", "missing_receipt", null),
+  ];
+  assert.deepEqual(buildBlockerReceipts(rows), [
+    {
+      receiptId: "r-a",
+      merchant: "izmicworld",
+      checkTypes: ["missing_amount", "missing_category"], // sorted
+    },
+    { receiptId: "r-b", merchant: null, checkTypes: ["missing_receipt"] },
+  ]);
+});
+
+test("compliance: buildBlockerReceipts dedupes repeated check types within a receipt", () => {
+  const rows = [
+    checkRow("r-a", "blocker", "missing_category"),
+    checkRow("r-a", "blocker", "missing_category"),
+  ];
+  assert.deepEqual(buildBlockerReceipts(rows), [
+    { receiptId: "r-a", merchant: "M", checkTypes: ["missing_category"] },
+  ]);
+});
+
+test("compliance: buildBlockerReceipts returns [] when no blocker-severity rows exist", () => {
+  const rows = [checkRow("r-a", "warning", "missing_tax_rate")];
+  assert.deepEqual(buildBlockerReceipts(rows), []);
 });
