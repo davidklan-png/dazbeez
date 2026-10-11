@@ -25,6 +25,50 @@ export async function logTap(
     .run();
 }
 
+export interface SigninRejectionInput {
+  token: string | null;
+  provider: string;
+  reason: string;
+  detail: string | null;
+  userAgent: string | null;
+  country: string | null;
+  asOrganization: string | null;
+}
+
+/**
+ * Record a rejected provider sign-in into audit_logs. Pages Functions keep no
+ * log history, so this row is the only durable answer to "did the visitor
+ * press Google and get rejected, or never press it at all?" detail is a short
+ * diagnostic (error message) — truncated, never trusted to be bounded.
+ */
+export async function logSigninRejection(
+  db: D1Database,
+  data: SigninRejectionInput,
+): Promise<void> {
+  await db
+    .prepare(
+      `INSERT INTO audit_logs (actor, action, entity_type, entity_id, batch_id, metadata_json)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(
+      'visitor',
+      'signin_rejected',
+      'card',
+      null,
+      null,
+      JSON.stringify({
+        token: data.token,
+        provider: data.provider,
+        reason: data.reason,
+        detail: data.detail === null ? null : data.detail.slice(0, 300),
+        user_agent: data.userAgent,
+        cf_country: data.country,
+        as_organization: data.asOrganization,
+      }),
+    )
+    .run();
+}
+
 export async function getCard(
   db: D1Database,
   token: string,

@@ -30,6 +30,16 @@ interface FakeNotificationFailureRow {
   payload_json: string;
 }
 
+interface FakeAuditLogRow {
+  id: number;
+  actor: string;
+  action: string;
+  entity_type: string;
+  entity_id: number | null;
+  batch_id: number | null;
+  metadata_json: string | null;
+}
+
 import { generateKeyPairSync, createSign } from 'node:crypto';
 
 interface FakeContactMethodRow {
@@ -65,10 +75,12 @@ export interface FakeDbState {
   contacts: FakeContactRow[];
   taps: FakeTapRow[];
   notificationFailures: FakeNotificationFailureRow[];
+  auditLogs: FakeAuditLogRow[];
   contactMethods: FakeContactMethodRow[];
   contactEvents: FakeContactEventRow[];
   vcardProfile: FakeVCardProfileRow;
   failInsertContact: boolean;
+  failInsertAudit: boolean;
 }
 
 export function createFakeDbState(
@@ -77,6 +89,7 @@ export function createFakeDbState(
     contacts?: Array<Partial<FakeContactRow> & { token: string; name: string; email: string; source: string }>;
     vcardProfile?: Partial<FakeVCardProfileRow>;
     failInsertContact?: boolean;
+    failInsertAudit?: boolean;
   } = {},
 ): FakeDbState {
   return {
@@ -96,6 +109,7 @@ export function createFakeDbState(
     })),
     taps: [],
     notificationFailures: [],
+    auditLogs: [],
     contactMethods: (options.contacts ?? []).map((contact, index) => ({
       id: index + 1,
       contact_id: contact.id ?? index + 1,
@@ -122,6 +136,7 @@ export function createFakeDbState(
       linkedin: options.vcardProfile?.linkedin ?? 'https://www.linkedin.com/in/david-klan',
     },
     failInsertContact: options.failInsertContact ?? false,
+    failInsertAudit: options.failInsertAudit ?? false,
   };
 }
 
@@ -279,6 +294,24 @@ export function createFakeD1Database(state: FakeDbState): D1Database {
                   payload_json: params[4] as string,
                 });
                 return { meta: { last_row_id: state.notificationFailures.length, changes: 1 } };
+              }
+
+              if (sql.includes('INSERT INTO audit_logs')) {
+                if (state.failInsertAudit) {
+                  throw new Error('Simulated D1 audit insert failure');
+                }
+
+                const row = {
+                  id: state.auditLogs.length + 1,
+                  actor: params[0] as string,
+                  action: params[1] as string,
+                  entity_type: params[2] as string,
+                  entity_id: (params[3] as number | null) ?? null,
+                  batch_id: (params[4] as number | null) ?? null,
+                  metadata_json: (params[5] as string | null) ?? null,
+                } satisfies FakeAuditLogRow;
+                state.auditLogs.push(row);
+                return { meta: { last_row_id: row.id, changes: 1 } };
               }
 
               if (sql.includes('INSERT OR IGNORE INTO contact_methods')) {

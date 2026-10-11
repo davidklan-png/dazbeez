@@ -132,7 +132,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
   return new Response(html, {
     headers: {
       'Content-Type': 'text/html; charset=utf-8',
-      'Set-Cookie': `__Host-oauth_state=${nonce}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=300`,
+      'Set-Cookie': `__Host-oauth_state=${nonce}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=1800`,
     },
   });
 };

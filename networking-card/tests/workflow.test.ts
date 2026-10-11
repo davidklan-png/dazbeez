@@ -47,7 +47,7 @@ test('hi route renders the Google GIS button and sets the CSRF cookie', async ()
   assert.equal(response.status, 200);
   assert.match(
     response.headers.get('Set-Cookie') ?? '',
-    /__Host-oauth_state=.*HttpOnly; Secure; SameSite=Lax; Max-Age=300/,
+    /__Host-oauth_state=.*HttpOnly; Secure; SameSite=Lax; Max-Age=1800/,
   );
   assert.match(html, /https:\/\/accounts\.google\.com\/gsi\/client/);
   assert.match(html, /class="g_id_signin"/);
@@ -365,6 +365,122 @@ test('google callback rejects GIS POST with mismatched page-nonce cookie', async
   assert.equal(response.status, 400);
   assert.match(html, /Google sign-in issue/);
   assert.match(response.headers.get('Set-Cookie') ?? '', /Max-Age=0/);
+});
+
+test('google callback records a nonce_mismatch/no_cookie audit row when the page-nonce cookie is absent', async () => {
+  const dbState = createFakeDbState([{ token: 'card-1', label: 'card-1' }]);
+  const env = createEnv({
+    DB: createFakeD1Database(dbState),
+  });
+  const form = new FormData();
+  form.set('credential', createIdToken({
+    aud: env.GOOGLE_CLIENT_ID,
+    exp: Math.floor(Date.now() / 1000) + 3600,
+    iss: 'https://accounts.google.com',
+    name: 'Google Person',
+    nonce: 'expected-nonce',
+    email: 'google.person@example.com',
+  }));
+  form.set('state', encodeOAuthState('expected-nonce', 'card-1'));
+
+  const { context, waitUntilCalls } = createPagesContext({
+    url: 'https://hi.dazbeez.com/auth/google/callback',
+    method: 'POST',
+    body: form,
+    env,
+  });
+
+  const response = await googleCallbackPost(context as never);
+  const html = await response.text();
+
+  assert.equal(response.status, 400);
+  assert.match(html, /sign-in session expired or was opened in a different browser context/);
+
+  await Promise.all(waitUntilCalls);
+  assert.equal(dbState.auditLogs.length, 1);
+  const row = dbState.auditLogs[0];
+  assert.equal(row.actor, 'visitor');
+  assert.equal(row.action, 'signin_rejected');
+  assert.equal(row.entity_type, 'card');
+  assert.equal(row.entity_id, null);
+  assert.equal(row.batch_id, null);
+  assert.deepEqual(JSON.parse(row.metadata_json ?? '{}'), {
+    token: 'card-1',
+    provider: 'google',
+    reason: 'nonce_mismatch',
+    detail: 'no_cookie',
+    user_agent: null,
+    cf_country: 'JP',
+    as_organization: 'NTT Communications',
+  });
+});
+
+test('google callback records an id_token_verify_failed audit row with the error detail', async () => {
+  const dbState = createFakeDbState([{ token: 'card-1', label: 'card-1' }]);
+  const env = createEnv({
+    DB: createFakeD1Database(dbState),
+  });
+  const form = new FormData();
+  // Malformed credential triggers verifyGoogleIdToken to throw.
+  form.set('credential', 'not-a-jwt');
+  form.set('state', encodeOAuthState('expected-nonce', 'card-1'));
+
+  const { context, waitUntilCalls } = createPagesContext({
+    url: 'https://hi.dazbeez.com/auth/google/callback',
+    method: 'POST',
+    headers: {
+      Cookie: '__Host-oauth_state=expected-nonce',
+    },
+    body: form,
+    env,
+  });
+
+  const response = await googleCallbackPost(context as never);
+
+  assert.equal(response.status, 502);
+
+  await Promise.all(waitUntilCalls);
+  assert.equal(dbState.auditLogs.length, 1);
+  const metadata = JSON.parse(dbState.auditLogs[0].metadata_json ?? '{}');
+  assert.equal(metadata.reason, 'id_token_verify_failed');
+  assert.equal(metadata.token, 'card-1');
+  assert.ok(typeof metadata.detail === 'string' && metadata.detail.length > 0);
+});
+
+test('google callback still returns its error response when the audit insert itself fails', async () => {
+  const dbState = createFakeDbState(
+    [{ token: 'card-1', label: 'card-1' }],
+    { failInsertAudit: true },
+  );
+  const env = createEnv({
+    DB: createFakeD1Database(dbState),
+  });
+  const form = new FormData();
+  form.set('credential', createIdToken({
+    aud: env.GOOGLE_CLIENT_ID,
+    exp: Math.floor(Date.now() / 1000) + 3600,
+    iss: 'https://accounts.google.com',
+    name: 'Google Person',
+    nonce: 'expected-nonce',
+    email: 'google.person@example.com',
+  }));
+  form.set('state', encodeOAuthState('expected-nonce', 'card-1'));
+
+  const { context, waitUntilCalls } = createPagesContext({
+    url: 'https://hi.dazbeez.com/auth/google/callback',
+    method: 'POST',
+    body: form,
+    env,
+  });
+
+  const response = await googleCallbackPost(context as never);
+  const html = await response.text();
+
+  assert.equal(response.status, 400);
+  assert.match(html, /Google sign-in issue/);
+  // The waitUntil promise is caught, so draining it must not reject.
+  await Promise.all(waitUntilCalls);
+  assert.equal(dbState.auditLogs.length, 0);
 });
 
 test('google callback completes the GIS POST happy path and clears the CSRF cookie', async () => {
