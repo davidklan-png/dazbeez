@@ -19,9 +19,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# C1 test card — David's verification taps land on this token and are
-# excluded from every metric. Override if the token changes.
-TEST_TOKEN="${NFC_TEST_TOKEN:-mT7JWcIv}"
+# Test cards — David's verification taps land on these tokens and are
+# excluded from every metric. biGXpIvD is current (2026-10); mT7JWcIv is the
+# retired C1 test card, still excluded in case it gets tapped.
+TEST_TOKEN="${NFC_TEST_TOKEN:-biGXpIvD}"
+OLD_TEST_TOKEN="mT7JWcIv"
 
 if date -u -v-7d +%Y-%m-%d >/dev/null 2>&1; then
   SINCE=$(date -u -v-7d +%Y-%m-%d)       # macOS/BSD
@@ -31,9 +33,9 @@ fi
 
 QUERY="SELECT
   (SELECT COUNT(*) FROM taps
-    WHERE created_at >= '${SINCE}' AND token <> '${TEST_TOKEN}') AS taps,
+    WHERE created_at >= '${SINCE}' AND token NOT IN ('${TEST_TOKEN}','${OLD_TEST_TOKEN}')) AS taps,
   (SELECT COUNT(*) FROM contact_events
-    WHERE created_at >= '${SINCE}' AND token <> '${TEST_TOKEN}') AS captures;"
+    WHERE created_at >= '${SINCE}' AND token NOT IN ('${TEST_TOKEN}','${OLD_TEST_TOKEN}')) AS captures;"
 
 RAW=$(npx wrangler d1 execute dazbeez-networking --remote --json --command "$QUERY" 2>/dev/null)
 
