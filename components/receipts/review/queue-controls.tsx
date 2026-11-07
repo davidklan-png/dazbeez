@@ -165,7 +165,7 @@ export function ReviewSearchControl({
   }
 
   return (
-    <form onSubmit={onSubmit} className="flex shrink-0 items-center gap-1.5">
+    <form onSubmit={onSubmit} className="flex min-w-0 items-center gap-1.5">
       <input
         // key forces the uncontrolled input to reset when navigation changes q.
         key={defaultValue}
@@ -174,12 +174,12 @@ export function ReviewSearchControl({
         defaultValue={defaultValue}
         placeholder="Search receipts…"
         aria-label="Search receipts (all months)"
-        className="h-[30px] w-56 rounded-[7px] border border-gray-200 bg-white px-2 text-[12px] text-gray-600 focus:outline-none"
+        className="h-[30px] w-36 min-w-0 rounded-[7px] border border-gray-200 bg-white px-2 text-[12px] text-gray-600 focus:outline-none sm:w-56"
       />
       {defaultValue && (
         <>
           {matchCount !== undefined && (
-            <span className="whitespace-nowrap text-[11px] text-gray-400">
+            <span className="hidden whitespace-nowrap text-[11px] text-gray-400 sm:inline">
               {matchCount} matches · all months
             </span>
           )}
