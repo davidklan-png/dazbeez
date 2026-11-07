@@ -28,9 +28,9 @@ function lineIndexOf(src: string, needle: string): number {
   return src.slice(0, idx).split("\n").length; // 1-based line number
 }
 
-const BATCHES = "app/admin/api/batches/route.ts";
-const DETECT = "app/admin/api/detect-cards/route.ts";
-const IMAGE = "app/admin/images/[id]/route.ts";
+const BATCHES = "app/(site)/admin/api/batches/route.ts";
+const DETECT = "app/(site)/admin/api/detect-cards/route.ts";
+const IMAGE = "app/(site)/admin/images/[id]/route.ts";
 
 // Contract 1: owner authorization is awaited BEFORE any body/provider/CRM/image work.
 test("batches: awaits requireOwnerActor() before body, provider, and CRM work", () => {
