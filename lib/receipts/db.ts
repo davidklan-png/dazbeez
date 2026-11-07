@@ -3751,8 +3751,10 @@ export interface CreateDeliveryInput {
  * Record a new send attempt (state 'pending') and set the export's
  * delivery_state='pending' in one transaction. Returns the new delivery id.
  */
-export async function createDelivery(input: CreateDeliveryInput): Promise<string> {
-  const db = getReceiptsDb();
+export async function createDelivery(
+  input: CreateDeliveryInput,
+  db: D1Database = getReceiptsDb(),
+): Promise<string> {
   const id = newUuid();
   const now = nowIso();
   await db.batch([
