@@ -1,15 +1,8 @@
 import type { Metadata } from "next";
-import { Inter } from "next/font/google";
 import Image from "next/image";
 import Link from "next/link";
-import { ClerkProvider } from "@clerk/nextjs";
 import { SiteNavigation } from "@/components/site-navigation";
-import "./globals.css";
-
-const inter = Inter({
-  subsets: ["latin"],
-  variable: "--font-inter",
-});
+import { RootDocument } from "@/components/root-document";
 
 export const metadata: Metadata = {
   title: "Dazbeez - AI, Automation & Data Solutions",
@@ -112,26 +105,16 @@ function Footer() {
   );
 }
 
-export default function RootLayout({
+export default function SiteLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className={`${inter.variable} antialiased`}>
-      <body className="min-h-screen flex flex-col">
-        <ClerkProvider>
-          <a
-            href="#main-content"
-            className="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-[60] focus:rounded-md focus:bg-amber-500 focus:px-4 focus:py-2 focus:text-white focus:shadow-lg"
-          >
-            Skip to main content
-          </a>
-          <SiteNavigation />
-          <main id="main-content" className="flex-1">{children}</main>
-          <Footer />
-        </ClerkProvider>
-      </body>
-    </html>
+    <RootDocument>
+      <SiteNavigation />
+      <main id="main-content" className="flex-1">{children}</main>
+      <Footer />
+    </RootDocument>
   );
 }

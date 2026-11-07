@@ -3,7 +3,7 @@ import {
   updateIntegrationSettingsAction,
   updateProfileSettingsAction,
   updateThresholdSettingsAction,
-} from "@/app/admin/crm-actions";
+} from "@/app/(site)/admin/crm-actions";
 import { getCrmIntegrations, getCrmThresholds, getDazbeezProfile } from "@/lib/crm";
 
 export const metadata: Metadata = {

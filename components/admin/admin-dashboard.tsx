@@ -5,7 +5,7 @@ import type {
   ActivityItem,
   ActionItem,
 } from "@/lib/admin-dashboard-data";
-import { deleteNfcContact, updateNfcVCard } from "@/app/admin/actions";
+import { deleteNfcContact, updateNfcVCard } from "@/app/(site)/admin/actions";
 import type { NfcAdminPanelData, NfcContactEventRow } from "@/lib/admin-nfc-dashboard";
 
 // ---- Small presentational helpers -----------------------------------------

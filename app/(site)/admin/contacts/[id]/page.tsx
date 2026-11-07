@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import Image from "next/image";
 import { notFound } from "next/navigation";
-import { sendDraftEmailAction, updateDraftEmailAction } from "@/app/admin/crm-actions";
+import { sendDraftEmailAction, updateDraftEmailAction } from "@/app/(site)/admin/crm-actions";
 import { getContactDetail } from "@/lib/crm";
 
 export const metadata: Metadata = {

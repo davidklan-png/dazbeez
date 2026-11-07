@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import Image from "next/image";
 import { notFound } from "next/navigation";
-import { processApprovedBatchAction, saveBatchCardReviewAction } from "@/app/admin/crm-actions";
+import { processApprovedBatchAction, saveBatchCardReviewAction } from "@/app/(site)/admin/crm-actions";
 import { getBatchDetail } from "@/lib/crm";
 
 export const metadata: Metadata = {
