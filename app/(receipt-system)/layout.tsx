@@ -10,6 +10,17 @@ export const metadata: Metadata = {
     statusBarStyle: "black-translucent",
     title: "Dazbeez",
   },
+  // Previously inherited from the single root layout; the split dropped it.
+  // The operator's home-screened capture page needs the icon (Codex P2, #193).
+  icons: {
+    apple: [
+      {
+        url: "/icons/apple-touch-icon.png",
+        sizes: "180x180",
+        type: "image/png",
+      },
+    ],
+  },
 };
 
 /**

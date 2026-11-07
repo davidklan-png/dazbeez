@@ -7,8 +7,9 @@ export const metadata: Metadata = {
 };
 
 // Boundary for notFound() thrown by receipts pages (review/[id], export,
-// trips). Sits at the group root so the ReceiptShell (receipts/layout.tsx,
-// which nests above it) still renders around the message.
+// trips). Lives INSIDE the receipts segment so the boundary is below
+// receipts/layout.tsx — ReceiptShell (the frozen nav) stays on screen
+// around the message (Codex P2, PR #193).
 export default function NotFound() {
   return (
     <div className="mx-auto w-full max-w-2xl px-4 py-16 text-center sm:px-8">
