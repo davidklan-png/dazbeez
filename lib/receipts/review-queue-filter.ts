@@ -87,15 +87,27 @@ export function normalizeReviewFilter(
   return filter && RECOGNIZED_REVIEW_FILTERS.has(filter) ? filter : "";
 }
 
+/** Normalize the `q` (cross-month search) param: trimmed, capped at 100
+ *  chars, '' when absent/malformed. Single authority for both review pages so
+ *  the page fetch and the URL round-trip agree (TASK-041). Pure. */
+export function normalizeReviewSearch(
+  raw: string | string[] | undefined,
+): string {
+  return typeof raw === "string" ? raw.trim().slice(0, 100) : "";
+}
+
 /** Build a `/receipts/review?…` query string from explicit control state. The
  *  single URL builder used by the SubHeader's month picker, closing-scope
- *  toggle, and filter tabs — pure so the toggle's "enable from implicit month"
- *  behavior is unit-testable without a DOM. `scope=closing` is emitted only for
- *  a concrete month (All months / default-with-no-effective-month drops it). */
+ *  toggle, filter tabs, and the search input — pure so the toggle's "enable
+ *  from implicit month" behavior is unit-testable without a DOM.
+ *  `scope=closing` is emitted only for a concrete month (All months /
+ *  default-with-no-effective-month drops it). `q` (when non-empty) rides along
+ *  so search composes with the tabs. */
 export function buildReviewControlQuery(args: {
   month: string;
   filter: string | null;
   scope: ReviewScope;
+  q?: string;
 }): string {
   const sp = new URLSearchParams();
   if (args.month) sp.set("month", args.month);
@@ -103,6 +115,7 @@ export function buildReviewControlQuery(args: {
   if (args.scope === "closing" && isConcreteMonth(args.month)) {
     sp.set("scope", "closing");
   }
+  if (args.q) sp.set("q", args.q);
   const qs = sp.toString();
   return qs ? `?${qs}` : "";
 }
@@ -235,7 +248,8 @@ export function effectiveReviewMonth(
  *  operator stays within the chosen month/scope/filter view. monthParam ''
  *  (default) is omitted so default-view navigation stays on the default month.
  *  scope=closing is preserved only for a concrete YYYY-MM month (dropped for
- *  'all'/default, matching resolveReviewScope). */
+ *  'all'/default, matching resolveReviewScope). `q` is preserved via the same
+ *  normalization the pages use, so search stays alive across rail navigation. */
 export function buildReviewQueryParams(
   params: Record<string, string | string[] | undefined>,
   monthParam: string,
@@ -246,11 +260,13 @@ export function buildReviewQueryParams(
   const status = typeof params.status === "string" ? params.status : undefined;
   const paymentPath =
     typeof params.payment_path === "string" ? params.payment_path : undefined;
+  const q = normalizeReviewSearch(params.q);
   if (filter) sp.set("filter", filter);
   if (monthParam) sp.set("month", monthParam);
   if (scope === "closing" && isConcreteMonth(monthParam)) sp.set("scope", "closing");
   if (status) sp.set("status", status);
   if (paymentPath) sp.set("payment_path", paymentPath);
+  if (q) sp.set("q", q);
   const qs = sp.toString();
   return qs ? `?${qs}` : "";
 }

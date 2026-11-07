@@ -6,6 +6,7 @@ import {
   listDistinctTransactionMonths,
   listAmexLineCountsByMonth,
   listReceiptRecords,
+  searchReceiptRecords,
 } from "@/lib/receipts/db";
 import { RECEIPT_VIEW_LIMIT } from "@/lib/receipts/list-policy";
 import { assertReceiptsPageAccess } from "@/lib/receipts/auth-request";
@@ -20,6 +21,7 @@ import { collectClosingAttentionReasons } from "@/lib/receipts/review-attention"
 import { findDuplicatePartnerId } from "@/lib/receipts/blockers";
 import { loadClosingScopeWorkingSet } from "@/lib/receipts/review-scope";
 import { DEFAULT_SORT, sortQueueItems } from "@/lib/receipts/queue-sort";
+import { parseReviewSearch } from "@/lib/receipts/review-search";
 import {
   buildReviewQueryParams,
   effectiveReviewMonth,
@@ -27,6 +29,7 @@ import {
   filterReviewQueue,
   isConcreteMonth,
   mergeMonthOptions,
+  normalizeReviewSearch,
   resolveQueueNavigation,
   resolveReviewMonthScope,
   resolveReviewScope,
@@ -77,6 +80,7 @@ async function renderReceiptPage(
   const { id } = await params;
   const sp = await searchParams;
   const filter = String(sp.filter ?? "");
+  const rawQ = normalizeReviewSearch(sp.q);
   const statusFilter = typeof sp.status === "string" ? sp.status : undefined;
   const paymentPathFilter =
     typeof sp.payment_path === "string" ? sp.payment_path : undefined;
@@ -86,10 +90,17 @@ async function renderReceiptPage(
   const scope: ReviewScope = resolveReviewScope(rawScope, monthParam);
   const { month: monthScope, includeUndated } = resolveReviewMonthScope(rawMonth);
 
-  // Working set: closing-scope membership (export authority) vs calendar month.
+  // Working set: closing-scope membership (export authority) vs calendar
+  // month. With an active search (q), the SAME search working set as the list
+  // page is loaded instead — otherwise a result opened from another month
+  // shows "not in this view" and j/k + save-and-advance cannot traverse the
+  // search results (Codex P1, PR #192).
+  const parsedSearch = parseReviewSearch(rawQ);
   let workingReceipts: ReceiptRecord[];
   let amexMatchedIds: Set<string> | undefined;
-  if (scope === "closing" && isConcreteMonth(monthParam)) {
+  if (parsedSearch) {
+    workingReceipts = await searchReceiptRecords(parsedSearch);
+  } else if (scope === "closing" && isConcreteMonth(monthParam)) {
     const workingSet = await loadClosingScopeWorkingSet(monthParam);
     workingReceipts = workingSet.receipts;
     amexMatchedIds = workingSet.amexMatchedIds;
@@ -234,6 +245,7 @@ async function renderReceiptPage(
       monthParam={monthParam}
       activeFilter={filter}
       scope={scope}
+      search={parsedSearch ? { q: rawQ, matchCount: workingReceipts.length } : undefined}
       imagePane={
         <ImagePane
           receiptId={receipt.id}

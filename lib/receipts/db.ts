@@ -12,6 +12,11 @@ import { assignMembershipForReceipt, postPatchMembershipDate } from "@/lib/recei
 import { assertExactlyOneRowWritten } from "@/lib/receipts/operator-message";
 import { deleteAmexArtifact } from "@/lib/receipts/storage";
 import { PENDING_EXTRACTION_STATES } from "@/lib/receipts/types";
+import {
+  buildReviewSearchSql,
+  type ReviewSearchParsed,
+} from "@/lib/receipts/review-search";
+import { RECEIPT_VIEW_LIMIT } from "@/lib/receipts/list-policy";
 import type { ReceiptAttendeeDirectoryEntry } from "@/lib/receipts/attendee-directory";
 import {
   RECENT_CAPTURE_LIMIT,
@@ -548,6 +553,55 @@ export async function listReceiptRecords(
     .all<ReceiptRecord>();
 
   return result.results ?? [];
+}
+
+/**
+ * Cross-month receipt search for the Review tab's `?q=` (TASK-041). Same row
+ * shape as listReceiptRecords but with extraction_json deliberately projected
+ * out (the review search needs none of it and the payloads are the table's
+ * largest column — buildQueueItems' failure-reason tooltip simply degrades to
+ * its generic title for failed receipts found via search). Display-only: the
+ * results feed the review rail only, never the closing/export working set.
+ *
+ * ORDER BY transaction_date DESC, created_at DESC. `limit` is clamped by
+ * RECEIPT_VIEW_LIMIT. No index added — a scan of ~hundreds of rows under a
+ * 200-row limit is fine; revisit if D1 timings ever say otherwise.
+ */
+const REVIEW_SEARCH_RECEIPT_COLUMNS =
+  "id, captured_at, captured_by, source, original_filename, " +
+  "payment_path, expense_type, transaction_date, merchant, amount_minor, " +
+  "currency, tax_amount_minor, business_purpose, alcohol_present, " +
+  "attendees_required, status, original_r2_key, original_sha256, " +
+  "original_content_type, original_size_bytes, processed_r2_key, " +
+  "legacy, exported_month, export_statement_month, created_at, updated_at, " +
+  "deleted_at, deleted_by, delete_reason, expense_category_code, " +
+  "retention_until, legal_hold, source_type, preservation_status, " +
+  "confirmed_at, confirmed_by, invoice_registration_number, " +
+  "invoice_registration_status, qualified_invoice_status, tax_rate, " +
+  "counterparty_name, search_text, compliance_warnings_json, " +
+  "device_id, client_capture_id, captured_at_client, upload_origin, " +
+  "extraction_state, extraction_enqueued_at, extraction_processed_at, " +
+  "extraction_attempts, extraction_processor, extraction_r2_key, " +
+  "needs_render, extraction_enqueue_failed_at";
+
+export async function searchReceiptRecords(
+  parsed: ReviewSearchParsed,
+  limit: number = RECEIPT_VIEW_LIMIT,
+  db: D1Database = getReceiptsDb(),
+): Promise<ReceiptRecord[]> {
+  const { where, params } = buildReviewSearchSql(parsed);
+  params.push(Math.min(limit, RECEIPT_VIEW_LIMIT));
+  const result = await db
+    .prepare(
+      `SELECT ${REVIEW_SEARCH_RECEIPT_COLUMNS} FROM receipt_records
+       WHERE ${where}
+       ORDER BY transaction_date DESC, created_at DESC
+       LIMIT ?`,
+    )
+    .bind(...params)
+    .all<Omit<ReceiptRecord, "extraction_json">>();
+
+  return (result.results ?? []).map((r) => ({ ...r, extraction_json: null }));
 }
 
 /**

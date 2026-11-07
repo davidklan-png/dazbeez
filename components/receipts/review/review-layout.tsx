@@ -10,6 +10,7 @@ import { QueueRail } from "@/components/receipts/review/queue-rail";
 import {
   QueueControlsProvider,
   QueueSortControl,
+  ReviewSearchControl,
 } from "@/components/receipts/review/queue-controls";
 import type { QueueItem } from "@/lib/receipts/queue-items";
 import {
@@ -53,6 +54,7 @@ export function ReviewLayout({
   activeFilter,
   scope,
   savedAtLabel,
+  search,
 }: {
   queueItems: QueueItem[];
   activeId: string | null;
@@ -78,6 +80,10 @@ export function ReviewLayout({
   /** Current closing scope — drives the toggle's pressed state. */
   scope?: ReviewScope;
   savedAtLabel?: string;
+  /** Cross-month search state (TASK-041). The list page passes the server
+   *  match count; the [id] page passes only `q` (its working set is the month
+   *  view, so no honest match count exists there — the label is omitted). */
+  search?: { q: string; matchCount?: number };
 }) {
   return (
     <QueueControlsProvider
@@ -93,6 +99,7 @@ export function ReviewLayout({
           monthParam={monthParam}
           activeFilter={activeFilter ?? null}
           scope={scope ?? "calendar"}
+          search={search}
         />
         {/* Phone: stack queue → image → form so each pane is full-width and
             swipable. Tablet+: 2-column with image / form side-by-side and the
@@ -102,6 +109,7 @@ export function ReviewLayout({
             <QueueRail
               totalUnreviewed={needsAttention}
               totalCaptured={workingSetCount}
+              showMonthBadges={Boolean(search)}
             />
           </div>
           <div className="min-h-[50vh] lg:min-h-0">{imagePane}</div>
@@ -129,6 +137,7 @@ function SubHeader({
   monthParam,
   activeFilter,
   scope,
+  search,
 }: {
   needsAttention: number;
   effectiveMonth: string;
@@ -136,6 +145,7 @@ function SubHeader({
   monthParam: string;
   activeFilter: string | null;
   scope: ReviewScope;
+  search?: { q: string; matchCount?: number };
 }) {
   const router = useRouter();
   // The toggle acts on the explicit month when present, otherwise the effective
@@ -145,13 +155,17 @@ function SubHeader({
   const toggleMonth = closingToggleMonth(monthParam, effectiveMonth);
   const concrete = isConcreteMonth(toggleMonth);
   const normalizedFilter = normalizeReviewFilter(activeFilter);
+  // While a search is active the working set ignores month/scope entirely —
+  // mute both controls so they don't read as live.
+  const searchActive = Boolean(search?.q);
+  const q = search?.q ?? "";
 
   function onMonthChange(value: string) {
     // Preserve the workflow filter across month changes. Closing scope is
     // preserved too, except when switching to 'all' (no closing scope there).
     const nextScope: ReviewScope = value === "all" ? "calendar" : scope;
     router.push(
-      `/receipts/review${buildReviewControlQuery({ month: value, filter: activeFilter || null, scope: nextScope })}`,
+      `/receipts/review${buildReviewControlQuery({ month: value, filter: activeFilter || null, scope: nextScope, q: q || undefined })}`,
     );
   }
 
@@ -162,7 +176,7 @@ function SubHeader({
     // preserves the concrete month. buildReviewControlQuery drops scope=closing
     // for a non-concrete month (All months).
     router.push(
-      `/receipts/review${buildReviewControlQuery({ month: toggleMonth, filter: activeFilter || null, scope: nextScope })}`,
+      `/receipts/review${buildReviewControlQuery({ month: toggleMonth, filter: activeFilter || null, scope: nextScope, q: q || undefined })}`,
     );
   }
 
@@ -182,8 +196,12 @@ function SubHeader({
         <select
           value={effectiveMonth}
           onChange={(e) => onMonthChange(e.target.value)}
+          disabled={searchActive}
           aria-label="Statement month"
-          className="h-[30px] max-w-[8.5rem] rounded-[7px] border border-gray-200 bg-white px-2 text-[12px] text-gray-600 focus:outline-none"
+          className={[
+            "h-[30px] max-w-[8.5rem] rounded-[7px] border border-gray-200 bg-white px-2 text-[12px] text-gray-600 focus:outline-none",
+            searchActive ? "cursor-not-allowed opacity-40" : "",
+          ].join(" ")}
         >
           {availableMonths.map((m) => (
             <option key={m} value={m}>
@@ -195,7 +213,7 @@ function SubHeader({
 
         <ClosingScopeToggle
           pressed={scope === "closing"}
-          disabled={!concrete}
+          disabled={!concrete || searchActive}
           onClick={onToggleScope}
         />
       </div>
@@ -212,7 +230,7 @@ function SubHeader({
             return (
               <Link
                 key={f.key || "all"}
-                href={reviewHref(f.key || null, monthParam, scope)}
+                href={reviewHref(f.key || null, monthParam, scope, q)}
                 role="tab"
                 aria-selected={isActive}
                 className={[
@@ -229,7 +247,7 @@ function SubHeader({
           {/* Locked pill — visually distinct (gray, lock glyph) from the other
               tabs. Rendered unconditionally so the control doesn't jump. */}
           <Link
-            href={reviewHref("locked", monthParam, scope)}
+            href={reviewHref("locked", monthParam, scope, q)}
             role="tab"
             aria-selected={normalizedFilter === "locked"}
             className={[
@@ -245,6 +263,13 @@ function SubHeader({
           </Link>
         </div>
         <QueueSortControl />
+        <ReviewSearchControl
+          monthParam={monthParam}
+          filter={activeFilter || null}
+          scope={scope}
+          defaultValue={q}
+          matchCount={search?.matchCount}
+        />
       </div>
     </div>
   );
@@ -297,14 +322,15 @@ function ClosingScopeToggle({
 }
 
 /** Build a /receipts/review href that sets `filter` (null → "All") and
- *  preserves month + scope. Clicking a tab intentionally drops legacy
- *  status/payment_path deep-link params. */
+ *  preserves month + scope + the active search. Clicking a tab intentionally
+ *  drops legacy status/payment_path deep-link params. */
 function reviewHref(
   filter: string | null,
   monthParam: string,
   scope: ReviewScope,
+  q: string,
 ): string {
-  return `/receipts/review${buildReviewControlQuery({ month: monthParam, filter, scope })}`;
+  return `/receipts/review${buildReviewControlQuery({ month: monthParam, filter, scope, q: q || undefined })}`;
 }
 
 /** Friendly month label for the picker. */
