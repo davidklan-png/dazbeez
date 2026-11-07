@@ -15,7 +15,9 @@ import type { CreateDeliveryInput } from "@/lib/receipts/db";
 // throw-at-cap test) makes these D1-coupled functions unit-testable.
 
 /** A recording fake D1: captures every statement passed to db.batch([...]) as
- *  its SQL string, and every standalone prepare().run() in `runs`, so tests can
+ *  its SQL string, and every statement executed outside db.batch in `runs`
+ *  — run(), first(), AND all(), so DML via `.first()` (the RETURNING
+ *  pattern) cannot slip past the boundary — so tests can
  *  assert on what a function wrote (and what it did NOT write) without
  *  bindings. */
 function recordingDb() {
@@ -28,9 +30,11 @@ function recordingDb() {
         return this;
       },
       async all<T = unknown>() {
+        runs.push(this._sql);
         return { results: [] as T[], success: true as const, meta: { changes: 0 } };
       },
       async first<T = unknown>(): Promise<T | null> {
+        runs.push(this._sql);
         return null;
       },
       async run() {
@@ -132,9 +136,10 @@ function assertSealSafe(
   batches: string[][],
   runs: string[],
 ): string {
-  // Standalone writes: nothing may touch the delivery/export rows outside the
-  // one db.batch — a wrapper mutating a sealed field via a standalone
-  // prepare().run() before or after its batch must not stay green.
+  // Standalone statements: NOTHING may touch the delivery/export rows outside
+  // the one db.batch — whether via .run(), .first() (RETURNING DML), or
+  // .all(). Reads count too: strictest form of the boundary, and no wrapper
+  // has a legitimate standalone statement on these tables today.
   for (const sql of runs) {
     assert.ok(
       !/\b(receipt_exports|export_deliveries)\b/i.test(sql),
