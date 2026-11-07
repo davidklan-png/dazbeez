@@ -12,9 +12,15 @@ import { useQueueControls } from "@/components/receipts/review/queue-controls";
 export function QueueRail({
   totalUnreviewed,
   totalCaptured,
+  showMonthBadges = false,
 }: {
   totalUnreviewed: number;
   totalCaptured: number;
+  /** Cross-month search mode (TASK-041): render each row's YYYY-MM as a gray
+   *  badge so results from different months are legible at a glance. Derived
+   *  from sortDateMs (transaction_date, captured_at fallback — same source as
+   *  dateLabel). Only set by the review list page when `q` is active. */
+  showMonthBadges?: boolean;
 }) {
   const router = useRouter();
   // Items/activeId/queryParams come from the QueueControls provider so j/k and
@@ -104,6 +110,14 @@ export function QueueRail({
                   </span>
                 </div>
                 <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-gray-500">
+                  {showMonthBadges && item.sortDateMs > 0 && (
+                    <span
+                      className="shrink-0 rounded bg-gray-100 px-1 py-px font-medium tabular-nums"
+                      title="Statement month of this receipt"
+                    >
+                      {new Date(item.sortDateMs).toISOString().slice(0, 7)}
+                    </span>
+                  )}
                   <span>{item.dateLabel}</span>
                   <span className="h-[3px] w-[3px] rounded-full bg-gray-300" />
                   <span className="truncate">{item.categoryLabel}</span>

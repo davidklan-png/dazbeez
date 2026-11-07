@@ -5,8 +5,10 @@ import {
   useContext,
   useMemo,
   useState,
+  type FormEvent,
   type ReactNode,
 } from "react";
+import { useRouter } from "next/navigation";
 import type { QueueItem } from "@/lib/receipts/queue-items";
 import {
   DEFAULT_SORT,
@@ -14,6 +16,7 @@ import {
   sortQueueItems,
   type SortKey,
 } from "@/lib/receipts/queue-sort";
+import { buildReviewControlQuery, type ReviewScope } from "@/lib/receipts/review-queue-filter";
 
 // Pure helpers (sortQueueItems, needsFirst, SortKey) live in
 // lib/receipts/queue-sort.ts so they're unit-testable without a DOM. This file
@@ -23,8 +26,9 @@ import {
 // Those three components live in different layout regions, so a single provider
 // owns the sort state and the derived `visible` list — keeping j/k and the
 // "n of m" footer on the sorted+filtered order, not the server order. The
-// client-side search control was removed (review-closing-scope UI); the sort
-// selector remains.
+// old client-side (in-rail) search control was removed with the
+// review-closing-scope UI; cross-month search (TASK-041) is server-side and
+// URL-driven — see ReviewSearchControl below.
 
 type QueueControlsCtx = {
   /** Server-order items (the post-filter working set). */
@@ -98,7 +102,7 @@ export function QueueControlsProvider({
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
 
-/** Sort-only control (the search field was removed). Lives in the SubHeader. */
+/** Sort control. Lives in the SubHeader. */
 export function QueueSortControl() {
   const { sortKey, setSortKey } = useQueueControls();
   return (
@@ -114,5 +118,82 @@ export function QueueSortControl() {
         </option>
       ))}
     </select>
+  );
+}
+
+/** Cross-month receipt search (TASK-041). Server-controlled: defaultValue from
+ *  the URL, Enter submits a router.push, ✕ clears — no client state library.
+ *  Search ignores month/scope (the server swaps in the search working set), so
+ *  the input builds its URL from the CURRENT control state and only `q` is
+ *  meaningful to the server while set. */
+export function ReviewSearchControl({
+  monthParam,
+  filter,
+  scope,
+  defaultValue,
+  matchCount,
+}: {
+  monthParam: string;
+  filter: string | null;
+  scope: ReviewScope;
+  /** Current `q` ('' when inactive). */
+  defaultValue: string;
+  /** Server-side match count; undefined when unknown (the [id] page) — the
+   *  "N matches" label is then omitted. */
+  matchCount?: number;
+}) {
+  const router = useRouter();
+
+  function push(q: string) {
+    router.push(
+      `/receipts/review${buildReviewControlQuery({
+        month: monthParam,
+        filter,
+        scope,
+        q: q || undefined,
+      })}`,
+    );
+  }
+
+  function onSubmit(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    const value = (e.currentTarget.elements.namedItem("q") as HTMLInputElement)
+      .value
+      .trim()
+      .slice(0, 100);
+    push(value);
+  }
+
+  return (
+    <form onSubmit={onSubmit} className="flex shrink-0 items-center gap-1.5">
+      <input
+        // key forces the uncontrolled input to reset when navigation changes q.
+        key={defaultValue}
+        type="text"
+        name="q"
+        defaultValue={defaultValue}
+        placeholder="Search receipts…"
+        aria-label="Search receipts (all months)"
+        className="h-[30px] w-56 rounded-[7px] border border-gray-200 bg-white px-2 text-[12px] text-gray-600 focus:outline-none"
+      />
+      {defaultValue && (
+        <>
+          {matchCount !== undefined && (
+            <span className="whitespace-nowrap text-[11px] text-gray-400">
+              {matchCount} matches · all months
+            </span>
+          )}
+          <button
+            type="button"
+            onClick={() => push("")}
+            aria-label="Clear search"
+            title="Clear search"
+            className="flex h-5 w-5 items-center justify-center rounded-full bg-gray-200 text-[11px] leading-none text-gray-600 hover:bg-gray-300"
+          >
+            ✕
+          </button>
+        </>
+      )}
+    </form>
   );
 }

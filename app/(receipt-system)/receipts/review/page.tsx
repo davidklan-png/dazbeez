@@ -4,6 +4,7 @@ import {
   listAmexLineCountsByMonth,
   listDistinctTransactionMonths,
   listReceiptRecords,
+  searchReceiptRecords,
 } from "@/lib/receipts/db";
 import { RECEIPT_VIEW_LIMIT } from "@/lib/receipts/list-policy";
 import { assertReceiptsPageAccess } from "@/lib/receipts/auth-request";
@@ -11,6 +12,7 @@ import { ReviewLayout } from "@/components/receipts/review/review-layout";
 import { buildQueueItems } from "@/lib/receipts/queue-items";
 import { getReceiptLocks } from "@/lib/receipts/receipt-locks";
 import { collectClosingAttentionReasons } from "@/lib/receipts/review-attention";
+import { parseReviewSearch } from "@/lib/receipts/review-search";
 import { loadClosingScopeWorkingSet } from "@/lib/receipts/review-scope";
 import { DEFAULT_SORT, sortQueueItems } from "@/lib/receipts/queue-sort";
 import { resolveWorkMonth, withWorkMonth } from "@/lib/receipts/work-month";
@@ -21,6 +23,7 @@ import {
   filterReviewQueue,
   isConcreteMonth,
   mergeMonthOptions,
+  normalizeReviewSearch,
   resolveReviewMonthScope,
   resolveReviewScope,
   type ReviewScope,
@@ -71,12 +74,21 @@ async function renderReviewPage(
   const scope: ReviewScope = resolveReviewScope(rawScope, monthParam);
   const { month: monthScope, includeUndated } = resolveReviewMonthScope(rawMonth);
 
+  // Cross-month search (TASK-041): when `q` is present it REPLACES the
+  // working-set fetch — search wins over both calendar and closing scope
+  // (month/scope stay cosmetic in the URL; the ✕ chip returns to them).
+  // Display-only: results feed the rail, never the closing/export working set.
+  const rawQ = normalizeReviewSearch(params.q);
+  const parsedSearch = parseReviewSearch(rawQ);
+
   // Working set: closing-scope membership (export authority) vs the calendar
   // transaction-date month. Closing scope reuses buildExportBundle(M).receipts
   // + listUnknownInScopeReceipts(M) so the queue cannot drift from what ships.
   let workingReceipts;
   let amexMatchedIds: Set<string> | undefined;
-  if (scope === "closing" && isConcreteMonth(monthParam)) {
+  if (parsedSearch) {
+    workingReceipts = await searchReceiptRecords(parsedSearch);
+  } else if (scope === "closing" && isConcreteMonth(monthParam)) {
     const workingSet = await loadClosingScopeWorkingSet(monthParam);
     workingReceipts = workingSet.receipts;
     amexMatchedIds = workingSet.amexMatchedIds;
@@ -115,10 +127,10 @@ async function renderReviewPage(
   ).length;
 
   // Bare URL (no params at all) → rapid-review entry point: jump to the first
-  // (earliest) unlocked item. Any explicit month/scope/filter param suppresses
-  // the redirect.
+  // (earliest) unlocked item. Any explicit month/scope/filter/search param
+  // suppresses the redirect (mid-search the redirect must not fire).
   const hasAnyParam = Boolean(
-    rawMonth || filter || statusFilter || paymentPathFilter || rawScope,
+    rawMonth || filter || statusFilter || paymentPathFilter || rawScope || rawQ,
   );
   if (queueItems.length > 0 && !hasAnyParam) {
     redirect(`/receipts/review/${queueItems[0]!.id}`);
@@ -147,6 +159,7 @@ async function renderReviewPage(
       monthParam={monthParam}
       activeFilter={filter}
       scope={scope}
+      search={parsedSearch ? { q: rawQ, matchCount: workingReceipts.length } : undefined}
       imagePane={
         <div className="flex h-full items-center justify-center bg-gray-100 text-sm text-gray-400">
           Select a receipt from the queue.

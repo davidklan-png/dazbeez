@@ -27,6 +27,7 @@ import {
   filterReviewQueue,
   isConcreteMonth,
   mergeMonthOptions,
+  normalizeReviewSearch,
   resolveQueueNavigation,
   resolveReviewMonthScope,
   resolveReviewScope,
@@ -77,6 +78,7 @@ async function renderReceiptPage(
   const { id } = await params;
   const sp = await searchParams;
   const filter = String(sp.filter ?? "");
+  const rawQ = normalizeReviewSearch(sp.q);
   const statusFilter = typeof sp.status === "string" ? sp.status : undefined;
   const paymentPathFilter =
     typeof sp.payment_path === "string" ? sp.payment_path : undefined;
@@ -234,6 +236,7 @@ async function renderReceiptPage(
       monthParam={monthParam}
       activeFilter={filter}
       scope={scope}
+      search={rawQ ? { q: rawQ } : undefined}
       imagePane={
         <ImagePane
           receiptId={receipt.id}
