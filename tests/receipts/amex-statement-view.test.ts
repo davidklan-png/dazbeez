@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { PillTone } from "@/components/ui/pill";
-import { amexMatchStatusPill } from "@/app/(receipt-system)/receipts/amex/statement/[id]/page";
+import { amexMatchStatusPill } from "@/lib/receipts/amex-match-status";
 
 // ─── amexMatchStatusPill (statement-lines view, TASK-044) ───────────────────
 // The /receipts/amex/statement/[id] table renders one Pill per statement line.
