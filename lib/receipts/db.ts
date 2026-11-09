@@ -2222,8 +2222,20 @@ export async function updateAmexArtifactStatus(
 // Lines still pointing at a replaced artifact after the import are therefore
 // exactly the superseded leftovers (charges absent from the new CSV).
 //
-// Flipped artifact ids and their deleted line counts are recorded in ONE
-// audit entry (amex_statement.replaced_artifact_lines_deleted).
+// Audit 2026-11-09 findings 3 + 8: the retirement batch must also (a) drop
+// the trip-member rows pointing at superseded lines BEFORE deleting those
+// lines — business_trip_report_lines.amex_statement_line_id has no ON DELETE
+// action (0005_amex_extended.sql:89), so the bare line DELETE was FK-blocked
+// whenever an auto-created candidate trip held a superseded line, wedging the
+// month; and (b) demote a receipt whose LAST confirmed claim is being
+// retired — the same guarded demotion setAmexLineMatch applies on unlink,
+// otherwise the receipt stays 'reconciled' with zero claiming lines and
+// vanishes from the rematching workflow. Trip REPORT rows are never touched
+// here (no trip purge); survivor lines keep their PKs, links and claims.
+//
+// Flipped artifact ids, deleted line/trip-link counts and demoted receipt
+// ids are recorded in ONE audit entry
+// (amex_statement.replaced_artifact_lines_deleted).
 export async function markPreviousArtifactsReplaced(
   statementMonth: string,
   exceptId: string,
@@ -2236,12 +2248,16 @@ export async function markPreviousArtifactsReplaced(
     .prepare(
       `SELECT id,
               (SELECT COUNT(*) FROM amex_statement_lines
-                WHERE statement_artifact_id = amex_statement_artifacts.id) AS line_count
+                WHERE statement_artifact_id = amex_statement_artifacts.id) AS line_count,
+              (SELECT COUNT(*) FROM business_trip_report_lines btrl
+                JOIN amex_statement_lines l
+                  ON l.id = btrl.amex_statement_line_id
+                WHERE l.statement_artifact_id = amex_statement_artifacts.id) AS trip_link_count
        FROM amex_statement_artifacts
        WHERE statement_month = ? AND id != ? AND import_status NOT IN ('failed','replaced')`,
     )
     .bind(statementMonth, exceptId)
-    .all<{ id: string; line_count: number }>();
+    .all<{ id: string; line_count: number; trip_link_count: number }>();
 
   const replaced = previous.results ?? [];
   if (replaced.length === 0) return;
@@ -2249,9 +2265,57 @@ export async function markPreviousArtifactsReplaced(
   const replacedIds = replaced.map((r) => r.id);
   const placeholders = replacedIds.map(() => "?").join(", ");
 
-  // Single transaction: line delete and status flip commit together, so a
-  // crash can never leave a 'replaced' artifact still owning lines.
+  // Receipts the retirement is about to strand: reconciled, claimed by a
+  // confirmed line on a replaced artifact, with NO surviving confirmed claim
+  // in ANY statement month (consolidated/shared claims survive → no demote;
+  // exported/archived statuses fail the status guard → no demote). Legacy
+  // lines with a NULL statement_artifact_id count as surviving. Shared by
+  // the audit pre-read and the in-batch UPDATE so the two cannot drift.
+  const strandPredicate = `
+     status = 'reconciled'
+     AND EXISTS (
+       SELECT 1 FROM amex_statement_lines sup
+       WHERE sup.matched_receipt_id = receipt_records.id
+         AND sup.match_status = 'confirmed'
+         AND sup.statement_artifact_id IN (${placeholders})
+     )
+     AND NOT EXISTS (
+       SELECT 1 FROM amex_statement_lines live
+       WHERE live.matched_receipt_id = receipt_records.id
+         AND live.match_status = 'confirmed'
+         AND (live.statement_artifact_id IS NULL
+              OR live.statement_artifact_id NOT IN (${placeholders}))
+     )`;
+  const strandBinds = [...replacedIds, ...replacedIds];
+
+  const demotees = await db
+    .prepare(`SELECT id FROM receipt_records WHERE${strandPredicate}`)
+    .bind(...strandBinds)
+    .all<{ id: string }>();
+  const demotedReceiptIds = (demotees.results ?? []).map((r) => r.id);
+
+  // Single transaction: receipt demotion, trip-link detach, line delete and
+  // status flip commit together, so a crash can never leave a 'replaced'
+  // artifact still owning lines — or a half-retired month at all. The
+  // demotion UPDATE runs FIRST because it locates affected receipts through
+  // the superseded lines it is about to delete.
   await db.batch([
+    db
+      .prepare(
+        `UPDATE receipt_records
+         SET status = 'needs_review', updated_at = ?
+         WHERE${strandPredicate}`,
+      )
+      .bind(nowIso(), ...strandBinds),
+    db
+      .prepare(
+        `DELETE FROM business_trip_report_lines
+         WHERE amex_statement_line_id IN (
+           SELECT id FROM amex_statement_lines
+           WHERE statement_artifact_id IN (${placeholders})
+         )`,
+      )
+      .bind(...replacedIds),
     db
       .prepare(
         `DELETE FROM amex_statement_lines WHERE statement_artifact_id IN (${placeholders})`,
@@ -2274,7 +2338,12 @@ export async function markPreviousArtifactsReplaced(
     newValueJson: JSON.stringify({
       statementMonth,
       supersededBy: exceptId,
-      replacedArtifacts: replaced.map((r) => ({ id: r.id, deletedLines: r.line_count })),
+      replacedArtifacts: replaced.map((r) => ({
+        id: r.id,
+        deletedLines: r.line_count,
+        deletedTripMemberLinks: r.trip_link_count,
+      })),
+      demotedReceiptIds,
     }),
   });
 }
