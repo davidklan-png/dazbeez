@@ -100,6 +100,7 @@ export default async function AmexPage({
                   <th className="px-3 py-2">Lines</th>
                   <th className="px-3 py-2">Total</th>
                   <th className="px-3 py-2">Status</th>
+                  <th className="px-3 py-2">View</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
@@ -128,6 +129,14 @@ export default async function AmexPage({
                     </td>
                     <td className="px-3 py-2">
                       <StatusBadge status={a.import_status} />
+                    </td>
+                    <td className="px-3 py-2">
+                      <a
+                        href={`/receipts/amex/statement/${a.id}`}
+                        className="text-amber-600 underline hover:text-amber-700"
+                      >
+                        View
+                      </a>
                     </td>
                   </tr>
                 ))}
