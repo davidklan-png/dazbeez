@@ -545,7 +545,10 @@ function contentDisposition(
   filename: string,
 ): string {
   if (/^[\x20-\x7E]+$/.test(filename)) {
-    return `${type}; filename="${filename}"`;
+    // Strip embedded double quotes (same as the fallback branch below) so the
+    // quoted-string parameter stays well-formed — receipt filenames come from
+    // email attachments and may contain `"` (receipt file route, audit 2026-11-09).
+    return `${type}; filename="${filename.replace(/"/g, "")}"`;
   }
   const asciiFallback = filename.replace(/[^\x20-\x7E]+/g, "_").replace(/"/g, "");
   const utf8 = encodeURIComponent(filename).replace(
