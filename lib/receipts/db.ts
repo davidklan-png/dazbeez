@@ -916,32 +916,39 @@ export async function createAttendees(
   receiptId: string,
   attendees: CreateAttendeeInput[],
   actor: string,
+  db: D1Database = getReceiptsDb(),
 ): Promise<void> {
-  const db = getReceiptsDb();
   const now = nowIso();
 
-  // Replace existing attendees for this receipt
-  await db.prepare(`DELETE FROM receipt_attendees WHERE receipt_id = ?`).bind(receiptId).run();
-
-  for (const a of attendees) {
-    await db
-      .prepare(
-        `INSERT INTO receipt_attendees
-          (id, receipt_id, attendee_name, company, relationship, is_dazbeez_employee, notes, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .bind(
-        newUuid(),
-        receiptId,
-        a.attendeeName,
-        a.company ?? null,
-        a.relationship ?? null,
-        a.isDazbeezEmployee ? 1 : 0,
-        a.notes ?? null,
-        now,
-      )
-      .run();
-  }
+  // Atomic replacement (audit finding 2): the DELETE and every INSERT are ONE
+  // D1 batch — an implicit transaction. A mid-insert failure (constraint,
+  // outage) rolls back to the previous roster instead of erasing it, and two
+  // concurrent replacements serialize as whole batches rather than interleaving
+  // into a mixed/duplicated roster. Statement order = array order (readers
+  // order by created_at ASC with one shared `now`, so row order is insert
+  // order); duplicate names are preserved — same-name attendees may be
+  // different people.
+  await db.batch([
+    db.prepare(`DELETE FROM receipt_attendees WHERE receipt_id = ?`).bind(receiptId),
+    ...attendees.map((a) =>
+      db
+        .prepare(
+          `INSERT INTO receipt_attendees
+            (id, receipt_id, attendee_name, company, relationship, is_dazbeez_employee, notes, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          newUuid(),
+          receiptId,
+          a.attendeeName,
+          a.company ?? null,
+          a.relationship ?? null,
+          a.isDazbeezEmployee ? 1 : 0,
+          a.notes ?? null,
+          now,
+        ),
+    ),
+  ]);
 
   await createAuditEntry(db, {
     actor,
@@ -2353,9 +2360,8 @@ export async function replaceAmexLineAttendees(
   lineId: string,
   names: string[],
   actor: string,
+  db: D1Database = getReceiptsDb(),
 ): Promise<void> {
-  const db = getReceiptsDb();
-
   // Block edits if the month's reconciliation is finalized.
   const lineMonth = await db
     .prepare(`SELECT statement_month FROM amex_statement_lines WHERE id = ? LIMIT 1`)
@@ -2365,22 +2371,24 @@ export async function replaceAmexLineAttendees(
     await rejectIfFinalized(db, lineMonth.statement_month);
   }
 
-  await db
-    .prepare(`DELETE FROM amex_line_attendees WHERE amex_statement_line_id = ?`)
-    .bind(lineId)
-    .run();
-
+  // Atomic replacement (audit finding 2) — same contract as createAttendees:
+  // DELETE + all INSERTs in ONE D1 batch so a mid-insert failure rolls back to
+  // the previous roster and concurrent replacements can never interleave.
   const now = nowIso();
-  for (const name of names) {
-    await db
-      .prepare(
-        `INSERT INTO amex_line_attendees
-          (id, amex_statement_line_id, attendee_name, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?)`,
-      )
-      .bind(newUuid(), lineId, name, now, now)
-      .run();
-  }
+  await db.batch([
+    db
+      .prepare(`DELETE FROM amex_line_attendees WHERE amex_statement_line_id = ?`)
+      .bind(lineId),
+    ...names.map((name) =>
+      db
+        .prepare(
+          `INSERT INTO amex_line_attendees
+            (id, amex_statement_line_id, attendee_name, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?)`,
+        )
+        .bind(newUuid(), lineId, name, now, now),
+    ),
+  ]);
 
   await createAuditEntry(db, {
     actor,
