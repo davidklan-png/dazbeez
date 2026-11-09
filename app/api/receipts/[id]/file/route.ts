@@ -68,9 +68,14 @@ function buildFileHeaders(
   // so even a direct navigation to the URL runs in an opaque origin with
   // script execution disabled; safe PDF/image derivatives stay inline.
   const passive = isPassiveContentType(contentType);
-  // 200-char cap keeps a hostile attachment name from blowing the header size
-  // limit; the helper handles ByteString/RFC 5987 encoding from there.
-  const filename = (receipt.original_filename || "receipt").slice(0, 200);
+  // 200-code-point cap keeps a hostile attachment name from blowing the header
+  // size limit. Array.from truncates by code point — String.slice counts UTF-16
+  // units and can split a surrogate pair (𠮷), which would hand the shared
+  // encoder a malformed string (cross-review 2026-11-10). The helper handles
+  // ByteString/RFC 5987 encoding from here.
+  const filename = Array.from(receipt.original_filename || "receipt")
+    .slice(0, 200)
+    .join("");
 
   const headers = new Headers({
     "Content-Type": contentType,

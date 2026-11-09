@@ -298,6 +298,57 @@ test("oversized filename is capped, not a header bomb", async () => {
   assert.ok(param.length <= 200, `capped at 200, got ${param.length}`);
 });
 
+// Cross-review 2026-11-10 finding 1: the cap must truncate by code point.
+// "a"×199 + "𠮷.pdf" — a UTF-16 slice at 200 kept only the HIGH surrogate of
+// 𠮷, and encodeURIComponent(lone surrogate) threw URIError → 500 on GET,
+// HEAD, and the processor path.
+test("cap lands on a supplementary-plane character: no split surrogate, no 500", async () => {
+  const pdf = new TextEncoder().encode("%PDF-1.4 fake");
+  const boundary = "a".repeat(199) + "𠮷.pdf";
+  const expected = "a".repeat(199) + "𠮷"; // cap keeps the full code point, drops ".pdf"
+  configure(
+    { original_content_type: "application/pdf", original_filename: boundary },
+    { body: streamOf(pdf), size: pdf.byteLength, httpMetadata: { contentType: "application/pdf" } },
+    { size: pdf.byteLength, httpMetadata: { contentType: "application/pdf" } },
+  );
+  const get = await route.GET(request(), ctx);
+  assert.equal(get.status, 200, "GET must not 500 when the cap hits a surrogate pair");
+  const head = await route.HEAD(request(), ctx);
+  assert.equal(head.status, 200, "HEAD must not 500 when the cap hits a surrogate pair");
+
+  const cd = get.headers.get("content-disposition");
+  const star = cd?.slice(cd.indexOf("filename*=UTF-8''") + "filename*=UTF-8''".length);
+  assert.equal(decodeURIComponent(star ?? ""), expected, "filename* carries the intact code point");
+  assert.equal(head.headers.get("content-disposition"), cd, "GET/HEAD agree");
+
+  state.actorThrows = true; // the processor must still reach the bytes
+  const processor = await route.GET(request({ processor: true }), ctx);
+  assert.equal(processor.status, 200, "processor-key access must not 500 on the boundary name");
+  assert.equal(await processor.text(), "%PDF-1.4 fake");
+});
+
+// Cross-review 2026-11-10 finding 2: the cap can leave a trailing backslash
+// ("a"×199 + "\.pdf" → 200 code points ending in `\`), which used to escape
+// the generated closing quote into an unterminated quoted-string.
+test("cap leaves a trailing backslash: quoted-string stays terminated", async () => {
+  const pdf = new TextEncoder().encode("%PDF-1.4 fake");
+  configure(
+    { original_content_type: "application/pdf", original_filename: "a".repeat(199) + "\\.pdf" },
+    { body: streamOf(pdf), size: pdf.byteLength, httpMetadata: { contentType: "application/pdf" } },
+    { size: pdf.byteLength, httpMetadata: { contentType: "application/pdf" } },
+  );
+  const get = await route.GET(request(), ctx);
+  assert.equal(get.status, 200);
+  assert.equal(
+    get.headers.get("content-disposition"),
+    `inline; filename="${"a".repeat(199)}"`,
+    "backslash stripped, closing quote terminates the parameter",
+  );
+  const head = await route.HEAD(request(), ctx);
+  assert.equal(head.status, 200);
+  assert.equal(head.headers.get("content-disposition"), get.headers.get("content-disposition"));
+});
+
 // ─── Authorization and processor byte access stay intact ──────────────────────
 
 test("no session and no processor key: 401 on GET and HEAD", async () => {
@@ -324,6 +375,64 @@ test("processor key bypasses Clerk and still receives the original bytes", async
   assert.ok(
     res.headers.get("content-disposition")?.startsWith("attachment"),
     "headers change, bytes do not",
+  );
+});
+
+// Reviewer matrix (cross-review 2026-11-10 suggestion 3): pin the remaining
+// processor/auth permutations and PDF-derivative parity, reusing the fixtures.
+
+test("processor key on HEAD bypasses Clerk with the same headers as GET", async () => {
+  const pdf = new TextEncoder().encode("%PDF-1.4 fake");
+  configure(
+    { original_content_type: "application/pdf", original_filename: "receipt.pdf" },
+    { body: streamOf(pdf), size: pdf.byteLength },
+    { size: pdf.byteLength },
+  );
+  state.actorThrows = true;
+  const head = await route.HEAD(request({ processor: true }), ctx);
+  assert.equal(head.status, 200, "valid processor key must satisfy HEAD without a session");
+  const get = await route.GET(request({ processor: true }), ctx);
+  assert.equal(head.headers.get("content-disposition"), get.headers.get("content-disposition"));
+});
+
+test("wrong processor key is rejected like a missing one", async () => {
+  configure(
+    {},
+    { body: streamOf(htmlBytes), size: htmlBytes.byteLength },
+  );
+  state.actorThrows = true; // no Clerk session either
+  const bad = new Request("http://app/api/receipts/r1/file", {
+    headers: { "x-receipts-processor-key": "not-the-key" },
+  });
+  assert.equal((await route.GET(bad, ctx)).status, 401, "wrong key GET");
+  assert.equal((await route.HEAD(bad, ctx)).status, 401, "wrong key HEAD");
+});
+
+test("PDF derivative serves inline on GET and HEAD with the same headers", async () => {
+  const pdf = new TextEncoder().encode("%PDF-1.4 rendered");
+  configure(
+    {
+      extraction_r2_key: "receipts/r1-rendered.pdf",
+      original_content_type: "text/html",
+      original_filename: "email-body.html",
+    },
+    { body: streamOf(pdf), size: pdf.byteLength, httpMetadata: { contentType: "application/pdf" } },
+    { size: pdf.byteLength, httpMetadata: { contentType: "application/pdf" } },
+  );
+  const get = await route.GET(request(), ctx);
+  assertInlineResponse(get);
+  assert.equal(get.headers.get("content-type"), "application/pdf");
+  const head = await route.HEAD(request(), ctx);
+  assertInlineResponse(head);
+  assert.equal(head.headers.get("content-type"), "application/pdf");
+  assert.deepEqual(state.requestedKeys, [
+    "receipts/r1-rendered.pdf",
+    "receipts/r1-rendered.pdf",
+  ], "both methods fetch the derivative key");
+  assert.equal(
+    head.headers.get("content-disposition"),
+    get.headers.get("content-disposition"),
+    "GET/HEAD parity",
   );
 });
 
