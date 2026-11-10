@@ -15,6 +15,7 @@ import {
   getAmexArtifactByMonth,
   getFinalizedReconciliationForMonth,
   classifyExistingArtifact,
+  findProtectedTripConflictsForReplacement,
   markPreviousArtifactsReplaced,
   purgeFailedAmexArtifactsByHash,
   updateAmexArtifactStatus,
@@ -275,6 +276,35 @@ export async function POST(request: Request) {
           existingBySha.id,
           sha256,
         );
+
+        // Protected-trip guard, same contract as the fresh path: a heal
+        // RETIRES superseded lines too, so it must refuse the same protected
+        // memberships instead of re-importing lines and then wedging on the
+        // retirement FK (cross-review 2026-11-10, finding 1).
+        const healConflicts = await findProtectedTripConflictsForReplacement(
+          existingBySha.statement_month,
+          healInputs,
+        );
+        if (healConflicts.length > 0) {
+          return NextResponse.json(
+            {
+              ok: true,
+              duplicate: true,
+              artifactId: existingBySha.id,
+              statementMonth: existingBySha.statement_month,
+              message:
+                "A prior upload of this file was found unfinished, but retiring its superseded lines would remove members of a confirmed/exported business trip — the heal was refused and nothing was changed.",
+              warnings: [
+                ...warnings,
+                `Detach ${healConflicts.length} protected trip member line(s) first (e.g. ` +
+                  `${healConflicts[0].merchant} on ${healConflicts[0].transactionDate}, trip ` +
+                  `"${healConflicts[0].tripName ?? healConflicts[0].tripId}"), then retry this file.`,
+              ],
+            },
+            { status: 200 },
+          );
+        }
+
         const { inserted, updated, unchanged } = await importAmexLines(
           healInputs,
           actor,
@@ -368,6 +398,42 @@ export async function POST(request: Request) {
       warnings.push(
         `The CSV's payment due date (${metadata.paymentDueDate}) does not fall in the selected statement month ${statementMonth} — check the month before replacing an existing statement.`,
       );
+    }
+
+    // ── Protected-trip replacement guard (cross-review 2026-11-10, f1) ─────
+    // Reject BEFORE any mutation (R2 upload, artifact row, line import) when
+    // a would-be-superseded line belongs to a confirmed/exported trip:
+    // retiring it would silently change operator-blessed trip contents. The
+    // operator detaches the line (or rejects the trip) and retries. Lines
+    // whose identity the new CSV retains are re-homed by the upsert, not
+    // superseded, so a trip holding only unchanged members does not block.
+    // Field names mirror netanswerLinesToImportInputs (the dedup identity);
+    // netanswer rows carry no amex reference.
+    if (previousArtifact && validationErrors.length === 0) {
+      const conflicts = await findProtectedTripConflictsForReplacement(
+        statementMonth,
+        lines.map((l) => ({
+          cardholderName: l.cardholderName ?? null,
+          transactionDate: l.transactionDate,
+          amountMinor: l.amountCents,
+          merchant: l.merchantName,
+        })),
+      );
+      if (conflicts.length > 0) {
+        return NextResponse.json(
+          {
+            ok: false,
+            error:
+              `Cannot replace ${statementMonth}: ${conflicts.length} statement line(s) ` +
+              `that would be retired are members of a confirmed/exported business trip ` +
+              `(e.g. ${conflicts[0].merchant} on ${conflicts[0].transactionDate}, trip ` +
+              `"${conflicts[0].tripName ?? conflicts[0].tripId}"). Detach those lines ` +
+              `from their trip (or reject the trip) first, then re-import.`,
+            protectedTripConflicts: conflicts,
+          },
+          { status: 409 },
+        );
+      }
     }
 
     // The artifact must not claim 'parsed' until lines are committed — if the

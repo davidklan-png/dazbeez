@@ -181,6 +181,23 @@ test("unknown content type original: fail-closed download", async () => {
   assertActiveContentResponse(res);
 });
 
+test("unknown image/* original (allowlist miss): GET and HEAD fail-closed download", async () => {
+  // Cross-review 2026-11-10 finding 3: the old image/* wildcard (minus svg)
+  // served an unregistered image MIME inline with no sandbox. Only the four
+  // raster types the pipeline actually stores pass the allowlist.
+  const bytes = new TextEncoder().encode("not-really-an-image");
+  configure(
+    { original_content_type: "image/x-unregistered-receipt", original_filename: "odd.img" },
+    { body: streamOf(bytes), size: bytes.byteLength, httpMetadata: { contentType: "image/x-unregistered-receipt" } },
+    { size: bytes.byteLength, httpMetadata: { contentType: "image/x-unregistered-receipt" } },
+  );
+  const get = await route.GET(request(), ctx);
+  assertActiveContentResponse(get);
+  assert.equal(get.headers.get("content-type"), "image/x-unregistered-receipt");
+  const head = await route.HEAD(request(), ctx);
+  assertActiveContentResponse(head);
+});
+
 // ─── Finding 1: safe PDF/image originals and derivatives stay inline ─────────
 
 test("uploaded PDF original (no derivative): inline, served type preserved", async () => {
@@ -203,6 +220,17 @@ test("uploaded JPEG original: inline", async () => {
   );
   const res = await route.GET(request(), ctx);
   assertInlineResponse(res);
+});
+
+test("uploaded HEIC original (allowlisted raster): inline", async () => {
+  const heic = new TextEncoder().encode("fake-heic-bytes");
+  configure(
+    { original_content_type: "image/heic", original_filename: "IMG_0001.heic" },
+    { body: streamOf(heic), size: heic.byteLength, httpMetadata: { contentType: "image/heic" } },
+  );
+  const res = await route.GET(request(), ctx);
+  assertInlineResponse(res);
+  assert.equal(res.headers.get("content-type"), "image/heic");
 });
 
 test("text/plain original (promoted text-only email body): inline", async () => {

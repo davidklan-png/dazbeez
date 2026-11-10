@@ -17,6 +17,14 @@
 // confirmed claim in ANY month — shared/consolidated claims and
 // exported/archived/reviewed statuses survive.
 //
+// Cross-review 2026-11-10 (PR #199 blockers): finding 1 — confirmed/exported
+// trip members block replacement up front (retained identities do not), a
+// raced protected attach aborts the whole retirement transaction via the FK,
+// and a finalized month refuses the import; finding 2 — the audit entry is
+// computed inside the retirement transaction, so a surviving claim changing
+// between any pre-read and the batch is reflected in BOTH the demotion and
+// the audit (both interleaving directions).
+//
 // Harness: the audit probe pattern (operator-validation-probes.cjs) turned
 // into a maintainable test — TypeScript modules loaded through a transpile
 // loader with exactly two shims: @/lib/cloudflare-runtime (in-memory D1/R2)
@@ -282,6 +290,48 @@ function confirmClaim(lineMerchant: string, receiptId: string): void {
        WHERE merchant = ?`,
     )
     .run(receiptId, lineMerchant);
+}
+
+/** Confirmed trip + member link (operator trips are born confirmed — POST
+ *  /api/receipts/trips; same table state updateBusinessTrip's confirm
+ *  transition produces). */
+function attachConfirmedTrip(tripId: string, tripName: string, lineMerchant: string): void {
+  const now = new Date().toISOString();
+  const lineId_ = lineId(lineMerchant);
+  sqlite
+    .prepare(
+      `INSERT INTO business_trip_reports
+         (id, trip_name, cardholder_name, start_date, end_date, status, created_at, updated_at)
+       VALUES (?, ?, 'Test Cardholder', '2026-10-01', '2026-10-02', 'confirmed', ?, ?)`,
+    )
+    .run(tripId, tripName, now, now);
+  sqlite
+    .prepare(
+      `INSERT INTO business_trip_report_lines
+         (id, business_trip_report_id, amex_statement_line_id, created_at)
+       VALUES (?, ?, ?, ?)`,
+    )
+    .run(`btrl-${tripId}`, tripId, lineId_, now);
+}
+
+/** Swap the route-facing db for one whose FIRST batch applies `mutation`
+ *  just before executing — the controlled interleaving between any pre-read
+ *  and the transaction (cross-review 2026-11-10, findings 1+2). The first
+ *  batch of a replacement POST is exactly markPreviousArtifactsReplaced's
+ *  retirement transaction (importAmexLines uses standalone .run()s). */
+function interleaveFirstBatch(mutate: () => void): void {
+  const real = database;
+  let armed = true;
+  database = {
+    prepare: (sql: string) => real.prepare(sql),
+    async batch(stmts: Parameters<typeof real.batch>[0]) {
+      if (armed) {
+        armed = false;
+        mutate();
+      }
+      return real.batch(stmts);
+    },
+  } as unknown as D1Database;
 }
 
 function setup(): void {
@@ -558,4 +608,215 @@ test("replace retaining every identity succeeds with links and statuses intact",
       "retained identity keeps its trip link",
     );
   }
+});
+
+// ── Cross-review 2026-11-10 finding 1: protected confirmed trips ─────────────
+
+test("confirmed trip member that would be retired blocks replacement before any mutation", async () => {
+  setup();
+  await postImport(csv(INITIAL));
+  // 京都 RAIL is absent from CORRECTION → would be superseded; give it a
+  // confirmed trip membership.
+  attachConfirmedTrip("trip-protected", "October demo trip", "京都 RAIL");
+
+  const res = await postImport(csv(CORRECTION), "2026-11", true);
+  assert.equal(res.status, 409);
+  const body = (await res.json()) as {
+    error: string;
+    protectedTripConflicts: { tripId: string; merchant: string }[];
+  };
+  assert.match(body.error, /confirmed\/exported business trip/);
+  assert.equal(body.protectedTripConflicts.length, 1);
+  assert.equal(body.protectedTripConflicts[0]!.tripId, "trip-protected");
+  assert.equal(body.protectedTripConflicts[0]!.merchant, "京都 RAIL");
+
+  // ZERO mutations: no R2 upload, no new artifact row, lines/links intact.
+  assert.equal(one<{ n: number }>(`SELECT COUNT(*) AS n FROM amex_statement_artifacts`).n, 1);
+  assert.equal(one<{ n: number }>(`SELECT COUNT(*) AS n FROM amex_statement_lines`).n, 2);
+  assert.equal(one<{ n: number }>(`SELECT COUNT(*) AS n FROM business_trip_report_lines`).n, 3);
+  assert.equal(
+    one<{ status: string }>(`SELECT status FROM business_trip_reports WHERE id = 'trip-protected'`).status,
+    "confirmed",
+    "protected trip contents are untouched",
+  );
+  assert.equal(objectMap.size, 1, "no second R2 artifact was uploaded");
+});
+
+test("confirmed trip member that the new CSV retains does NOT block replacement", async () => {
+  setup();
+  await postImport(csv(INITIAL));
+  const osakaId = lineId("大阪 HOTEL");
+  // 大阪 HOTEL is retained by CORRECTION (same identity, re-homed by the
+  // upsert) — an unchanged confirmed member must not block.
+  attachConfirmedTrip("trip-ok", "Osaka trip", "大阪 HOTEL");
+
+  const res = await postImport(csv(CORRECTION), "2026-11", true);
+  assert.equal(res.status, 200, await res.clone().text());
+
+  assert.equal(lineId("大阪 HOTEL"), osakaId, "retained member keeps its PK");
+  assert.equal(
+    one<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM business_trip_report_lines
+       WHERE business_trip_report_id = 'trip-ok'`,
+    ).n,
+    1,
+    "confirmed trip keeps its member",
+  );
+  assert.equal(
+    one<{ status: string }>(`SELECT status FROM business_trip_reports WHERE id = 'trip-ok'`).status,
+    "confirmed",
+  );
+  // The superseded line still retired normally (candidate link only).
+  assert.equal(
+    one<{ n: number }>(`SELECT COUNT(*) AS n FROM amex_statement_lines WHERE merchant = '京都 RAIL'`).n,
+    0,
+  );
+});
+
+test("finalized month refuses import before any replacement logic", async () => {
+  setup();
+  const first = await postImport(csv(INITIAL));
+  const artifactId = ((await first.json()) as { artifactId: string }).artifactId;
+  const now = new Date().toISOString();
+  sqlite
+    .prepare(
+      `INSERT INTO amex_reconciliations
+         (id, statement_month, statement_artifact_id, status, line_count, matched_count,
+          no_receipt_count, created_by, created_at, finalized_by, finalized_at)
+       VALUES ('rec-final', '2026-11', ?, 'finalized', 2, 0, 0, 'test', ?, 'test', ?)`,
+    )
+    .run(artifactId, now, now);
+
+  const res = await postImport(csv(CORRECTION), "2026-11", true);
+  assert.equal(res.status, 409);
+  assert.match(((await res.json()) as { error: string }).error, /finalized/i);
+  // Nothing changed — the sealed month is untouched by the refusal.
+  assert.equal(one<{ n: number }>(`SELECT COUNT(*) AS n FROM amex_statement_lines`).n, 2);
+  assert.equal(one<{ n: number }>(`SELECT COUNT(*) AS n FROM amex_statement_artifacts`).n, 1);
+});
+
+test("protected link raced between pre-check and retirement aborts the whole batch; retry heals after detach", async () => {
+  setup();
+  await postImport(csv(INITIAL));
+  const kyotoId = lineId("京都 RAIL");
+
+  // The pre-check passes (no protected trips yet); a concurrent attach lands
+  // exactly at the retirement transaction — the batch must refuse to delete
+  // the protected link and the FK must roll the WHOLE transaction back.
+  interleaveFirstBatch(() => attachConfirmedTrip("trip-race", "raced trip", "京都 RAIL"));
+  const failed = await postImport(csv(CORRECTION), "2026-11", true);
+  assert.equal(failed.status, 500);
+  assert.match(((await failed.json()) as { error: string }).error, /FOREIGN KEY/i);
+
+  // Full rollback: all three charges live, artifact statuses unchanged,
+  // protected link present, and NO audit row claimed a retirement.
+  assert.equal(one<{ n: number }>(`SELECT COUNT(*) AS n FROM amex_statement_lines`).n, 3);
+  const statuses = q<{ import_status: string }>(
+    `SELECT import_status FROM amex_statement_artifacts ORDER BY created_at`,
+  ).map((r) => r.import_status);
+  assert.deepEqual(statuses, ["parsed", "uploaded"]);
+  assert.equal(
+    one<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM business_trip_report_lines WHERE amex_statement_line_id = ?`,
+      kyotoId,
+    ).n,
+    2,
+    "both the candidate and the raced protected link survive the rollback",
+  );
+  assert.equal(
+    one<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM receipt_audit_log
+       WHERE action = 'amex_statement.replaced_artifact_lines_deleted'`,
+    ).n,
+    0,
+    "the in-batch audit rolled back with the transaction",
+  );
+
+  // Operator detaches the protected member; the exact-SHA retry heals.
+  sqlite
+    .prepare(`DELETE FROM business_trip_report_lines WHERE business_trip_report_id = 'trip-race'`)
+    .run();
+  const retry = await postImport(csv(CORRECTION), "2026-11", true);
+  assert.equal(retry.status, 200, await retry.clone().text());
+  const retryBody = (await retry.json()) as { duplicate: boolean; message: string };
+  assert.equal(retryBody.duplicate, true);
+  assert.match(retryBody.message, /completed in place/);
+  assert.equal(
+    one<{ n: number }>(`SELECT COUNT(*) AS n FROM amex_statement_lines WHERE merchant = '京都 RAIL'`).n,
+    0,
+    "retry completed the retirement",
+  );
+  assert.equal(
+    one<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM receipt_audit_log
+       WHERE action = 'amex_statement.replaced_artifact_lines_deleted'`,
+    ).n,
+    1,
+    "healed retirement wrote exactly one audit entry",
+  );
+});
+
+// ── Cross-review 2026-11-10 finding 2: audit reflects committed state ────────
+
+test("surviving confirmed claim APPEARING between check and batch: not demoted, audit omits it", async () => {
+  setup();
+  await postImport(csv(INITIAL));
+  insertReceipt("rA", "reconciled");
+  confirmClaim("京都 RAIL", "rA"); // only claim is the superseded line → pre-read demotee
+
+  // Between the (old) pre-read and the retirement transaction, another
+  // request confirms a claim on the SURVIVOR line — the UPDATE correctly
+  // keeps rA reconciled, and the audit must not claim a demotion.
+  interleaveFirstBatch(() => confirmClaim("大阪 HOTEL", "rA"));
+  const res = await postImport(csv(CORRECTION), "2026-11", true);
+  assert.equal(res.status, 200, await res.clone().text());
+
+  assert.equal(
+    one<{ status: string }>(`SELECT status FROM receipt_records WHERE id = 'rA'`).status,
+    "reconciled",
+    "live surviving claim → no demotion",
+  );
+  const audits = q<{ new_value_json: string }>(
+    `SELECT new_value_json FROM receipt_audit_log
+     WHERE action = 'amex_statement.replaced_artifact_lines_deleted'`,
+  );
+  assert.equal(audits.length, 1);
+  const payload = JSON.parse(audits[0]!.new_value_json) as { demotedReceiptIds: string[] };
+  assert.deepEqual(payload.demotedReceiptIds, [], "audit records the committed (empty) demotion set");
+});
+
+test("surviving confirmed claim REMOVED between check and batch: demoted, audit includes it", async () => {
+  setup();
+  await postImport(csv(INITIAL));
+  insertReceipt("rB", "reconciled");
+  confirmClaim("京都 RAIL", "rB"); // superseded claim
+  confirmClaim("大阪 HOTEL", "rB"); // surviving claim → pre-read would say "no demote"
+
+  // Between the pre-read and the transaction the survivor claim is unlinked —
+  // the UPDATE must demote rB and the audit must record it (the old pre-read
+  // audit would have omitted the demotion that actually committed).
+  interleaveFirstBatch(() => {
+    sqlite
+      .prepare(
+        `UPDATE amex_statement_lines
+         SET match_status = 'unmatched', receipt_status = 'missing_receipt', matched_receipt_id = NULL
+         WHERE merchant = '大阪 HOTEL'`,
+      )
+      .run();
+  });
+  const res = await postImport(csv(CORRECTION), "2026-11", true);
+  assert.equal(res.status, 200, await res.clone().text());
+
+  assert.equal(
+    one<{ status: string }>(`SELECT status FROM receipt_records WHERE id = 'rB'`).status,
+    "needs_review",
+    "last confirmed claim retired → demoted",
+  );
+  const audits = q<{ new_value_json: string }>(
+    `SELECT new_value_json FROM receipt_audit_log
+     WHERE action = 'amex_statement.replaced_artifact_lines_deleted'`,
+  );
+  assert.equal(audits.length, 1);
+  const payload = JSON.parse(audits[0]!.new_value_json) as { demotedReceiptIds: string[] };
+  assert.deepEqual(payload.demotedReceiptIds, ["rB"], "audit records the committed demotion set");
 });

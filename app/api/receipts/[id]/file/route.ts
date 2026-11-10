@@ -31,17 +31,31 @@ function isProcessorRequest(request: Request): boolean {
   return !!processorKey && !!presented && timingSafeEqual(presented, processorKey);
 }
 
+// Raster image types the receipts pipeline actually stores: upload-policy
+// originals (jpeg/png/heic/heif), Mac-consumer proof derivatives (jpeg), and
+// Mac-rendered derivatives (png). Deliberately NOT an image/* wildcard — an
+// unregistered or future image type is unvetted and belongs in the sandboxed
+// download branch with everything else unknown (cross-review 2026-11-10,
+// finding 3).
+const PASSIVE_IMAGE_TYPES = new Set([
+  "image/jpeg",
+  "image/png",
+  "image/heic",
+  "image/heif",
+]);
+
 // Content types this route may render INLINE. Everything else is served as a
 // sandboxed download. The served bytes are raw evidence — a promoted email
 // body is text/html and an email attachment's MIME type is chosen by the
 // sender — so a hostile HTML/SVG original served inline with the operator's
 // session would execute on the signed-in app origin (audit 2026-11-09,
-// finding 1). Fail-closed: unknown types download too. PDF, plain text, and
-// non-SVG images cannot execute when rendered with their declared type.
+// finding 1). Fail-closed: unknown types download too, including unknown
+// image/*. PDF, plain text, and the allowlisted raster formats cannot
+// execute when rendered with their declared type.
 function isPassiveContentType(contentType: string): boolean {
   const base = contentType.split(";")[0].trim().toLowerCase();
   if (base === "application/pdf" || base === "text/plain") return true;
-  return base.startsWith("image/") && base !== "image/svg+xml";
+  return PASSIVE_IMAGE_TYPES.has(base);
 }
 
 function buildFileHeaders(
