@@ -37,3 +37,17 @@ test("contentDispositionInline matches contentDispositionAttachment except for t
     contentDispositionAttachment("plain.csv"),
   );
 });
+
+// Cross-review 2026-11-10: quoted-string escaping must hold for the inline
+// form too — a trailing backslash would escape the generated closing quote
+// and leave an unterminated quoted-string on the AMEX CSV view route.
+test("contentDispositionInline: trailing backslash stripped in ASCII and non-ASCII names", () => {
+  assert.equal(
+    contentDispositionInline("tail\\"),
+    `inline; filename="tail"`,
+  );
+  const jp = contentDispositionInline("明細\\.csv");
+  assert.ok(jp.startsWith(`inline; filename="_.csv"`), `ASCII fallback has no backslash: ${jp}`);
+  const encoded = jp.slice(jp.indexOf("filename*=UTF-8''") + "filename*=UTF-8''".length);
+  assert.equal(decodeURIComponent(encoded), "明細\\.csv", "filename* keeps the original name");
+});

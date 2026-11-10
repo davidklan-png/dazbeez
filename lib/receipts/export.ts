@@ -544,11 +544,20 @@ function contentDisposition(
   type: "inline" | "attachment",
   filename: string,
 ): string {
+  // Quoted-string safety: `"` and `\` are stripped from every quoted
+  // filename form. A trailing backslash would escape the generated closing
+  // quote and leave an unterminated quoted-string (cross-review 2026-11-10);
+  // receipt filenames come from email attachments and may contain either.
   if (/^[\x20-\x7E]+$/.test(filename)) {
-    return `${type}; filename="${filename}"`;
+    return `${type}; filename="${filename.replace(/["\\]/g, "")}"`;
   }
-  const asciiFallback = filename.replace(/[^\x20-\x7E]+/g, "_").replace(/"/g, "");
-  const utf8 = encodeURIComponent(filename).replace(
+  const asciiFallback = filename
+    .replace(/[^\x20-\x7E]+/g, "_")
+    .replace(/["\\]/g, "");
+  // toWellFormed() replaces any lone surrogate with U+FFFD so
+  // encodeURIComponent cannot throw URIError on a malformed stored string
+  // (e.g. a filename truncated mid-code-point by an older writer).
+  const utf8 = encodeURIComponent(filename.toWellFormed()).replace(
     /['()*]/g,
     (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase(),
   );
