@@ -280,7 +280,13 @@ export async function POST(request: Request) {
         // Protected-trip guard, same contract as the fresh path: a heal
         // RETIRES superseded lines too, so it must refuse the same protected
         // memberships instead of re-importing lines and then wedging on the
-        // retirement FK (cross-review 2026-11-10, finding 1).
+        // retirement FK (cross-review 2026-11-10, finding 1). Round 2
+        // finding 1: the refusal is a CONFLICT (409 ok:false + structured
+        // protectedTripConflicts), not a 200 duplicate:true — while stale
+        // charges and the incomplete artifact remain, a machine-readable
+        // success would mask the refused recovery (the import form surfaces
+        // error for non-ok responses). Successful duplicate semantics are
+        // reserved for imports that actually completed.
         const healConflicts = await findProtectedTripConflictsForReplacement(
           existingBySha.statement_month,
           healInputs,
@@ -288,20 +294,18 @@ export async function POST(request: Request) {
         if (healConflicts.length > 0) {
           return NextResponse.json(
             {
-              ok: true,
-              duplicate: true,
+              ok: false,
+              error:
+                `Cannot finish the unfinished import of this file: retiring its superseded ` +
+                `lines would remove members of a confirmed/exported business trip ` +
+                `(e.g. ${healConflicts[0].merchant} on ${healConflicts[0].transactionDate}, trip ` +
+                `"${healConflicts[0].tripName ?? healConflicts[0].tripId}"). Detach those lines ` +
+                `from their trip (or reject the trip) first, then retry this file. Nothing was changed.`,
+              protectedTripConflicts: healConflicts,
               artifactId: existingBySha.id,
               statementMonth: existingBySha.statement_month,
-              message:
-                "A prior upload of this file was found unfinished, but retiring its superseded lines would remove members of a confirmed/exported business trip — the heal was refused and nothing was changed.",
-              warnings: [
-                ...warnings,
-                `Detach ${healConflicts.length} protected trip member line(s) first (e.g. ` +
-                  `${healConflicts[0].merchant} on ${healConflicts[0].transactionDate}, trip ` +
-                  `"${healConflicts[0].tripName ?? healConflicts[0].tripId}"), then retry this file.`,
-              ],
             },
-            { status: 200 },
+            { status: 409 },
           );
         }
 

@@ -1202,9 +1202,23 @@ export interface AmexLineDedupFields {
 }
 
 export function amexLineDedupKey(f: AmexLineDedupFields): string {
+  // Tagged tuple, JSON-encoded: every field is escaped by JSON, so distinct
+  // identities stay distinct. A `|` join is not injective — merchant
+  // "HOTEL|Alice" + cardholder "Bob" and merchant "HOTEL" + cardholder
+  // "Alice|Bob" collapse to one key, letting the protected-trip precheck
+  // mistake a superseded protected line for a retained identity
+  // (cross-review 2026-11-10 round 2, finding 2). NULL cardholder still
+  // normalizes to "" and an empty-string reference still routes to the
+  // no-reference identity, exactly as before.
   return f.amexReference
-    ? `ref|${f.amexReference}|${f.cardholderName ?? ""}`
-    : `noref|${f.transactionDate}|${f.amountMinor}|${f.merchant}|${f.cardholderName ?? ""}`;
+    ? JSON.stringify(["ref", f.amexReference, f.cardholderName ?? ""])
+    : JSON.stringify([
+        "noref",
+        f.transactionDate,
+        f.amountMinor,
+        f.merchant,
+        f.cardholderName ?? "",
+      ]);
 }
 
 export async function importAmexLines(
@@ -2449,6 +2463,12 @@ export async function markPreviousArtifactsReplaced(
   // JSON1), which the later statements then produce — same transaction, no
   // interleaving possible. The demotion UPDATE follows because it locates
   // affected receipts through the superseded lines it is about to delete.
+  // The array-valued aggregate subqueries are wrapped in json() AT THE
+  // ARGUMENT POSITION: json_group_array's JSON subtype does not reliably
+  // survive the scalar-subquery boundary (SQLite 3.54.1 / node:sqlite
+  // embedded the arrays as quoted strings — cross-review 2026-11-10 round 2,
+  // finding 3), and json((SELECT …)) re-establishes it explicitly so one
+  // JSON.parse of new_value_json yields actual arrays.
   await db.batch([
     db
       .prepare(
@@ -2458,7 +2478,7 @@ export async function markPreviousArtifactsReplaced(
            json_object(
              'statementMonth', ?,
              'supersededBy', ?,
-             'replacedArtifacts', (
+             'replacedArtifacts', json((
                SELECT json_group_array(json_object(
                  'id', a.id,
                  'deletedLines', (
@@ -2475,10 +2495,10 @@ export async function markPreviousArtifactsReplaced(
                FROM amex_statement_artifacts a
                WHERE a.statement_month = ? AND a.id != ?
                  AND a.import_status NOT IN ('failed','replaced')
-             ),
-             'demotedReceiptIds', (
+             )),
+             'demotedReceiptIds', json((
                SELECT json_group_array(id) FROM receipt_records WHERE${strandPredicate}
-             )
+             ))
            ),
            ?)`,
       )
