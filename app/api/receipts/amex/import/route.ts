@@ -482,13 +482,23 @@ export async function POST(request: Request) {
 
     const { inserted, updated, unchanged } = await importAmexLines(importInputs, actor);
 
-    await updateAmexArtifactStatus(savedArtifactId, "parsed");
-
     // ── Mark previous artifact replaced (after successful import) ──────────
-    // Also deletes the replaced artifact's superseded lines (TASK-037).
+    // Also deletes the replaced artifact's superseded lines + trip-member
+    // links and demotes stranded receipts (TASK-037; audit findings 3+8).
     if (previousArtifact) {
       await markPreviousArtifactsReplaced(statementMonth, savedArtifactId, actor);
     }
+
+    // ── Earn the parsed badge ───────────────────────────────────────────────
+    // Parsed is claimed only after the WHOLE replacement contract (new lines
+    // + retirement of superseded lines) has committed. Flipping before the
+    // retirement step meant an FK-failed retirement left the new artifact
+    // 'parsed' while stale charges stayed live, and the same-SHA retry then
+    // answered duplicate:true forever (audit finding 3). If retirement fails,
+    // this line never runs: the artifact stays 'uploaded', which the sha-dedup
+    // branch classifies as heal, so the retry re-runs the idempotent import
+    // and completes the retirement before earning 'parsed'.
+    await updateAmexArtifactStatus(savedArtifactId, "parsed");
 
     // ── Business trip candidate detection ───────────────────────────────────
     const businessTripCandidatesCount = await runBusinessTripDetection(
