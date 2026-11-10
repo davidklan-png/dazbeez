@@ -23,8 +23,8 @@ interface Issued {
 }
 
 interface FakeCfg {
-  /** Rows for the markPreviousArtifactsReplaced targets SELECT (id + line_count). */
-  replaced?: { id: string; line_count: number }[];
+  /** Rows for the markPreviousArtifactsReplaced targets SELECT (id + counts). */
+  replaced?: { id: string; line_count: number; trip_link_count?: number }[];
   /** Rows for the purge diagnostic SELECT (failed/replaced rows with counts). */
   failedReplaced?: { id: string; line_count: number }[];
   /** Rows for the purge stale SELECT (id + r2_key). */
@@ -101,8 +101,8 @@ function auditEntries(runs: Issued[]) {
 test("markPreviousArtifactsReplaced: deletes lines of flipped artifacts in the same batch as the flip", async () => {
   const fake = fakeDb({
     replaced: [
-      { id: "old1", line_count: 23 },
-      { id: "old2", line_count: 0 },
+      { id: "old1", line_count: 23, trip_link_count: 2 },
+      { id: "old2", line_count: 0, trip_link_count: 0 },
     ],
   });
   await markPreviousArtifactsReplaced("2026-10", "new1", "actor-x", { db: fake.db });
@@ -115,23 +115,41 @@ test("markPreviousArtifactsReplaced: deletes lines of flipped artifacts in the s
   assert.match(targets.sql, /WHERE statement_month = \? AND id != \? AND import_status NOT IN \('failed','replaced'\)/);
   assert.deepEqual(targets.binds, ["2026-10", "new1"]);
 
-  // One batch of exactly [line DELETE, status flip].
+  // One batch of exactly [guarded receipt demotion, trip-link DELETE, line
+  // DELETE, status flip] — audit findings 3+8: the trip-member detach must
+  // precede the line DELETE inside the same transaction (the FK has no ON
+  // DELETE action), and a receipt whose last confirmed claim is being retired
+  // demotes here too, guarded to reconciled receipts with no surviving
+  // confirmed claim.
   assert.equal(fake.batches.length, 1);
-  const [del, flip] = fake.batches[0];
+  const [demote, unlinkTrips, del, flip] = fake.batches[0];
+  assert.match(demote.sql, /^UPDATE receipt_records\s+SET status = 'needs_review'/);
+  assert.match(demote.sql, /status = 'reconciled'/);
+  assert.match(demote.sql, /sup\.statement_artifact_id IN \(\?, \?\)/);
+  assert.match(
+    demote.sql,
+    /live\.statement_artifact_id IS NULL\s+OR live\.statement_artifact_id NOT IN \(\?, \?\)/,
+    "legacy NULL-artifact lines count as surviving claims",
+  );
+  assert.deepEqual(demote.binds.slice(1), ["old1", "old2", "old1", "old2"]);
+  assert.match(unlinkTrips.sql, /^DELETE FROM business_trip_report_lines\s+WHERE amex_statement_line_id IN \(\s+SELECT id FROM amex_statement_lines/);
+  assert.deepEqual(unlinkTrips.binds, ["old1", "old2"]);
   assert.match(del.sql, /^DELETE FROM amex_statement_lines WHERE statement_artifact_id IN \(\?, \?\)$/);
   assert.deepEqual(del.binds, ["old1", "old2"]);
   assert.match(flip.sql, /SET import_status = 'replaced'/);
   assert.deepEqual(flip.binds.slice(1), ["2026-10", "new1"]);
 
-  // One audit entry recording every replaced artifact id + its deleted line count.
+  // One audit entry recording every replaced artifact id + its deleted line
+  // and trip-link counts, plus the (here empty) demotion list.
   const audits = auditEntries(fake.runs);
   assert.equal(audits.length, 1);
   assert.equal(audits[0].binds[2], "amex_statement.replaced_artifact_lines_deleted");
   const payload = JSON.parse(String(audits[0].binds[6]));
   assert.deepEqual(payload.replacedArtifacts, [
-    { id: "old1", deletedLines: 23 },
-    { id: "old2", deletedLines: 0 },
+    { id: "old1", deletedLines: 23, deletedTripMemberLinks: 2 },
+    { id: "old2", deletedLines: 0, deletedTripMemberLinks: 0 },
   ]);
+  assert.deepEqual(payload.demotedReceiptIds, []);
   assert.equal(payload.supersededBy, "new1");
 });
 
