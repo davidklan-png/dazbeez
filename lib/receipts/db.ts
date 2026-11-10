@@ -916,32 +916,39 @@ export async function createAttendees(
   receiptId: string,
   attendees: CreateAttendeeInput[],
   actor: string,
+  db: D1Database = getReceiptsDb(),
 ): Promise<void> {
-  const db = getReceiptsDb();
   const now = nowIso();
 
-  // Replace existing attendees for this receipt
-  await db.prepare(`DELETE FROM receipt_attendees WHERE receipt_id = ?`).bind(receiptId).run();
-
-  for (const a of attendees) {
-    await db
-      .prepare(
-        `INSERT INTO receipt_attendees
-          (id, receipt_id, attendee_name, company, relationship, is_dazbeez_employee, notes, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .bind(
-        newUuid(),
-        receiptId,
-        a.attendeeName,
-        a.company ?? null,
-        a.relationship ?? null,
-        a.isDazbeezEmployee ? 1 : 0,
-        a.notes ?? null,
-        now,
-      )
-      .run();
-  }
+  // Atomic replacement (audit finding 2): the DELETE and every INSERT are ONE
+  // D1 batch — an implicit transaction. A mid-insert failure (constraint,
+  // outage) rolls back to the previous roster instead of erasing it, and two
+  // concurrent replacements serialize as whole batches rather than interleaving
+  // into a mixed/duplicated roster. Statement order = array order (readers
+  // order by created_at ASC with one shared `now`, so row order is insert
+  // order); duplicate names are preserved — same-name attendees may be
+  // different people.
+  await db.batch([
+    db.prepare(`DELETE FROM receipt_attendees WHERE receipt_id = ?`).bind(receiptId),
+    ...attendees.map((a) =>
+      db
+        .prepare(
+          `INSERT INTO receipt_attendees
+            (id, receipt_id, attendee_name, company, relationship, is_dazbeez_employee, notes, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          newUuid(),
+          receiptId,
+          a.attendeeName,
+          a.company ?? null,
+          a.relationship ?? null,
+          a.isDazbeezEmployee ? 1 : 0,
+          a.notes ?? null,
+          now,
+        ),
+    ),
+  ]);
 
   await createAuditEntry(db, {
     actor,
@@ -1179,6 +1186,27 @@ export const AMEX_LINE_ROW_PLACEHOLDER = `(${AMEX_LINE_INSERT_COLUMNS.map((c) =>
   c === "match_status!" ? "'unmatched'" : "?",
 ).join(", ")})`;
 
+// ── AMEX line dedup identity (single source) ─────────────────────────────────
+// Line identity is what the INSERT…ON CONFLICT paths below retain: with a
+// reference, (month, amex_reference, cardholder_name); without, (month,
+// transaction_date, amount_minor, merchant, cardholder_name). The classifier
+// here AND the import route's protected-trip pre-check both derive this exact
+// key — a second hand-rolled copy would drift from what the upsert actually
+// retains. (month omitted: every caller is month-scoped.)
+export interface AmexLineDedupFields {
+  amexReference?: string | null;
+  cardholderName?: string | null;
+  transactionDate: string;
+  amountMinor: number;
+  merchant: string;
+}
+
+export function amexLineDedupKey(f: AmexLineDedupFields): string {
+  return f.amexReference
+    ? `ref|${f.amexReference}|${f.cardholderName ?? ""}`
+    : `noref|${f.transactionDate}|${f.amountMinor}|${f.merchant}|${f.cardholderName ?? ""}`;
+}
+
 export async function importAmexLines(
   rows: ImportAmexLineInput[],
   actor: string,
@@ -1217,14 +1245,16 @@ export async function importAmexLines(
     (typeof existingResult.results)[number]
   >();
   for (const r of existingResult.results) {
-    if (r.amex_reference) {
-      existingMap.set(`ref|${r.amex_reference}|${r.cardholder_name ?? ""}`, r);
-    } else {
-      existingMap.set(
-        `noref|${r.transaction_date}|${r.amount_minor}|${r.merchant}|${r.cardholder_name ?? ""}`,
-        r,
-      );
-    }
+    existingMap.set(
+      amexLineDedupKey({
+        amexReference: r.amex_reference,
+        cardholderName: r.cardholder_name,
+        transactionDate: r.transaction_date,
+        amountMinor: r.amount_minor,
+        merchant: r.merchant,
+      }),
+      r,
+    );
   }
 
   let inserted = 0;
@@ -1233,7 +1263,7 @@ export async function importAmexLines(
 
   for (const row of rows) {
     if (row.amexReference) {
-      const key = `ref|${row.amexReference}|${row.cardholderName ?? ""}`;
+      const key = amexLineDedupKey(row);
       const ex = existingMap.get(key);
       if (!ex) {
         inserted++;
@@ -1251,7 +1281,7 @@ export async function importAmexLines(
         updated++;
       }
     } else {
-      const key = `noref|${row.transactionDate}|${row.amountMinor}|${row.merchant}|${row.cardholderName ?? ""}`;
+      const key = amexLineDedupKey(row);
       const ex = existingMap.get(key);
       if (!ex) {
         inserted++;
@@ -2202,6 +2232,118 @@ export async function updateAmexArtifactStatus(
     .run();
 }
 
+// ── Protected-trip replacement guard (cross-review 2026-11-10, finding 1) ──
+// A confirmed trip (including operator-created trips, which are born
+// 'confirmed') or an exported one is operator-blessed accounting state.
+// Retiring one of its member lines would silently change the confirmed trip's
+// contents — or empty it while it stays 'confirmed'. Replacement must be
+// REJECTED before any import mutation when a would-be-superseded line belongs
+// to such a trip; the operator detaches the line (or rejects the trip) and
+// retries. Identity-retained lines are NOT superseded (the ON CONFLICT upsert
+// re-homes them, PK intact), so a trip whose member lines all survive the new
+// CSV does not block replacement. The retirement batch re-enforces this with
+// the schema's own FK: protected member links are never deleted, so a raced
+// attach between this check and the batch aborts the whole transaction
+// (FOREIGN KEY constraint) instead of silently invalidating the trip.
+export interface ProtectedTripConflict {
+  tripId: string;
+  tripName: string | null;
+  tripStatus: string;
+  lineId: string;
+  merchant: string;
+  transactionDate: string;
+  amountMinor: number;
+}
+
+export async function findProtectedTripConflictsForReplacement(
+  statementMonth: string,
+  incoming: AmexLineDedupFields[],
+  opts: { db?: D1Database } = {},
+): Promise<ProtectedTripConflict[]> {
+  const db = opts.db ?? getReceiptsDb();
+
+  const incomingKeys = new Set(incoming.map(amexLineDedupKey));
+
+  // Would-be-superseded lines: month lines still owned by a retireable
+  // (non-failed/replaced) artifact whose dedup identity is absent from the
+  // incoming rows — exactly the set markPreviousArtifactsReplaced deletes
+  // after the upsert has re-homed the survivors.
+  const monthLines = await db
+    .prepare(
+      `SELECT l.id, l.amex_reference, l.cardholder_name, l.transaction_date,
+              l.merchant, l.amount_minor
+       FROM amex_statement_lines l
+       JOIN amex_statement_artifacts a ON a.id = l.statement_artifact_id
+       WHERE l.statement_month = ?
+         AND a.import_status NOT IN ('failed','replaced')`,
+    )
+    .bind(statementMonth)
+    .all<{
+      id: string;
+      amex_reference: string | null;
+      cardholder_name: string | null;
+      transaction_date: string;
+      merchant: string;
+      amount_minor: number;
+    }>();
+
+  const supersededIds = (monthLines.results ?? [])
+    .filter(
+      (l) =>
+        !incomingKeys.has(
+          amexLineDedupKey({
+            amexReference: l.amex_reference,
+            cardholderName: l.cardholder_name,
+            transactionDate: l.transaction_date,
+            amountMinor: l.amount_minor,
+            merchant: l.merchant,
+          }),
+        ),
+    )
+    .map((l) => l.id);
+  if (supersededIds.length === 0) return [];
+
+  // Chunked IN: a full month of charges can exceed D1's bind ceiling.
+  const conflicts: ProtectedTripConflict[] = [];
+  for (let i = 0; i < supersededIds.length; i += 50) {
+    const chunk = supersededIds.slice(i, i + 50);
+    const placeholders = chunk.map(() => "?").join(", ");
+    const rows = await db
+      .prepare(
+        `SELECT btr.id AS trip_id, btr.trip_name, btr.status AS trip_status,
+                l.id AS line_id, l.merchant, l.transaction_date, l.amount_minor
+         FROM amex_statement_lines l
+         JOIN business_trip_report_lines btrl ON btrl.amex_statement_line_id = l.id
+         JOIN business_trip_reports btr ON btr.id = btrl.business_trip_report_id
+         WHERE l.id IN (${placeholders})
+           AND btr.status IN ('confirmed','exported')
+         ORDER BY btr.created_at, l.transaction_date`,
+      )
+      .bind(...chunk)
+      .all<{
+        trip_id: string;
+        trip_name: string | null;
+        trip_status: string;
+        line_id: string;
+        merchant: string;
+        transaction_date: string;
+        amount_minor: number;
+      }>();
+    for (const r of rows.results ?? []) {
+      conflicts.push({
+        tripId: r.trip_id,
+        tripName: r.trip_name,
+        tripStatus: r.trip_status,
+        lineId: r.line_id,
+        merchant: r.merchant,
+        transactionDate: r.transaction_date,
+        amountMinor: r.amount_minor,
+      });
+    }
+  }
+  return conflicts;
+}
+
 // TASK-037: superseding an artifact must supersede its LINES too. The old
 // version only flipped import_status='replaced' and left the lines in place;
 // the follow-up purgeFailedAmexArtifactsByHash then deleted the artifact row
@@ -2215,8 +2357,31 @@ export async function updateAmexArtifactStatus(
 // Lines still pointing at a replaced artifact after the import are therefore
 // exactly the superseded leftovers (charges absent from the new CSV).
 //
-// Flipped artifact ids and their deleted line counts are recorded in ONE
-// audit entry (amex_statement.replaced_artifact_lines_deleted).
+// Audit 2026-11-09 findings 3 + 8: the retirement batch must also (a) drop
+// the trip-member rows pointing at superseded lines BEFORE deleting those
+// lines — business_trip_report_lines.amex_statement_line_id has no ON DELETE
+// action (0005_amex_extended.sql:89), so the bare line DELETE was FK-blocked
+// whenever an auto-created candidate trip held a superseded line, wedging the
+// month; and (b) demote a receipt whose LAST confirmed claim is being
+// retired — the same guarded demotion setAmexLineMatch applies on unlink,
+// otherwise the receipt stays 'reconciled' with zero claiming lines and
+// vanishes from the rematching workflow. Trip REPORT rows are never touched
+// here (no trip purge); survivor lines keep their PKs, links and claims.
+//
+// Cross-review 2026-11-10 findings 1 + 2: (a) member links of PROTECTED
+// trips (confirmed incl. operator-created, or exported) are never deleted —
+// the route rejects such replacements up front via
+// findProtectedTripConflictsForReplacement, and the line DELETE then acts as
+// the transactional backstop: a raced attach FK-aborts the WHOLE batch
+// (loud, healable by retry after the operator detaches) rather than
+// silently invalidating confirmed trip contents; and (b) the audit entry is
+// written INSIDE the retirement transaction, its payload computed by JSON1
+// subqueries from the same pre-mutation state the batch statements mutate —
+// no separately-awaited pre-read can drift from what actually commits.
+//
+// Flipped artifact ids, deleted line/trip-link counts and demoted receipt
+// ids are recorded in ONE audit entry
+// (amex_statement.replaced_artifact_lines_deleted).
 export async function markPreviousArtifactsReplaced(
   statementMonth: string,
   exceptId: string,
@@ -2225,51 +2390,149 @@ export async function markPreviousArtifactsReplaced(
 ): Promise<void> {
   const db = opts.db ?? getReceiptsDb();
 
+  // No-op guard + audit objectId only. Everything the batch DOES — and
+  // everything the audit records — is derived inside the transaction below,
+  // so a write racing between this read and the batch cannot desync the
+  // audit from the committed changes (cross-review 2026-11-10, finding 2).
   const previous = await db
     .prepare(
-      `SELECT id,
-              (SELECT COUNT(*) FROM amex_statement_lines
-                WHERE statement_artifact_id = amex_statement_artifacts.id) AS line_count
-       FROM amex_statement_artifacts
+      `SELECT id FROM amex_statement_artifacts
        WHERE statement_month = ? AND id != ? AND import_status NOT IN ('failed','replaced')`,
     )
     .bind(statementMonth, exceptId)
-    .all<{ id: string; line_count: number }>();
+    .all<{ id: string }>();
 
-  const replaced = previous.results ?? [];
-  if (replaced.length === 0) return;
+  const replacedIds = (previous.results ?? []).map((r) => r.id);
+  if (replacedIds.length === 0) return;
 
-  const replacedIds = replaced.map((r) => r.id);
-  const placeholders = replacedIds.map(() => "?").join(", ");
+  // The retiring artifact set, derived IN-transaction (binds: statementMonth,
+  // exceptId) so the audit, the demotion and every DELETE see one set even if
+  // an artifact's status changed after the guard read above.
+  const retiring = `(SELECT id FROM amex_statement_artifacts
+      WHERE statement_month = ? AND id != ? AND import_status NOT IN ('failed','replaced'))`;
 
-  // Single transaction: line delete and status flip commit together, so a
-  // crash can never leave a 'replaced' artifact still owning lines.
+  // Receipts the retirement is about to strand: reconciled, claimed by a
+  // confirmed line on a retiring artifact, with NO surviving confirmed claim
+  // in ANY statement month (consolidated/shared claims survive → no demote;
+  // exported/archived statuses fail the status guard → no demote). Legacy
+  // lines with a NULL statement_artifact_id count as surviving. Shared by
+  // the in-batch audit INSERT and the in-batch UPDATE so the two cannot
+  // drift — both evaluate it inside the same transaction.
+  const strandPredicate = `
+     status = 'reconciled'
+     AND EXISTS (
+       SELECT 1 FROM amex_statement_lines sup
+       WHERE sup.matched_receipt_id = receipt_records.id
+         AND sup.match_status = 'confirmed'
+         AND sup.statement_artifact_id IN ${retiring}
+     )
+     AND NOT EXISTS (
+       SELECT 1 FROM amex_statement_lines live
+       WHERE live.matched_receipt_id = receipt_records.id
+         AND live.match_status = 'confirmed'
+         AND (live.statement_artifact_id IS NULL
+              OR live.statement_artifact_id NOT IN ${retiring})
+     )`;
+
+  // Protected trips keep their member links (see
+  // findProtectedTripConflictsForReplacement above).
+  const protectedTrips = `(SELECT id FROM business_trip_reports WHERE status IN ('confirmed','exported'))`;
+
+  const now = nowIso();
+
+  // Single transaction: the audit, receipt demotion, trip-link detach, line
+  // delete and status flip commit together, so a crash can never leave a
+  // 'replaced' artifact still owning lines — or a half-retired month at all —
+  // and the audit can never claim a retirement (or demotion) that did not
+  // commit. The audit INSERT runs FIRST: it computes counts and demotees from
+  // the pre-mutation state via JSON1 subqueries (D1 and node:sqlite both ship
+  // JSON1), which the later statements then produce — same transaction, no
+  // interleaving possible. The demotion UPDATE follows because it locates
+  // affected receipts through the superseded lines it is about to delete.
   await db.batch([
     db
       .prepare(
-        `DELETE FROM amex_statement_lines WHERE statement_artifact_id IN (${placeholders})`,
+        `INSERT INTO receipt_audit_log
+           (id, actor, action, object_type, object_id, old_value_json, new_value_json, created_at)
+         VALUES (?, ?, 'amex_statement.replaced_artifact_lines_deleted', 'amex_statement_artifact', ?, NULL,
+           json_object(
+             'statementMonth', ?,
+             'supersededBy', ?,
+             'replacedArtifacts', (
+               SELECT json_group_array(json_object(
+                 'id', a.id,
+                 'deletedLines', (
+                   SELECT COUNT(*) FROM amex_statement_lines l
+                   WHERE l.statement_artifact_id = a.id
+                 ),
+                 'deletedTripMemberLinks', (
+                   SELECT COUNT(*) FROM business_trip_report_lines btrl
+                   JOIN amex_statement_lines l2 ON l2.id = btrl.amex_statement_line_id
+                   WHERE l2.statement_artifact_id = a.id
+                     AND btrl.business_trip_report_id NOT IN ${protectedTrips}
+                 )
+               ))
+               FROM amex_statement_artifacts a
+               WHERE a.statement_month = ? AND a.id != ?
+                 AND a.import_status NOT IN ('failed','replaced')
+             ),
+             'demotedReceiptIds', (
+               SELECT json_group_array(id) FROM receipt_records WHERE${strandPredicate}
+             )
+           ),
+           ?)`,
       )
-      .bind(...replacedIds),
+      .bind(
+        newUuid(),
+        actor,
+        replacedIds.join(","),
+        statementMonth,
+        exceptId,
+        statementMonth,
+        exceptId,
+        // strandPredicate: retiring set ×2 (EXISTS + NOT EXISTS)
+        statementMonth,
+        exceptId,
+        statementMonth,
+        exceptId,
+        now,
+      ),
+    db
+      .prepare(
+        `UPDATE receipt_records
+         SET status = 'needs_review', updated_at = ?
+         WHERE${strandPredicate}`,
+      )
+      .bind(
+        now,
+        statementMonth,
+        exceptId,
+        statementMonth,
+        exceptId,
+      ),
+    db
+      .prepare(
+        `DELETE FROM business_trip_report_lines
+         WHERE amex_statement_line_id IN (
+           SELECT id FROM amex_statement_lines
+           WHERE statement_artifact_id IN ${retiring}
+         )
+         AND business_trip_report_id NOT IN ${protectedTrips}`,
+      )
+      .bind(statementMonth, exceptId),
+    db
+      .prepare(
+        `DELETE FROM amex_statement_lines WHERE statement_artifact_id IN ${retiring}`,
+      )
+      .bind(statementMonth, exceptId),
     db
       .prepare(
         `UPDATE amex_statement_artifacts
          SET import_status = 'replaced', updated_at = ?
          WHERE statement_month = ? AND id != ? AND import_status NOT IN ('failed','replaced')`,
       )
-      .bind(nowIso(), statementMonth, exceptId),
+      .bind(now, statementMonth, exceptId),
   ]);
-
-  await createAuditEntry(db, {
-    actor,
-    action: "amex_statement.replaced_artifact_lines_deleted",
-    objectType: "amex_statement_artifact",
-    objectId: replacedIds.join(","),
-    newValueJson: JSON.stringify({
-      statementMonth,
-      supersededBy: exceptId,
-      replacedArtifacts: replaced.map((r) => ({ id: r.id, deletedLines: r.line_count })),
-    }),
-  });
 }
 
 // ─── AMEX line categorization ─────────────────────────────────────────────────
@@ -2353,9 +2616,8 @@ export async function replaceAmexLineAttendees(
   lineId: string,
   names: string[],
   actor: string,
+  db: D1Database = getReceiptsDb(),
 ): Promise<void> {
-  const db = getReceiptsDb();
-
   // Block edits if the month's reconciliation is finalized.
   const lineMonth = await db
     .prepare(`SELECT statement_month FROM amex_statement_lines WHERE id = ? LIMIT 1`)
@@ -2365,22 +2627,24 @@ export async function replaceAmexLineAttendees(
     await rejectIfFinalized(db, lineMonth.statement_month);
   }
 
-  await db
-    .prepare(`DELETE FROM amex_line_attendees WHERE amex_statement_line_id = ?`)
-    .bind(lineId)
-    .run();
-
+  // Atomic replacement (audit finding 2) — same contract as createAttendees:
+  // DELETE + all INSERTs in ONE D1 batch so a mid-insert failure rolls back to
+  // the previous roster and concurrent replacements can never interleave.
   const now = nowIso();
-  for (const name of names) {
-    await db
-      .prepare(
-        `INSERT INTO amex_line_attendees
-          (id, amex_statement_line_id, attendee_name, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?)`,
-      )
-      .bind(newUuid(), lineId, name, now, now)
-      .run();
-  }
+  await db.batch([
+    db
+      .prepare(`DELETE FROM amex_line_attendees WHERE amex_statement_line_id = ?`)
+      .bind(lineId),
+    ...names.map((name) =>
+      db
+        .prepare(
+          `INSERT INTO amex_line_attendees
+            (id, amex_statement_line_id, attendee_name, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?)`,
+        )
+        .bind(newUuid(), lineId, name, now, now),
+    ),
+  ]);
 
   await createAuditEntry(db, {
     actor,

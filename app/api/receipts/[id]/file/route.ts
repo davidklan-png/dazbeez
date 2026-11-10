@@ -1,6 +1,10 @@
 import { requireReceiptsActor } from "@/lib/receipts/auth";
 import { getReceiptRecord } from "@/lib/receipts/db";
 import { getReceiptsBucket, getReceiptsProcessorKey } from "@/lib/cloudflare-runtime";
+import {
+  contentDispositionAttachment,
+  contentDispositionInline,
+} from "@/lib/receipts/export";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -27,10 +31,31 @@ function isProcessorRequest(request: Request): boolean {
   return !!processorKey && !!presented && timingSafeEqual(presented, processorKey);
 }
 
-function safeFilename(name: string | null): string {
-  if (!name) return "receipt";
-  // Strip characters that break Content-Disposition header value
-  return name.replace(/[\x00-\x1F\x7F/\\:*?"<>|]/g, "_").slice(0, 200) || "receipt";
+// Raster image types the receipts pipeline actually stores: upload-policy
+// originals (jpeg/png/heic/heif), Mac-consumer proof derivatives (jpeg), and
+// Mac-rendered derivatives (png). Deliberately NOT an image/* wildcard — an
+// unregistered or future image type is unvetted and belongs in the sandboxed
+// download branch with everything else unknown (cross-review 2026-11-10,
+// finding 3).
+const PASSIVE_IMAGE_TYPES = new Set([
+  "image/jpeg",
+  "image/png",
+  "image/heic",
+  "image/heif",
+]);
+
+// Content types this route may render INLINE. Everything else is served as a
+// sandboxed download. The served bytes are raw evidence — a promoted email
+// body is text/html and an email attachment's MIME type is chosen by the
+// sender — so a hostile HTML/SVG original served inline with the operator's
+// session would execute on the signed-in app origin (audit 2026-11-09,
+// finding 1). Fail-closed: unknown types download too, including unknown
+// image/*. PDF, plain text, and the allowlisted raster formats cannot
+// execute when rendered with their declared type.
+function isPassiveContentType(contentType: string): boolean {
+  const base = contentType.split(";")[0].trim().toLowerCase();
+  if (base === "application/pdf" || base === "text/plain") return true;
+  return PASSIVE_IMAGE_TYPES.has(base);
 }
 
 function buildFileHeaders(
@@ -50,12 +75,35 @@ function buildFileHeaders(
       object.httpMetadata?.contentType ||
       "application/octet-stream";
 
+  // Audit 2026-11-09, findings 1 + 7. Non-ASCII filenames (領収書.pdf) go
+  // through the shared RFC 5987 helper — a raw UTF-8 name in a Headers value
+  // throws in the Response constructor and returned 500. Active-content or
+  // unknown types get `attachment` plus a response-level sandbox CSP + nosniff
+  // so even a direct navigation to the URL runs in an opaque origin with
+  // script execution disabled; safe PDF/image derivatives stay inline.
+  const passive = isPassiveContentType(contentType);
+  // 200-code-point cap keeps a hostile attachment name from blowing the header
+  // size limit. Array.from truncates by code point — String.slice counts UTF-16
+  // units and can split a surrogate pair (𠮷), which would hand the shared
+  // encoder a malformed string (cross-review 2026-11-10). The helper handles
+  // ByteString/RFC 5987 encoding from here.
+  const filename = Array.from(receipt.original_filename || "receipt")
+    .slice(0, 200)
+    .join("");
+
   const headers = new Headers({
     "Content-Type": contentType,
-    "Content-Disposition": `inline; filename="${safeFilename(receipt.original_filename)}"`,
+    "Content-Disposition": passive
+      ? contentDispositionInline(filename)
+      : contentDispositionAttachment(filename),
+    "X-Content-Type-Options": "nosniff",
     "Cache-Control": "private, max-age=300",
     "X-Robots-Tag": "noindex, nofollow",
   });
+
+  if (!passive) {
+    headers.set("Content-Security-Policy", "sandbox");
+  }
 
   if (object.size !== undefined) {
     headers.set("Content-Length", String(object.size));
