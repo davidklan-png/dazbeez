@@ -331,6 +331,36 @@ test("contentDispositionAttachment: ASCII stays plain; non-ASCII gets RFC 5987 f
   assert.ok(/^[\x00-\xFF]*$/.test(cd), "header value is Latin-1 (ByteString) safe");
 });
 
+test("contentDispositionAttachment: quoted-string escapes — trailing backslash and quotes stripped", () => {
+  // Cross-review 2026-11-10: a raw backslash before the generated closing
+  // quote escapes it, leaving an unterminated quoted-string. Both `"` and `\`
+  // are stripped from the quoted forms in every branch.
+  assert.equal(
+    contentDispositionAttachment("tail\\"),
+    `attachment; filename="tail"`,
+  );
+  assert.equal(
+    contentDispositionAttachment('say_"hello".pdf'),
+    `attachment; filename="say_hello.pdf"`,
+  );
+});
+
+test("contentDispositionAttachment: non-ASCII name with backslash — safe fallback, intact filename*", () => {
+  const cd = contentDispositionAttachment("領収書\\.pdf");
+  assert.ok(cd.startsWith(`attachment; filename="_.pdf"`), `ASCII fallback has no backslash: ${cd}`);
+  assert.ok(!cd.slice(0, cd.indexOf("filename*")).includes("\\"), "no raw backslash in the quoted form");
+  const encoded = cd.slice(cd.indexOf("filename*=UTF-8''") + "filename*=UTF-8''".length);
+  assert.equal(decodeURIComponent(encoded), "領収書\\.pdf", "filename* keeps the original name (backslash percent-encoded)");
+});
+
+test("contentDispositionAttachment: lone surrogate cannot throw URIError", () => {
+  // A malformed stored string (e.g. truncated mid-code-point by an older
+  // writer) must not 500 the route — toWellFormed() substitutes U+FFFD.
+  const cd = contentDispositionAttachment("a\uD800b");
+  assert.ok(cd.startsWith(`attachment; filename="a`), `fallback is printable: ${cd}`);
+  assert.ok(/^[\x00-\xFF]*$/.test(cd), "header value is Latin-1 (ByteString) safe");
+});
+
 // ─── Byte-identity: no draft/finalize-conditional content ───────────────────
 // Drafts are the candidate seal. finalize re-uses the staged R2 objects (it
 // does not rebuild), so a staged draft's bytes == the sealed bytes. This test
