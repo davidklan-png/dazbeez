@@ -9,12 +9,10 @@
 // "the receipt was not modified" (a committed result followed by a failed
 // response leaves the outcome uncertain), and must not leak internals.
 //
-// Runs under the documented node:test module-mock API:
-//   node --experimental-test-module-mocks --import tsx --test \
-//     tests/receipts/render-recovery-routes.test.ts
-// Under the default `tsx --test` (npm test) the flag is absent, so these
-// tests self-skip — the flagged command above is the committed way to run
-// them; both commands are reported in the PR.
+// Runs under the documented node:test module-mock API. `npm test` passes
+// the flag through the project runner (tsx), so these execute in the
+// NORMAL suite/CI; the skip guard below is only a fallback for someone
+// invoking plain `tsx --test` by hand.
 
 import test from "node:test";
 import assert from "node:assert/strict";

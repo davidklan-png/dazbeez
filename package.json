@@ -16,7 +16,7 @@
     "cf-typegen": "wrangler types cloudflare-env.d.ts --env-interface CloudflareEnv",
     "start": "next start",
     "lint": "eslint",
-    "test": "tsx --test \"tests/**/*.test.ts\""
+    "test": "tsx --experimental-test-module-mocks --test \"tests/**/*.test.ts\""
   },
   "dependencies": {
     "@clerk/nextjs": "^7.5.12",
