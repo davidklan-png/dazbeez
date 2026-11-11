@@ -57,25 +57,39 @@ function makeFormHarness() {
   };
   let merchant = "committed-value";
   let composing = false;
+  // Mirrors the real buildSaveBody contract: the reviewed rider decides
+  // whether `status` is included.
+  const buildBody = (markReviewed: boolean) => ({
+    merchant,
+    ...(markReviewed ? { status: "reviewed" } : {}),
+  });
   const queue = new SaveQueue({
     url: "/api/receipts/r1",
-    buildBody: () => ({ merchant }),
+    buildBody,
     deferFire: () => composing,
     fetchImpl: wrapFetch,
   });
   const render = () =>
     queue.rebind({
       url: "/api/receipts/r1",
-      buildBody: () => ({ merchant }),
+      buildBody,
       deferFire: () => composing,
       fetchImpl: wrapFetch,
     });
   const badge: string[] = [];
   let debounceArmed = false;
-  // Single-flight + re-check loop, mirroring form-pane's flushPendingEdits:
-  // concurrent navigation intents share ONE flush; edits made during a flush
-  // get their own save.
+  // Mirrors form-pane's flushPendingEdits (cross-review round 4 shape):
+  // single-flight with POST-ASSIGNMENT cleanup (B1), re-check loop carrying
+  // the reviewed rider (B2), halted refusal (B3), and composition holds
+  // with waiters woken on commit (B5).
+  const compositionWaiters: Array<() => void> = [];
+  let reviewedRider = false;
   let flushing: Promise<void> | null = null;
+
+  const waitForCompositionEnd = () =>
+    composing
+      ? new Promise<void>((resolve) => compositionWaiters.push(resolve))
+      : Promise.resolve();
 
   return {
     calls: rawCalls,
@@ -87,6 +101,10 @@ function makeFormHarness() {
       render();
       debounceArmed = true;
     },
+    /** Save-and-next action: arms the reviewed rider (B2). */
+    markReviewed() {
+      reviewedRider = true;
+    },
     /** IME composition starts (business purpose): the pending debounce is
      * cleared and saves are held until WebKit commits. */
     startComposition() {
@@ -94,11 +112,14 @@ function makeFormHarness() {
       render();
       debounceArmed = false;
     },
-    /** Composition ends: the hold lifts and the form re-arms the save. */
+    /** Composition ends: WebKit commits — wake held flush passes and
+     * re-arm the save. */
     endComposition() {
       composing = false;
       render();
       debounceArmed = true;
+      const wake = compositionWaiters.splice(0);
+      for (const w of wake) w();
     },
     /** The debounce window elapsed while the operator was NOT navigating:
      * triggerSave fired and the save is now in flight. */
@@ -107,35 +128,49 @@ function makeFormHarness() {
       void queue.save();
       await tick();
     },
-    /** triggerSave's debounce firing after a composition end re-armed it —
-     * the queue.save() call that re-attempts a deferFire-held drain. */
-    fireDebounce() {
-      debounceArmed = false;
-      return queue.save();
-    },
-    /** form-pane's flushPendingEdits, verbatim semantics. */
+    /** form-pane's flushPendingEdits, mirrored semantics. */
     flushPendingEdits(): Promise<void> {
-      if (!flushing) {
-        flushing = (async () => {
-          try {
-            for (;;) {
-              const hadPendingEdits = debounceArmed;
-              debounceArmed = false;
-              if (!hadPendingEdits && queue.idle && !queue.lastFailed) return;
-              badge.push("saving");
-              const result = await queue.save();
+      if (flushing) return flushing;
+      const run = (async () => {
+        try {
+          for (;;) {
+            if (composing) {
+              await waitForCompositionEnd();
+              continue;
+            }
+            const rider = reviewedRider;
+            reviewedRider = false;
+            const hadPendingEdits = debounceArmed;
+            debounceArmed = false;
+            if (
+              !hadPendingEdits && !rider &&
+              queue.idle && !queue.lastFailed && !queue.halted
+            ) {
+              return;
+            }
+            badge.push("saving");
+            const result = await queue.save(rider);
+            if (!composing) {
               void result;
               badge.push("saved");
             }
-          } catch (error) {
-            badge.push(`error:${(error as Error).message}`);
-            throw error;
-          } finally {
-            flushing = null;
           }
-        })();
-      }
-      return flushing;
+        } catch (error) {
+          if (composing) await waitForCompositionEnd();
+          badge.push(`error:${(error as Error).message}`);
+          throw error;
+        }
+      })();
+      flushing = run;
+      void run.then(
+        () => {
+          if (flushing === run) flushing = null;
+        },
+        () => {
+          if (flushing === run) flushing = null;
+        },
+      );
+      return run;
     },
     get merchant() {
       return merchant;
@@ -402,8 +437,7 @@ test("navigation during IME composition: a held flush waits for WebKit to commit
   assert.equal(form.calls.length, 1);
   assert.equal(pushed.length, 0);
 
-  form.endComposition(); // WebKit commits; composition end re-arms the save
-  void form.fireDebounce(); // 450 ms later, triggerSave fires → drain re-attempts
+  form.endComposition(); // WebKit commits; wake releases the held pass, save re-arms
   await tick();
   assert.equal(form.calls.length, 2);
   form.deferred.calls[1]!.ok({});
@@ -434,6 +468,115 @@ test("registerSaveFlusher: re-registering replaces; unregistering restores immed
     true,
     "after unmount, navigation is immediate",
   );
+});
+
+test("B4: a pending intent from form A cannot push after A is replaced by form B", async (t) => {
+  const formA = makeFormHarness();
+  const offA = registerSaveFlusher(formA.flushPendingEdits);
+  t.after(offA);
+  formA.edit("a-edit");
+  const pushed: string[] = [];
+  const navA = guardedNavigate(() => pushed.push("A-target"));
+  await tick();
+  assert.equal(formA.calls.length, 1); // A's flush in flight
+
+  offA(); // form A unmounts; form B mounts while A's flush is unresolved
+  const formB = makeFormHarness();
+  const offB = registerSaveFlusher(formB.flushPendingEdits);
+  t.after(offB);
+
+  formA.deferred.calls[0]!.ok({}); // A's flush finally completes
+  assert.equal(await navA, false); // era changed — stale target dies
+  assert.deepEqual(pushed, [] as string[]); // zero stale pushes into B's screen
+
+  formB.edit("b-edit");
+  const navB = guardedNavigate(() => pushed.push("B-target"));
+  await tick();
+  formB.deferred.calls[0]!.ok({});
+  assert.equal(await navB, true);
+  assert.deepEqual(pushed, ["B-target"]);
+});
+
+test("B4: pending intent dies when no form is mounted — a later immediate nav pushes exactly once", async (t) => {
+  const formA = makeFormHarness();
+  const offA = registerSaveFlusher(formA.flushPendingEdits);
+  t.after(offA);
+  formA.edit("x");
+  const pushed: string[] = [];
+  const navA = guardedNavigate(() => pushed.push("stale"));
+  await tick();
+
+  offA(); // unmount, NO replacement
+  assert.equal(
+    await guardedNavigate(() => pushed.push("fresh")),
+    true,
+    "no-flusher fast path navigates immediately",
+  );
+  assert.deepEqual(pushed, ["fresh"]);
+
+  formA.deferred.calls[0]!.ok({}); // old flush completes late
+  assert.equal(await navA, false);
+  assert.deepEqual(pushed, ["fresh"]); // still zero stale pushes
+});
+
+test("B4: stale cleanup from form A cannot remove form B's registration or kill its intents", async (t) => {
+  const formA = makeFormHarness();
+  const offA = registerSaveFlusher(formA.flushPendingEdits); // never cleanly run first
+  const formB = makeFormHarness();
+  const offB = registerSaveFlusher(formB.flushPendingEdits);
+  t.after(offB);
+
+  offA(); // A's cleanup AFTER B registered — must be a no-op for B
+
+  formB.edit("b-edit");
+  const pushed: string[] = [];
+  const nav = guardedNavigate(() => pushed.push("B"));
+  await tick();
+  assert.equal(formB.calls.length, 1); // B's flusher still active
+  formB.deferred.calls[0]!.ok({});
+  assert.equal(await nav, true);
+  assert.deepEqual(pushed, ["B"]);
+});
+
+test("B2 parity at guard level: save-and-next rider competes with a newer month intent — latest wins", async (t) => {
+  const form = makeFormHarness();
+  const off = registerSaveFlusher(form.flushPendingEdits);
+  t.after(off);
+
+  // `s` pressed first (rider + next-receipt target), then a month pick
+  // arrives while the reviewed flush is still committing.
+  form.edit("fields");
+  form.markReviewed(); // the save-and-next action arms the rider
+  const pushed: string[] = [];
+  const sNav = guardedNavigate(() => pushed.push("NEXT-RECEIPT"));
+  await tick();
+  assert.equal(form.calls.length, 1);
+  assert.equal(
+    (JSON.parse(form.calls[0]!.init.body as string) as { status?: string })
+      .status,
+    "reviewed",
+    "rider rode the first save",
+  );
+
+  const monthNav = guardedNavigate(() => pushed.push("MONTH-2026-07"));
+  form.deferred.calls[0]!.ok({}); // reviewed save commits
+  assert.equal(await sNav, false); // superseded by the newer intent
+  assert.equal(await monthNav, true);
+  assert.deepEqual(pushed, ["MONTH-2026-07"]);
+
+  // Edits made during the reviewed request were NOT left behind: the loop
+  // sends them as their own commit before acknowledging.
+  form.edit("late-edit");
+  const finalFlush = form.flushPendingEdits();
+  await tick();
+  assert.equal(form.calls.length, 2);
+  assert.equal(
+    (JSON.parse(form.calls[1]!.init.body as string) as { merchant: string })
+      .merchant,
+    "late-edit",
+  );
+  form.deferred.calls[1]!.ok({});
+  await finalFlush;
 });
 
 // ─── wiring: queue-rail actually routes j/k + item links through the guard ──

@@ -56,6 +56,23 @@ export interface SaveSuccess {
   warnings: string[];
 }
 
+/**
+ * A transport-level loss (fetch rejected) means the request MAY have been
+ * applied server-side — the outcome is UNKNOWN, not failed. Once that
+ * happens the queue HALTS: no further request is sent automatically (a
+ * later flush could not be claimed safely ordered if the unknown one still
+ * commits), pending waiters are rejected with this guidance (fields stay
+ * with the caller — nothing is silently discarded), and every later save()
+ * rejects until the operator reloads the receipt and checks its state.
+ * Deliberately no in-session auto-resume: without a server protocol there
+ * is no safe one. An HTTP error RESPONSE is a known failure (the server
+ * spoke) and does NOT halt — retries keep working there.
+ */
+export const SAVE_HALTED_MESSAGE =
+  "Network lost mid-save — this change may or may not have reached the server. " +
+  "Reload the receipt to check what was saved; your edits are kept on this form " +
+  "but nothing more will be sent until then.";
+
 interface Waiter {
   resolve: (success: SaveSuccess) => void;
   reject: (error: Error) => void;
@@ -67,6 +84,7 @@ export class SaveQueue {
   private hasPending = false;
   private pendingMarkReviewed = false;
   private lastFlushFailed = false;
+  private haltedForUnknownOutcome = false;
   private waiters: Waiter[] = [];
 
   constructor(config: SaveQueueConfig) {
@@ -92,6 +110,14 @@ export class SaveQueue {
     return this.lastFlushFailed;
   }
 
+  /** True after an UNKNOWN network outcome (transport loss). While halted
+   * nothing drains automatically and save() rejects with SAVE_HALTED_MESSAGE
+   * — the operator must reload and check; there is no safe in-session
+   * resume without a server protocol. */
+  get halted(): boolean {
+    return this.haltedForUnknownOutcome;
+  }
+
   /**
    * Request a save. Resolves once a PATCH carrying this request's intent has
    * COMMITTED (possibly coalesced with later requests into one flush — the
@@ -100,6 +126,12 @@ export class SaveQueue {
    */
   save(markReviewed = false): Promise<SaveSuccess> {
     return new Promise<SaveSuccess>((resolve, reject) => {
+      // Unknown-outcome halt: refuse rather than enqueue — sending more
+      // after an ambiguous request cannot be claimed safely ordered.
+      if (this.haltedForUnknownOutcome) {
+        reject(new Error(SAVE_HALTED_MESSAGE));
+        return;
+      }
       this.waiters.push({ resolve, reject });
       this.hasPending = true;
       if (markReviewed) this.pendingMarkReviewed = true;
@@ -108,6 +140,7 @@ export class SaveQueue {
   }
 
   private drain(): void {
+    if (this.haltedForUnknownOutcome) return; // no automatic draining (B3)
     if (this.inFlight || !this.hasPending) return;
     if (this.config.deferFire?.()) return; // held; next save() re-attempts
     this.inFlight = true;
@@ -130,6 +163,7 @@ export class SaveQueue {
     fetchImpl: SaveFetch,
   ): Promise<void> {
     let result: SaveSuccess | Error;
+    let haltError: Error | null = null;
     try {
       const res = await fetchImpl(url, {
         method: "PATCH",
@@ -144,15 +178,30 @@ export class SaveQueue {
         ? { warnings: json.warnings ?? [] }
         : new Error(json.error ?? "Save failed");
     } catch {
-      result = new Error("Network error");
+      // Transport loss: the request may still have been applied — UNKNOWN
+      // outcome, distinct from a confirmed HTTP failure above. Halt.
+      haltError = new Error(SAVE_HALTED_MESSAGE);
+      result = haltError;
     }
     this.inFlight = false;
+    if (haltError) {
+      // Halt BEFORE rejecting so even synchronous observers see it.
+      this.haltedForUnknownOutcome = true;
+      // Work queued behind the ambiguous request cannot be safely ordered:
+      // reject (never silently drop) its waiters too. Fields stay with the
+      // caller; the guidance message is the honest recovery state.
+      const queued = this.waiters;
+      this.waiters = [];
+      this.hasPending = false;
+      this.pendingMarkReviewed = false;
+      for (const waiter of queued) waiter.reject(haltError);
+    }
     this.lastFlushFailed = result instanceof Error;
     for (const waiter of waiters) {
       if (result instanceof Error) waiter.reject(result);
       else waiter.resolve(result);
     }
-    this.drain();
+    this.drain(); // no-op while halted
   }
 }
 

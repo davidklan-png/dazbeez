@@ -21,14 +21,28 @@
 type SaveFlusher = () => Promise<void>;
 
 let activeFlusher: SaveFlusher | null = null;
+// Bumped on every registration AND unregistration: pending navigation
+// intents are bound to the registering form's lifetime. A form being
+// replaced (or unmounting) invalidates its still-pending intents so a late
+// flush can never push a stale target into the next form's screen.
+let registrationEra = 0;
 
 /** The mounted review form registers its flush; the returned function
  * unregisters it (form unmount). Registering replaces any previous flusher —
- * only one review form is mounted at a time. */
+ * only one review form is mounted at a time — and invalidates the previous
+ * form's pending intents. Stale cleanup (an old form's unregister) never
+ * removes a NEWER registration. */
 export function registerSaveFlusher(flusher: SaveFlusher): () => void {
   activeFlusher = flusher;
+  registrationEra += 1;
   return () => {
-    if (activeFlusher === flusher) activeFlusher = null;
+    // Only invalidate when THIS flusher is still the active one — a stale
+    // cleanup (form A unmounting after form B registered) must not touch
+    // B's era; B's registration already invalidated A's pending intents.
+    if (activeFlusher === flusher) {
+      activeFlusher = null;
+      registrationEra += 1; // this form's own pending intents die with it
+    }
   };
 }
 
@@ -48,10 +62,14 @@ let navigating: object | null = null;
 
 export async function guardedNavigate(push: () => void): Promise<boolean> {
   if (!activeFlusher) {
+    // No form mounted (list page, or between form replacement): any pending
+    // intent from the previous form is from a dead era — kill it.
+    navigating = null;
     push();
     return true;
   }
   const token = {};
+  const era = registrationEra;
   navigating = token; // supersedes any in-flight guarded navigation
   try {
     await activeFlusher();
@@ -59,7 +77,8 @@ export async function guardedNavigate(push: () => void): Promise<boolean> {
     if (navigating === token) navigating = null;
     return false;
   }
-  if (navigating !== token) return false; // superseded by a newer intent
+  // Superseded by a newer intent, or invalidated by form replacement/unmount.
+  if (navigating !== token || registrationEra !== era) return false;
   navigating = null;
   push();
   return true;

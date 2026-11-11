@@ -1,7 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { SaveQueue, type SaveFetch } from "@/lib/receipts/save-queue";
+import {
+  SAVE_HALTED_MESSAGE,
+  SaveQueue,
+  type SaveFetch,
+} from "@/lib/receipts/save-queue";
 
 // ─── controlled deferred fetch ──────────────────────────────────────────
 // Every request is a manually-resolved promise so tests decide exactly when
@@ -205,17 +209,55 @@ test("SaveQueue: failed flush rejects its waiters with the server error and the 
   await p3;
 });
 
-test("SaveQueue: network failure rejects with 'Network error'", async () => {
+test("SaveQueue: transport loss = UNKNOWN outcome — halts draining, rejects queued work with guidance, later saves refuse (B3)", async () => {
   const { calls, fetchImpl } = makeDeferredFetch();
   const q = new SaveQueue({ url: "/r", buildBody: () => ({}), fetchImpl });
 
-  const p = q.save();
+  // Request A in flight; work B queues behind it (newer fields + rider).
+  const pA = q.save();
   await tick();
+  const pB = q.save(true);
+  await tick();
+  assert.equal(calls.length, 1);
+
+  // A's transport drops after the server may have accepted it.
   calls[0]!.drop();
-  await assert.rejects(p, /Network error/);
+  await assert.rejects(pA, new RegExp(SAVE_HALTED_MESSAGE.slice(0, 24)));
+  // B was queued behind an UNKNOWN outcome — it must NOT be sent, and its
+  // waiter must be rejected with the guidance, never resolved, never lost
+  // silently.
+  await assert.rejects(pB, /may or may not have reached the server/);
+  assert.equal(calls.length, 1); // B never fired
+  assert.equal(q.halted, true);
+
+  // No automatic resume: a later navigation/edit attempt is refused with
+  // the honest recovery state until the operator reloads.
+  await assert.rejects(q.save(), /Reload the receipt/);
+  assert.equal(calls.length, 1);
+
+  // A late "success" elsewhere cannot clear the uncertainty: nothing else
+  // was sent, so nothing can acknowledge safe ordering.
+  assert.equal(q.halted, true);
 });
 
-test("SaveQueue: deferFire holds the pending flush until the next save re-drains", async () => {
+test("SaveQueue: an HTTP error RESPONSE is a known failure — queue keeps draining and retrying (B3 contrast)", async () => {
+  const { calls, fetchImpl } = makeDeferredFetch();
+  const q = new SaveQueue({ url: "/r", buildBody: () => ({}), fetchImpl });
+
+  const pA = q.save();
+  await tick();
+  const pB = q.save();
+  calls[0]!.fail("Receipt is sealed"); // server SPOKE — definitive failure
+  await assert.rejects(pA, /Receipt is sealed/);
+  assert.equal(q.halted, false);
+
+  await tick();
+  assert.equal(calls.length, 2); // B still sends and can commit safely
+  calls[1]!.ok();
+  await pB;
+});
+
+test("SaveQueue: deferFire holds REAL pending work — nothing fires or resolves until composition ends (N1)", async () => {
   const { calls, fetchImpl } = makeDeferredFetch();
   let composing = false;
   const q = new SaveQueue({
@@ -227,17 +269,33 @@ test("SaveQueue: deferFire holds the pending flush until the next save re-drains
 
   const p1 = q.save();
   await tick();
-  composing = true; // composition begins while request 1 is in flight
+  assert.equal(calls.length, 1);
+
+  // Composition begins, and while it is active AND request 1 still in
+  // flight, a second save queues BEHIND it (pending waiter exists).
+  composing = true;
+  let bResolved = false;
+  const p2 = q.save().then(
+    () => {
+      bResolved = true;
+    },
+    () => {
+      bResolved = true;
+    },
+  );
+
+  // NOW request 1 completes — the drain must hold the pending flush.
   calls[0]!.ok();
   await tick();
-  assert.equal(calls.length, 1); // pending flush held
+  assert.equal(calls.length, 1, "pending flush must not fire while composing");
+  assert.equal(bResolved, false, "pending waiter must not resolve while held");
 
-  composing = false; // composition end re-arms the save
-  const p2 = q.save();
+  composing = false; // composition end re-arms (the next save re-drains)
+  const p3 = q.save();
   await tick();
   assert.equal(calls.length, 2);
   calls[1]!.ok();
-  await Promise.all([p1, p2]);
+  await Promise.all([p1, p2, p3]);
 });
 
 test("SaveQueue: lastFailed tracks the newest flush outcome for retry decisions", async () => {
@@ -312,32 +370,37 @@ test("form-pane routes every save through the serialized queue (no parallel PATC
   assert.doesNotMatch(reviewForm, /new AbortController/);
   assert.doesNotMatch(reviewForm, /\.abort\(\)/);
   assert.doesNotMatch(reviewForm, /inFlightRef/);
-  // Every fetch in the form is either the queue's or a disjoint endpoint
-  // (override sends only exportStatementMonth; delete/extract/directory).
-  const markReviewed = section(
-    reviewForm,
-    "const onMarkReviewed = useCallback(",
-    "// Flush pending edits NOW", // flushPendingEdits follows
+  // The ONLY hand-rolled PATCH left in the form is the statement-month
+  // override (field-disjoint from autosaves by design); every field save
+  // goes through the queue.
+  const formBody = reviewForm.slice(
+    reviewForm.indexOf("export function FormPane"),
+    reviewForm.indexOf("function formatAmountInput"),
   );
-  assert.ok(!/await fetch\(/.test(markReviewed));
-  assert.match(markReviewed, /await saveQueue\.save\(true\)/);
+  assert.equal(
+    (formBody.match(/method: "PATCH"/g) ?? []).length,
+    1,
+    "exactly one non-queue PATCH: the exportStatementMonth override",
+  );
 });
 
-test("form-pane: save-and-next navigates only AFTER the queue commits, and stays on failure", () => {
-  const fn = reviewForm.slice(
-    reviewForm.indexOf("const onMarkReviewed = useCallback("),
-    reviewForm.indexOf("const flushPendingEdits"),
+test("form-pane: save-and-next is a guarded navigation intent — same drain, same supersession (B2)", () => {
+  const fn = section(
+    reviewForm,
+    "const onMarkReviewed = useCallback(",
+    "// Flush pending edits NOW",
   );
-  const awaitIdx = fn.indexOf("await saveQueue.save(true)");
-  const pushIdx = fn.indexOf("router.push(");
-  assert.ok(awaitIdx !== -1 && pushIdx !== -1);
-  assert.ok(awaitIdx < pushIdx, "navigation must follow the awaited save");
-  // Honest failure: the catch sets an error badge and NEVER navigates.
-  const catchIdx = fn.indexOf("} catch (error) {");
-  assert.ok(catchIdx !== -1);
-  const catchBlock = fn.slice(catchIdx);
-  assert.match(catchBlock, /kind: "error"/);
-  assert.doesNotMatch(catchBlock, /router\.push\(/);
+  // Rider set, then navigation goes through the guard — no direct push, no
+  // private save path bypassing the latest-edit drain.
+  assert.match(fn, /reviewedRiderRef\.current = true/);
+  assert.match(fn, /guardedNavigate\(/);
+  assert.match(fn, /router\.push\(/); // inside the guard callback only
+  assert.doesNotMatch(fn, /await saveQueue\.save/);
+  // The button + `s` gate is unchanged.
+  assert.match(
+    reviewForm,
+    /if \(!canMarkReviewed\(receipt\.status, isLocked\) \|\| !inView\) return;/,
+  );
 });
 
 test("form-pane: registers the navigation flusher; Skip and in-form links navigate through the guard", () => {
@@ -375,11 +438,23 @@ test("form-pane: flushPendingEdits commits pending work and rethrows failures to
   );
   assert.match(fn, /saveTimerRef\.current/);
   assert.match(fn, /saveQueue\.idle/);
-  assert.match(fn, /await saveQueue\.save\(\)/);
+  assert.match(fn, /saveQueue\.halted/); // B3: clean pass refuses when halted
+  assert.match(fn, /await saveQueue\.save\(markReviewed\)/); // B2: rider rides
   // Failure surfaces the badge error AND rejects so the navigator stays.
   assert.match(fn, /kind: "error"/);
   assert.match(fn, /throw error;/);
   assert.doesNotMatch(fn, /router\.push/);
+  // B5: holds through an active composition at every pass, including one
+  // started mid-await, and suppresses badge updates until WebKit commits.
+  assert.ok(
+    (fn.match(/waitForCompositionEnd\(\)/g) ?? []).length >= 2,
+    "loop-head hold + error-path hold",
+  );
+  assert.match(fn, /if \(!businessPurposeComposingRef\.current\) \{/);
+  // B1: cleanup is post-assignment (.then), never a finally inside the
+  // async body — a synchronous clean pass must not cache its success.
+  assert.match(fn, /void flush\.then\(/);
+  assert.doesNotMatch(fn, /finally \{/);
 });
 
 test("form-pane: unmount keeps only a send-and-hope net for un-awaitable exits", () => {
