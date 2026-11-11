@@ -223,43 +223,48 @@ export async function persistReceiptChecks(
 
   const wantedTypes = new Set(computed.map((c) => c.checkType));
   const now = nowIso();
+  const statements: D1PreparedStatement[] = [];
 
   // Resolve previously-open checks that no longer apply.
   for (const [checkType, row] of existingOpen) {
     if (!wantedTypes.has(checkType as ComplianceCheckType)) {
-      await db
-        .prepare(
-          `UPDATE receipt_compliance_checks
-           SET status = 'resolved', resolved_at = ?, resolved_by = 'system'
-           WHERE id = ?`,
-        )
-        .bind(now, row.id)
-        .run();
+      statements.push(
+        db
+          .prepare(
+            `UPDATE receipt_compliance_checks
+             SET status = 'resolved', resolved_at = ?, resolved_by = 'system'
+             WHERE id = ?`,
+          )
+          .bind(now, row.id),
+      );
     }
   }
 
   // Insert any newly-triggered checks.
   for (const check of computed) {
     if (existingOpen.has(check.checkType)) continue;
-    await db
-      .prepare(
-        `INSERT INTO receipt_compliance_checks
-          (id, object_type, object_id, check_type, status, severity, message,
-           details_json, checked_at, created_at)
-         VALUES (?, 'receipt', ?, ?, 'open', ?, ?, ?, ?, ?)`,
-      )
-      .bind(
-        newUuid(),
-        receiptId,
-        check.checkType,
-        check.severity,
-        check.message,
-        check.details ? stringifyJson(check.details) : null,
-        now,
-        now,
-      )
-      .run();
+    statements.push(
+      db
+        .prepare(
+          `INSERT INTO receipt_compliance_checks
+            (id, object_type, object_id, check_type, status, severity, message,
+             details_json, checked_at, created_at)
+           VALUES (?, 'receipt', ?, ?, 'open', ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          newUuid(),
+          receiptId,
+          check.checkType,
+          check.severity,
+          check.message,
+          check.details ? stringifyJson(check.details) : null,
+          now,
+          now,
+        ),
+    );
   }
+  // D1 batches roll back together; a failed refresh must not partly resolve checks.
+  if (statements.length > 0) await db.batch(statements);
 }
 
 export async function listChecksForObject(
@@ -476,7 +481,7 @@ export async function runComplianceChecksForReceipt(
     .prepare(`SELECT * FROM receipt_records WHERE id = ? LIMIT 1`)
     .bind(receiptId)
     .first<ReceiptRecord>();
-  if (!receipt) return [];
+  if (!receipt) throw new Error(`Receipt ${receiptId} not found during compliance refresh.`);
 
   const attendeesResult = await db
     .prepare(`SELECT * FROM receipt_attendees WHERE receipt_id = ?`)

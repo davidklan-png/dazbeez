@@ -11,6 +11,9 @@ import { ExportFinalizedError } from "@/lib/receipts/month-lock";
 import { nowIso, stringifyJson } from "@/lib/receipts/db-utils";
 import { getReceiptsDb, getReceiptsProcessorKey } from "@/lib/cloudflare-runtime";
 import type { ExtractionResult } from "@/lib/receipts/types";
+import { runComplianceChecksForReceipt } from "@/lib/receipts/compliance";
+import { getComplianceSettings } from "@/lib/receipts/settings";
+import { getReceiptLocks } from "@/lib/receipts/receipt-locks";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -85,6 +88,14 @@ export async function POST(request: Request, { params }: RouteContext) {
         newValueJson: stringifyJson({ reason: "not_found" }),
       });
       return NextResponse.json({ error: "Receipt not found." }, { status: 404 });
+    }
+
+    const lock = (await getReceiptLocks([receipt])).get(id);
+    if (receipt.deleted_at || receipt.status === "archived" || lock?.locked) {
+      return NextResponse.json(
+        { error: "Receipt is deleted, archived, or locked and cannot be re-extracted." },
+        { status: 409 },
+      );
     }
 
     // Reviewed-and-beyond receipts are never machine-overwritten. A queued
@@ -171,8 +182,8 @@ export async function POST(request: Request, { params }: RouteContext) {
         discrepancies,
         ...(sourcePageCount ? { sourcePageCount } : {}),
       }),
-      extractionState: "processed",
-      extractionProcessedAt: nowIso(),
+      // Explicit state prevents the captured → needs_review update's auto-completion.
+      extractionState: receipt.extraction_state ?? "captured",
       extractionProcessor: provider,
       extractionAttempts: (receipt.extraction_attempts ?? 0) + 1,
     };
@@ -241,6 +252,22 @@ export async function POST(request: Request, { params }: RouteContext) {
         }),
       });
     }
+
+    // Keep queued work pending until derived checks commit, so a 500 is retryable.
+    try {
+      const settings = await getComplianceSettings();
+      await runComplianceChecksForReceipt(db, id, settings);
+    } catch (error) {
+      console.error("[api/receipts/[id]/extract] compliance refresh failed", id, error);
+      return NextResponse.json(
+        { error: "Extraction fields saved, but compliance refresh failed. Retry extraction to refresh checks." },
+        { status: 500 },
+      );
+    }
+    await updateReceiptRecord(id, {
+      extractionState: "processed",
+      extractionProcessedAt: nowIso(),
+    }, actor);
 
     await createAuditEntry(db, {
       actor,
