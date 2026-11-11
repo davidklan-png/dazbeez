@@ -113,7 +113,8 @@ test("MIURA: tax amount and rate are merged in one guarded D1 batch", async () =
     actor: "operator@example.com",
   });
   assert.deepEqual(result.updatedFields, ["tax_amount", "tax_rate"]);
-  assert.equal(db.batches.length, 1);
+  assert.equal(db.batches.length, 2);
+  assert.ok(db.batches[1].every((s) => s.sql.includes("receipt_compliance_checks")));
   const batch = db.batches[0]!;
   assert.match(batch[0]!.sql, /INSERT INTO duplicate_merge_log/);
   const update = batch.find((statement) => statement.sql.includes("UPDATE receipt_records"))!;

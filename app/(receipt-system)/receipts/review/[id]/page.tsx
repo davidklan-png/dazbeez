@@ -118,6 +118,14 @@ async function renderReceiptPage(
   ]);
   if (!receipt) notFound();
 
+  let rawText: string | null = null;
+  try {
+    const extraction = JSON.parse(receipt.extraction_json ?? "null");
+    if (typeof extraction?.rawText === "string") rawText = extraction.rawText;
+  } catch {
+    // Malformed historical extraction must not prevent evidence review.
+  }
+
   // ADR 0008 (reusing 0006 §D6): open export months (override targets) + the
   // receipt's natural calendar month, for the discretionary membership override
   // control.
@@ -252,8 +260,7 @@ async function renderReceiptPage(
           receiptDisplayId={shortId}
           filename={receipt.original_filename}
           fileSizeBytes={receipt.original_size_bytes}
-          contentType={receipt.original_content_type}
-          hasExtraction={Boolean(receipt.extraction_json)}
+          rawText={rawText}
         />
       }
       formPane={
