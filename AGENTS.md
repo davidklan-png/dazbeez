@@ -579,25 +579,38 @@ starts. Design consequences:
     extraction leg — classify permanent render failures and POST a
     processor-key-guarded endpoint that records the failure, so it surfaces
     like `extraction_state='failed'` does.
-    IMPLEMENTED (2026-11-11, receipts-processing-recovery PR): consumer
-    classifies permanent render failures via an explicit allowlist
-    (`PermanentRenderError` only — empty body bytes from /file, WeasyPrint
-    empty PDF; everything else stays retryable) and POSTs
-    `/api/receipts/:id/render-failed` (processor-key OR Clerk; in
-    PUBLIC_ROUTES + middleware-routing test). Terminal marker reuses
-    `extraction_state='failed'` + extraction_json `{failed,stage:'render',
-    reason}` — no migration (architect preference, extraction-failed
-    precedent); `needs_render=1` stays as the render-vs-extraction
-    discriminator. `pull_render_pending` excludes failed rows (the retry
-    stop); legacy stalled rows untouched. Pipeline health gains
-    render_failed/extraction_failed classes + per-receipt rows (filename,
-    review link, age, reason, honest action); extraction-failed rows get NO
-    auto-retry (the /enqueue contract intentionally refuses failed rows — the
-    health row says "replace the file or enter fields by hand"). Deliberate
-    recovery: `/api/receipts/:id/render-retry` (Clerk-only, strict 409
-    admission mirroring /enqueue) clears the marker so the render leg picks
-    the row up next cycle. Live follow-up: restart the launchd
-    auto-promote-render job from committed code.
+    IMPLEMENTED (2026-11-11, receipts-processing-recovery PR; hardened in
+    round 2 after cross-review B1–B5): consumer classifies permanent render
+    failures via an explicit allowlist (`PermanentRenderError` only — empty
+    body bytes from /file, WeasyPrint empty PDF; everything else stays
+    retryable) and POSTs `/api/receipts/:id/render-failed` (processor-key OR
+    Clerk; in PUBLIC_ROUTES + middleware-routing test). Terminal marker
+    reuses `extraction_state='failed'` + extraction_json
+    `{failed,stage:'render',reason}` — no migration (architect preference,
+    extraction-failed precedent); `needs_render=1` stays as the
+    render-vs-extraction discriminator. The terminal state AND its reason
+    commit in ONE conditional UPDATE whose WHERE repeats the full admission;
+    preexisting extraction data in extraction_json is merged (preserved) and
+    the FIRST terminal reason/timestamp is immutable — repeat reports are
+    read-only idempotent successes. `pull_render_pending` excludes failed
+    rows (the retry stop); legacy stalled rows untouched. Pipeline health
+    gains render_failed/extraction_failed classes + per-receipt rows
+    (filename, review link, age, reason, honest action; "showing oldest 50
+    of N" cap disclosure; failed detail queries surface an explicit
+    "details unavailable — reload" line, never a silent empty list);
+    extraction-failed rows get NO auto-retry (the /enqueue contract
+    intentionally refuses failed rows — the health row says "replace the
+    file or enter fields by hand"). Deliberate recovery:
+    `/api/receipts/:id/render-retry` (Clerk-only) clears the marker so the
+    render leg picks the row up next cycle — admission (needs_render=1,
+    failed, pre-review status, not deleted, and BOTH canonical month/seal
+    locks from month-lock.ts incl. the ADR 0012 draft carve-out) is enforced
+    inside the atomic UPDATE with affected-rows inspection; a lost race or a
+    sealed month answers 409 honestly, never a false success. Real-SQLite
+    regressions (tests/receipts/render-recovery-persistence.test.ts) cover
+    merge/idempotence, rollback, review/delete races, and sealed-month
+    fixtures. Live follow-up: restart the launchd auto-promote-render job
+    from committed code.
 
 23. **`preservation_status` is a three-way inconsistency in existing rows —
     backfill SEPARATELY (not in the capture-contract PR).** Found during the #18

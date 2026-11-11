@@ -548,8 +548,9 @@ def is_permanent_render_error(exc: Exception) -> bool:
     from /file, or the renderer producing an empty PDF. Both are properties of
     the same bytes, so retrying cannot change the outcome. Everything else
     (WeasyPrint environmental errors, requests failures, HTTP 4xx/5xx from
-    /render) stays on the existing every-cycle retry path, bounded by the
-    class-3 render_stalled health signal + these stderr logs.
+    /render) stays on the existing every-cycle retry path (no numeric cap;
+    aging is surfaced by the class-3 render_stalled health signal + these
+    stderr logs).
     """
     return isinstance(exc, PermanentRenderError)
 
@@ -914,16 +915,18 @@ def pull_auto_promote_candidates(
     ]
 
 
-def post_render_failed(receipt_id: str, reason: str) -> None:
+def post_render_failed(receipt_id: str, reason: str) -> bool:
     """Tell the Worker a needs_render receipt's render failed permanently
-    (backlog #22). Mirrors post_extraction_failed: the Worker moves
-    extraction_state to 'failed' with stage:'render' in extraction_json, so
-    the receipt surfaces as a terminal render failure (red pill + dashboard
-    health row with a Retry-render action) instead of retrying every cycle.
+    (backlog #22). The Worker moves extraction_state to 'failed' with
+    stage:'render' in extraction_json, so the receipt surfaces as a terminal
+    render failure (red pill + dashboard health row with a Retry-render
+    action) instead of retrying every cycle.
 
-    Failures of THIS call are swallowed — the row stays retryable and the
-    next cycle re-attempts the render and the report. Losing the reason
-    annotation once is preferable to an unhandled crash of the render leg.
+    Returns True only when the report was ACCEPTED (HTTP 2xx). A transport
+    failure or non-OK response returns False and is swallowed — the row
+    stays retryable and the next cycle re-attempts the render and the report.
+    The caller must NOT log a terminal claim unless this returns True (an
+    unaccepted report means nothing was committed).
     """
     headers = {
         "x-receipts-processor-key": PROCESSOR_KEY,
@@ -942,12 +945,15 @@ def post_render_failed(receipt_id: str, reason: str) -> None:
                 f"HTTP {resp.status_code}; will retry next cycle",
                 file=sys.stderr,
             )
+            return False
+        return True
     except requests.RequestException as exc:
         print(
             f"[warn] {receipt_id}: failed to post render-failed ({exc}); "
             "will retry next cycle",
             file=sys.stderr,
         )
+        return False
 
 
 def pull_render_pending(only_id: str | None = None) -> list[dict[str, Any]]:
@@ -1040,14 +1046,23 @@ def process_renders(dry_run: bool, only_id: str | None = None) -> None:
                 # Deterministic-permanent (empty body / empty PDF). Mark the
                 # receipt terminal so the render leg stops retrying it every
                 # cycle; the dashboard surfaces it with the reason + a
-                # Retry-render action. Transient errors stay retryable.
+                # Retry-render action. The terminal claim is logged ONLY if
+                # the Worker accepted the report — otherwise the row stays
+                # in the pending pool and the next cycle re-reports.
                 reason = _format_render_failure_reason(exc)
-                post_render_failed(rid, reason)
-                print(
-                    f"  [fail-perm] {rid}: {reason} "
-                    "— marked render-failed (terminal until Retry render)",
-                    file=sys.stderr,
-                )
+                if post_render_failed(rid, reason):
+                    print(
+                        f"  [fail-perm] {rid}: {reason} "
+                        "— marked render-failed (terminal until Retry render)",
+                        file=sys.stderr,
+                    )
+                else:
+                    print(
+                        f"  [fail-perm-unreported] {rid}: {reason} "
+                        "— report NOT accepted; still retryable, will "
+                        "re-attempt next cycle",
+                        file=sys.stderr,
+                    )
             else:
                 print(f"  [retry] {rid}: {exc}", file=sys.stderr)
 

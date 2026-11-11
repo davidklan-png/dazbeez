@@ -222,3 +222,48 @@ export function currentCalendarMonth(): string {
   const jst = new Date(now.getTime() + 9 * 60 * 60 * 1000);
   return jst.toISOString().slice(0, 7);
 }
+
+// ─── Embeddable SQL forms of the canonical locks ─────────────────────────────
+//
+// The predicates above answer "is month M locked?" from JS, one query at a
+// time. Some write paths need the SAME semantics inside a single conditional
+// UPDATE (so admission cannot be lost to a race between read and write) —
+// e.g. the render-retry recovery write (render-recovery.ts). These builders
+// emit the exact table/status predicates the JS functions use, including the
+// ADR 0012 unified draft carve-out, so the embedded guard and the JS
+// predicate cannot drift apart in meaning. render-recovery's persistence
+// tests execute BOTH against the same SQLite fixture and assert they agree.
+
+/**
+ * SQL boolean: the month named by `monthExpr` (a SQL expression yielding
+ * YYYY-MM, e.g. a bound param or substr(transaction_date,1,7)) is locked for
+ * edits — finalized export exists AND no open draft. Mirrors
+ * {@link isMonthLockedForEdits}.
+ */
+export function monthLockedForEditsSql(monthExpr: string): string {
+  return (
+    `EXISTS(SELECT 1 FROM receipt_exports e ` +
+    `WHERE e.export_month = ${monthExpr} AND e.status = 'finalized') ` +
+    `AND NOT EXISTS(SELECT 1 FROM receipt_exports d ` +
+    `WHERE d.export_month = ${monthExpr} AND d.status = 'draft')`
+  );
+}
+
+/**
+ * SQL boolean: the receipt identified by `receiptIdExpr` is matched to an
+ * AMEX line in a statement month whose reconciliation is finalized AND still
+ * edit-locked (same draft carve-out). Mirrors
+ * rejectIfReceiptInFinalizedReconciliation in db.ts.
+ */
+export function receiptInFinalizedReconciliationSql(
+  receiptIdExpr: string,
+): string {
+  return (
+    `EXISTS(SELECT 1 FROM amex_statement_lines asl ` +
+    `JOIN amex_reconciliations ar ` +
+    `ON ar.statement_month = asl.statement_month ` +
+    `AND ar.status = 'finalized' ` +
+    `WHERE asl.matched_receipt_id = ${receiptIdExpr} ` +
+    `AND ${monthLockedForEditsSql("ar.statement_month")})`
+  );
+}

@@ -89,7 +89,7 @@ class TestProcessRenders(unittest.TestCase):
         """Zero-byte body from /file → post_render_failed, no post_render."""
         with patch.object(consumer, "pull_render_pending", return_value=self._rows()), \
              patch.object(consumer, "fetch_original_bytes", return_value=b""), \
-             patch.object(consumer, "post_render_failed") as fail, \
+             patch.object(consumer, "post_render_failed", return_value=True) as fail, \
              patch.object(consumer, "post_render") as ok:
             consumer.process_renders(dry_run=False)
         ok.assert_not_called()
@@ -102,7 +102,7 @@ class TestProcessRenders(unittest.TestCase):
         """Fetch failure (None) → no terminal report; retried next cycle."""
         with patch.object(consumer, "pull_render_pending", return_value=self._rows()), \
              patch.object(consumer, "fetch_original_bytes", return_value=None), \
-             patch.object(consumer, "post_render_failed") as fail, \
+             patch.object(consumer, "post_render_failed", return_value=True) as fail, \
              patch.object(consumer, "post_render") as ok:
             consumer.process_renders(dry_run=False)
         ok.assert_not_called()
@@ -116,7 +116,7 @@ class TestProcessRenders(unittest.TestCase):
                  "render_email_body.render_body_to_pdf",
                  side_effect=PermanentRenderError("WeasyPrint produced an empty PDF"),
              ), \
-             patch.object(consumer, "post_render_failed") as fail, \
+             patch.object(consumer, "post_render_failed", return_value=True) as fail, \
              patch.object(consumer, "post_render") as ok:
             consumer.process_renders(dry_run=False)
         ok.assert_not_called()
@@ -131,7 +131,7 @@ class TestProcessRenders(unittest.TestCase):
                  "render_email_body.render_body_to_pdf",
                  side_effect=RuntimeError("pango blew up"),
              ), \
-             patch.object(consumer, "post_render_failed") as fail, \
+             patch.object(consumer, "post_render_failed", return_value=True) as fail, \
              patch.object(consumer, "post_render") as ok:
             consumer.process_renders(dry_run=False)
         ok.assert_not_called()
@@ -142,24 +142,82 @@ class TestProcessRenders(unittest.TestCase):
         with patch.object(consumer, "pull_render_pending", return_value=self._rows()), \
              patch.object(consumer, "fetch_original_bytes", return_value=b"<html>x</html>"), \
              patch("render_email_body.render_body_to_pdf", return_value=b"%PDF-1.4"), \
-             patch.object(consumer, "post_render_failed") as fail, \
+             patch.object(consumer, "post_render_failed", return_value=True) as fail, \
              patch.object(consumer, "post_render") as ok:
             consumer.process_renders(dry_run=False)
         ok.assert_called_once_with("rid-1", b"%PDF-1.4", "application/pdf")
         fail.assert_not_called()
 
+    def test_terminal_claim_logged_only_when_report_accepted(self):
+        """N2: an UNACCEPTED report (HTTP 503) must not log a contradictory
+        'marked render-failed (terminal)' line — the row was not committed,
+        so it stays retryable and the log says so."""
+        import contextlib
+        import io
+
+        def permanent_render(body, content_type):
+            raise PermanentRenderError("WeasyPrint produced an empty PDF")
+
+        with patch.object(consumer, "pull_render_pending", return_value=self._rows()), \
+             patch.object(consumer, "fetch_original_bytes", return_value=b"<html>x</html>"), \
+             patch("render_email_body.render_body_to_pdf", side_effect=permanent_render), \
+             patch.object(consumer, "post_render_failed", return_value=False), \
+             patch.object(consumer, "post_render"):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                consumer.process_renders(dry_run=False)
+        log = err.getvalue()
+        self.assertIn("fail-perm-unreported", log)
+        self.assertIn("report NOT accepted", log)
+        self.assertNotIn("terminal until Retry render", log)
+
+    def test_terminal_claim_logged_when_report_accepted(self):
+        import contextlib
+        import io
+
+        def permanent_render(body, content_type):
+            raise PermanentRenderError("WeasyPrint produced an empty PDF")
+
+        with patch.object(consumer, "pull_render_pending", return_value=self._rows()), \
+             patch.object(consumer, "fetch_original_bytes", return_value=b"<html>x</html>"), \
+             patch("render_email_body.render_body_to_pdf", side_effect=permanent_render), \
+             patch.object(consumer, "post_render_failed", return_value=True), \
+             patch.object(consumer, "post_render"):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                consumer.process_renders(dry_run=False)
+        self.assertIn("terminal until Retry render", err.getvalue())
+
 
 class TestPostRenderFailed(unittest.TestCase):
-    def test_transport_failure_is_swallowed(self):
-        """A network failure posting the report must not raise — the row
-        stays retryable and the next cycle re-reports."""
+    def test_transport_failure_is_swallowed_and_reports_failure(self):
+        """A network failure posting the report must not raise — and must
+        return False so the caller never logs a terminal claim (N2)."""
         import requests
         with patch.object(
             consumer.requests,
             "post",
             side_effect=requests.ConnectionError("down"),
         ):
-            consumer.post_render_failed("rid-1", "empty")  # must not raise
+            accepted = consumer.post_render_failed("rid-1", "empty")
+        self.assertFalse(accepted)
+
+    def test_http_503_is_not_accepted(self):
+        """503 from the endpoint → False (nothing was committed)."""
+        import requests
+        resp = requests.Response()
+        resp.status_code = 503
+        with patch.object(consumer.requests, "post", return_value=resp):
+            accepted = consumer.post_render_failed("rid-1", "empty")
+        self.assertFalse(accepted)
+
+    def test_http_200_is_accepted(self):
+        import requests
+        resp = requests.Response()
+        resp.status_code = 200
+        with patch.object(consumer.requests, "post", return_value=resp):
+            accepted = consumer.post_render_failed("rid-1", "empty")
+        self.assertTrue(accepted)
 
     def test_posts_to_render_failed_endpoint_with_reason(self):
         with patch.object(consumer.requests, "post") as post:

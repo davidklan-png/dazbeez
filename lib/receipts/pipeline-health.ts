@@ -339,6 +339,22 @@ export interface PipelineAttentionReceipt {
   reason: string | null;
 }
 
+/** Detail rows for one lit class, plus the uncapped total (N1: the loader is
+ *  bounded to the oldest MAX_DETAIL_ROWS; `total` lets the surface say
+ *  "showing oldest 50 of 51"). `unavailable` is the honest error sentinel —
+ *  a failed detail query is NOT an empty list (review B5). */
+export const MAX_DETAIL_ROWS = 50;
+
+export interface PipelineAttention {
+  kind: PipelineDetailKind;
+  rows: PipelineAttentionReceipt[];
+  /** Total affected rows for the class (≥ rows.length). */
+  total: number;
+  /** True when the detail query FAILED — rows must not be treated as the
+   *  complete affected set (nor as "none affected": the count is lit). */
+  unavailable?: boolean;
+}
+
 interface AttentionRow {
   id: string;
   original_filename: string | null;
@@ -347,7 +363,17 @@ interface AttentionRow {
   age_from: string | null;
   extraction_state: string | null;
   needs_render: number | null;
-  extraction_json: string | null;
+  /** Only selected for the terminal classes (they alone read the reason). */
+  extraction_json?: string | null;
+  /** COUNT(*) OVER () — total affected rows for the class. */
+  total: number;
+}
+
+/** True for the terminal classes, which surface extraction_json's failure
+ *  reason; the stalled/never-enqueued classes never read it, so the detail
+ *  query skips the column for them (N1). */
+function kindUsesFailureReason(kind: PipelineDetailKind): boolean {
+  return kind === "render_failed" || kind === "extraction_failed";
 }
 
 /** Pure SQL spec for one class's detail rows. Bindings in D1 bind order. */
@@ -358,77 +384,83 @@ export function buildPipelineDetailQuery(
   switch (kind) {
     case "never_enqueued":
       return {
-        sql: DETAIL_PREFIX + `
+        sql: DETAIL_PREFIX(kind) + `
          AND extraction_state = 'captured'
          AND extraction_enqueued_at IS NULL
          AND (needs_render = 0 OR needs_render IS NULL)
-       ORDER BY captured_at ASC LIMIT 50`,
+       ORDER BY captured_at ASC LIMIT ${MAX_DETAIL_ROWS}`,
         bindings: [],
       };
     case "consumer_stalled":
       return {
-        sql: DETAIL_PREFIX + `
+        sql: DETAIL_PREFIX(kind) + `
          AND extraction_state IN ('captured','queued','processing')
          AND extraction_enqueued_at IS NOT NULL
          AND extraction_enqueued_at < ?
-       ORDER BY extraction_enqueued_at ASC LIMIT 50`,
+       ORDER BY extraction_enqueued_at ASC LIMIT ${MAX_DETAIL_ROWS}`,
         bindings: [staleBeforeIso],
       };
     case "render_stalled":
       return {
-        sql: DETAIL_PREFIX + `
+        sql: DETAIL_PREFIX(kind) + `
          AND needs_render = 1
          AND (extraction_state IS NULL OR extraction_state != 'failed')
          AND captured_at < ?
-       ORDER BY captured_at ASC LIMIT 50`,
+       ORDER BY captured_at ASC LIMIT ${MAX_DETAIL_ROWS}`,
         bindings: [staleBeforeIso],
       };
     case "render_failed":
       return {
-        sql: DETAIL_PREFIX + `
+        sql: DETAIL_PREFIX(kind) + `
          AND extraction_state = 'failed'
          AND needs_render = 1
-       ORDER BY extraction_processed_at ASC LIMIT 50`,
+       ORDER BY extraction_processed_at ASC LIMIT ${MAX_DETAIL_ROWS}`,
         bindings: [],
       };
     case "extraction_failed":
       return {
-        sql: DETAIL_PREFIX + `
+        sql: DETAIL_PREFIX(kind) + `
          AND extraction_state = 'failed'
          AND (needs_render = 0 OR needs_render IS NULL)
-       ORDER BY extraction_processed_at ASC LIMIT 50`,
+       ORDER BY extraction_processed_at ASC LIMIT ${MAX_DETAIL_ROWS}`,
         bindings: [],
       };
   }
 }
 
-const DETAIL_PREFIX = `SELECT id, original_filename,
+const DETAIL_PREFIX = (kind: PipelineDetailKind): string => `SELECT id, original_filename,
          CASE
            WHEN extraction_state = 'failed' THEN extraction_processed_at
            WHEN extraction_enqueued_at IS NOT NULL THEN extraction_enqueued_at
            ELSE captured_at
          END AS age_from,
-         extraction_state, needs_render, extraction_json
+         extraction_state, needs_render${kindUsesFailureReason(kind) ? ", extraction_json" : ""},
+         COUNT(*) OVER () AS total
        FROM receipt_records
        WHERE deleted_at IS NULL`;
 
-/** The affected receipts for a lit class (filename, age, reason). Only load
- *  when the class is lit — bounded to 50, these are rare error cases. */
+/** The affected receipts for a lit class (filename, age, reason) plus the
+ *  uncapped total. Only load when the class is lit — bounded to the oldest
+ *  MAX_DETAIL_ROWS; these are rare error cases. Throws on query failure —
+ *  the dashboard maps that to the `unavailable` sentinel (B5), not []. */
 export async function listPipelineAttentionReceipts(
   kind: PipelineDetailKind,
   db: D1Database = getReceiptsDb(),
   now: number = Date.now(),
-): Promise<PipelineAttentionReceipt[]> {
+): Promise<PipelineAttention> {
   const staleBeforeIso = new Date(now - STALE_PENDING_MS).toISOString();
   const { sql, bindings } = buildPipelineDetailQuery(kind, staleBeforeIso);
   const result = await db.prepare(sql).bind(...bindings).all<AttentionRow>();
-  return (result.results ?? []).map((row) => ({
+  const rows = (result.results ?? []).map((row) => ({
     id: row.id,
     original_filename: row.original_filename,
     ageMs: row.age_from ? Math.max(0, now - Date.parse(row.age_from)) : 0,
-    reason: readFailureInfo({
-      extraction_state: row.extraction_state,
-      extraction_json: row.extraction_json,
-    }).reason,
+    reason: kindUsesFailureReason(kind)
+      ? readFailureInfo({
+          extraction_state: row.extraction_state,
+          extraction_json: row.extraction_json ?? null,
+        }).reason
+      : null,
   }));
+  return { kind, rows, total: rows.length > 0 ? (result.results?.[0]?.total ?? rows.length) : 0 };
 }

@@ -224,6 +224,32 @@ test("detail queries: the terminal classes key on the failed-state predicate", (
   assert.match(rs, /!= 'failed'/);
 });
 
+test("N1 detail queries: report the uncapped total (window) so the UI can disclose the cap", () => {
+  for (const kind of ["never_enqueued", "render_failed", "consumer_stalled"] as const) {
+    const sql = buildPipelineDetailQuery(kind, "S").sql;
+    assert.match(sql, /COUNT\(\*\) OVER \(\) AS total/, `${kind} must carry the total`);
+  }
+});
+
+test("N1 detail queries: extraction_json is only read by the classes that use its reason", () => {
+  // Terminal classes DO read it (the reason line).
+  for (const kind of ["render_failed", "extraction_failed"] as const) {
+    assert.match(
+      buildPipelineDetailQuery(kind, "S").sql,
+      /extraction_json/,
+      `${kind} reads the failure reason`,
+    );
+  }
+  // Stalled / never-enqueued classes never use the reason — skip the column.
+  for (const kind of ["consumer_stalled", "render_stalled", "never_enqueued"] as const) {
+    assert.doesNotMatch(
+      buildPipelineDetailQuery(kind, "S").sql,
+      /extraction_json/,
+      `${kind} must not read extraction_json`,
+    );
+  }
+});
+
 test("detail query: render_failed ages from extraction_processed_at, consumer_stalled from enqueued_at", () => {
   const renderFailed = buildPipelineDetailQuery("render_failed", "S").sql;
   assert.match(renderFailed, /ORDER BY extraction_processed_at ASC/);

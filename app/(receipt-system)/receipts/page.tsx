@@ -22,7 +22,7 @@ import {
   getPipelineHealth,
   listPipelineAttentionReceipts,
   PIPELINE_ALL_CLEAR,
-  type PipelineAttentionReceipt,
+  type PipelineAttention,
   type PipelineDetailKind,
 } from "@/lib/receipts/pipeline-health";
 import {
@@ -124,12 +124,11 @@ export default async function ReceiptsDashboardPage() {
 
   // Per-receipt detail rows (filename, review link, age, reason, next action)
   // for every lit class except missing_manifest (its remedy is a separate
-  // flow). Loaded only for lit classes, bounded to 50 each. Each loader is
-  // independently failure-tolerant — one broken query must not take the rest
-  // of the health surface down.
-  const attentionByKind: Partial<
-    Record<PipelineDetailKind, PipelineAttentionReceipt[]>
-  > = {};
+  // flow). Loaded only for lit classes, bounded to the oldest 50 each. A
+  // FAILED detail query maps to the `unavailable` sentinel — the count stays
+  // visible and the component says the details could not be loaded (B5),
+  // rather than silently showing no rows.
+  const attentionByKind: Partial<Record<PipelineDetailKind, PipelineAttention>> = {};
   await Promise.all(
     pipelineHealth.lit
       .map((c) => c.kind)
@@ -138,7 +137,7 @@ export default async function ReceiptsDashboardPage() {
         attentionByKind[kind] = await listPipelineAttentionReceipts(
           kind,
           getReceiptsDb(),
-        ).catch(() => []);
+        ).catch(() => ({ kind, rows: [], total: 0, unavailable: true }));
       }),
   );
 

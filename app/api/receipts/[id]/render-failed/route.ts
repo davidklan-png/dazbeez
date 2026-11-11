@@ -1,9 +1,8 @@
 import { NextResponse } from "next/server";
 import { requireReceiptsActor } from "@/lib/receipts/auth";
-import { getReceiptRecord, reconcileExtractionState } from "@/lib/receipts/db";
 import { createAuditEntry } from "@/lib/receipts/audit";
-import { nowIso, stringifyJson } from "@/lib/receipts/db-utils";
-import { admitRenderFailure } from "@/lib/receipts/render-recovery";
+import { stringifyJson } from "@/lib/receipts/db-utils";
+import { parseRenderFailedBody, recordRenderFailure } from "@/lib/receipts/render-recovery";
 import { getReceiptsDb, getReceiptsProcessorKey } from "@/lib/cloudflare-runtime";
 
 type RouteContext = { params: Promise<{ id: string }> };
@@ -23,12 +22,6 @@ function timingSafeEqual(a: string, b: string): boolean {
   return mismatch === 0;
 }
 
-interface RenderFailedBody {
-  /** Why the render failed permanently (e.g. "WeasyPrint produced an empty
-   * PDF"). Classifier-generated — never the raw email body. */
-  reason?: string;
-}
-
 /**
  * Mark a needs_render receipt's render as permanently failed (backlog #22).
  *
@@ -44,12 +37,13 @@ interface RenderFailedBody {
  * so processor-key requests reach the handler instead of being 404-rewritten
  * by `auth.protect()` — asserted in tests/middleware-routing.test.ts.
  *
- * Effect: `extraction_state` → 'failed' (only from pending states via
- * reconcileExtractionState — idempotent) and extraction_json gains the
- * failure payload with `stage: 'render'` so the pipeline-health surface can
- * distinguish a terminal RENDER failure (needs_render=1) from a terminal
- * EXTRACTION failure. needs_render stays 1 — the row keeps its evidence and
- * remains the class discriminator. The original body in R2 is untouched.
+ * Persistence lives in recordRenderFailure (lib/receipts/render-recovery.ts):
+ * ONE atomic conditional UPDATE commits extraction_state='failed' together
+ * with a merged extraction_json payload that preserves existing extraction
+ * data (review B1/B2); the first committed terminal marker is immutable and
+ * a repeat report is a read-only idempotent success. The body is validated
+ * for runtime types before any string logic (review B4) — malformed JSON
+ * values get 4xx, never 500.
  */
 export async function POST(request: Request, { params }: RouteContext) {
   try {
@@ -65,112 +59,61 @@ export async function POST(request: Request, { params }: RouteContext) {
       : await requireReceiptsActor(request.headers);
 
     const { id } = await params;
-    const body = (await request.json().catch(() => null)) as
-      | RenderFailedBody
-      | null;
-    const reason = (body?.reason ?? "").trim();
-    if (!reason) {
-      return NextResponse.json(
-        { error: "Body must include a non-empty `reason`." },
-        { status: 400 },
-      );
-    }
-    if (reason.length > 1000) {
-      return NextResponse.json(
-        { error: "`reason` must be 1000 characters or fewer." },
-        { status: 413 },
-      );
+    const raw = await request.json().catch(() => null);
+    const parsed = parseRenderFailedBody(raw);
+    if (!parsed.ok) {
+      return NextResponse.json({ error: parsed.error }, { status: parsed.status });
     }
 
-    const receipt = await getReceiptRecord(id);
-    const db = getReceiptsDb();
-
-    if (!receipt) {
-      await createAuditEntry(db, {
-        actor,
-        action: "receipt.render_failed",
-        objectType: "receipt",
-        objectId: id,
-        newValueJson: stringifyJson({ reason: "not_found", failureReason: reason }),
-      });
-      return NextResponse.json({ error: "Receipt not found." }, { status: 404 });
-    }
-
-    // Rejections: 409 + audit. Only the human-advanced case also reconciles a
-    // stale pending state (mirrors /extraction-failed — the month-close gate
-    // must not stay blocked by a queue report that arrived after human
-    // review). A needs_render=0 rejection is a wrong-pipeline report and must
-    // NOT touch extraction_state — the row may legitimately be mid-extraction.
-    const admission = admitRenderFailure(receipt);
-    if (!admission.ok) {
-      const humanAdvanced =
-        receipt.status !== "captured" && receipt.status !== "needs_review";
-      if (
-        humanAdvanced &&
-        receipt.extraction_state &&
-        ["captured", "queued", "processing"].includes(receipt.extraction_state)
-      ) {
-        await reconcileExtractionState(id, "processed");
-      }
-      await createAuditEntry(db, {
-        actor,
-        action: "receipt.render_failed",
-        objectType: "receipt",
-        objectId: id,
-        newValueJson: stringifyJson({
-          reason: "rejected",
-          status: receipt.status,
-          failureReason: reason,
-        }),
-      });
-      return NextResponse.json({ error: admission.error }, { status: admission.status });
-    }
-
-    const failedPayload = {
-      failed: true as const,
-      stage: "render" as const,
-      reason,
-      failedAt: nowIso(),
-    };
-
-    // Idempotent: only transitions rows still in a pending state.
-    await reconcileExtractionState(id, "failed");
-
-    // Write extraction_json separately, gated on the terminal state (mirrors
-    // /extraction-failed). Bypasses the finalized-reconciliation guard for the
-    // same reason — queue-state mirror, not business fields.
-    await db
-      .prepare(
-        `UPDATE receipt_records
-           SET extraction_json = ?, updated_at = ?
-         WHERE id = ?
-           AND extraction_state = 'failed'`,
-      )
-      .bind(stringifyJson(failedPayload), nowIso(), id)
-      .run();
-
-    await createAuditEntry(db, {
+    const result = await recordRenderFailure({
+      db: getReceiptsDb(),
+      receiptId: id,
+      reason: parsed.reason,
       actor,
-      action: "receipt.render_failed",
-      objectType: "receipt",
-      objectId: id,
-      newValueJson: stringifyJson({ failureReason: reason, stage: "render" }),
     });
 
-    return NextResponse.json(
-      { ok: true, extractionState: "failed", failedAt: failedPayload.failedAt },
-      { status: 200 },
-    );
+    switch (result.kind) {
+      case "recorded":
+        return NextResponse.json(
+          { ok: true, extractionState: "failed", failedAt: result.failedAt },
+          { status: 200 },
+        );
+      case "already_terminal":
+        // Idempotent: the FIRST committed marker is authoritative. The
+        // response names it so the consumer's log cannot claim a fresh mark.
+        return NextResponse.json(
+          {
+            ok: true,
+            extractionState: "failed",
+            alreadyRecorded: true,
+            reason: result.reason,
+            failedAt: result.failedAt,
+          },
+          { status: 200 },
+        );
+      case "not_found":
+        await createAuditEntry(getReceiptsDb(), {
+          actor,
+          action: "receipt.render_failed",
+          objectType: "receipt",
+          objectId: id,
+          newValueJson: stringifyJson({
+            reason: "not_found",
+            failureReason: parsed.reason,
+          }),
+        });
+        return NextResponse.json({ error: "Receipt not found." }, { status: 404 });
+      case "conflict":
+        return NextResponse.json({ error: result.error }, { status: 409 });
+    }
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("Unauthorized")) {
       return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
     }
+    // B5: never echo internals (D1/SQL error text) to the client — log only.
     console.error("[api/receipts/[id]/render-failed] failed", error);
     return NextResponse.json(
-      {
-        error:
-          error instanceof Error ? error.message : "Failed to mark render-failed.",
-      },
+      { error: "Failed to mark render-failed. The receipt was not modified." },
       { status: 500 },
     );
   }
