@@ -57,21 +57,47 @@ export interface SaveSuccess {
 }
 
 /**
- * A transport-level loss (fetch rejected) means the request MAY have been
- * applied server-side — the outcome is UNKNOWN, not failed. Once that
- * happens the queue HALTS: no further request is sent automatically (a
- * later flush could not be claimed safely ordered if the unknown one still
- * commits), pending waiters are rejected with this guidance (fields stay
- * with the caller — nothing is silently discarded), and every later save()
- * rejects until the operator reloads the receipt and checks its state.
- * Deliberately no in-session auto-resume: without a server protocol there
- * is no safe one. An HTTP error RESPONSE is a known failure (the server
- * spoke) and does NOT halt — retries keep working there.
+ * An UNKNOWN save outcome — the request may have been applied server-side —
+ * arises from MORE than a transport loss (response-boundary addendum):
+ *   • fetch rejects (connection lost; the request may still land), or
+ *   • a 5xx / off-contract status: the route's catch-all 500
+ *     (app/api/receipts/[id]/route.ts:387-401) can FOLLOW a committed
+ *     UPDATE — updateReceiptRecord writes the row before its audit and
+ *     membership steps (lib/receipts/db.ts), so a later crash answers 500
+ *     with the write already durable, or
+ *   • a 2xx whose body cannot be parsed: not a usable acknowledgement.
+ * Once any of those happens the queue HALTS: no further request is sent
+ * automatically (a later flush could not be claimed safely ordered if the
+ * unknown one still commits), pending waiters are rejected with this
+ * guidance (fields stay with the caller — nothing is silently discarded),
+ * and every later save() rejects until the operator reloads the receipt
+ * and checks its state. Deliberately no in-session auto-resume: without a
+ * server protocol there is no safe one.
  */
 export const SAVE_HALTED_MESSAGE =
-  "Network lost mid-save — this change may or may not have reached the server. " +
+  "This save's outcome is uncertain — it may or may not have reached the server. " +
   "Reload the receipt to check what was saved; your edits are kept on this form " +
   "but nothing more will be sent until then.";
+
+/**
+ * Statuses the receipt PATCH route can ONLY emit BEFORE any D1 write, i.e. a
+ * response with one of these conclusively proves nothing was applied and the
+ * ordinary corrected-input retry may proceed: 400 field validation, 404/409
+ * lifecycle guards, 422 sealed-month guard (all route.ts:92-311, ahead of
+ * updateReceiptRecord), 401 auth (requireReceiptsActor), 403 edge/middleware
+ * auth. Every other status — notably the catch-all 500 — can follow a
+ * committed write and is therefore an UNKNOWN outcome (see above).
+ */
+export function isConclusivePreWriteRefusal(status: number): boolean {
+  return (
+    status === 400 ||
+    status === 401 ||
+    status === 403 ||
+    status === 404 ||
+    status === 409 ||
+    status === 422
+  );
+}
 
 interface Waiter {
   resolve: (success: SaveSuccess) => void;
@@ -170,16 +196,26 @@ export class SaveQueue {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
-      const json = (await res.json().catch(() => ({}))) as {
-        error?: string;
-        warnings?: string[];
-      };
-      result = res.ok
-        ? { warnings: json.warnings ?? [] }
-        : new Error(json.error ?? "Save failed");
+      // Ack boundary: a success ack must be a 2xx WITH a parseable body; a
+      // conclusive failure must be one of the route's proven PRE-WRITE
+      // statuses. Anything else is an UNKNOWN outcome and halts.
+      let parsed: { error?: string; warnings?: string[] } | null = null;
+      try {
+        parsed = (await res.json()) as { error?: string; warnings?: string[] };
+      } catch {
+        parsed = null; // malformed/missing body — not a usable ack
+      }
+      if (res.ok && parsed) {
+        result = { warnings: parsed.warnings ?? [] };
+      } else if (!res.ok && isConclusivePreWriteRefusal(res.status)) {
+        result = new Error(parsed?.error ?? "Save failed");
+      } else {
+        haltError = new Error(SAVE_HALTED_MESSAGE);
+        result = haltError;
+      }
     } catch {
       // Transport loss: the request may still have been applied — UNKNOWN
-      // outcome, distinct from a confirmed HTTP failure above. Halt.
+      // outcome. Halt.
       haltError = new Error(SAVE_HALTED_MESSAGE);
       result = haltError;
     }

@@ -94,6 +94,8 @@ interface MockRequest {
   body: Record<string, unknown>;
   ok: (json?: unknown) => void;
   fail: (error: string) => void;
+  failWith: (status: number, error: string) => void;
+  okGarbled: () => void;
   drop: () => void;
 }
 const requests: MockRequest[] = [];
@@ -118,6 +120,9 @@ function installFetchMock() {
           resolve(
             new Response(JSON.stringify({ error }), { status: 422 }),
           ),
+        failWith: (status, error) =>
+          resolve(new Response(JSON.stringify({ error }), { status })),
+        okGarbled: () => resolve(new Response("{{not-json", { status: 200 })),
         drop: () => reject(new TypeError("Simulated transport loss")),
       });
     });
@@ -406,6 +411,44 @@ async function runScenarios(swapReceipt: () => Promise<void>) {
   record("B3 user fields retained after halt", () => {
     assert(merchantNow === "mStillHalted", `fields lost: ${merchantNow}`);
     return `merchant input still reads "${merchantNow}"`;
+  });
+
+  // S8 — response boundary: a 500 can FOLLOW a committed write (the route's
+  // catch-all), so it is an UNKNOWN outcome: halt on a FRESH form.
+  await swapReceipt(); // fresh form + fresh queue
+  typeMerchant("m500");
+  mark = pushCount();
+  buttonByText("Skip").click();
+  await waitFor(() => requests.length === 14, "S8 PATCH");
+  requests[13].failWith(500, "audit write failed");
+  await waitFor(() => badgeText().includes("may or may not have reached"), "S8 halt badge");
+  typeMerchant("m500b");
+  buttonByText("Skip").click();
+  await tick();
+  await tick();
+  record("500-after-possible-write halts — no later send, no push, fields kept", () => {
+    assert(requests.length === 14, "sent a request after an ambiguous 500");
+    assert(pushCount() === mark, "navigated after an ambiguous 500");
+    assert(
+      (inputByLabel("Merchant") as HTMLInputElement).value === "m500b",
+      "fields lost after 500",
+    );
+    return "halt guidance shown, queue frozen, fields retained";
+  });
+
+  // S9 — response boundary: a 200 whose body cannot be parsed is not a
+  // usable acknowledgement: UNKNOWN, halt, on another fresh form.
+  await swapReceipt();
+  typeMerchant("mGarbled");
+  mark = pushCount();
+  buttonByText("Skip").click();
+  await waitFor(() => requests.length === 15, "S9 PATCH");
+  requests[14].okGarbled();
+  await waitFor(() => badgeText().includes("may or may not have reached"), "S9 halt badge");
+  record("malformed 200 ack halts — never acknowledged as saved", () => {
+    assert(!badgeText().includes("Saved"), "false saved badge after garbled ack");
+    assert(pushCount() === mark, "navigated on a garbled ack");
+    return "halt guidance shown, no push";
   });
 }
 

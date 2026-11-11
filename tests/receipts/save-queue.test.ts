@@ -17,6 +17,10 @@ interface DeferredCall {
   ok: (json?: unknown) => void;
   /** Complete the request with an HTTP error status + JSON error body. */
   fail: (error: string) => void;
+  /** Complete with an arbitrary status + JSON error body (e.g. 500). */
+  failWith: (status: number, error: string) => void;
+  /** Complete with 200 but a body that is NOT parseable JSON. */
+  okGarbled: () => void;
   /** Simulate a network-level failure (fetch rejects). */
   drop: () => void;
 }
@@ -41,6 +45,12 @@ function makeDeferredFetch() {
               headers: { "Content-Type": "application/json" },
             }),
           ),
+        failWith: (status, error) =>
+          resolve(
+            new Response(JSON.stringify({ error }), { status }),
+          ),
+        okGarbled: () =>
+          resolve(new Response("{{not-json", { status: 200 })),
         drop: () => reject(new TypeError("Network request failed")),
       });
     });
@@ -240,7 +250,45 @@ test("SaveQueue: transport loss = UNKNOWN outcome — halts draining, rejects qu
   assert.equal(q.halted, true);
 });
 
-test("SaveQueue: an HTTP error RESPONSE is a known failure — queue keeps draining and retrying (B3 contrast)", async () => {
+test("SaveQueue: a 500 can FOLLOW a committed write — UNKNOWN outcome, halts, queued B never claims success (response boundary)", async () => {
+  const { calls, fetchImpl } = makeDeferredFetch();
+  const q = new SaveQueue({ url: "/r", buildBody: () => ({}), fetchImpl });
+
+  // A is applied (or mid-application) server-side; its handler then crashes
+  // in a post-write step and answers 500. B (newer fields + rider) is
+  // already queued behind it.
+  const pA = q.save();
+  await tick();
+  const pB = q.save(true);
+  calls[0]!.failWith(500, "audit write failed");
+
+  await assert.rejects(pA, /may or may not have reached the server/);
+  await assert.rejects(pB, /may or may not have reached the server/);
+  assert.equal(calls.length, 1, "B must not be sent after an ambiguous A");
+  assert.equal(q.halted, true);
+  await assert.rejects(q.save(), /Reload the receipt/);
+  assert.equal(calls.length, 1, "no auto-resume, no further sends");
+});
+
+test("SaveQueue: a 200 whose body cannot be parsed is not a usable ack — UNKNOWN, halts (response boundary)", async () => {
+  const { calls, fetchImpl } = makeDeferredFetch();
+  const q = new SaveQueue({ url: "/r", buildBody: () => ({}), fetchImpl });
+
+  const pA = q.save();
+  await tick();
+  const pB = q.save();
+  calls[0]!.okGarbled(); // status says 200, body is garbage
+
+  await assert.rejects(pA, /may or may not have reached the server/);
+  await assert.rejects(pB, /may or may not have reached the server/);
+  assert.equal(calls.length, 1);
+  assert.equal(q.halted, true);
+  // A later well-formed response elsewhere still cannot clear it: nothing
+  // else was sent after the halt.
+  await assert.rejects(q.save(), /Reload the receipt/);
+});
+
+test("SaveQueue: a conclusive PRE-WRITE refusal (422) is a known failure — corrected-input retry stays available", async () => {
   const { calls, fetchImpl } = makeDeferredFetch();
   const q = new SaveQueue({ url: "/r", buildBody: () => ({}), fetchImpl });
 
