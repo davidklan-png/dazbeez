@@ -6,10 +6,10 @@
 // surface has no `email`/`scheduled` hook. This worker mirrors the existing
 // workers/email-reply-capture pattern (own wrangler/package/tsconfig, postal-mime,
 // readRaw + ctx.waitUntil) but, unlike reply-capture, it KEEPS the message
-// (intake, not a forward passthrough) and also runs the daily cleanup cron.
+// (intake, not a forward passthrough) and runs cleanup plus the operator digest.
 //
 // All intake/cleanup LOGIC lives in lib/receipts/{email-intake,email-parse}.ts;
-// this file is the thin binding/IO glue.
+// pipeline-digest.ts owns the operator digest; this file is thin binding/IO glue.
 
 import PostalMime from "postal-mime";
 import {
@@ -31,10 +31,9 @@ import {
 } from "../../../lib/receipts/email-parse";
 import { parseRfcFromMailbox, resolveBlockedSenderIdentity } from "./sender-identity";
 
-interface Env {
-  RECEIPTS_DB: D1Database;
-  RECEIPTS_BUCKET: R2Bucket;
-}
+import { CLEANUP_CRON, DIGEST_CRON, runPipelineDigest, type DigestConfig } from "../../../lib/receipts/pipeline-digest";
+
+interface Env extends Omit<IntakeBindings, "DIGEST_ENABLED" | "NOTIFY_FROM_ADDRESS">, DigestConfig {}
 
 const CLEANUP_BATCH_LIMIT = 200;
 
@@ -154,13 +153,23 @@ const worker = {
     ctx.waitUntil(processMessage(env, message, rawBytes));
   },
 
-  // ─── Daily cleanup cron (03:00 UTC) ───────────────────────────────────────
+  // ─── Cleanup (03:00 UTC) and digest (23:30 UTC / 08:30 JST) ───────────────────────────────────────
   async scheduled(
-    _controller: ScheduledController,
+    controller: ScheduledController,
     env: Env,
     ctx: ExecutionContext,
   ): Promise<void> {
-    ctx.waitUntil(cleanupStaleIntake(env));
+    switch (controller.cron) {
+      case CLEANUP_CRON:
+        ctx.waitUntil(cleanupStaleIntake(env));
+        break;
+      case DIGEST_CRON:
+        ctx.waitUntil(runScheduledDigest(env, controller.scheduledTime));
+        break;
+      default:
+        console.error(JSON.stringify({ event: "receipts_unknown_cron", cron: controller.cron }));
+        throw new Error("Unknown receipts intake cron");
+    }
   },
 };
 
@@ -345,4 +354,17 @@ async function cleanupStaleIntake(env: Env): Promise<void> {
     candidates: rows.length,
     r2Deleted: deleted,
   });
+}
+
+// Disabled is a successful no-op. Config/provider failures reject the scheduled
+// event; unavailable data sends a truthful diagnostic and also fails the event.
+async function runScheduledDigest(env: Env, now: number): Promise<void> {
+  const result = await runPipelineDigest(env.RECEIPTS_DB, env, now, fetch);
+  const failed = result.status !== "disabled" && (result.status !== "accepted" || result.dataUnavailable);
+  const log = JSON.stringify({ event: "receipts_health_digest", ...result });
+  if (failed) {
+    console.error(log);
+    throw new Error("Receipt health digest incomplete; inspect structured result");
+  }
+  console.log(log);
 }

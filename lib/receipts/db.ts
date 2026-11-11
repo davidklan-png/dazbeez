@@ -1,3 +1,4 @@
+import { expectedStatementMonths } from "./missing-statements";
 import { getReceiptsDb } from "@/lib/cloudflare-runtime";
 import { createAuditEntry } from "@/lib/receipts/audit";
 import { D1_ID_CHUNK_SIZE, nowIso, newUuid, stringifyJson } from "@/lib/receipts/db-utils";
@@ -2719,23 +2720,7 @@ export async function getMissingStatementAlerts(
 ): Promise<MissingStatementAlert[]> {
   // Collect the last 3 months that should have statements ready
   const alerts: MissingStatementAlert[] = [];
-  const today = new Date();
-
-  for (let offset = 0; offset < 3; offset++) {
-    const d = new Date(today);
-    d.setMonth(d.getMonth() - offset);
-    const statementMonth = d.toISOString().slice(0, 7);
-
-    // Expected ready date: 18th of the prior calendar month
-    const readyD = new Date(d);
-    readyD.setDate(1);
-    readyD.setMonth(readyD.getMonth() - 1);
-    readyD.setDate(18);
-    const expectedReadyDate = readyD.toISOString().slice(0, 10);
-
-    // Only alert if we've passed the ready date
-    if (today.toISOString().slice(0, 10) < expectedReadyDate) continue;
-
+  for (const { statementMonth, expectedReadyDate } of expectedStatementMonths(new Date())) {
     // Check if artifact already uploaded for this month
     const artifact = await getAmexArtifactByMonth(statementMonth);
     if (artifact) continue;
