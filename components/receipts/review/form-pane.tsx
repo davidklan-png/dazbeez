@@ -32,6 +32,7 @@ import {
 } from "@/lib/receipts/receipt-status-policy";
 import { resolveWorkMonth, withWorkMonth } from "@/lib/receipts/work-month";
 import { formatReviewMonthLabel } from "@/lib/receipts/review-queue-filter";
+import { getSaveQueue } from "@/lib/receipts/save-queue";
 import type {
   PaymentPath,
   ReceiptAttendee,
@@ -250,106 +251,96 @@ export function FormPane(props: FormPaneProps) {
   const categoryRef = useRef<HTMLSelectElement | null>(null);
   const attendeeAddRef = useRef<HTMLDivElement | null>(null);
 
-  // ─── autosave (debounced PATCH) ─────────────────────────────────────
+  // ─── autosave (debounced PATCH through the serialized save queue) ───
   const initialRenderRef = useRef(true);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const inFlightRef = useRef<AbortController | null>(null);
 
-  const triggerSave = useCallback(
-    (markReviewed: boolean) => {
-      if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-      saveTimerRef.current = setTimeout(async () => {
-        // A composition may have started after this timer was scheduled. Do
-        // not update SaveBadge or any other React state until WebKit commits.
-        if (businessPurposeComposingRef.current) return;
-        inFlightRef.current?.abort();
-        const ctrl = new AbortController();
-        inFlightRef.current = ctrl;
-        setSave({ kind: "saving" });
+  // One PATCH body for every save path (autosave AND save-and-next — they
+  // differ only by the reviewed rider). Called at FIRE time by the queue, so
+  // it always reads the latest state via this render's closure.
+  const buildSaveBody = (markReviewed: boolean) => {
+    let amountMinor: number | null = null;
+    if (amountDisplay.trim()) {
+      const parsed = parseFloat(amountDisplay.replace(/[^0-9.]/g, ""));
+      if (!isNaN(parsed)) {
+        amountMinor =
+          currency === "JPY" ? Math.round(parsed) : Math.round(parsed * 100);
+      }
+    }
+    return {
+      paymentPath,
+      expenseCategoryCode: expenseCategoryCode || null,
+      transactionDate: transactionDate || null,
+      merchant: merchant.trim() || null,
+      amountMinor,
+      currency,
+      businessPurpose: businessPurposeValueRef.current.trim() || null,
+      attendees: attendees.map((a) => a.trim()).filter(Boolean),
+      // Audit 2026-07-21 Phase 1: ordinary autosaves NEVER send status —
+      // a stale client value must not be able to overwrite a lifecycle
+      // status an internal flow (reconcile/export) has since advanced.
+      // "reviewed" is sent only by the explicit Mark-reviewed path below,
+      // and only when the receipt is still in a pre-review state.
+      ...(markReviewed && canPromoteToReviewed(receipt.status)
+        ? { status: "reviewed" as ReceiptStatus }
+        : {}),
+    };
+  };
 
-        let amountMinor: number | null = null;
-        if (amountDisplay.trim()) {
-          const parsed = parseFloat(amountDisplay.replace(/[^0-9.]/g, ""));
-          if (!isNaN(parsed)) {
-            amountMinor =
-              currency === "JPY" ? Math.round(parsed) : Math.round(parsed * 100);
-          }
-        }
+  // Serialized save queue, module-scoped per receipt id: autosaves for one
+  // review session never overlap (an earlier snapshot cannot commit after a
+  // later acknowledged save), a remount of the same receipt joins the still-
+  // draining queue instead of racing it, and requests survive route changes
+  // (keepalive). Each render rebinds the latest buildSaveBody closure.
+  const saveQueue = getSaveQueue(receipt.id, {
+    url: `/api/receipts/${receipt.id}`,
+    buildBody: buildSaveBody,
+    deferFire: () => businessPurposeComposingRef.current,
+  });
 
-        try {
-          const res = await fetch(`/api/receipts/${receipt.id}`, {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              paymentPath,
-              expenseCategoryCode: expenseCategoryCode || null,
-              transactionDate: transactionDate || null,
-              merchant: merchant.trim() || null,
-              amountMinor,
-              currency,
-              businessPurpose: businessPurposeValueRef.current.trim() || null,
-              attendees: attendees.map((a) => a.trim()).filter(Boolean),
-              // Audit 2026-07-21 Phase 1: ordinary autosaves NEVER send status —
-              // a stale client value must not be able to overwrite a lifecycle
-              // status an internal flow (reconcile/export) has since advanced.
-              // "reviewed" is sent only by the explicit Mark-reviewed path below,
-              // and only when the receipt is still in a pre-review state.
-              ...(markReviewed && canPromoteToReviewed(receipt.status)
-                ? { status: "reviewed" as ReceiptStatus }
-                : {}),
-            }),
-            signal: ctrl.signal,
-          });
-          const json = (await res.json().catch(() => ({}))) as {
-            error?: string;
-            warnings?: string[];
-          };
-          // Abort normally wins when composition begins during a request, but
-          // a response can already be resolving. Avoid its state updates too.
+  const triggerSave = useCallback(() => {
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = setTimeout(() => {
+      saveTimerRef.current = null;
+      // A composition may have started after this timer was scheduled. Do
+      // not enqueue (or update SaveBadge / any other React state) until
+      // WebKit commits; composition end re-arms the save.
+      if (businessPurposeComposingRef.current) return;
+      setSave({ kind: "saving" });
+      void saveQueue.save().then(
+        (result) => {
+          // A composition may have started while the request was in flight.
+          // Avoid its state updates until WebKit commits.
           if (businessPurposeComposingRef.current) return;
-          if (!res.ok) {
-            setSave({
-              kind: "error",
-              message: json.error ?? "Save failed",
-            });
-            return;
-          }
-          setApiWarnings(json.warnings ?? []);
+          setApiWarnings(result.warnings);
           setSave({ kind: "saved", at: Date.now() });
           // Do not refresh the route after ordinary field autosaves. A refresh
           // can interrupt an active WebKit IME conversion and steal focus from
           // any text field; the local form state is already authoritative for
           // the editor. Explicit actions and navigation still refresh normally.
-        } catch (error) {
-          if ((error as DOMException | undefined)?.name === "AbortError") return;
-          setSave({ kind: "error", message: "Network error" });
-        }
-      }, SAVE_DEBOUNCE_MS);
-    },
-    [
-      receipt.id,
-      receipt.status,
-      paymentPath,
-      expenseCategoryCode,
-      transactionDate,
-      merchant,
-      amountDisplay,
-      currency,
-      attendees,
-    ],
-  );
+        },
+        (error: Error) => {
+          if (businessPurposeComposingRef.current) return;
+          setSave({ kind: "error", message: error.message });
+        },
+      );
+    }, SAVE_DEBOUNCE_MS);
+  }, [saveQueue]);
 
   const handleBusinessPurposeCompositionStart = useCallback(() => {
     businessPurposeComposingRef.current = true;
+    // The in-flight save is NOT aborted: abort() is client-side only (the
+    // server still applies a sent PATCH), and the queue serializes commits
+    // so there is nothing to cancel. Just hold the pending debounce until
+    // composition ends.
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-    inFlightRef.current?.abort();
   }, []);
 
   const handleBusinessPurposeCompositionEnd = useCallback(
     (value: string) => {
       businessPurposeValueRef.current = value;
       businessPurposeComposingRef.current = false;
-      triggerSave(false);
+      triggerSave();
     },
     [triggerSave],
   );
@@ -394,7 +385,7 @@ export function FormPane(props: FormPaneProps) {
     // so they can't change, but this guards against programmatic state changes
     // and is the explicit "suppress entirely" the lock requires.
     if (isLocked || businessPurposeComposingRef.current) return;
-    triggerSave(false);
+    triggerSave();
   }, [
     paymentPath,
     expenseCategoryCode,
@@ -409,76 +400,58 @@ export function FormPane(props: FormPaneProps) {
 
   // ─── keyboard shortcuts ─────────────────────────────────────────────
   const onMarkReviewed = useCallback(() => {
-    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-    // Trigger an immediate save with reviewed status, then navigate
+    // Save-and-next: cancel the debounce and flush EVERYTHING through the
+    // queue — latest fields AND the reviewed rider — then navigate only
+    // after it commits. Waiting for the queue also waits out any in-flight
+    // autosave with an older snapshot, which can no longer land after this
+    // save and revert the operator's last edits.
+    if (saveTimerRef.current) {
+      clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
+    }
     void (async () => {
       setSave({ kind: "saving" });
       try {
-        let amountMinor: number | null = null;
-        if (amountDisplay.trim()) {
-          const parsed = parseFloat(amountDisplay.replace(/[^0-9.]/g, ""));
-          if (!isNaN(parsed))
-            amountMinor =
-              currency === "JPY"
-                ? Math.round(parsed)
-                : Math.round(parsed * 100);
-        }
-        const res = await fetch(`/api/receipts/${receipt.id}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            paymentPath,
-            expenseCategoryCode: expenseCategoryCode || null,
-            transactionDate: transactionDate || null,
-            merchant: merchant.trim() || null,
-            amountMinor,
-            currency,
-            businessPurpose: businessPurposeValueRef.current.trim() || null,
-            attendees: attendees.map((a) => a.trim()).filter(Boolean),
-            // Promote to reviewed only when still in a pre-review state. For an
-            // already-reviewed/reconciled/exported/archived receipt the server
-            // would reject the downgrade; we simply don't send it. Fields still
-            // save and the operator advances to the next queue item.
-            ...(canPromoteToReviewed(receipt.status)
-              ? { status: "reviewed" as ReceiptStatus }
-              : {}),
-          }),
-        });
-        if (!res.ok) {
-          const json = (await res.json().catch(() => ({}))) as {
-            error?: string;
-          };
-          setSave({ kind: "error", message: json.error ?? "Save failed" });
-          return;
-        }
-        const okJson = (await res.json().catch(() => ({}))) as {
-          warnings?: string[];
-        };
-        setApiWarnings(okJson.warnings ?? []);
+        const result = await saveQueue.save(true);
+        setApiWarnings(result.warnings);
         setSave({ kind: "saved", at: Date.now() });
         if (nextReceiptId) {
           router.push(`/receipts/review/${nextReceiptId}${queryParams}`);
         } else {
           router.push(`/receipts/review${queryParams}`);
         }
-      } catch {
-        setSave({ kind: "error", message: "Network error" });
+      } catch (error) {
+        // Failed or ambiguous save: stay on this receipt with the honest
+        // error — never navigate away from uncommitted edits, never show a
+        // saved badge. Edits are retained in the form state.
+        setSave({
+          kind: "error",
+          message: error instanceof Error ? error.message : "Save failed",
+        });
       }
     })();
-  }, [
-    receipt.id,
-    receipt.status,
-    paymentPath,
-    expenseCategoryCode,
-    transactionDate,
-    merchant,
-    amountDisplay,
-    currency,
-    attendees,
-    nextReceiptId,
-    queryParams,
-    router,
-  ]);
+  }, [saveQueue, nextReceiptId, queryParams, router]);
+
+  // Unmount safety net for navigation this form does not own (rail links,
+  // j/k): a pending debounce is flushed NOW with a body pinned at unmount
+  // time, through the module-scoped queue so it serializes behind any
+  // in-flight save and ahead of a same-receipt remount, and survives the
+  // route change (keepalive). Fire-and-forget ceiling, documented: a failure
+  // here cannot be surfaced (the form is gone) — the awaited s / Skip paths
+  // above are the surfaces with honest errors.
+  useEffect(() => {
+    return () => {
+      if (saveTimerRef.current) {
+        clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
+        void saveQueue.save(false, { pinBody: true }).catch(() => {
+          // Cannot surface after unmount; the next visit renders the server
+          // state and the operator re-edits. Cross-tab last-write-wins still
+          // applies (no server CAS by design v1).
+        });
+      }
+    };
+  }, [saveQueue]);
 
   useKeyboardShortcuts({
     s: (e) => {
@@ -501,6 +474,36 @@ export function FormPane(props: FormPaneProps) {
       if (input instanceof HTMLInputElement) input.focus();
     },
   });
+
+  // Skip must not silently discard edits made inside the debounce window
+  // (same-session save contract): flush pending work through the queue and
+  // only leave on success. Clean form → navigates immediately, no PATCH.
+  async function handleSkip() {
+    const hadPendingEdits = saveTimerRef.current !== null;
+    if (saveTimerRef.current) {
+      clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
+    }
+    if (hadPendingEdits || !saveQueue.idle) {
+      setSave({ kind: "saving" });
+      try {
+        const result = await saveQueue.save();
+        setApiWarnings(result.warnings);
+        setSave({ kind: "saved", at: Date.now() });
+      } catch (error) {
+        // Stay on the receipt with the honest error — navigating away would
+        // silently drop the uncommitted edits.
+        setSave({
+          kind: "error",
+          message: error instanceof Error ? error.message : "Save failed",
+        });
+        return;
+      }
+    }
+    if (nextReceiptId) {
+      router.push(`/receipts/review/${nextReceiptId}${queryParams}`);
+    }
+  }
 
   async function handleDelete() {
     if (!window.confirm(`Soft-delete receipt ${receipt.id.slice(0, 8)}…?`))
@@ -799,7 +802,7 @@ export function FormPane(props: FormPaneProps) {
               defaultValue={receipt.business_purpose ?? ""}
               onChange={(e) => {
                 businessPurposeValueRef.current = e.currentTarget.value;
-                if (!businessPurposeComposingRef.current) triggerSave(false);
+                if (!businessPurposeComposingRef.current) triggerSave();
               }}
               onCompositionStart={handleBusinessPurposeCompositionStart}
               onCompositionEnd={(e) =>
@@ -808,7 +811,7 @@ export function FormPane(props: FormPaneProps) {
               onBlur={(e) => {
                 businessPurposeValueRef.current = e.currentTarget.value;
                 businessPurposeComposingRef.current = false;
-                triggerSave(false);
+                triggerSave();
               }}
               disabled={isLocked}
               placeholder="e.g. Client dinner — Acme product review"
@@ -884,13 +887,7 @@ export function FormPane(props: FormPaneProps) {
             <Kbd>s</Kbd>
           </span>
           {nextReceiptId && (
-            <Btn
-              kind="ghost"
-              size="md"
-              onClick={() =>
-                router.push(`/receipts/review/${nextReceiptId}${queryParams}`)
-              }
-            >
+            <Btn kind="ghost" size="md" onClick={handleSkip}>
               Skip
             </Btn>
           )}
