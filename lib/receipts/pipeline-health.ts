@@ -13,6 +13,7 @@
 // needs_render) — could not see class 3. That function and its test are deleted.
 
 import { getReceiptsDb } from "@/lib/cloudflare-runtime";
+import { readFailureInfo } from "@/lib/receipts/queue-items";
 
 /** Consumer launchd interval is 600s; 20 min of unprocessed backlog means it is
  *  not draining. Same threshold the deleted getExtractionHealth used. */
@@ -22,7 +23,9 @@ export type PipelineClassKind =
   | "never_enqueued"
   | "consumer_stalled"
   | "render_stalled"
-  | "missing_manifest";
+  | "missing_manifest"
+  | "render_failed"
+  | "extraction_failed";
 
 export type PipelineSeverity = "error" | "warn";
 
@@ -77,6 +80,18 @@ const CLASS_META: Record<PipelineClassKind, ClassMeta> = {
     text: (n) =>
       `${n} ${n === 1 ? "receipt" : "receipts"} missing their manifest row (blocks finalize)`,
   },
+  // Backlog #22: terminal failures. Distinguished by needs_render (the row
+  // itself is the discriminator; extraction_json only carries the reason).
+  render_failed: {
+    severity: "error",
+    text: (n) =>
+      `${n} email-body ${n === 1 ? "receipt" : "receipts"} failed rendering permanently (terminal)`,
+  },
+  extraction_failed: {
+    severity: "error",
+    text: (n) =>
+      `${n} ${n === 1 ? "receipt" : "receipts"} failed extraction permanently (terminal)`,
+  },
 };
 
 /** Format an age in ms as a short label (12m / 3h / 6d). Pure. */
@@ -97,10 +112,14 @@ export function summarizePipelineHealth(input: {
   consumerStalled: PipelineClassSignal;
   renderStalled: PipelineClassSignal;
   missingManifest: PipelineClassSignal;
+  renderFailed: PipelineClassSignal;
+  extractionFailed: PipelineClassSignal;
 }): PipelineHealth {
   const order: PipelineClassKind[] = [
     "never_enqueued",
     "missing_manifest",
+    "render_failed",
+    "extraction_failed",
     "consumer_stalled",
     "render_stalled",
   ];
@@ -134,6 +153,8 @@ function classSignalKey(kind: PipelineClassKind): keyof {
   consumerStalled: PipelineClassSignal;
   renderStalled: PipelineClassSignal;
   missingManifest: PipelineClassSignal;
+  renderFailed: PipelineClassSignal;
+  extractionFailed: PipelineClassSignal;
 } {
   switch (kind) {
     case "never_enqueued":
@@ -144,6 +165,10 @@ function classSignalKey(kind: PipelineClassKind): keyof {
       return "renderStalled";
     case "missing_manifest":
       return "missingManifest";
+    case "render_failed":
+      return "renderFailed";
+    case "extraction_failed":
+      return "extractionFailed";
   }
 }
 
@@ -183,13 +208,16 @@ export function buildPipelineClassQuery(
         bindings: [staleBeforeIso],
       };
     // Class 3 (warn): awaiting a Mac render, older than the stall threshold.
-    // process_renders logs failures to stderr ONLY — this is the only D1 signal.
+    // process_renders logs transient failures to stderr ONLY — this is the
+    // only D1 signal for them. Terminal render failures (extraction_state
+    // ='failed') are excluded: they are class render_failed, not stalled.
     case "render_stalled":
       return {
         sql: `SELECT COUNT(*) AS n, MIN(captured_at) AS oldest_at
               FROM receipt_records
               WHERE deleted_at IS NULL
                 AND needs_render = 1
+                AND (extraction_state IS NULL OR extraction_state != 'failed')
                 AND captured_at < ?`,
         bindings: [staleBeforeIso],
       };
@@ -205,6 +233,32 @@ export function buildPipelineClassQuery(
                   SELECT 1 FROM receipt_files rf
                   WHERE rf.object_type = 'receipt' AND rf.object_id = rr.id
                 )`,
+        bindings: [],
+      };
+    // Class 5 (error, backlog #22): terminal RENDER failure — the receipt's
+    // email body failed to render permanently. needs_render=1 is what makes
+    // this a render failure rather than an extraction failure; the reason
+    // lives in extraction_json (stage:'render'). Oldest = when it went
+    // terminal (extraction_processed_at, set by the terminal reconcile).
+    case "render_failed":
+      return {
+        sql: `SELECT COUNT(*) AS n, MIN(extraction_processed_at) AS oldest_at
+              FROM receipt_records
+              WHERE deleted_at IS NULL
+                AND extraction_state = 'failed'
+                AND needs_render = 1`,
+        bindings: [],
+      };
+    // Class 6 (error): terminal EXTRACTION failure (corrupt image/PDF,
+    // zero-byte download — marked by the consumer's permanent classifier).
+    // Disjoint from class 5 on needs_render.
+    case "extraction_failed":
+      return {
+        sql: `SELECT COUNT(*) AS n, MIN(extraction_processed_at) AS oldest_at
+              FROM receipt_records
+              WHERE deleted_at IS NULL
+                AND extraction_state = 'failed'
+                AND (needs_render = 0 OR needs_render IS NULL)`,
         bindings: [],
       };
   }
@@ -238,44 +292,175 @@ export async function getPipelineHealth(
   now: number = Date.now(),
 ): Promise<PipelineHealth> {
   const staleBeforeIso = new Date(now - STALE_PENDING_MS).toISOString();
-  const [neverEnqueued, consumerStalled, renderStalled, missingManifest] =
-    await Promise.all([
-      runClassSignal(db, "never_enqueued", staleBeforeIso, now),
-      runClassSignal(db, "consumer_stalled", staleBeforeIso, now),
-      runClassSignal(db, "render_stalled", staleBeforeIso, now),
-      runClassSignal(db, "missing_manifest", staleBeforeIso, now),
-    ]);
+  const [
+    neverEnqueued,
+    consumerStalled,
+    renderStalled,
+    missingManifest,
+    renderFailed,
+    extractionFailed,
+  ] = await Promise.all([
+    runClassSignal(db, "never_enqueued", staleBeforeIso, now),
+    runClassSignal(db, "consumer_stalled", staleBeforeIso, now),
+    runClassSignal(db, "render_stalled", staleBeforeIso, now),
+    runClassSignal(db, "missing_manifest", staleBeforeIso, now),
+    runClassSignal(db, "render_failed", staleBeforeIso, now),
+    runClassSignal(db, "extraction_failed", staleBeforeIso, now),
+  ]);
   return summarizePipelineHealth({
     neverEnqueued,
     consumerStalled,
     renderStalled,
     missingManifest,
+    renderFailed,
+    extractionFailed,
   });
 }
 
-/** A class-1 receipt row for the dashboard's per-receipt Enqueue action. */
-export interface NeverEnqueuedReceipt {
+// ─── Per-receipt detail rows (backlog #19/#22) ───────────────────────────────
+//
+// Counts alone don't let the operator ACT. For every lit class except
+// missing_manifest (whose fix path is a separate backlog item), the dashboard
+// loads the affected receipts with filename, review link, age, reason (the
+// terminal classes), and the honest next action — rendered by
+// PipelineHealthAlert.
+
+/** Classes that get per-receipt detail rows. missing_manifest is excluded:
+ *  its remedy (backfill/re-upload investigation) is a separate flow, not a
+ *  per-receipt button or explanation the dashboard can own here. */
+export type PipelineDetailKind = Exclude<PipelineClassKind, "missing_manifest">;
+
+/** One affected receipt for the dashboard health rows. `ageMs` is computed at
+ *  load time; `reason` is only set for the terminal classes. */
+export interface PipelineAttentionReceipt {
   id: string;
-  captured_at: string | null;
   original_filename: string | null;
+  ageMs: number;
+  reason: string | null;
 }
 
-/** The class-1 receipts. Only load when class 1 is lit — bounded (these are
- *  rare error cases). */
-export async function listNeverEnqueuedReceipts(
-  db: D1Database = getReceiptsDb(),
-): Promise<NeverEnqueuedReceipt[]> {
-  const result = await db
-    .prepare(
-      `SELECT id, captured_at, original_filename
-       FROM receipt_records
-       WHERE deleted_at IS NULL
+/** Detail rows for one lit class, plus the uncapped total (N1: the loader is
+ *  bounded to the oldest MAX_DETAIL_ROWS; `total` lets the surface say
+ *  "showing oldest 50 of 51"). `unavailable` is the honest error sentinel —
+ *  a failed detail query is NOT an empty list (review B5). */
+export const MAX_DETAIL_ROWS = 50;
+
+export interface PipelineAttention {
+  kind: PipelineDetailKind;
+  rows: PipelineAttentionReceipt[];
+  /** Total affected rows for the class (≥ rows.length). */
+  total: number;
+  /** True when the detail query FAILED — rows must not be treated as the
+   *  complete affected set (nor as "none affected": the count is lit). */
+  unavailable?: boolean;
+}
+
+interface AttentionRow {
+  id: string;
+  original_filename: string | null;
+  /** Timestamp the class ages from: captured_at (1/3), extraction_enqueued_at
+   *  (2), or extraction_processed_at (5/6 — when it went terminal). */
+  age_from: string | null;
+  extraction_state: string | null;
+  needs_render: number | null;
+  /** Only selected for the terminal classes (they alone read the reason). */
+  extraction_json?: string | null;
+  /** COUNT(*) OVER () — total affected rows for the class. */
+  total: number;
+}
+
+/** True for the terminal classes, which surface extraction_json's failure
+ *  reason; the stalled/never-enqueued classes never read it, so the detail
+ *  query skips the column for them (N1). */
+function kindUsesFailureReason(kind: PipelineDetailKind): boolean {
+  return kind === "render_failed" || kind === "extraction_failed";
+}
+
+/** Pure SQL spec for one class's detail rows. Bindings in D1 bind order. */
+export function buildPipelineDetailQuery(
+  kind: PipelineDetailKind,
+  staleBeforeIso: string,
+): { sql: string; bindings: readonly unknown[] } {
+  switch (kind) {
+    case "never_enqueued":
+      return {
+        sql: DETAIL_PREFIX(kind) + `
          AND extraction_state = 'captured'
          AND extraction_enqueued_at IS NULL
          AND (needs_render = 0 OR needs_render IS NULL)
-       ORDER BY captured_at ASC
-       LIMIT 50`,
-    )
-    .all<{ id: string; captured_at: string | null; original_filename: string | null }>();
-  return result.results ?? [];
+       ORDER BY captured_at ASC LIMIT ${MAX_DETAIL_ROWS}`,
+        bindings: [],
+      };
+    case "consumer_stalled":
+      return {
+        sql: DETAIL_PREFIX(kind) + `
+         AND extraction_state IN ('captured','queued','processing')
+         AND extraction_enqueued_at IS NOT NULL
+         AND extraction_enqueued_at < ?
+       ORDER BY extraction_enqueued_at ASC LIMIT ${MAX_DETAIL_ROWS}`,
+        bindings: [staleBeforeIso],
+      };
+    case "render_stalled":
+      return {
+        sql: DETAIL_PREFIX(kind) + `
+         AND needs_render = 1
+         AND (extraction_state IS NULL OR extraction_state != 'failed')
+         AND captured_at < ?
+       ORDER BY captured_at ASC LIMIT ${MAX_DETAIL_ROWS}`,
+        bindings: [staleBeforeIso],
+      };
+    case "render_failed":
+      return {
+        sql: DETAIL_PREFIX(kind) + `
+         AND extraction_state = 'failed'
+         AND needs_render = 1
+       ORDER BY extraction_processed_at ASC LIMIT ${MAX_DETAIL_ROWS}`,
+        bindings: [],
+      };
+    case "extraction_failed":
+      return {
+        sql: DETAIL_PREFIX(kind) + `
+         AND extraction_state = 'failed'
+         AND (needs_render = 0 OR needs_render IS NULL)
+       ORDER BY extraction_processed_at ASC LIMIT ${MAX_DETAIL_ROWS}`,
+        bindings: [],
+      };
+  }
+}
+
+const DETAIL_PREFIX = (kind: PipelineDetailKind): string => `SELECT id, original_filename,
+         CASE
+           WHEN extraction_state = 'failed' THEN extraction_processed_at
+           WHEN extraction_enqueued_at IS NOT NULL THEN extraction_enqueued_at
+           ELSE captured_at
+         END AS age_from,
+         extraction_state, needs_render${kindUsesFailureReason(kind) ? ", extraction_json" : ""},
+         COUNT(*) OVER () AS total
+       FROM receipt_records
+       WHERE deleted_at IS NULL`;
+
+/** The affected receipts for a lit class (filename, age, reason) plus the
+ *  uncapped total. Only load when the class is lit — bounded to the oldest
+ *  MAX_DETAIL_ROWS; these are rare error cases. Throws on query failure —
+ *  the dashboard maps that to the `unavailable` sentinel (B5), not []. */
+export async function listPipelineAttentionReceipts(
+  kind: PipelineDetailKind,
+  db: D1Database = getReceiptsDb(),
+  now: number = Date.now(),
+): Promise<PipelineAttention> {
+  const staleBeforeIso = new Date(now - STALE_PENDING_MS).toISOString();
+  const { sql, bindings } = buildPipelineDetailQuery(kind, staleBeforeIso);
+  const result = await db.prepare(sql).bind(...bindings).all<AttentionRow>();
+  const rows = (result.results ?? []).map((row) => ({
+    id: row.id,
+    original_filename: row.original_filename,
+    ageMs: row.age_from ? Math.max(0, now - Date.parse(row.age_from)) : 0,
+    reason: kindUsesFailureReason(kind)
+      ? readFailureInfo({
+          extraction_state: row.extraction_state,
+          extraction_json: row.extraction_json ?? null,
+        }).reason
+      : null,
+  }));
+  return { kind, rows, total: rows.length > 0 ? (result.results?.[0]?.total ?? rows.length) : 0 };
 }

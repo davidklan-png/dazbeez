@@ -50,6 +50,14 @@ export const PUBLIC_ROUTES: string[] = [
   // they MUST be exempt from auth.protect() here — without this, Clerk
   // 404-rewrites the consumer's processor-key POST before the handler runs.
   "/api/receipts/:id/render",
+  // Backlog #22: the render leg's terminal-failure report (consumer POSTs when
+  // an email-body render fails permanently). Same layered processor-key OR
+  // Clerk auth inside the handler (mirrors extraction-failed), so it MUST be
+  // exempted here or Clerk 404-rewrites the consumer's POST before the handler
+  // runs — the render failure would then stay invisible. NB the sibling
+  // /render-retry route is Clerk-ONLY (operator button, no processor path) and
+  // deliberately NOT exempted — tests/middleware-routing.test.ts pins both.
+  "/api/receipts/:id/render-failed",
   "/api/receipts/inbox/:id/promote",
   // Recovery endpoint for receipts captured but never enqueued (email-attachment
   // promote before its enqueue fix; any future stranded capture path). Same

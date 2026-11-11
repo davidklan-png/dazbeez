@@ -113,3 +113,34 @@ test("PUBLIC_ROUTES: the /enqueue recovery endpoint IS exempted (processor-key a
     "/enqueue must be exempted from auth.protect() so its handler's processor-key path runs",
   );
 });
+
+test("PUBLIC_ROUTES: the /render-failed endpoint IS exempted (processor-key auth reaches the handler)", () => {
+  // POST /api/receipts/[id]/render-failed is the consumer render leg's
+  // terminal-failure report (backlog #22). Layered processor-key OR Clerk auth
+  // inside the handler (mirrors /extraction-failed). Without the exemption,
+  // Clerk 404-rewrites the consumer's processor-key POST before the handler
+  // runs and the render failure stays invisible — the recurring PR #59 bug.
+  const renderFailedRequest = new NextRequest(
+    "https://dazbeez.com/api/receipts/00000000-0000-0000-0000-000000000000/render-failed",
+    { method: "POST" },
+  );
+  assert.ok(
+    isPublicRoute(renderFailedRequest),
+    "/render-failed must be exempted from auth.protect() so its handler's processor-key path runs",
+  );
+});
+
+test("PUBLIC_ROUTES: the /render-retry recovery endpoint is NOT exempted (Clerk-protected)", () => {
+  // POST /api/receipts/[id]/render-retry is the operator's deliberate
+  // recovery (dashboard "Retry render" button). It has NO processor-key path
+  // (requireReceiptsActor only), so it must stay under auth.protect() —
+  // exempting it would let unauthenticated callers flip pipeline state.
+  const renderRetryRequest = new NextRequest(
+    "https://dazbeez.com/api/receipts/00000000-0000-0000-0000-000000000000/render-retry",
+    { method: "POST" },
+  );
+  assert.ok(
+    !isPublicRoute(renderRetryRequest),
+    "/render-retry must NOT be exempted from auth.protect() (Clerk-only operator action)",
+  );
+});

@@ -51,6 +51,10 @@ from queue_policy import (  # same-dir import; consumer.py runs as a script
     MAC_PER_PULL_VISIBILITY_TIMEOUT_MS as VISIBILITY_TIMEOUT_MS,
     MAC_POLL_INTERVAL_S as POLL_INTERVAL_S,
 )
+# Module-level import is cheap (render_email_body only lazy-imports WeasyPrint
+# inside render_body_to_pdf). Shares the permanent-failure class so the
+# classifier and both raise sites agree on one type.
+from render_email_body import PermanentRenderError
 
 CF_ACCOUNT_ID = os.environ["CF_ACCOUNT_ID"]
 CF_QUEUE_ID = os.environ["CF_QUEUE_ID"]
@@ -537,6 +541,25 @@ def _format_failure_reason(exc: Exception) -> str:
     return f"{exc.__class__.__name__}: {exc}"[:1000]
 
 
+def is_permanent_render_error(exc: Exception) -> bool:
+    """True for deterministic-permanent render-leg failures (backlog #22).
+
+    EXPLICIT ALLOWLIST: only PermanentRenderError qualifies — empty source body
+    from /file, or the renderer producing an empty PDF. Both are properties of
+    the same bytes, so retrying cannot change the outcome. Everything else
+    (WeasyPrint environmental errors, requests failures, HTTP 4xx/5xx from
+    /render) stays on the existing every-cycle retry path (no numeric cap;
+    aging is surfaced by the class-3 render_stalled health signal + these
+    stderr logs).
+    """
+    return isinstance(exc, PermanentRenderError)
+
+
+def _format_render_failure_reason(exc: Exception) -> str:
+    """Build the reason string for post_render_failed."""
+    return str(exc)[:1000]
+
+
 # ─── Backfill drain (--backfill mode) ────────────────────────────────────────
 # Recovery path for receipts stranded in a pending extraction_state — typically
 # because the queue consumer acked a 4xx poison pill (409 locked, 422 no OCR)
@@ -892,13 +915,62 @@ def pull_auto_promote_candidates(
     ]
 
 
+def post_render_failed(receipt_id: str, reason: str) -> bool:
+    """Tell the Worker a needs_render receipt's render failed permanently
+    (backlog #22). The Worker moves extraction_state to 'failed' with
+    stage:'render' in extraction_json, so the receipt surfaces as a terminal
+    render failure (red pill + dashboard health row with a Retry-render
+    action) instead of retrying every cycle.
+
+    Returns True only when the report was ACCEPTED (HTTP 2xx). A transport
+    failure or non-OK response returns False and is swallowed — the row
+    stays retryable and the next cycle re-attempts the render and the report.
+    The caller must NOT log a terminal claim unless this returns True (an
+    unaccepted report means nothing was committed).
+    """
+    headers = {
+        "x-receipts-processor-key": PROCESSOR_KEY,
+        "Content-Type": "application/json",
+    }
+    try:
+        resp = requests.post(
+            f"{EXTRACT_BASE}/{receipt_id}/render-failed",
+            headers=headers,
+            json={"reason": reason[:1000]},
+            timeout=30,
+        )
+        if not resp.ok:
+            print(
+                f"[warn] {receipt_id}: render-failed endpoint returned "
+                f"HTTP {resp.status_code}; will retry next cycle",
+                file=sys.stderr,
+            )
+            return False
+        return True
+    except requests.RequestException as exc:
+        print(
+            f"[warn] {receipt_id}: failed to post render-failed ({exc}); "
+            "will retry next cycle",
+            file=sys.stderr,
+        )
+        return False
+
+
 def pull_render_pending(only_id: str | None = None) -> list[dict[str, Any]]:
-    """receipt_records awaiting a Mac render (needs_render=1)."""
+    """receipt_records awaiting a Mac render (needs_render=1).
+
+    Excludes extraction_state='failed' rows — those are TERMINAL render
+    failures (marked via post_render_failed). The operator recovers them with
+    the dashboard's Retry-render action, which resets extraction_state to
+    'captured' and returns the row to this pool. Legacy stalled rows (never
+    marked failed) keep their retry-every-cycle behavior unchanged.
+    """
     where_id = f" AND id = {_sql_escape(only_id)}" if only_id else ""
     return _d1_query(
         "SELECT id, original_content_type "
         "FROM receipt_records "
-        "WHERE needs_render = 1 AND deleted_at IS NULL"
+        "WHERE needs_render = 1 AND deleted_at IS NULL "
+        "AND (extraction_state IS NULL OR extraction_state != 'failed')"
         + where_id + ";"
     )
 
@@ -954,16 +1026,45 @@ def process_renders(dry_run: bool, only_id: str | None = None) -> None:
             continue
         try:
             body = fetch_original_bytes(rid)  # GET /file → raw body bytes
-            if not body:
-                print(f"  [skip] {rid}: empty body from /file", file=sys.stderr)
+            if body is None:
+                # fetch_original_bytes already warned — transient (network /
+                # 5xx). Retry next cycle; never terminal.
                 continue
+            if not body:
+                # 200 OK with zero bytes: R2 has nothing for this key. Same
+                # bytes → same failure → permanent (backlog #22).
+                raise PermanentRenderError(
+                    "original body from /file is empty (zero bytes in R2)"
+                )
             pdf = render_body_to_pdf(
                 body.decode("utf-8", errors="replace"), content_type
             )
             post_render(rid, pdf, "application/pdf")
             print(f"  [ok] rendered {rid}")
         except Exception as exc:  # noqa: BLE001
-            print(f"  [fail] {rid}: {exc}", file=sys.stderr)
+            if is_permanent_render_error(exc):
+                # Deterministic-permanent (empty body / empty PDF). Mark the
+                # receipt terminal so the render leg stops retrying it every
+                # cycle; the dashboard surfaces it with the reason + a
+                # Retry-render action. The terminal claim is logged ONLY if
+                # the Worker accepted the report — otherwise the row stays
+                # in the pending pool and the next cycle re-reports.
+                reason = _format_render_failure_reason(exc)
+                if post_render_failed(rid, reason):
+                    print(
+                        f"  [fail-perm] {rid}: {reason} "
+                        "— marked render-failed (terminal until Retry render)",
+                        file=sys.stderr,
+                    )
+                else:
+                    print(
+                        f"  [fail-perm-unreported] {rid}: {reason} "
+                        "— report NOT accepted; still retryable, will "
+                        "re-attempt next cycle",
+                        file=sys.stderr,
+                    )
+            else:
+                print(f"  [retry] {rid}: {exc}", file=sys.stderr)
 
 
 def process_once() -> int:
