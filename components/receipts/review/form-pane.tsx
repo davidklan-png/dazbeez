@@ -446,33 +446,49 @@ export function FormPane(props: FormPaneProps) {
   }, [saveQueue, nextReceiptId, queryParams, router]);
 
   // Flush pending edits NOW and resolve once the latest save has COMMITTED —
-  // the awaited-navigation contract for Skip, j/k, rail clicks and the
-  // compare / view-in-month links (registered below; see review-navigation.ts).
-  // Rejects (after surfacing the badge error) when the save fails so the
-  // caller stays on this receipt with its edits intact.
-  const flushPendingEdits = useCallback(async () => {
-    const hadPendingEdits = saveTimerRef.current !== null;
-    if (saveTimerRef.current) {
-      clearTimeout(saveTimerRef.current);
-      saveTimerRef.current = null;
+  // the awaited-navigation contract for Skip, j/k, rail clicks, SubHeader
+  // scope/month/search and the compare / view-in-month links (registered
+  // below; see review-navigation.ts). Single-flight: concurrent navigation
+  // intents (rapid j j, a month pick then a search) share ONE flush. The
+  // loop re-checks after each commit — edits made while a flush was in
+  // flight get their own save rather than being left behind. Rejects (after
+  // surfacing the badge error) when a save fails so the caller stays on this
+  // receipt with its edits intact.
+  const flushingRef = useRef<Promise<void> | null>(null);
+  const flushPendingEdits = useCallback((): Promise<void> => {
+    if (!flushingRef.current) {
+      flushingRef.current = (async () => {
+        try {
+          for (;;) {
+            const hadPendingEdits = saveTimerRef.current !== null;
+            if (saveTimerRef.current) {
+              clearTimeout(saveTimerRef.current);
+              saveTimerRef.current = null;
+            }
+            // lastFailed: a failed save leaves unsaved edits with NO timer
+            // armed — without this check a retry navigation would skip the
+            // save and silently abandon them.
+            if (!hadPendingEdits && saveQueue.idle && !saveQueue.lastFailed) {
+              return;
+            }
+            setSave({ kind: "saving" });
+            const result = await saveQueue.save();
+            setApiWarnings(result.warnings);
+            setSave({ kind: "saved", at: Date.now() });
+          }
+        } catch (error) {
+          // Stay + honest error; edits are retained in the form state.
+          setSave({
+            kind: "error",
+            message: error instanceof Error ? error.message : "Save failed",
+          });
+          throw error;
+        } finally {
+          flushingRef.current = null;
+        }
+      })();
     }
-    // lastFailed: a failed save leaves unsaved edits with NO timer armed —
-    // without this check the retry navigation would skip the save and
-    // silently abandon them.
-    if (!hadPendingEdits && saveQueue.idle && !saveQueue.lastFailed) return;
-    setSave({ kind: "saving" });
-    try {
-      const result = await saveQueue.save();
-      setApiWarnings(result.warnings);
-      setSave({ kind: "saved", at: Date.now() });
-    } catch (error) {
-      // Stay + honest error; edits are retained in the form state.
-      setSave({
-        kind: "error",
-        message: error instanceof Error ? error.message : "Save failed",
-      });
-      throw error;
-    }
+    return flushingRef.current;
   }, [saveQueue]);
 
   // The single mounted review form publishes its flush to the navigation

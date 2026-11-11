@@ -44,9 +44,9 @@ function bodyOf(fetches: { init: RequestInit }[], i: number) {
 }
 
 /** Mini form: same moving parts form-pane owns — a debounce timer, a
- * per-instance serialized queue rebound on every "render", and the
- * flushPendingEdits contract (save now, badge on settle, rethrow on
- * failure). */
+ * per-instance serialized queue rebound on every "render", the IME
+ * composition hold (deferFire), and the flushPendingEdits contract (save
+ * now, badge on settle, rethrow on failure). */
 function makeFormHarness() {
   const deferred = makeDeferredFetch();
   const rawCalls: { init: RequestInit }[] = [];
@@ -56,19 +56,26 @@ function makeFormHarness() {
     return fetchImpl(url, init);
   };
   let merchant = "committed-value";
+  let composing = false;
   const queue = new SaveQueue({
     url: "/api/receipts/r1",
     buildBody: () => ({ merchant }),
+    deferFire: () => composing,
     fetchImpl: wrapFetch,
   });
   const render = () =>
     queue.rebind({
       url: "/api/receipts/r1",
       buildBody: () => ({ merchant }),
+      deferFire: () => composing,
       fetchImpl: wrapFetch,
     });
   const badge: string[] = [];
   let debounceArmed = false;
+  // Single-flight + re-check loop, mirroring form-pane's flushPendingEdits:
+  // concurrent navigation intents share ONE flush; edits made during a flush
+  // get their own save.
+  let flushing: Promise<void> | null = null;
 
   return {
     calls: rawCalls,
@@ -80,6 +87,19 @@ function makeFormHarness() {
       render();
       debounceArmed = true;
     },
+    /** IME composition starts (business purpose): the pending debounce is
+     * cleared and saves are held until WebKit commits. */
+    startComposition() {
+      composing = true;
+      render();
+      debounceArmed = false;
+    },
+    /** Composition ends: the hold lifts and the form re-arms the save. */
+    endComposition() {
+      composing = false;
+      render();
+      debounceArmed = true;
+    },
     /** The debounce window elapsed while the operator was NOT navigating:
      * triggerSave fired and the save is now in flight. */
     async elapseDebounce() {
@@ -87,19 +107,35 @@ function makeFormHarness() {
       void queue.save();
       await tick();
     },
-    /** form-pane's flushPendingEdits, verbatim semantics. */
-    async flushPendingEdits() {
-      const hadPendingEdits = debounceArmed;
+    /** triggerSave's debounce firing after a composition end re-armed it —
+     * the queue.save() call that re-attempts a deferFire-held drain. */
+    fireDebounce() {
       debounceArmed = false;
-      if (!hadPendingEdits && queue.idle && !queue.lastFailed) return;
-      badge.push("saving");
-      try {
-        await queue.save();
-        badge.push("saved");
-      } catch (error) {
-        badge.push(`error:${(error as Error).message}`);
-        throw error;
+      return queue.save();
+    },
+    /** form-pane's flushPendingEdits, verbatim semantics. */
+    flushPendingEdits(): Promise<void> {
+      if (!flushing) {
+        flushing = (async () => {
+          try {
+            for (;;) {
+              const hadPendingEdits = debounceArmed;
+              debounceArmed = false;
+              if (!hadPendingEdits && queue.idle && !queue.lastFailed) return;
+              badge.push("saving");
+              const result = await queue.save();
+              void result;
+              badge.push("saved");
+            }
+          } catch (error) {
+            badge.push(`error:${(error as Error).message}`);
+            throw error;
+          } finally {
+            flushing = null;
+          }
+        })();
       }
+      return flushing;
     },
     get merchant() {
       return merchant;
@@ -275,6 +311,112 @@ test("guardedLinkClick: modifier and non-left clicks keep native new-tab behavio
   assert.deepEqual(pushed, ["/receipts/review/x?month=2026-06"]);
 });
 
+test("SubHeader month pick during debounce: awaits commit, pushes after, and a rapid second choice supersedes the stale target", async (t) => {
+  const form = makeFormHarness();
+  const off = registerSaveFlusher(form.flushPendingEdits);
+  t.after(off);
+
+  form.edit("june-edit"); // month select clicked within the 450 ms window
+  const pushed: string[] = [];
+
+  // Operator picks June, then immediately re-picks July while the save for
+  // June's intent is still committing — the stale June target must never
+  // land after the newer choice.
+  const june = guardedNavigate(() => pushed.push("/review?month=2026-06"));
+  const july = guardedNavigate(() => pushed.push("/review?month=2026-07"));
+  await tick();
+  assert.equal(form.calls.length, 1); // one flush serves both intents
+
+  form.deferred.calls[0]!.ok({});
+  assert.equal(await june, false); // superseded — never pushes
+  assert.equal(await july, true); // latest intent pushes, once
+  assert.deepEqual(pushed, ["/review?month=2026-07"]);
+});
+
+test("scope toggle during debounce: failure keeps the operator on the receipt; retry navigates", async (t) => {
+  const form = makeFormHarness();
+  const off = registerSaveFlusher(form.flushPendingEdits);
+  t.after(off);
+
+  form.edit("scope-toggle-edit");
+  const pushed: string[] = [];
+  const toggle = guardedNavigate(() =>
+    pushed.push("/review?month=2026-08&scope=closing"),
+  );
+  await tick();
+  form.deferred.calls[0]!.fail("D1 unavailable");
+  assert.equal(await toggle, false);
+  assert.deepEqual(pushed, [] as string[]); // stayed — no silent discard, honest badge
+  assert.ok(form.badge.includes("error:D1 unavailable"));
+
+  // Operator retries the toggle once the failure is visible: the edits
+  // re-flush (lastFailed) and the navigation then succeeds.
+  const retry = guardedNavigate(() =>
+    pushed.push("/review?month=2026-08&scope=closing"),
+  );
+  await tick();
+  assert.equal(form.calls.length, 2);
+  form.deferred.calls[1]!.ok({});
+  assert.equal(await retry, true);
+  assert.deepEqual(pushed, ["/review?month=2026-08&scope=closing"]);
+});
+
+test("debounced search submit: same awaited guard as rail/j-k", async (t) => {
+  const form = makeFormHarness();
+  const off = registerSaveFlusher(form.flushPendingEdits);
+  t.after(off);
+
+  form.edit("search-edit");
+  const pushed: string[] = [];
+  const search = guardedNavigate(() => pushed.push("/review?q=express"));
+  await tick();
+  assert.equal(pushed.length, 0); // not yet — the save must commit first
+  form.deferred.calls[0]!.ok({});
+  assert.equal(await search, true);
+  assert.deepEqual(pushed, ["/review?q=express"]);
+});
+
+test("navigation during IME composition: a held flush waits for WebKit to commit, then completes", async (t) => {
+  const form = makeFormHarness();
+  const off = registerSaveFlusher(form.flushPendingEdits);
+  t.after(off);
+
+  // Reachable shape: the autosave for an edit is already IN FLIGHT when the
+  // operator starts composing (a coalesced flush is pending behind it), then
+  // navigates. (Navigating while composing always blurs the input first in
+  // the real UI — blur/composition-end commits the text before the click
+  // handler runs — so the guard never sees an active composition with a
+  // clean queue.)
+  form.edit("merchant-edit");
+  await form.elapseDebounce(); // request 1 in flight
+  form.startComposition(); // pending edits exist but are now held
+  const pushed: string[] = [];
+  const month = guardedNavigate(() => pushed.push("/review?month=2026-09"));
+  await tick();
+
+  form.deferred.calls[0]!.ok({}); // in-flight commits; the flush wants to fire
+  await tick();
+
+  // Composition active: the flush must NOT fire with uncommitted
+  // (marked-text) business-purpose state — nothing sent, nothing pushed.
+  assert.equal(form.calls.length, 1);
+  assert.equal(pushed.length, 0);
+
+  form.endComposition(); // WebKit commits; composition end re-arms the save
+  void form.fireDebounce(); // 450 ms later, triggerSave fires → drain re-attempts
+  await tick();
+  assert.equal(form.calls.length, 2);
+  form.deferred.calls[1]!.ok({});
+  assert.equal(await month, true);
+  assert.deepEqual(pushed, ["/review?month=2026-09"]);
+  // The edit rode the committed flushes — merchant saved, not dropped.
+  assert.equal(
+    (JSON.parse(form.calls[1]!.init.body as string) as { merchant: string })
+      .merchant,
+    "merchant-edit",
+  );
+});
+
 test("registerSaveFlusher: re-registering replaces; unregistering restores immediate navigation", async () => {
   const offA = registerSaveFlusher(async () => {
     throw new Error("stale form");
@@ -322,4 +464,53 @@ test("queue-rail: item links are guarded with native modifier behavior preserved
   // the shared module's isTypingTarget path).
   assert.match(queueRail, /useKeyboardShortcuts\(\{\s*j:/);
   assert.doesNotMatch(queueRail, /allowInInputs/);
+});
+
+const reviewLayout = readFileSync(
+  "components/receipts/review/review-layout.tsx",
+  "utf8",
+);
+const queueControls = readFileSync(
+  "components/receipts/review/queue-controls.tsx",
+  "utf8",
+);
+
+test("SubHeader: month select, scope toggle and filter tabs navigate through the guard", () => {
+  // Month select + scope toggle: the push runs inside guardedNavigate, with
+  // the URL still built by the same buildReviewControlQuery call.
+  const monthFrom = reviewLayout.indexOf("function onMonthChange");
+  const month = reviewLayout.slice(
+    monthFrom,
+    reviewLayout.indexOf("return (", monthFrom),
+  );
+  assert.match(month, /guardedNavigate\(\(\) =>\s*router\.push\(/);
+  assert.match(month, /buildReviewControlQuery/);
+  const scopeFrom = reviewLayout.indexOf("function onToggleScope");
+  const scope = reviewLayout.slice(
+    scopeFrom,
+    reviewLayout.indexOf("return (", scopeFrom),
+  );
+  assert.match(scope, /guardedNavigate\(\(\) =>\s*router\.push\(/);
+
+  // Filter tabs + Locked pill: guarded link clicks preserving new-tab. The
+  // 4 tabs come from one JSX site in the FILTER_TABS map, the locked pill
+  // from its own — 2 guarded Link sites cover all 5 rendered controls.
+  const guardedLinks = reviewLayout.match(/guardedLinkClick\(/g) ?? [];
+  assert.equal(
+    guardedLinks.length,
+    2,
+    "filter-tabs map + locked pill both guarded",
+  );
+  // The tab URLs themselves are unchanged (same reviewHref source).
+  assert.match(reviewLayout, /reviewHref\(f\.key \|\| null, monthParam, scope, q\)/);
+});
+
+test("search submit/clear navigates through the guard; push semantics preserved", () => {
+  const search = queueControls.slice(
+    queueControls.indexOf("function push(q: string)"),
+    queueControls.indexOf("function onSubmit"),
+  );
+  assert.match(search, /guardedNavigate\(\(\) =>\s*router\.push\(/);
+  assert.match(search, /buildReviewControlQuery/);
+  assert.doesNotMatch(search, /router\.replace/);
 });

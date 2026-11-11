@@ -1,9 +1,10 @@
 // Client-safe awaited-navigation guard for the receipt review screen.
 //
 // The review form (form-pane) owns the pending-edit state (debounce timer +
-// serialized save queue). Every navigation the form can trigger — Skip, the
-// `s` save-and-next, j/k + arrow keys, rail item clicks, the compare and
-// view-in-month links — must WAIT for the latest save to commit before
+// serialized save queue). Every navigation that can leave the form — Skip,
+// the `s` save-and-next, j/k + arrow keys, rail item clicks, the compare and
+// view-in-month links, the SubHeader month/scope/filter controls and the
+// cross-month search — must WAIT for the latest save to commit before
 // routing, and must NOT route when that save fails (the operator stays on
 // the receipt, the form keeps its edits, the save badge shows the error).
 // Those callers live in different components, so the single mounted form
@@ -36,19 +37,32 @@ export function registerSaveFlusher(flusher: SaveFlusher): () => void {
  * push. Resolves false WITHOUT navigating when the save failed — the caller
  * does nothing further; the still-mounted form surfaces the error badge and
  * retains the operator's edits.
+ *
+ * Multiple rapid intents (j j j, a month pick then a search while the save
+ * is still committing) are coalesced by SUPERSESSION: only the LATEST
+ * registered intent may push, and only after its own flush succeeds. An
+ * older intent resolves false without pushing — its target would be stale
+ * by the time the shared flush resolves.
  */
+let navigating: object | null = null;
+
 export async function guardedNavigate(push: () => void): Promise<boolean> {
   if (!activeFlusher) {
     push();
     return true;
   }
+  const token = {};
+  navigating = token; // supersedes any in-flight guarded navigation
   try {
     await activeFlusher();
-    push();
-    return true;
   } catch {
+    if (navigating === token) navigating = null;
     return false;
   }
+  if (navigating !== token) return false; // superseded by a newer intent
+  navigating = null;
+  push();
+  return true;
 }
 
 /** Structural subset of React's MouseEvent<HTMLAnchorElement> — keeps the

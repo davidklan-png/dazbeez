@@ -20,6 +20,10 @@ import {
   normalizeReviewFilter,
   type ReviewScope,
 } from "@/lib/receipts/review-queue-filter";
+import {
+  guardedLinkClick,
+  guardedNavigate,
+} from "@/lib/receipts/review-navigation";
 
 const REVIEW_HINTS = [
   ["j / k", "next · prev"],
@@ -163,9 +167,14 @@ function SubHeader({
   function onMonthChange(value: string) {
     // Preserve the workflow filter across month changes. Closing scope is
     // preserved too, except when switching to 'all' (no closing scope there).
+    // The push awaits the form's pending edits (see review-navigation.ts);
+    // a rapid second intent supersedes this one so no stale month target
+    // lands after the newer choice.
     const nextScope: ReviewScope = value === "all" ? "calendar" : scope;
-    router.push(
-      `/receipts/review${buildReviewControlQuery({ month: value, filter: activeFilter || null, scope: nextScope, q: q || undefined })}`,
+    void guardedNavigate(() =>
+      router.push(
+        `/receipts/review${buildReviewControlQuery({ month: value, filter: activeFilter || null, scope: nextScope, q: q || undefined })}`,
+      ),
     );
   }
 
@@ -175,8 +184,10 @@ function SubHeader({
     // from an implicit/default month navigates with an explicit month; disabling
     // preserves the concrete month. buildReviewControlQuery drops scope=closing
     // for a non-concrete month (All months).
-    router.push(
-      `/receipts/review${buildReviewControlQuery({ month: toggleMonth, filter: activeFilter || null, scope: nextScope, q: q || undefined })}`,
+    void guardedNavigate(() =>
+      router.push(
+        `/receipts/review${buildReviewControlQuery({ month: toggleMonth, filter: activeFilter || null, scope: nextScope, q: q || undefined })}`,
+      ),
     );
   }
 
@@ -227,10 +238,12 @@ function SubHeader({
         >
           {FILTER_TABS.map((f) => {
             const isActive = normalizedFilter === f.key;
+            const href = reviewHref(f.key || null, monthParam, scope, q);
             return (
               <Link
                 key={f.key || "all"}
-                href={reviewHref(f.key || null, monthParam, scope, q)}
+                href={href}
+                onClick={(e) => guardedLinkClick(e, href, (h) => router.push(h))}
                 role="tab"
                 aria-selected={isActive}
                 className={[
@@ -248,6 +261,9 @@ function SubHeader({
               tabs. Rendered unconditionally so the control doesn't jump. */}
           <Link
             href={reviewHref("locked", monthParam, scope, q)}
+            onClick={(e) =>
+              guardedLinkClick(e, reviewHref("locked", monthParam, scope, q), (h) => router.push(h))
+            }
             role="tab"
             aria-selected={normalizedFilter === "locked"}
             className={[
