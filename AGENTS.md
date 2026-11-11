@@ -580,24 +580,35 @@ starts. Design consequences:
     processor-key-guarded endpoint that records the failure, so it surfaces
     like `extraction_state='failed'` does.
     IMPLEMENTED (2026-11-11, receipts-processing-recovery PR; hardened in
-    round 2 after cross-review B1–B5): consumer classifies permanent render
-    failures via an explicit allowlist (`PermanentRenderError` only — empty
-    body bytes from /file, WeasyPrint empty PDF; everything else stays
-    retryable) and POSTs `/api/receipts/:id/render-failed` (processor-key OR
-    Clerk; in PUBLIC_ROUTES + middleware-routing test). Terminal marker
-    reuses `extraction_state='failed'` + extraction_json
+    rounds 2–3 after cross-reviews B1–B5 / R1–R4): consumer classifies
+    permanent render failures via an explicit allowlist
+    (`PermanentRenderError` only — empty body bytes from /file, WeasyPrint
+    empty PDF; everything else stays retryable) and POSTs
+    `/api/receipts/:id/render-failed` (processor-key OR Clerk; in
+    PUBLIC_ROUTES + middleware-routing test). Terminal marker reuses
+    `extraction_state='failed'` + extraction_json
     `{failed,stage:'render',reason}` — no migration (architect preference,
     extraction-failed precedent); `needs_render=1` stays as the
-    render-vs-extraction discriminator. The terminal state AND its reason
-    commit in ONE conditional UPDATE whose WHERE repeats the full admission;
-    preexisting extraction data in extraction_json is merged (preserved) and
-    the FIRST terminal reason/timestamp is immutable — repeat reports are
-    read-only idempotent successes. `pull_render_pending` excludes failed
-    rows (the retry stop); legacy stalled rows untouched. Pipeline health
+    render-vs-extraction discriminator. The terminal state, its reason, and
+    the audit entry commit in ONE D1 batch (transaction): the failure keys
+    merge into the CURRENT extraction_json via SQLite `json_patch` inside
+    the UPDATE (a concurrent JSON edit is preserved, not overwritten), the
+    WHERE admits the NULL extraction_state arm of the consumer's poll
+    predicate (the schema itself is NOT NULL — 0016 — so this is
+    poll/write consistency, not a reachable legacy state), and
+    an audit-write failure rolls the mutation back so a thrown error truly
+    means "not modified". The FIRST terminal reason/timestamp is immutable —
+    repeat reports are read-only idempotent successes. `pull_render_pending`
+    excludes failed rows (the retry stop); an unconfirmed report (non-2xx or
+    lost response) is logged as outcome-UNCONFIRMED, never as "still
+    retryable". Legacy stalled rows untouched. Pipeline health
     gains render_failed/extraction_failed classes + per-receipt rows
     (filename, review link, age, reason, honest action; "showing oldest 50
     of N" cap disclosure; failed detail queries surface an explicit
     "details unavailable — reload" line, never a silent empty list);
+    Health-row action failures are classified (409 refused / 404 removed /
+    401·403 auth / else temporary): only temporary leaves the button
+    enabled; refusals show the endpoint's own validated message.
     extraction-failed rows get NO auto-retry (the /enqueue contract
     intentionally refuses failed rows — the health row says "replace the
     file or enter fields by hand"). Deliberate recovery:
@@ -608,9 +619,10 @@ starts. Design consequences:
     inside the atomic UPDATE with affected-rows inspection; a lost race or a
     sealed month answers 409 honestly, never a false success. Real-SQLite
     regressions (tests/receipts/render-recovery-persistence.test.ts) cover
-    merge/idempotence, rollback, review/delete races, and sealed-month
-    fixtures. Live follow-up: restart the launchd auto-promote-render job
-    from committed code.
+    json_patch merge under a concurrent edit, NULL-state admission,
+    batch/audit rollback, two-admitted-request retry races, wrong-pipeline
+    rejection, and sealed-month fixtures. Live follow-up: restart the
+    launchd auto-promote-render job from committed code.
 
 23. **`preservation_status` is a three-way inconsistency in existing rows —
     backfill SEPARATELY (not in the capture-contract PR).** Found during the #18

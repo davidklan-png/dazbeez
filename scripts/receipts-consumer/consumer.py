@@ -923,10 +923,11 @@ def post_render_failed(receipt_id: str, reason: str) -> bool:
     action) instead of retrying every cycle.
 
     Returns True only when the report was ACCEPTED (HTTP 2xx). A transport
-    failure or non-OK response returns False and is swallowed — the row
-    stays retryable and the next cycle re-attempts the render and the report.
-    The caller must NOT log a terminal claim unless this returns True (an
-    unaccepted report means nothing was committed).
+    failure or non-OK response returns False and is swallowed — the OUTCOME
+    IS UNCONFIRMED: the report may have been committed before the response
+    was lost, in which case the row is terminal and will NOT be re-rendered.
+    The caller must log a terminal claim only when this returns True, and
+    otherwise say the outcome is unconfirmed (never assert retryability).
     """
     headers = {
         "x-receipts-processor-key": PROCESSOR_KEY,
@@ -942,7 +943,7 @@ def post_render_failed(receipt_id: str, reason: str) -> bool:
         if not resp.ok:
             print(
                 f"[warn] {receipt_id}: render-failed endpoint returned "
-                f"HTTP {resp.status_code}; will retry next cycle",
+                f"HTTP {resp.status_code}; outcome unconfirmed",
                 file=sys.stderr,
             )
             return False
@@ -950,7 +951,7 @@ def post_render_failed(receipt_id: str, reason: str) -> bool:
     except requests.RequestException as exc:
         print(
             f"[warn] {receipt_id}: failed to post render-failed ({exc}); "
-            "will retry next cycle",
+            "outcome unconfirmed",
             file=sys.stderr,
         )
         return False
@@ -1059,8 +1060,9 @@ def process_renders(dry_run: bool, only_id: str | None = None) -> None:
                 else:
                     print(
                         f"  [fail-perm-unreported] {rid}: {reason} "
-                        "— report NOT accepted; still retryable, will "
-                        "re-attempt next cycle",
+                        "— report delivery unconfirmed: if it was accepted "
+                        "the row is terminal and will NOT re-render; check "
+                        "the dashboard health row",
                         file=sys.stderr,
                     )
             else:

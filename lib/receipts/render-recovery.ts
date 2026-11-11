@@ -8,14 +8,23 @@
 // stays 1, so the row itself remains the discriminator between a terminal
 // RENDER failure and a terminal EXTRACTION failure.
 //
-// Persistence rules (review B1/B2):
+// Persistence rules (review B1/B2 + round-3 R1/R2/R3):
 //   - The terminal state AND its diagnostic commit in ONE conditional UPDATE
 //     whose WHERE repeats the full admission (deleted/render/status/pending
-//     state) — no read-then-act window, no state-without-reason commit.
-//   - Non-failure extraction data already in extraction_json is PRESERVED
-//     (merged under the failure keys); the FIRST committed terminal reason
-//     and timestamp are immutable — an already-terminal report is a
-//     read-only idempotent success (no write, no audit).
+//     state, including the legacy NULL extraction_state the consumer's poll
+//     supports) — no read-then-act window, no state-without-reason commit.
+//   - The failure keys are merged into the CURRENT extraction_json inside
+//     that UPDATE (SQLite json_patch), so a JSON edit that lands between the
+//     read and the write survives — failure keys win, sibling keys are kept.
+//   - The mutation and its audit entry commit in one D1 batch (a transaction):
+//     an audit-write failure rolls the mutation back, so a thrown error after
+//     the UPDATE genuinely means "not modified" (R3). The audit INSERT is
+//     guarded on the just-written state, so a zero-change UPDATE writes no
+//     success audit.
+//   - Non-failure extraction data already in extraction_json is PRESERVED;
+//     the FIRST committed terminal reason and timestamp are immutable — an
+//     already-terminal report is a read-only idempotent success (no write,
+//     no audit).
 //
 // Recovery rules (review B3): retry admits only the terminal render-failure
 // state, re-checks admission INSIDE the atomic write (deleted_at, status,
@@ -28,7 +37,7 @@ import {
   receiptInFinalizedReconciliationSql,
 } from "@/lib/receipts/month-lock";
 import { createAuditEntry } from "@/lib/receipts/audit";
-import { nowIso, stringifyJson } from "@/lib/receipts/db-utils";
+import { nowIso, newUuid, stringifyJson } from "@/lib/receipts/db-utils";
 import type { ReceiptRecord } from "@/lib/receipts/types";
 
 const PENDING_STATES = ["captured", "queued", "processing"] as const;
@@ -164,49 +173,18 @@ interface FailureRow {
 }
 
 /**
- * Merge the terminal render-failure marker into an existing extraction_json
- * payload WITHOUT discarding non-failure data (review B1). Pure.
- *  - existing parseable object → its keys survive; failure keys win.
- *  - anything else (null, malformed, non-object) → fresh payload only —
- *    there is no structured data to preserve (extraction-failed precedent).
- */
-export function mergeTerminalRenderPayload(
-  existingJson: string | null,
-  reason: string,
-  failedAt: string,
-): string {
-  let base: Record<string, unknown> = {};
-  if (existingJson) {
-    try {
-      const parsed = JSON.parse(existingJson) as unknown;
-      if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
-        base = parsed as Record<string, unknown>;
-      }
-    } catch {
-      /* malformed — nothing preservable */
-    }
-  }
-  return stringifyJson({
-    ...base,
-    failed: true as const,
-    stage: "render" as const,
-    reason,
-    failedAt,
-  });
-}
-
-/**
- * Record a terminal render failure ATOMICICALLY (review B1/B2).
+ * Record a terminal render failure ATOMICICALLY (review B1/B2 + R1/R2/R3).
  *
  * One conditional UPDATE commits state + diagnostic together, gated on the
- * full admitted state (deleted_at IS NULL, needs_render=1, pending
- * extraction_state, pre-review status). Idempotence: when the row is
- * already terminally failed (or a concurrent report won the race), the
- * FIRST committed marker is returned untouched — no second write, no second
- * audit. A thrown error anywhere before/during the UPDATE leaves the row
- * exactly as it was (single statement ⇒ no partial commit), so the render
- * leg re-attempts next cycle — the row can never be excluded from polling
- * without its reason (B2).
+ * full admitted state (deleted_at IS NULL, needs_render=1, pending or legacy
+ * NULL extraction_state, pre-review status). The failure keys merge into the
+ * CURRENT extraction_json via json_patch inside the same statement (R1), so
+ * a concurrent JSON edit is not lost. The mutation and its audit entry then
+ * commit in one D1 batch/transaction (R3): an audit-write failure rolls the
+ * mutation back, so a thrown error here genuinely means "not modified".
+ * Idempotence: when the row is already terminally failed (or a concurrent
+ * report won the race), the FIRST committed marker is returned untouched —
+ * no second write, no second audit.
  */
 export async function recordRenderFailure(input: {
   db: D1Database;
@@ -239,20 +217,31 @@ export async function recordRenderFailure(input: {
   } as unknown as ReceiptRecord;
   const admission = admitRenderFailure(asRecord);
   if (!admission.ok) {
-    // Human-advanced rows reconcile stale pending state like /extraction-failed
-    // (so the month-close gate isn't blocked by a late queue report). A
-    // needs_render=0 rejection is a wrong-pipeline report and must NOT touch
-    // extraction_state — the row may legitimately be mid-extraction.
+    // Human-advanced RENDER rows (needs_render=1) reconcile stale pending
+    // state like /extraction-failed, so the month-close gate isn't blocked by
+    // a late queue report. A needs_render=0 rejection is a WRONG-PIPELINE
+    // report (review N1): it must not touch extraction_state at all — the row
+    // may legitimately be mid-extraction. The WHERE re-checks the render
+    // lifecycle constraints this cleanup is defined for.
     const humanAdvanced =
       row.status !== "captured" && row.status !== "needs_review";
-    if (humanAdvanced && row.extraction_state && isPendingState(row.extraction_state)) {
+    if (
+      row.needs_render === 1 &&
+      humanAdvanced &&
+      row.extraction_state !== null &&
+      isPendingState(row.extraction_state)
+    ) {
       await db
         .prepare(
           `UPDATE receipt_records
              SET extraction_state = 'processed', updated_at = ?
-           WHERE id = ? AND extraction_state IN ('captured','queued','processing')`,
+           WHERE id = ?
+             AND deleted_at IS NULL
+             AND needs_render = 1
+             AND status = ?
+             AND extraction_state IN ('captured','queued','processing')`,
         )
-        .bind(now, receiptId)
+        .bind(now, receiptId, row.status)
         .run();
     }
     await createAuditEntry(db, {
@@ -269,27 +258,62 @@ export async function recordRenderFailure(input: {
     return { kind: "conflict", error: admission.error };
   }
 
-  const mergedJson = mergeTerminalRenderPayload(row.extraction_json, reason, now);
-  // B1/B2: the WHERE re-checks the entire admitted state, so a race that
-  // advances, deletes, or terminally marks the receipt between the read and
-  // this write yields zero affected rows — handled honestly below.
-  const result = await db
-    .prepare(
-      `UPDATE receipt_records
-         SET extraction_state = 'failed',
-             extraction_processed_at = ?,
-             extraction_json = ?,
-             updated_at = ?
-       WHERE id = ?
-         AND deleted_at IS NULL
-         AND needs_render = 1
-         AND extraction_state IN ('captured','queued','processing')
-         AND status IN ('captured','needs_review')`,
-    )
-    .bind(now, mergedJson, now, receiptId)
-    .run();
+  // R1/B1/B2: the WHERE re-checks the entire admitted state (R2: NULL
+  // extraction_state is a supported legacy pending state — the consumer's
+  // poll includes it), and json_patch merges the failure keys into the
+  // extraction_json AS IT IS AT WRITE TIME, so concurrent edits survive.
+  const failurePatch = stringifyJson({
+    failed: true as const,
+    stage: "render" as const,
+    reason,
+    failedAt: now,
+  });
+  const [result] = await db.batch([
+    db
+      .prepare(
+        `UPDATE receipt_records
+           SET extraction_state = 'failed',
+               extraction_processed_at = ?,
+               extraction_json = json_patch(
+                 CASE
+                   WHEN extraction_json IS NULL THEN '{}'
+                   WHEN json_valid(extraction_json) THEN extraction_json
+                   ELSE '{}'
+                 END, ?),
+               updated_at = ?
+         WHERE id = ?
+           AND deleted_at IS NULL
+           AND needs_render = 1
+           AND (extraction_state IN ('captured','queued','processing')
+                OR extraction_state IS NULL)
+           AND status IN ('captured','needs_review')`,
+      )
+      .bind(now, failurePatch, now, receiptId),
+    // Audit INSERT guarded on the just-written state (same transaction): a
+    // zero-change UPDATE cannot produce a success audit.
+    db
+      .prepare(
+        `INSERT INTO receipt_audit_log
+           (id, actor, action, object_type, object_id, old_value_json, new_value_json, created_at)
+         SELECT ?, ?, 'receipt.render_failed', 'receipt', ?, NULL, ?, ?
+         WHERE EXISTS(
+           SELECT 1 FROM receipt_records
+           WHERE id = ? AND extraction_state = 'failed'
+             AND needs_render = 1 AND updated_at = ?
+         )`,
+      )
+      .bind(
+        newUuid(),
+        actor,
+        receiptId,
+        stringifyJson({ failureReason: reason, stage: "render" }),
+        now,
+        receiptId,
+        now,
+      ),
+  ]);
 
-  if ((result.meta.changes ?? 0) === 0) {
+  if ((result?.meta.changes ?? 0) === 0) {
     // Admission lost between read and write. If a concurrent report won, the
     // marker it committed is authoritative; otherwise name the conflict.
     const after = await db
@@ -312,13 +336,6 @@ export async function recordRenderFailure(input: {
     };
   }
 
-  await createAuditEntry(db, {
-    actor,
-    action: "receipt.render_failed",
-    objectType: "receipt",
-    objectId: receiptId,
-    newValueJson: stringifyJson({ failureReason: reason, stage: "render" }),
-  });
   return { kind: "recorded", failedAt: now };
 }
 
@@ -379,7 +396,9 @@ export function retrySealGuardSql(): string {
  * seal guards above, and the status/state predicates — is enforced INSIDE
  * the single conditional UPDATE; affected rows are inspected. Zero rows
  * changed is re-read and reported honestly (deleted → not_found; raced
- * review/seal/recovery → conflict), never a false success audit.
+ * review/seal/recovery → conflict), never a false success audit. The
+ * mutation and its audit commit in one D1 batch/transaction (R3): an
+ * audit-write failure rolls the retry back.
  *
  * Writes no business fields and never enqueues (render rows enqueue via
  * /render only, after the derivative lands — the intentionally narrow
@@ -411,23 +430,49 @@ export async function retryRender(input: {
   } as unknown as ReceiptRecord);
   if (!admission.ok) return { kind: "conflict", error: admission.error };
 
-  const result = await db
-    .prepare(
-      `UPDATE receipt_records
-         SET extraction_state = 'captured',
-             extraction_processed_at = NULL,
-             updated_at = ?
-       WHERE id = ?
-         AND deleted_at IS NULL
-         AND needs_render = 1
-         AND extraction_state = 'failed'
-         AND status IN ('captured','needs_review')
-         AND ${retrySealGuardSql()}`,
-    )
-    .bind(now, receiptId)
-    .run();
+  // R3: mutation + audit commit in one D1 batch/transaction — an audit-write
+  // failure rolls the retry back, so a thrown error genuinely means "not
+  // modified". The audit INSERT is guarded on the just-written state, so a
+  // zero-change UPDATE writes no success audit.
+  const [result] = await db.batch([
+    db
+      .prepare(
+        `UPDATE receipt_records
+           SET extraction_state = 'captured',
+               extraction_processed_at = NULL,
+               updated_at = ?
+         WHERE id = ?
+           AND deleted_at IS NULL
+           AND needs_render = 1
+           AND extraction_state = 'failed'
+           AND status IN ('captured','needs_review')
+           AND ${retrySealGuardSql()}`,
+      )
+      .bind(now, receiptId),
+    db
+      .prepare(
+        `INSERT INTO receipt_audit_log
+           (id, actor, action, object_type, object_id, old_value_json, new_value_json, created_at)
+         SELECT ?, ?, 'receipt.render_retry', 'receipt', ?, NULL, ?, ?
+         WHERE EXISTS(
+           SELECT 1 FROM receipt_records
+           WHERE id = ? AND extraction_state = 'captured'
+             AND needs_render = 1 AND extraction_processed_at IS NULL
+             AND updated_at = ?
+         )`,
+      )
+      .bind(
+        newUuid(),
+        actor,
+        receiptId,
+        stringifyJson({ previousState: "failed", via: "dashboard_health_row" }),
+        now,
+        receiptId,
+        now,
+      ),
+  ]);
 
-  if ((result.meta.changes ?? 0) === 0) {
+  if ((result?.meta.changes ?? 0) === 0) {
     const after = await db
       .prepare(
         `SELECT deleted_at, needs_render, extraction_state, status, transaction_date
@@ -459,15 +504,5 @@ export async function retryRender(input: {
     };
   }
 
-  await createAuditEntry(db, {
-    actor,
-    action: "receipt.render_retry",
-    objectType: "receipt",
-    objectId: receiptId,
-    newValueJson: stringifyJson({
-      previousState: "failed",
-      via: "dashboard_health_row",
-    }),
-  });
   return { kind: "retrying" };
 }
