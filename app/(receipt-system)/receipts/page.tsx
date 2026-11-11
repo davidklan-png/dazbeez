@@ -20,8 +20,10 @@ import { ComplianceSummaryCards } from "@/components/receipts/ComplianceSummaryC
 import { summarizeOpenChecksForMonth } from "@/lib/receipts/compliance";
 import {
   getPipelineHealth,
-  listNeverEnqueuedReceipts,
+  listPipelineAttentionReceipts,
   PIPELINE_ALL_CLEAR,
+  type PipelineAttentionReceipt,
+  type PipelineDetailKind,
 } from "@/lib/receipts/pipeline-health";
 import {
   deriveFinalizedMonthsDeliveryState,
@@ -120,13 +122,25 @@ export default async function ReceiptsDashboardPage() {
     .map(([m, state]) => ({ month: m, state }))
     .sort((a, b) => b.month.localeCompare(a.month));
 
-  // Load the class-1 receipts only when class 1 is lit (rare) — for the
-  // per-receipt Enqueue action.
-  const neverEnqueuedReceipts = pipelineHealth.lit.some(
-    (c) => c.kind === "never_enqueued",
-  )
-    ? await listNeverEnqueuedReceipts(getReceiptsDb()).catch(() => [])
-    : [];
+  // Per-receipt detail rows (filename, review link, age, reason, next action)
+  // for every lit class except missing_manifest (its remedy is a separate
+  // flow). Loaded only for lit classes, bounded to 50 each. Each loader is
+  // independently failure-tolerant — one broken query must not take the rest
+  // of the health surface down.
+  const attentionByKind: Partial<
+    Record<PipelineDetailKind, PipelineAttentionReceipt[]>
+  > = {};
+  await Promise.all(
+    pipelineHealth.lit
+      .map((c) => c.kind)
+      .filter((kind): kind is PipelineDetailKind => kind !== "missing_manifest")
+      .map(async (kind) => {
+        attentionByKind[kind] = await listPipelineAttentionReceipts(
+          kind,
+          getReceiptsDb(),
+        ).catch(() => []);
+      }),
+  );
 
   const unreviewed = monthReceipts.filter(
     (r) => r.status === "captured" || r.status === "needs_review",
@@ -149,7 +163,7 @@ export default async function ReceiptsDashboardPage() {
 
       <PipelineHealthAlert
         lit={pipelineHealth.lit}
-        neverEnqueuedReceipts={neverEnqueuedReceipts}
+        attentionByKind={attentionByKind}
       />
 
       <SealedUndeliveredAlert months={sealedUndeliveredMonths} />

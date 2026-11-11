@@ -91,9 +91,13 @@ function sortDateMsFor(r: ReceiptRecord): number {
 /** Parse extraction_json for the failed marker written by
  *  POST /api/receipts/[id]/extraction-failed. Returns null-safe defaults
  *  for receipts that never failed or have a non-JSON / mismatched shape. */
-function readFailureInfo(
-  r: ReceiptRecord,
-): { failed: boolean; reason: string | null } {
+/** Parse the terminal-failure reason out of extraction_json. Exported so the
+ * pipeline-health surface (backlog #22) reads the same payload shape the
+ * queue pill reads — single source for { failed, reason }. */
+export function readFailureInfo(r: {
+  extraction_state?: string | null;
+  extraction_json?: string | null;
+}): { failed: boolean; reason: string | null } {
   if (r.extraction_state !== "failed") return { failed: false, reason: null };
   if (!r.extraction_json) return { failed: true, reason: null };
   try {

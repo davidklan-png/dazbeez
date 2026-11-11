@@ -107,6 +107,9 @@ export type AuditAction =
   | "receipt.extraction_date_deferred"
   | "receipt.extraction_failed"
   | "receipt.extraction_enqueued"
+  // Backlog #22: terminal render failure + deliberate operator recovery.
+  | "receipt.render_failed"
+  | "receipt.render_retry"
   | "receipt.reviewed"
   | "receipt.reconciled"
   | "receipt.exported"

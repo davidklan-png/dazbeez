@@ -579,6 +579,25 @@ starts. Design consequences:
     extraction leg — classify permanent render failures and POST a
     processor-key-guarded endpoint that records the failure, so it surfaces
     like `extraction_state='failed'` does.
+    IMPLEMENTED (2026-11-11, receipts-processing-recovery PR): consumer
+    classifies permanent render failures via an explicit allowlist
+    (`PermanentRenderError` only — empty body bytes from /file, WeasyPrint
+    empty PDF; everything else stays retryable) and POSTs
+    `/api/receipts/:id/render-failed` (processor-key OR Clerk; in
+    PUBLIC_ROUTES + middleware-routing test). Terminal marker reuses
+    `extraction_state='failed'` + extraction_json `{failed,stage:'render',
+    reason}` — no migration (architect preference, extraction-failed
+    precedent); `needs_render=1` stays as the render-vs-extraction
+    discriminator. `pull_render_pending` excludes failed rows (the retry
+    stop); legacy stalled rows untouched. Pipeline health gains
+    render_failed/extraction_failed classes + per-receipt rows (filename,
+    review link, age, reason, honest action); extraction-failed rows get NO
+    auto-retry (the /enqueue contract intentionally refuses failed rows — the
+    health row says "replace the file or enter fields by hand"). Deliberate
+    recovery: `/api/receipts/:id/render-retry` (Clerk-only, strict 409
+    admission mirroring /enqueue) clears the marker so the render leg picks
+    the row up next cycle. Live follow-up: restart the launchd
+    auto-promote-render job from committed code.
 
 23. **`preservation_status` is a three-way inconsistency in existing rows —
     backfill SEPARATELY (not in the capture-contract PR).** Found during the #18

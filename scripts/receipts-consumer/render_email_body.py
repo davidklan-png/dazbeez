@@ -24,6 +24,15 @@ import re
 # Tags stripped entirely (contents too). WeasyPrint has no JS engine, so these
 # are inert anyway — stripped for defense in depth and to keep output clean.
 _STRIP_TAG_PAIRS = ("script", "iframe", "object", "embed", "noscript")
+class PermanentRenderError(RuntimeError):
+    """Deterministic-permanent render-leg failure: the same source body will
+    fail the same way on every retry (empty body bytes from R2, renderer
+    producing an empty PDF). Raised by consumer.process_renders (empty /file
+    body) and render_body_to_pdf (empty output). Environmental errors —
+    WeasyPrint libs missing, network, HTTP failures — are NOT this class and
+    stay on the retry path."""
+
+
 _TAG_ALT = "|".join(_STRIP_TAG_PAIRS)
 _STRIP_TAG_PAIR_RE = re.compile(
     rf"<(?:{_TAG_ALT})\b[^>]*>.*?</(?:{_TAG_ALT})\s*>",
@@ -104,5 +113,5 @@ def render_body_to_pdf(body: str, content_type: str) -> bytes:
 
     pdf = HTML(string=html_doc, url_fetcher=disabled_url_fetcher).write_pdf()
     if not pdf:
-        raise RuntimeError("WeasyPrint produced an empty PDF")
+        raise PermanentRenderError("WeasyPrint produced an empty PDF")
     return pdf
