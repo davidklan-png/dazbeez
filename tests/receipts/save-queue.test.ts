@@ -1,11 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import {
-  SaveQueue,
-  getSaveQueue,
-  type SaveFetch,
-} from "@/lib/receipts/save-queue";
+import { SaveQueue, type SaveFetch } from "@/lib/receipts/save-queue";
 
 // ─── controlled deferred fetch ──────────────────────────────────────────
 // Every request is a manually-resolved promise so tests decide exactly when
@@ -244,71 +240,48 @@ test("SaveQueue: deferFire holds the pending flush until the next save re-drains
   await Promise.all([p1, p2]);
 });
 
-test("SaveQueue: pinned body (unmount flush) ignores later builder changes", async () => {
+test("SaveQueue: lastFailed tracks the newest flush outcome for retry decisions", async () => {
   const { calls, fetchImpl } = makeDeferredFetch();
-  let merchant = "final-edit";
+  const q = new SaveQueue({ url: "/r", buildBody: () => ({}), fetchImpl });
+  assert.equal(q.lastFailed, false);
+
+  const pFail = q.save();
+  await tick();
+  calls[0]!.fail("boom");
+  await assert.rejects(pFail, /boom/);
+  assert.equal(q.lastFailed, true); // edits that failed must stay re-flushable
+
+  const pOk = q.save();
+  await tick();
+  calls[1]!.ok();
+  await pOk;
+  assert.equal(q.lastFailed, false);
+});
+
+test("SaveQueue: rebind swaps the builder so later flushes carry the new fields", async () => {
+  const { calls, fetchImpl } = makeDeferredFetch();
   const q = new SaveQueue({
     url: "/r",
-    buildBody: () => ({ merchant }),
+    buildBody: () => ({ merchant: "first-render" }),
     fetchImpl,
   });
 
   const p1 = q.save();
   await tick();
+  assert.equal(bodyOf(calls[0]!).merchant, "first-render");
 
-  // Unmount while busy: the flush pins the form's final fields NOW. A
-  // same-receipt remount rebinding the builder to stale server props must
-  // not rewrite the pending body.
-  const pFlush = q.save(false, { pinBody: true });
-  merchant = "stale-server-value";
+  // The form re-renders (fields changed) and rebinds a fresh closure.
+  q.rebind({
+    url: "/r",
+    buildBody: () => ({ merchant: "next-render" }),
+    fetchImpl,
+  });
+  const p2 = q.save();
   calls[0]!.ok();
   await tick();
-
-  assert.equal(bodyOf(calls[1]!).merchant, "final-edit");
+  assert.equal(bodyOf(calls[1]!).merchant, "next-render");
   calls[1]!.ok();
-  await Promise.all([p1, pFlush]);
-});
-
-test("SaveQueue: requests are sent keepalive so route changes cannot drop them", async () => {
-  const { calls, fetchImpl } = makeDeferredFetch();
-  const q = new SaveQueue({ url: "/r", buildBody: () => ({}), fetchImpl });
-
-  const p = q.save();
-  await tick();
-  assert.equal(calls[0]!.init.keepalive, true);
-  assert.equal(calls[0]!.init.method, "PATCH");
-  calls[0]!.ok();
-  await p;
-});
-
-test("getSaveQueue: same receipt joins one queue (rebinding builders), different receipts stay independent", async () => {
-  const { calls, fetchImpl } = makeDeferredFetch();
-  let who = 1;
-  const a1 = getSaveQueue("registry-a", {
-    url: "/a",
-    buildBody: () => ({ who }),
-    fetchImpl,
-  });
-  who = 2;
-  const a2 = getSaveQueue("registry-a", {
-    url: "/a",
-    buildBody: () => ({ who }),
-    fetchImpl,
-  });
-  assert.equal(a1, a2); // remount joins, not races
-
-  const p = a2.save(); // fires with the REBOUND (latest) builder
-  await tick();
-  assert.equal(bodyOf(calls[0]!).who, 2);
-  calls[0]!.ok();
-  await p;
-
-  const b = getSaveQueue("registry-b", {
-    url: "/b",
-    buildBody: () => ({}),
-    fetchImpl,
-  });
-  assert.notEqual(b, a1);
+  await Promise.all([p1, p2]);
 });
 
 // ─── integration wiring (source-structure, repo convention: the React
@@ -329,9 +302,10 @@ function section(source: string, start: string, end: string): string {
 }
 
 test("form-pane routes every save through the serialized queue (no parallel PATCH paths)", () => {
+  assert.match(reviewForm, /import \{ SaveQueue \} from "@\/lib\/receipts\/save-queue"/);
   assert.match(
     reviewForm,
-    /import \{ getSaveQueue \} from "@\/lib\/receipts\/save-queue"/,
+    /import \{\n(?:.*\n)*?  registerSaveFlusher,\n(?:.*\n)*?\} from "@\/lib\/receipts\/review-navigation"/,
   );
   // The queue owns all PATCH traffic — the old hand-rolled fetch in
   // onMarkReviewed and the abort-and-refire in triggerSave are gone.
@@ -343,7 +317,7 @@ test("form-pane routes every save through the serialized queue (no parallel PATC
   const markReviewed = section(
     reviewForm,
     "const onMarkReviewed = useCallback(",
-    "// Unmount safety net", // marker of the effect that follows
+    "// Flush pending edits NOW", // flushPendingEdits follows
   );
   assert.ok(!/await fetch\(/.test(markReviewed));
   assert.match(markReviewed, /await saveQueue\.save\(true\)/);
@@ -352,7 +326,7 @@ test("form-pane routes every save through the serialized queue (no parallel PATC
 test("form-pane: save-and-next navigates only AFTER the queue commits, and stays on failure", () => {
   const fn = reviewForm.slice(
     reviewForm.indexOf("const onMarkReviewed = useCallback("),
-    reviewForm.indexOf("useKeyboardShortcuts({"),
+    reviewForm.indexOf("const flushPendingEdits"),
   );
   const awaitIdx = fn.indexOf("await saveQueue.save(true)");
   const pushIdx = fn.indexOf("router.push(");
@@ -366,31 +340,66 @@ test("form-pane: save-and-next navigates only AFTER the queue commits, and stays
   assert.doesNotMatch(catchBlock, /router\.push\(/);
 });
 
-test("form-pane: Skip flushes pending edits through the queue before navigating, and stays on failure", () => {
-  const fn = section(
+test("form-pane: registers the navigation flusher; Skip and in-form links navigate through the guard", () => {
+  // The single mounted form publishes its flush to the guard.
+  assert.match(
     reviewForm,
-    "async function handleSkip()",
+    /useEffect\(\(\) => registerSaveFlusher\(flushPendingEdits\), \[flushPendingEdits\]\)/,
+  );
+  // Skip delegates to the awaited guard (flushPendingEdits does the saving);
+  // the push runs only inside the guard's callback, i.e. after the flush.
+  const skip = section(
+    reviewForm,
+    "function handleSkip()",
     "async function handleDelete()",
   );
-  assert.match(fn, /saveQueue\.idle/);
-  const saveIdx = fn.indexOf("await saveQueue.save()");
-  const pushIdx = fn.indexOf("router.push(");
-  assert.ok(saveIdx !== -1 && pushIdx !== -1 && saveIdx < pushIdx);
-  // The error path returns BEFORE the navigation.
-  const catchIdx = fn.indexOf("} catch (error) {");
-  const returnIdx = fn.indexOf("return;", catchIdx);
-  assert.ok(catchIdx !== -1 && returnIdx !== -1 && returnIdx < pushIdx);
+  assert.match(skip, /guardedNavigate\(\(\) =>\s*router\.push\(/);
+  // Compare + View-in-month links: guarded click preserving native
+  // modifier/new-tab behavior (onClick precedes the link text in JSX, so
+  // match from the href template to the guarded click).
+  assert.match(
+    reviewForm,
+    /href=\{`\/receipts\/review\/\$\{receipt\.id\}\?month=\$\{props\.switchToMonth\}`\}[\s\S]{0,600}guardedLinkClick\(/,
+  );
+  assert.match(
+    reviewForm,
+    /href=\{`\/receipts\/review\/\$\{props\.duplicatePartner\.id\}`\}[\s\S]{0,400}guardedLinkClick\(/,
+  );
 });
 
-test("form-pane: unmount flushes a pending debounce with a pinned body through the queue", () => {
+test("form-pane: flushPendingEdits commits pending work and rethrows failures to the caller", () => {
   const fn = section(
     reviewForm,
-    "// ─── keyboard shortcuts ─",
+    "const flushPendingEdits = useCallback(",
+    "// The single mounted review form publishes",
+  );
+  assert.match(fn, /saveTimerRef\.current/);
+  assert.match(fn, /saveQueue\.idle/);
+  assert.match(fn, /await saveQueue\.save\(\)/);
+  // Failure surfaces the badge error AND rejects so the navigator stays.
+  assert.match(fn, /kind: "error"/);
+  assert.match(fn, /throw error;/);
+  assert.doesNotMatch(fn, /router\.push/);
+});
+
+test("form-pane: unmount keeps only a send-and-hope net for un-awaitable exits", () => {
+  const fn = section(
+    reviewForm,
+    "// Residual net for exits",
     "useKeyboardShortcuts({",
   );
-  assert.match(fn, /save\(false, \{ pinBody: true \}\)/);
-  // Fire-and-forget but never unhandled.
-  assert.match(fn, /\.catch\(\(\) => \{/);
+  assert.match(fn, /void saveQueue\.save\(\)\.catch\(\(\) => \{\}\)/);
+  assert.doesNotMatch(reviewForm, /pinBody/);
+  // No zombie debounce: the timer is cleared at unmount, fired immediately.
+  assert.match(fn, /clearTimeout\(saveTimerRef\.current\)/);
+});
+
+test("save-queue: no fire-and-forget lifecycle machinery (pin/keepalive/registry removed)", () => {
+  const queueSource = readFileSync("lib/receipts/save-queue.ts", "utf8");
+  assert.doesNotMatch(queueSource, /keepalive/);
+  assert.doesNotMatch(queueSource, /pinBody/);
+  assert.doesNotMatch(queueSource, /getSaveQueue/);
+  assert.doesNotMatch(queueSource, /new Map/);
 });
 
 test("form-pane: debounce + composition guards preserved (IME invariants)", () => {

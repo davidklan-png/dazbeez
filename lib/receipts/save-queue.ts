@@ -25,10 +25,14 @@
 //   • No client aborts anywhere: serialization removes the need, and aborting
 //     never stopped the server anyway.
 //
+// One queue per mounted form instance (form-pane creates it in a ref and
+// REBINDS the latest closures every render). Navigation callers await saves
+// through lib/receipts/review-navigation.ts BEFORE routing, so commits
+// complete before the form can unmount — there is deliberately no
+// fire-and-forget machinery here.
+//
 // ponytail: this is client-only ordering. Cross-tab / cross-session
-// last-write-wins remains (no server CAS by design v1); the module-scoped
-// registry below is unbounded within a session (one small queue per reviewed
-// receipt) — fine for a reviewing session, revisit if that ever matters.
+// last-write-wins remains (no server CAS by design v1).
 
 export type SaveFetch = (url: string, init: RequestInit) => Promise<Response>;
 
@@ -62,18 +66,15 @@ export class SaveQueue {
   private inFlight = false;
   private hasPending = false;
   private pendingMarkReviewed = false;
-  /** Body snapshot pinned at enqueue time (unmount flush). Null = build at
-   * fire time from the latest state. */
-  private pinnedBody: Record<string, unknown> | null = null;
+  private lastFlushFailed = false;
   private waiters: Waiter[] = [];
 
   constructor(config: SaveQueueConfig) {
     this.config = config;
   }
 
-  /** Replace the closures (form re-renders hand in fresh ones over the latest
-   * field state; a remounted form must not fire the previous instance's
-   * builder). The url is constant per queue key. */
+  /** Replace the closures: the form re-renders with fresh field state, and
+   * the queue must build bodies from the LATEST render, never a stale one. */
   rebind(config: SaveQueueConfig): void {
     this.config = config;
   }
@@ -83,27 +84,25 @@ export class SaveQueue {
     return !this.inFlight && !this.hasPending;
   }
 
+  /** True when the most recent completed flush FAILED (cleared by the next
+   * successful one). The form's unsaved edits can outlive the debounce timer
+   * exactly when a save failed — callers use this to keep re-attempting
+   * until the edits actually commit. */
+  get lastFailed(): boolean {
+    return this.lastFlushFailed;
+  }
+
   /**
    * Request a save. Resolves once a PATCH carrying this request's intent has
    * COMMITTED (possibly coalesced with later requests into one flush — the
    * flush always carries the latest fields, so the intent is satisfied).
    * Rejects with the server/network error if that flush fails.
-   *
-   * `pinBody: true` snapshots the body NOW instead of at fire time — used by
-   * the unmount flush, where a same-receipt remount could rebind the builder
-   * to stale server props before an in-flight request drains.
    */
-  save(
-    markReviewed = false,
-    opts: { pinBody?: boolean } = {},
-  ): Promise<SaveSuccess> {
+  save(markReviewed = false): Promise<SaveSuccess> {
     return new Promise<SaveSuccess>((resolve, reject) => {
       this.waiters.push({ resolve, reject });
       this.hasPending = true;
       if (markReviewed) this.pendingMarkReviewed = true;
-      if (opts.pinBody) {
-        this.pinnedBody = this.config.buildBody(markReviewed);
-      }
       this.drain();
     });
   }
@@ -115,13 +114,12 @@ export class SaveQueue {
     this.hasPending = false;
     const markReviewed = this.pendingMarkReviewed;
     this.pendingMarkReviewed = false;
-    const pinned = this.pinnedBody;
-    this.pinnedBody = null;
     const waiters = this.waiters;
     this.waiters = [];
-    // Capture the config BEFORE awaiting — a remount may rebind mid-flight.
+    // Capture the config BEFORE awaiting — rebind must not swap the fetch
+    // under an in-flight request.
     const { url, fetchImpl = defaultFetch } = this.config;
-    const body = pinned ?? this.config.buildBody(markReviewed);
+    const body = this.config.buildBody(markReviewed);
     void this.fire(url, body, waiters, fetchImpl);
   }
 
@@ -137,9 +135,6 @@ export class SaveQueue {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
-        // Survives page unload / SPA route changes; bodies are small JSON,
-        // far under the 64 KB keepalive limit.
-        keepalive: true,
       });
       const json = (await res.json().catch(() => ({}))) as {
         error?: string;
@@ -152,6 +147,7 @@ export class SaveQueue {
       result = new Error("Network error");
     }
     this.inFlight = false;
+    this.lastFlushFailed = result instanceof Error;
     for (const waiter of waiters) {
       if (result instanceof Error) waiter.reject(result);
       else waiter.resolve(result);
@@ -162,24 +158,4 @@ export class SaveQueue {
 
 function defaultFetch(url: string, init: RequestInit): Promise<Response> {
   return fetch(url, init);
-}
-
-// Module-scoped registry keyed by receipt id. A remount of the SAME receipt
-// (navigate away and back while a flush is still draining) joins the existing
-// queue instead of racing it with a parallel PATCH — that reordering is the
-// one case a per-instance queue cannot prevent. Different receipts get
-// different queues (disjoint rows — parallel is safe).
-const queues = new Map<string, SaveQueue>();
-
-/** Get-or-create the queue for a receipt, rebinding the caller's latest
- * closures into it. Call from render; it is cheap (one Map hit). */
-export function getSaveQueue(key: string, config: SaveQueueConfig): SaveQueue {
-  const existing = queues.get(key);
-  if (existing) {
-    existing.rebind(config);
-    return existing;
-  }
-  const queue = new SaveQueue(config);
-  queues.set(key, queue);
-  return queue;
 }

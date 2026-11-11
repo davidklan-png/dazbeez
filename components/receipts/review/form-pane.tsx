@@ -32,7 +32,12 @@ import {
 } from "@/lib/receipts/receipt-status-policy";
 import { resolveWorkMonth, withWorkMonth } from "@/lib/receipts/work-month";
 import { formatReviewMonthLabel } from "@/lib/receipts/review-queue-filter";
-import { getSaveQueue } from "@/lib/receipts/save-queue";
+import { SaveQueue } from "@/lib/receipts/save-queue";
+import {
+  guardedLinkClick,
+  guardedNavigate,
+  registerSaveFlusher,
+} from "@/lib/receipts/review-navigation";
 import type {
   PaymentPath,
   ReceiptAttendee,
@@ -287,16 +292,24 @@ export function FormPane(props: FormPaneProps) {
     };
   };
 
-  // Serialized save queue, module-scoped per receipt id: autosaves for one
-  // review session never overlap (an earlier snapshot cannot commit after a
-  // later acknowledged save), a remount of the same receipt joins the still-
-  // draining queue instead of racing it, and requests survive route changes
-  // (keepalive). Each render rebinds the latest buildSaveBody closure.
-  const saveQueue = getSaveQueue(receipt.id, {
+  // Serialized save queue, one per form instance: autosaves for one review
+  // session never overlap, and an earlier snapshot can never commit after a
+  // later acknowledged save. Every render rebinds the latest buildSaveBody
+  // closure so flushes always carry the newest fields. All navigation away
+  // from the form awaits this queue (see review-navigation.ts) BEFORE
+  // routing, so commits complete while the form is still mounted.
+  const saveQueueConfig = {
     url: `/api/receipts/${receipt.id}`,
     buildBody: buildSaveBody,
     deferFire: () => businessPurposeComposingRef.current,
-  });
+  };
+  const saveQueueRef = useRef<SaveQueue | null>(null);
+  if (saveQueueRef.current === null) {
+    saveQueueRef.current = new SaveQueue(saveQueueConfig);
+  } else {
+    saveQueueRef.current.rebind(saveQueueConfig);
+  }
+  const saveQueue = saveQueueRef.current;
 
   const triggerSave = useCallback(() => {
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
@@ -432,23 +445,52 @@ export function FormPane(props: FormPaneProps) {
     })();
   }, [saveQueue, nextReceiptId, queryParams, router]);
 
-  // Unmount safety net for navigation this form does not own (rail links,
-  // j/k): a pending debounce is flushed NOW with a body pinned at unmount
-  // time, through the module-scoped queue so it serializes behind any
-  // in-flight save and ahead of a same-receipt remount, and survives the
-  // route change (keepalive). Fire-and-forget ceiling, documented: a failure
-  // here cannot be surfaced (the form is gone) — the awaited s / Skip paths
-  // above are the surfaces with honest errors.
+  // Flush pending edits NOW and resolve once the latest save has COMMITTED —
+  // the awaited-navigation contract for Skip, j/k, rail clicks and the
+  // compare / view-in-month links (registered below; see review-navigation.ts).
+  // Rejects (after surfacing the badge error) when the save fails so the
+  // caller stays on this receipt with its edits intact.
+  const flushPendingEdits = useCallback(async () => {
+    const hadPendingEdits = saveTimerRef.current !== null;
+    if (saveTimerRef.current) {
+      clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
+    }
+    // lastFailed: a failed save leaves unsaved edits with NO timer armed —
+    // without this check the retry navigation would skip the save and
+    // silently abandon them.
+    if (!hadPendingEdits && saveQueue.idle && !saveQueue.lastFailed) return;
+    setSave({ kind: "saving" });
+    try {
+      const result = await saveQueue.save();
+      setApiWarnings(result.warnings);
+      setSave({ kind: "saved", at: Date.now() });
+    } catch (error) {
+      // Stay + honest error; edits are retained in the form state.
+      setSave({
+        kind: "error",
+        message: error instanceof Error ? error.message : "Save failed",
+      });
+      throw error;
+    }
+  }, [saveQueue]);
+
+  // The single mounted review form publishes its flush to the navigation
+  // guard (queue-rail's j/k + item links call it via guardedNavigate).
+  useEffect(() => registerSaveFlusher(flushPendingEdits), [flushPendingEdits]);
+
+  // Residual net for exits that CANNOT be awaited (browser back/reload,
+  // header scope/search controls outside this form): a pending debounce is
+  // sent immediately, serialized behind any in-flight save. Base parity with
+  // the old behavior (the debounce timer firing after unmount), minus its
+  // 450 ms delay. Fire-and-forget ceiling: a failure here cannot be surfaced
+  // — every awaitable navigation path uses the guard above instead.
   useEffect(() => {
     return () => {
       if (saveTimerRef.current) {
         clearTimeout(saveTimerRef.current);
         saveTimerRef.current = null;
-        void saveQueue.save(false, { pinBody: true }).catch(() => {
-          // Cannot surface after unmount; the next visit renders the server
-          // state and the operator re-edits. Cross-tab last-write-wins still
-          // applies (no server CAS by design v1).
-        });
+        void saveQueue.save().catch(() => {});
       }
     };
   }, [saveQueue]);
@@ -475,34 +517,14 @@ export function FormPane(props: FormPaneProps) {
     },
   });
 
-  // Skip must not silently discard edits made inside the debounce window
-  // (same-session save contract): flush pending work through the queue and
-  // only leave on success. Clean form → navigates immediately, no PATCH.
-  async function handleSkip() {
-    const hadPendingEdits = saveTimerRef.current !== null;
-    if (saveTimerRef.current) {
-      clearTimeout(saveTimerRef.current);
-      saveTimerRef.current = null;
-    }
-    if (hadPendingEdits || !saveQueue.idle) {
-      setSave({ kind: "saving" });
-      try {
-        const result = await saveQueue.save();
-        setApiWarnings(result.warnings);
-        setSave({ kind: "saved", at: Date.now() });
-      } catch (error) {
-        // Stay on the receipt with the honest error — navigating away would
-        // silently drop the uncommitted edits.
-        setSave({
-          kind: "error",
-          message: error instanceof Error ? error.message : "Save failed",
-        });
-        return;
-      }
-    }
-    if (nextReceiptId) {
-      router.push(`/receipts/review/${nextReceiptId}${queryParams}`);
-    }
+  // Skip awaits the same guarded flush as every other navigation caller —
+  // pending edits commit first; on failure the operator stays here with the
+  // honest error badge and the edits intact.
+  function handleSkip() {
+    if (!nextReceiptId) return;
+    void guardedNavigate(() =>
+      router.push(`/receipts/review/${nextReceiptId}${queryParams}`),
+    );
   }
 
   async function handleDelete() {
@@ -569,6 +591,13 @@ export function FormPane(props: FormPaneProps) {
           {!inView && props.switchToMonth && (
             <Link
               href={`/receipts/review/${receipt.id}?month=${props.switchToMonth}`}
+              onClick={(e) =>
+                guardedLinkClick(
+                  e,
+                  `/receipts/review/${receipt.id}?month=${props.switchToMonth}`,
+                  (h) => router.push(h),
+                )
+              }
               className="font-medium text-amber-600 underline-offset-2 hover:text-amber-700 hover:underline"
             >
               View in {formatReviewMonthLabel(props.switchToMonth)}
@@ -592,6 +621,18 @@ export function FormPane(props: FormPaneProps) {
           </span>
           <Link
             href={`/receipts/review/${props.duplicatePartner.id}`}
+            onClick={(e) => {
+              // Narrow inside the callback — the JSX guard does not flow
+              // into closures over `props`.
+              const partner = props.duplicatePartner;
+              if (partner) {
+                guardedLinkClick(
+                  e,
+                  `/receipts/review/${partner.id}`,
+                  (h) => router.push(h),
+                );
+              }
+            }}
             className="ml-auto shrink-0 font-semibold text-amber-700 underline-offset-2 hover:text-amber-800 hover:underline"
           >
             Compare →
