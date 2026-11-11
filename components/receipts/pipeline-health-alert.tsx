@@ -29,10 +29,11 @@ import type {
   PipelineDetailKind,
 } from "@/lib/receipts/pipeline-health";
 import {
-  classifyActionFailure,
   formatAge,
+  HEALTH_ACTION_FAILURE_NOTE,
   isActionDisabledByFailure,
 } from "@/lib/receipts/pipeline-health";
+import { performHealthAction } from "@/lib/receipts/health-action";
 
 interface Props {
   lit: PipelineClassReport[];
@@ -150,15 +151,16 @@ interface ActionFailure {
 }
 
 /**
- * Shared action-button behavior (B5 + R4): 200 → done; anything else is
- * classified by classifyActionFailure —
+ * Shared action-button behavior (B5 + R4 + round-2). The request path lives
+ * in performHealthAction (lib/receipts/health-action.ts) so the actual
+ * fetch/parse/classification runs in tests; this hook keeps state wiring:
  *   refused (409)  → the endpoint's own validated message; action disabled
  *                    (prohibited in this state until refresh)
  *   removed (404)  → stale row; reload guidance; action disabled
  *   auth (401/403) → session lost; sign-in guidance; action disabled
- *   temporary      → transport/server failure; retry stays possible
- * Only 409 bodies carry an endpoint message worth showing (validated by the
- * route); 5xx bodies are generic — no SQL/internal text reaches the UI.
+ *   unconfirmed (5xx / network loss) → the POST may have committed — fixed
+ *                    reload-and-check-current-state note, action disabled
+ *                    until refreshed (never an immediate repeat)
  */
 function useActionButton(endpoint: string): {
   state: ButtonState;
@@ -170,25 +172,13 @@ function useActionButton(endpoint: string): {
   async function run() {
     setState("busy");
     setFailure(null);
-    try {
-      const res = await fetch(endpoint, { method: "POST" });
-      if (res.ok) {
-        setState("done");
-        return;
-      }
-      const body = (await res.json().catch(() => null)) as { error?: unknown } | null;
-      const text = typeof body?.error === "string" ? body.error : null;
-      const kind = classifyActionFailure(res.status);
-      setFailure({
-        kind,
-        message: kind === "refused" ? (text ?? "this receipt is not in the recoverable state") : null,
-      });
-      setState("failed");
-    } catch {
-      // Network-level failure — no status to classify; temporary.
-      setFailure({ kind: "temporary", message: null });
-      setState("failed");
+    const outcome = await performHealthAction(endpoint);
+    if (outcome.status === "done") {
+      setState("done");
+      return;
     }
+    setFailure({ kind: outcome.kind, message: outcome.message });
+    setState("failed");
   }
   return { state, failure, run };
 }
@@ -210,15 +200,6 @@ function RetryRenderButton({ receiptId }: { receiptId: string }) {
     />
   );
 }
-
-/** Per-failure-kind operator guidance (R4). Refusal keeps the endpoint's own
- *  safe message; the others state the honest next step. */
-const FAILURE_NOTE: Record<ActionFailureKind, string> = {
-  refused: "", // rendered separately with the endpoint message
-  removed: "receipt no longer exists — reload the page",
-  auth: "session expired — sign in again",
-  temporary: "temporarily unavailable — try again",
-};
 
 function ActionButton({
   state,
@@ -255,7 +236,7 @@ function ActionButton({
         </span>
       )}
       {kind !== null && kind !== "refused" && (
-        <span className="shrink-0 text-red-700">{FAILURE_NOTE[kind]}</span>
+        <span className="shrink-0 text-red-700">{HEALTH_ACTION_FAILURE_NOTE[kind]}</span>
       )}
     </>
   );

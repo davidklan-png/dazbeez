@@ -377,7 +377,8 @@ test("B3/R3 double retry: two concurrently ADMITTED requests — one wins, the l
     retryRender({ db: d1.asD1(), receiptId: id, actor: "op", now: "2026-11-11T10:00:00.001Z" }),
   ]);
   d1.onBeforeRunAsync = null;
-  // Exactly one retry admitted; the other hit the zero-change UPDATE and
+  // Only one MUTATION won (both requests were admitted); the loser hit
+  // the zero-change UPDATE and
   // reported the actual (now captured) state — never a false success.
   const kinds = [ra.kind, rb.kind].sort();
   assert.deepEqual(kinds, ["conflict", "retrying"]);
@@ -509,6 +510,69 @@ test("R1 concurrent JSON edit between the read and the UPDATE is PRESERVED (json
   assert.equal(stored.failedAt, "2026-11-11T10:00:00Z");
 });
 
+// ─── Blocker 1: same-millisecond duplicate requests — changes() admits the
+// success audit, so a losing zero-change UPDATE writes none ──────────────────
+
+test("blocker-1 same-ms duplicate failure reports: one winner, ONE success audit (winning actor/reason), loser read-only already_terminal", async () => {
+  const d1 = new SqliteD1();
+  const id = seedRenderRow(d1, { extraction_json: PREEXISTING_JSON });
+  let updates = 0;
+  d1.onBeforeRunAsync = async (sql) => {
+    if (sql.includes("SET extraction_state = 'failed'")) {
+      updates += 1;
+      if (updates === 1) await new Promise((r) => setImmediate(r));
+    }
+  };
+  // IDENTICAL `now` — the timestamp cannot identify the request.
+  const now = "2026-11-11T10:00:00.000Z";
+  const [ra, rb] = await Promise.all([
+    recordRenderFailure({ db: d1.asD1(), receiptId: id, reason: "winner reason", actor: "actor-a", now }),
+    recordRenderFailure({ db: d1.asD1(), receiptId: id, reason: "loser reason", actor: "actor-b", now }),
+  ]);
+  d1.onBeforeRunAsync = null;
+  const winner = ra.kind === "recorded" ? ra : rb;
+  const loser = ra.kind === "recorded" ? rb : ra;
+  assert.equal(winner.kind, "recorded");
+  assert.equal(loser.kind, "already_terminal");
+  assert.equal(loser.reason, "winner reason"); // first committed marker immutable
+  // Exactly ONE success audit — attributed to the WINNING actor.
+  const all = audits(d1, id);
+  assert.equal(all.length, 1);
+  const auditRow = d1.db
+    .prepare(`SELECT actor, new_value_json FROM receipt_audit_log WHERE object_id = ?`)
+    .get(id) as unknown as { actor: string; new_value_json: string };
+  assert.equal(auditRow.actor, "actor-a");
+  assert.match(auditRow.new_value_json, /winner reason/);
+  assert.doesNotMatch(auditRow.new_value_json, /loser reason/);
+});
+
+test("blocker-1 same-ms duplicate retries: one winner, ONE success audit (winning actor), loser honest conflict", async () => {
+  const d1 = new SqliteD1();
+  const id = seedRenderRow(d1, { extraction_state: "failed", extraction_json: JSON.stringify({ failed: true, reason: "x" }) });
+  let updates = 0;
+  d1.onBeforeRunAsync = async (sql) => {
+    if (sql.includes("SET extraction_state = 'captured'")) {
+      updates += 1;
+      if (updates === 1) await new Promise((r) => setImmediate(r));
+    }
+  };
+  const now = "2026-11-11T10:00:00.000Z";
+  const [ra, rb] = await Promise.all([
+    retryRender({ db: d1.asD1(), receiptId: id, actor: "actor-a", now }),
+    retryRender({ db: d1.asD1(), receiptId: id, actor: "actor-b", now }),
+  ]);
+  d1.onBeforeRunAsync = null;
+  const kinds = [ra.kind, rb.kind].sort();
+  assert.deepEqual(kinds, ["conflict", "retrying"]);
+  const all = audits(d1, id);
+  assert.equal(all.length, 1);
+  const auditRow = d1.db
+    .prepare(`SELECT actor FROM receipt_audit_log WHERE object_id = ?`)
+    .get(id) as unknown as { actor: string };
+  assert.equal(auditRow.actor, "actor-a"); // winner only — loser wrote no audit
+  assert.equal(row(d1, id).extraction_state, "captured");
+});
+
 // ─── R2: legacy NULL extraction_state (polled by the consumer) ───────────────
 //
 // SCHEMA FACT (verified against db/receipts/0016_extraction_queue.sql):
@@ -554,10 +618,12 @@ test("R2 NULL-state protections: human-advanced and deleted rows are refused wit
 
 // ─── R3: post-UPDATE audit failure rolls the mutation back (D1 batch) ────────
 
-test("R3 render-failed: audit-write failure AFTER the terminal UPDATE commits rolls the whole batch back", async () => {
+test("R3 render-failed: audit-statement failure after the terminal UPDATE EXECUTES rolls the whole batch back", async () => {
   const d1 = new SqliteD1();
   const id = seedRenderRow(d1, { extraction_json: PREEXISTING_JSON });
   d1.onBeforeRun = (sql) => {
+    // Throws immediately BEFORE the audit statement executes — after the
+    // preceding UPDATE has executed inside the still-open transaction.
     if (sql.includes("INSERT INTO receipt_audit_log") && sql.includes("'receipt.render_failed'")) {
       throw new Error("D1_ERROR: audit write failed after mutation");
     }
@@ -567,9 +633,12 @@ test("R3 render-failed: audit-write failure AFTER the terminal UPDATE commits ro
     /audit write failed/,
   );
   d1.onBeforeRun = null;
-  // The terminal UPDATE had already EXECUTED inside the batch — the rollback
-  // must remove it: the row is exactly as it started, and "not modified" is
-  // the truthful reading of the thrown error.
+  // The terminal UPDATE had EXECUTED (but was not yet committed — the
+  // throw lands immediately before the audit statement runs) inside the
+  // batch's open transaction, and the rollback removed it: the row is
+  // exactly as it started. This proves rollback of a preceding EXECUTED
+  // statement, not of an error raised inside the audit SQL engine, and not
+  // anything about a lost post-commit acknowledgement.
   const r = row(d1, id);
   assert.equal(r.extraction_state, "captured");
   assert.equal(r.extraction_json, PREEXISTING_JSON);
@@ -577,7 +646,7 @@ test("R3 render-failed: audit-write failure AFTER the terminal UPDATE commits ro
   assert.equal(audits(d1, id).length, 0);
 });
 
-test("R3 render-retry: audit-write failure AFTER the retry UPDATE commits rolls the whole batch back", async () => {
+test("R3 render-retry: audit-statement failure after the retry UPDATE EXECUTES rolls the whole batch back", async () => {
   const d1 = new SqliteD1();
   const id = seedRenderRow(d1, { extraction_state: "failed", extraction_json: JSON.stringify({ failed: true, reason: "x" }) });
   d1.onBeforeRun = (sql) => {

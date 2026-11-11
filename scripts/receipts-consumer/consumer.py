@@ -1048,8 +1048,10 @@ def process_renders(dry_run: bool, only_id: str | None = None) -> None:
                 # receipt terminal so the render leg stops retrying it every
                 # cycle; the dashboard surfaces it with the reason + a
                 # Retry-render action. The terminal claim is logged ONLY if
-                # the Worker accepted the report — otherwise the row stays
-                # in the pending pool and the next cycle re-reports.
+                # the Worker accepted the report — otherwise the outcome is
+                # UNCONFIRMED (the report may have committed before the
+                # response was lost), so the log says so and points at the
+                # dashboard instead of asserting the row stays pending.
                 reason = _format_render_failure_reason(exc)
                 if post_render_failed(rid, reason):
                     print(

@@ -595,9 +595,13 @@ starts. Design consequences:
     the UPDATE (a concurrent JSON edit is preserved, not overwritten), the
     WHERE admits the NULL extraction_state arm of the consumer's poll
     predicate (the schema itself is NOT NULL — 0016 — so this is
-    poll/write consistency, not a reachable legacy state), and
-    an audit-write failure rolls the mutation back so a thrown error truly
-    means "not modified". The FIRST terminal reason/timestamp is immutable —
+    poll/write consistency, not a reachable legacy state), and the success
+    audit INSERT is admitted by the immediately preceding UPDATE's
+    changes()=1 — a losing same-millisecond duplicate writes no audit. A
+    STATEMENT failure inside the batch rolls the executed mutation back;
+    a lost acknowledgement after commit leaves the outcome uncertain
+    (check current state, don't assume). The FIRST terminal
+    reason/timestamp is immutable —
     repeat reports are read-only idempotent successes. `pull_render_pending`
     excludes failed rows (the retry stop); an unconfirmed report (non-2xx or
     lost response) is logged as outcome-UNCONFIRMED, never as "still

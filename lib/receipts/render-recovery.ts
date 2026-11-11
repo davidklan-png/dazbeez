@@ -16,11 +16,14 @@
 //   - The failure keys are merged into the CURRENT extraction_json inside
 //     that UPDATE (SQLite json_patch), so a JSON edit that lands between the
 //     read and the write survives — failure keys win, sibling keys are kept.
-//   - The mutation and its audit entry commit in one D1 batch (a transaction):
-//     an audit-write failure rolls the mutation back, so a thrown error after
-//     the UPDATE genuinely means "not modified" (R3). The audit INSERT is
-//     guarded on the just-written state, so a zero-change UPDATE writes no
-//     success audit.
+//   - The mutation and its audit entry commit in one D1 batch (a transaction).
+//     A STATEMENT failure inside the batch (e.g. the audit INSERT erroring)
+//     rolls the executed-but-uncommitted UPDATE back; a lost batch
+//     acknowledgement after commit leaves the outcome UNCERTAIN — callers
+//     must not assert either way, only check current state (R3). The audit
+//     INSERT is admitted by the immediately preceding UPDATE's affected-row
+//     result (`WHERE changes() = 1`), so a zero-change UPDATE (e.g. a losing
+//     same-millisecond duplicate) can never write a success audit.
 //   - Non-failure extraction data already in extraction_json is PRESERVED;
 //     the FIRST committed terminal reason and timestamp are immutable — an
 //     already-terminal report is a read-only idempotent success (no write,
@@ -181,7 +184,9 @@ interface FailureRow {
  * CURRENT extraction_json via json_patch inside the same statement (R1), so
  * a concurrent JSON edit is not lost. The mutation and its audit entry then
  * commit in one D1 batch/transaction (R3): an audit-write failure rolls the
- * mutation back, so a thrown error here genuinely means "not modified".
+ * mutation back — so a STATEMENT failure inside the batch means the row was
+ * not modified. A lost batch acknowledgement after the commit instead
+ * leaves the outcome uncertain; callers must say so, not claim either way.
  * Idempotence: when the row is already terminally failed (or a concurrent
  * report won the race), the FIRST committed marker is returned untouched —
  * no second write, no second audit.
@@ -289,26 +294,21 @@ export async function recordRenderFailure(input: {
            AND status IN ('captured','needs_review')`,
       )
       .bind(now, failurePatch, now, receiptId),
-    // Audit INSERT guarded on the just-written state (same transaction): a
-    // zero-change UPDATE cannot produce a success audit.
+    // Audit INSERT admitted by the immediately preceding UPDATE's changes()
+    // (same connection, same transaction): a zero-change UPDATE — including a
+    // losing same-millisecond duplicate — cannot produce a success audit.
     db
       .prepare(
         `INSERT INTO receipt_audit_log
            (id, actor, action, object_type, object_id, old_value_json, new_value_json, created_at)
          SELECT ?, ?, 'receipt.render_failed', 'receipt', ?, NULL, ?, ?
-         WHERE EXISTS(
-           SELECT 1 FROM receipt_records
-           WHERE id = ? AND extraction_state = 'failed'
-             AND needs_render = 1 AND updated_at = ?
-         )`,
+         WHERE changes() = 1`,
       )
       .bind(
         newUuid(),
         actor,
         receiptId,
         stringifyJson({ failureReason: reason, stage: "render" }),
-        now,
-        receiptId,
         now,
       ),
   ]);
@@ -430,10 +430,11 @@ export async function retryRender(input: {
   } as unknown as ReceiptRecord);
   if (!admission.ok) return { kind: "conflict", error: admission.error };
 
-  // R3: mutation + audit commit in one D1 batch/transaction — an audit-write
-  // failure rolls the retry back, so a thrown error genuinely means "not
-  // modified". The audit INSERT is guarded on the just-written state, so a
-  // zero-change UPDATE writes no success audit.
+  // R3: mutation + audit commit in one D1 batch/transaction. A statement
+  // failure inside the batch rolls the executed UPDATE back; a lost
+  // acknowledgement after commit leaves the outcome uncertain (check state).
+  // The audit INSERT is admitted by the preceding UPDATE's changes() = 1,
+  // so a losing zero-change duplicate writes no success audit.
   const [result] = await db.batch([
     db
       .prepare(
@@ -454,20 +455,13 @@ export async function retryRender(input: {
         `INSERT INTO receipt_audit_log
            (id, actor, action, object_type, object_id, old_value_json, new_value_json, created_at)
          SELECT ?, ?, 'receipt.render_retry', 'receipt', ?, NULL, ?, ?
-         WHERE EXISTS(
-           SELECT 1 FROM receipt_records
-           WHERE id = ? AND extraction_state = 'captured'
-             AND needs_render = 1 AND extraction_processed_at IS NULL
-             AND updated_at = ?
-         )`,
+         WHERE changes() = 1`,
       )
       .bind(
         newUuid(),
         actor,
         receiptId,
         stringifyJson({ previousState: "failed", via: "dashboard_health_row" }),
-        now,
-        receiptId,
         now,
       ),
   ]);

@@ -208,7 +208,9 @@ class TestPostRenderFailed(unittest.TestCase):
         self.assertFalse(accepted)
 
     def test_http_503_is_not_accepted(self):
-        """503 from the endpoint → False (nothing was committed)."""
+        """503 from the endpoint → False (not accepted). NB: a 503 does NOT
+        prove nothing was committed — the outcome is unconfirmed; False only
+        means no acceptance was observed."""
         import requests
         resp = requests.Response()
         resp.status_code = 503
