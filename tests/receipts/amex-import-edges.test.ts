@@ -15,6 +15,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
+  amexLineDedupKey,
   classifyExistingArtifact,
   isIncompleteArtifact,
   type ExistingArtifactVerdict,
@@ -153,6 +154,68 @@ test("statementMonthFitsPaymentDue: due date inside the month → true", () => {
 
 test("statementMonthFitsPaymentDue: due date outside the month → false (the 2610 mis-slot shape)", () => {
   assert.equal(statementMonthFitsPaymentDue("2026-09", "2026-10-05"), false);
+});
+
+// ─── amexLineDedupKey: injectivity across pipe-containing identities ─────────
+// Cross-review 2026-11-10 round 2, finding 2: the old `|`-join folded the
+// two distinct tuples below onto ONE key, so the protected-trip precheck
+// mistook a superseded protected line for a retained identity. The key must
+// be injective over the identities the upsert's conflict targets define,
+// while preserving the existing normalization (NULL cardholder → "", ref
+// present ⇔ ref identity).
+
+test("amexLineDedupKey: pipe-containing distinct identities never collide", () => {
+  const base = { transactionDate: "2026-10-01", amountMinor: 1000 } as const;
+  const a = amexLineDedupKey({ ...base, merchant: "HOTEL|Alice", cardholderName: "Bob" });
+  const b = amexLineDedupKey({ ...base, merchant: "HOTEL", cardholderName: "Alice|Bob" });
+  assert.notEqual(a, b, "the round-2 collision pair must be distinct keys");
+  // Same identity → same key: retained-identity detection still works.
+  assert.equal(a, amexLineDedupKey({ ...base, merchant: "HOTEL|Alice", cardholderName: "Bob" }));
+  // Every field boundary is unambiguous — exhaustively over a small grid of
+  // pipe-containing field combinations, no two distinct tuples share a key.
+  const merchants = ["HOTEL", "HOTEL|Alice", "A|B|C", "|", ""];
+  const cardholders = [null, "", "Bob", "Alice|Bob", "|"];
+  const seen = new Map<string, string>();
+  for (const merchant of merchants) {
+    for (const cardholder of cardholders) {
+      const key = amexLineDedupKey({ ...base, merchant, cardholderName: cardholder });
+      // Identity under the key's own normalization: NULL cardholder ≡ "".
+      const identity = JSON.stringify([merchant, cardholder ?? ""]);
+      const clash = seen.get(key);
+      // Same identity may repeat (NULL vs "") — only DISTINCT identities
+      // sharing one key is a collision.
+      if (clash !== undefined) {
+        assert.equal(clash, identity, `key collision: ${identity} vs ${clash}`);
+      } else {
+        seen.set(key, identity);
+      }
+    }
+  }
+});
+
+test("amexLineDedupKey: ref/noref split and NULL normalization preserved", () => {
+  const base = { transactionDate: "2026-10-01", amountMinor: 1000, merchant: "M" } as const;
+  // Reference identity ignores the noref fields; pipes in the reference
+  // itself cannot leak into the cardholder position.
+  assert.notEqual(
+    amexLineDedupKey({ ...base, amexReference: "R|1", cardholderName: null }),
+    amexLineDedupKey({ ...base, amexReference: "R", cardholderName: "1" }),
+  );
+  // Empty-string reference routes to the no-reference identity (unchanged).
+  assert.equal(
+    amexLineDedupKey({ ...base, amexReference: "", cardholderName: "X" }),
+    amexLineDedupKey({ ...base, cardholderName: "X" }),
+  );
+  // NULL and empty-string cardholders normalize to the same key.
+  assert.equal(
+    amexLineDedupKey({ ...base, cardholderName: null }),
+    amexLineDedupKey({ ...base, cardholderName: "" }),
+  );
+  // Distinct dates/amounts stay distinct even with identical pipes.
+  assert.notEqual(
+    amexLineDedupKey({ ...base, transactionDate: "2026-10-01", cardholderName: "|" }),
+    amexLineDedupKey({ ...base, transactionDate: "2026-10|01", cardholderName: "" }),
+  );
 });
 
 test("statementMonthFitsPaymentDue: absent due date → null (no verdict)", () => {

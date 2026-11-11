@@ -214,15 +214,17 @@ function load<T>(relative: string): T {
 type CsvRow = [date: string, merchant: string, amount: number];
 
 /** Netanswer-shaped CSV (same shape as the audit probe / amex-parser tests;
- *  UTF-8 like the parser tests — decodeAmexBuffer falls through to UTF-8). */
-function csv(rows: CsvRow[]): File {
+ *  UTF-8 like the parser tests — decodeAmexBuffer falls through to UTF-8).
+ *  Cardholder is parameterizable: it is part of the line dedup identity, and
+ *  the pipe-collision regression needs two statements with different ones. */
+function csv(rows: CsvRow[], cardholder = "Test Cardholder"): File {
   const total = rows.reduce((sum, r) => sum + r[2], 0);
   const text = [
     "カード名称,TestCard",
     "お支払日,2026/11/07",
     `今回ご請求額,${total}`,
     "利用日,ご利用店名及び商品名,本人・家族区分,支払区分名称,締前入金区分,利用金額,備考",
-    ",ご利用者名:Test Cardholder 様,1,,,,",
+    `,ご利用者名:${cardholder} 様,1,,,,`,
     ...rows.map((r) => `${r[0]},${r[1]},1,1回,,${r[2]},`),
   ].join("\n");
   return new File([text], "SYNTHETIC.csv", { type: "text/csv" });
@@ -565,9 +567,23 @@ test("retirement demotes only reconciled receipts with no surviving confirmed cl
   );
   assert.equal(audits.length, 1);
   const payload = JSON.parse(audits[0]!.new_value_json) as {
+    statementMonth: string;
+    supersededBy: string;
     demotedReceiptIds: string[];
     replacedArtifacts: { deletedTripMemberLinks: number }[];
   };
+  // Cross-review round 2, finding 3: ONE JSON.parse must yield actual
+  // arrays. On SQLite 3.54.1 the bare aggregate subqueries embedded as
+  // quoted strings — the json() argument-position wrap pins the array form
+  // (and the payload's key order) across SQLite builds.
+  assert.deepEqual(Object.keys(payload), [
+    "statementMonth",
+    "supersededBy",
+    "replacedArtifacts",
+    "demotedReceiptIds",
+  ]);
+  assert.ok(Array.isArray(payload.replacedArtifacts), "parses once to an array");
+  assert.ok(Array.isArray(payload.demotedReceiptIds), "parses once to an array");
   assert.deepEqual(payload.demotedReceiptIds, ["orphan"]);
   assert.ok(
     payload.replacedArtifacts.some((a) => a.deletedTripMemberLinks > 0),
@@ -753,6 +769,153 @@ test("protected link raced between pre-check and retirement aborts the whole bat
     ).n,
     1,
     "healed retirement wrote exactly one audit entry",
+  );
+});
+
+// ── Cross-review 2026-11-10 round 2, finding 1: blocked heal must fail loudly ─
+
+test("blocked exact-SHA heal with protection still present: visible 409, incomplete state unchanged; detach → heal → completed duplicate", async () => {
+  setup();
+  await postImport(csv(INITIAL));
+
+  // Leave the month holding an UNFINISHED replacement (retirement aborts
+  // mid-batch → fresh artifact stays 'uploaded', stale charge still live).
+  sqlite
+    .exec(`CREATE TRIGGER fail_retirement BEFORE DELETE ON amex_statement_lines
+           WHEN OLD.merchant = '京都 RAIL'
+           BEGIN SELECT RAISE(ABORT, 'synthetic retirement failure'); END;`);
+  const failed = await postImport(csv(CORRECTION), "2026-11", true);
+  assert.equal(failed.status, 500);
+  sqlite.exec("DROP TRIGGER fail_retirement");
+
+  // The stale charge gains a protected trip membership BEFORE any retry.
+  attachConfirmedTrip("trip-stuck", "stuck trip", "京都 RAIL");
+  const kyotoId = lineId("京都 RAIL");
+
+  // Identical-SHA retry WHILE the protection still exists: the heal is
+  // refused, and the refusal must be machine-readably a FAILURE — 409,
+  // ok:false, structured protectedTripConflicts. A 200 ok:true
+  // duplicate:true here would report a healthy duplicate over an
+  // incomplete import (round 2, finding 1).
+  const blocked = await postImport(csv(CORRECTION), "2026-11", true);
+  assert.equal(blocked.status, 409);
+  const blockedBody = (await blocked.json()) as {
+    ok: boolean;
+    duplicate?: boolean;
+    error: string;
+    protectedTripConflicts: { tripId: string; merchant: string }[];
+  };
+  assert.equal(blockedBody.ok, false);
+  assert.equal(blockedBody.duplicate, undefined, "no healthy duplicate status");
+  assert.match(blockedBody.error, /confirmed\/exported business trip/);
+  assert.equal(blockedBody.protectedTripConflicts.length, 1);
+  assert.equal(blockedBody.protectedTripConflicts[0]!.tripId, "trip-stuck");
+  assert.equal(blockedBody.protectedTripConflicts[0]!.merchant, "京都 RAIL");
+
+  // The refusal mutated nothing: still incomplete — three charges live,
+  // statuses parsed+uploaded, protected link present.
+  assert.equal(one<{ n: number }>(`SELECT COUNT(*) AS n FROM amex_statement_lines`).n, 3);
+  assert.deepEqual(
+    q<{ import_status: string }>(
+      `SELECT import_status FROM amex_statement_artifacts ORDER BY created_at`,
+    ).map((r) => r.import_status),
+    ["parsed", "uploaded"],
+  );
+  assert.equal(
+    one<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM business_trip_report_lines WHERE amex_statement_line_id = ?`,
+      kyotoId,
+    ).n,
+    2,
+    "candidate + protected links untouched by the refusal",
+  );
+
+  // Operator detaches the protected member → the SAME SHA now heals.
+  sqlite
+    .prepare(`DELETE FROM business_trip_report_lines WHERE business_trip_report_id = 'trip-stuck'`)
+    .run();
+  const healed = await postImport(csv(CORRECTION), "2026-11", true);
+  assert.equal(healed.status, 200, await healed.clone().text());
+  const healedBody = (await healed.json()) as { duplicate: boolean; message: string };
+  assert.equal(healedBody.duplicate, true);
+  assert.match(healedBody.message, /completed in place/);
+  assert.equal(
+    one<{ n: number }>(`SELECT COUNT(*) AS n FROM amex_statement_lines`).n,
+    2,
+    "retry completed the retirement",
+  );
+
+  // With the import now genuinely complete, the identical file IS the
+  // ordinary healthy duplicate — success semantics are reserved for
+  // completed state.
+  const dup = await postImport(csv(CORRECTION), "2026-11", true);
+  assert.equal(dup.status, 200);
+  const dupBody = (await dup.json()) as { ok: boolean; duplicate: boolean; message: string };
+  assert.equal(dupBody.ok, true);
+  assert.equal(dupBody.duplicate, true);
+  assert.match(dupBody.message, /already been uploaded/);
+  assert.equal(one<{ n: number }>(`SELECT COUNT(*) AS n FROM amex_statement_lines`).n, 2);
+});
+
+// ── Cross-review 2026-11-10 round 2, finding 2: pipe-delimiter collision ─────
+
+test("distinct pipe-containing identities do not collide: protected conflict refuses BEFORE any mutation", async () => {
+  setup();
+  // Statement A: merchant "HOTEL|Alice", cardholder "Bob" — under the old
+  // `|`-join key this produced noref|2026-10-01|1000|HOTEL|Alice|Bob.
+  await postImport(csv([["2026/10/01", "HOTEL|Alice", 1000]], "Bob"), "2026-11");
+  attachConfirmedTrip("trip-pipe", "pipe trip", "HOTEL|Alice");
+  const protectedLineId = lineId("HOTEL|Alice");
+
+  // Statement B replaces the month: merchant "HOTEL", cardholder "Alice|Bob"
+  // — the OTHER tuple the old key folded onto the same string. The precheck
+  // must see the protected line as SUPERSEDED (distinct identity) and
+  // refuse pre-import, instead of mistaking it for retained, importing, and
+  // wedging on the retirement FK after the mutations commit.
+  const res = await postImport(
+    csv([["2026/10/01", "HOTEL", 1000]], "Alice|Bob"),
+    "2026-11",
+    true,
+  );
+  assert.equal(res.status, 409);
+  const body = (await res.json()) as {
+    ok: boolean;
+    error: string;
+    protectedTripConflicts: { tripId: string; merchant: string; lineId: string }[];
+  };
+  assert.equal(body.ok, false);
+  assert.match(body.error, /confirmed\/exported business trip/);
+  assert.equal(body.protectedTripConflicts.length, 1);
+  assert.equal(body.protectedTripConflicts[0]!.tripId, "trip-pipe");
+  assert.equal(body.protectedTripConflicts[0]!.merchant, "HOTEL|Alice");
+  assert.equal(body.protectedTripConflicts[0]!.lineId, protectedLineId);
+
+  // ZERO mutation: no new R2 artifact, no new artifact row, no line was
+  // inserted/re-homed/deleted, protected trip + link intact.
+  assert.equal(objectMap.size, 1, "no second R2 artifact was uploaded");
+  assert.equal(one<{ n: number }>(`SELECT COUNT(*) AS n FROM amex_statement_artifacts`).n, 1);
+  assert.equal(
+    one<{ n: number }>(`SELECT COUNT(*) AS n FROM amex_statement_lines`).n,
+    1,
+    "only the protected line exists — the incoming identity was never imported",
+  );
+  assert.equal(
+    one<{ statement_artifact_id: string }>(
+      `SELECT statement_artifact_id FROM amex_statement_lines WHERE merchant = 'HOTEL|Alice'`,
+    ).statement_artifact_id,
+    one<{ id: string }>(`SELECT id FROM amex_statement_artifacts`).id,
+    "protected line still belongs to its original artifact",
+  );
+  assert.equal(
+    one<{ status: string }>(`SELECT status FROM business_trip_reports WHERE id = 'trip-pipe'`).status,
+    "confirmed",
+    "protected trip contents are untouched",
+  );
+  assert.equal(
+    one<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM business_trip_report_lines WHERE business_trip_report_id = 'trip-pipe'`,
+    ).n,
+    1,
   );
 });
 
