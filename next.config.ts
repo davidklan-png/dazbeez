@@ -1,5 +1,6 @@
 import { initOpenNextCloudflareForDev } from "@opennextjs/cloudflare";
 import type { NextConfig } from "next";
+import { PHASE_PRODUCTION_BUILD } from "next/constants";
 
 const nextConfig: NextConfig = {
   reactStrictMode: true,
@@ -56,6 +57,8 @@ const nextConfig: NextConfig = {
   },
 };
 
-export default nextConfig;
-
-initOpenNextCloudflareForDev();
+export default function config(phase: string): NextConfig {
+  // Builds need local bindings, without opening an authenticated remote preview.
+  initOpenNextCloudflareForDev({ remoteBindings: phase !== PHASE_PRODUCTION_BUILD });
+  return nextConfig;
+}
