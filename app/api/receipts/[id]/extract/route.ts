@@ -90,10 +90,9 @@ export async function POST(request: Request, { params }: RouteContext) {
       return NextResponse.json({ error: "Receipt not found." }, { status: 404 });
     }
 
-    const lock = (await getReceiptLocks([receipt])).get(id);
-    if (receipt.deleted_at || receipt.status === "archived" || lock?.locked) {
+    if (receipt.deleted_at) {
       return NextResponse.json(
-        { error: "Receipt is deleted, archived, or locked and cannot be re-extracted." },
+        { error: "Receipt is deleted and cannot be re-extracted." },
         { status: 409 },
       );
     }
@@ -103,6 +102,7 @@ export async function POST(request: Request, { params }: RouteContext) {
     // drained the queue): reconcile its stale pending extraction_state to
     // 'processed' so the month-close gate isn't blocked and the consumer can ack
     // the 409 cleanly.
+    // Heal before checking seals: the consumer permanently ACKs a 409.
     if (receipt.status !== "captured" && receipt.status !== "needs_review") {
       await reconcileExtractionState(id, "processed");
       await createAuditEntry(db, {
@@ -114,6 +114,14 @@ export async function POST(request: Request, { params }: RouteContext) {
       });
       return NextResponse.json(
         { error: `Receipt is ${receipt.status} and cannot be re-extracted.` },
+        { status: 409 },
+      );
+    }
+
+    const lock = (await getReceiptLocks([receipt])).get(id);
+    if (lock?.locked) {
+      return NextResponse.json(
+        { error: "Receipt is locked and cannot be re-extracted." },
         { status: 409 },
       );
     }
