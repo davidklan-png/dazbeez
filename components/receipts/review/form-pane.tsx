@@ -32,6 +32,12 @@ import {
 } from "@/lib/receipts/receipt-status-policy";
 import { resolveWorkMonth, withWorkMonth } from "@/lib/receipts/work-month";
 import { formatReviewMonthLabel } from "@/lib/receipts/review-queue-filter";
+import { SaveQueue } from "@/lib/receipts/save-queue";
+import {
+  guardedLinkClick,
+  guardedNavigate,
+  registerSaveFlusher,
+} from "@/lib/receipts/review-navigation";
 import type {
   PaymentPath,
   ReceiptAttendee,
@@ -153,6 +159,10 @@ export function FormPane(props: FormPaneProps) {
   const businessPurposeValueRef = useRef(receipt.business_purpose ?? "");
   const businessPurposeComposingRef = useRef(false);
   const businessPurposeInputRef = useRef<HTMLInputElement | null>(null);
+  // B5: resolvers for navigation flush passes holding through an ACTIVE
+  // composition (including one started mid-network-await) — woken when the
+  // composition ends or the input blurs, i.e. WebKit committed the text.
+  const compositionWaitersRef = useRef<Array<() => void>>([]);
   const [attendees, setAttendees] = useState<string[]>(
     props.initialAttendees.map((a) => a.attendee_name),
   );
@@ -250,106 +260,114 @@ export function FormPane(props: FormPaneProps) {
   const categoryRef = useRef<HTMLSelectElement | null>(null);
   const attendeeAddRef = useRef<HTMLDivElement | null>(null);
 
-  // ─── autosave (debounced PATCH) ─────────────────────────────────────
+  // ─── autosave (debounced PATCH through the serialized save queue) ───
   const initialRenderRef = useRef(true);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const inFlightRef = useRef<AbortController | null>(null);
 
-  const triggerSave = useCallback(
-    (markReviewed: boolean) => {
-      if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-      saveTimerRef.current = setTimeout(async () => {
-        // A composition may have started after this timer was scheduled. Do
-        // not update SaveBadge or any other React state until WebKit commits.
-        if (businessPurposeComposingRef.current) return;
-        inFlightRef.current?.abort();
-        const ctrl = new AbortController();
-        inFlightRef.current = ctrl;
-        setSave({ kind: "saving" });
+  // One PATCH body for every save path (autosave AND save-and-next — they
+  // differ only by the reviewed rider). Called at FIRE time by the queue, so
+  // it always reads the latest state via this render's closure.
+  const buildSaveBody = (markReviewed: boolean) => {
+    let amountMinor: number | null = null;
+    if (amountDisplay.trim()) {
+      const parsed = parseFloat(amountDisplay.replace(/[^0-9.]/g, ""));
+      if (!isNaN(parsed)) {
+        amountMinor =
+          currency === "JPY" ? Math.round(parsed) : Math.round(parsed * 100);
+      }
+    }
+    return {
+      paymentPath,
+      expenseCategoryCode: expenseCategoryCode || null,
+      transactionDate: transactionDate || null,
+      merchant: merchant.trim() || null,
+      amountMinor,
+      currency,
+      businessPurpose: businessPurposeValueRef.current.trim() || null,
+      attendees: attendees.map((a) => a.trim()).filter(Boolean),
+      // Audit 2026-07-21 Phase 1: ordinary autosaves NEVER send status —
+      // a stale client value must not be able to overwrite a lifecycle
+      // status an internal flow (reconcile/export) has since advanced.
+      // "reviewed" is sent only by the explicit Mark-reviewed path below,
+      // and only when the receipt is still in a pre-review state.
+      ...(markReviewed && canPromoteToReviewed(receipt.status)
+        ? { status: "reviewed" as ReceiptStatus }
+        : {}),
+    };
+  };
 
-        let amountMinor: number | null = null;
-        if (amountDisplay.trim()) {
-          const parsed = parseFloat(amountDisplay.replace(/[^0-9.]/g, ""));
-          if (!isNaN(parsed)) {
-            amountMinor =
-              currency === "JPY" ? Math.round(parsed) : Math.round(parsed * 100);
-          }
-        }
+  // Serialized save queue, one per form instance: autosaves for one review
+  // session never overlap, and an earlier snapshot can never commit after a
+  // later acknowledged save. Every render rebinds the latest buildSaveBody
+  // closure so flushes always carry the newest fields. All navigation away
+  // from the form awaits this queue (see review-navigation.ts) BEFORE
+  // routing, so commits complete while the form is still mounted.
+  const saveQueueConfig = {
+    url: `/api/receipts/${receipt.id}`,
+    buildBody: buildSaveBody,
+    deferFire: () => businessPurposeComposingRef.current,
+  };
+  const saveQueueRef = useRef<SaveQueue | null>(null);
+  if (saveQueueRef.current === null) {
+    saveQueueRef.current = new SaveQueue(saveQueueConfig);
+  } else {
+    saveQueueRef.current.rebind(saveQueueConfig);
+  }
+  const saveQueue = saveQueueRef.current;
 
-        try {
-          const res = await fetch(`/api/receipts/${receipt.id}`, {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              paymentPath,
-              expenseCategoryCode: expenseCategoryCode || null,
-              transactionDate: transactionDate || null,
-              merchant: merchant.trim() || null,
-              amountMinor,
-              currency,
-              businessPurpose: businessPurposeValueRef.current.trim() || null,
-              attendees: attendees.map((a) => a.trim()).filter(Boolean),
-              // Audit 2026-07-21 Phase 1: ordinary autosaves NEVER send status —
-              // a stale client value must not be able to overwrite a lifecycle
-              // status an internal flow (reconcile/export) has since advanced.
-              // "reviewed" is sent only by the explicit Mark-reviewed path below,
-              // and only when the receipt is still in a pre-review state.
-              ...(markReviewed && canPromoteToReviewed(receipt.status)
-                ? { status: "reviewed" as ReceiptStatus }
-                : {}),
-            }),
-            signal: ctrl.signal,
-          });
-          const json = (await res.json().catch(() => ({}))) as {
-            error?: string;
-            warnings?: string[];
-          };
-          // Abort normally wins when composition begins during a request, but
-          // a response can already be resolving. Avoid its state updates too.
+  const triggerSave = useCallback(() => {
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = setTimeout(() => {
+      saveTimerRef.current = null;
+      // A composition may have started after this timer was scheduled. Do
+      // not enqueue (or update SaveBadge / any other React state) until
+      // WebKit commits; composition end re-arms the save.
+      if (businessPurposeComposingRef.current) return;
+      setSave({ kind: "saving" });
+      void saveQueue.save().then(
+        (result) => {
+          // A composition may have started while the request was in flight.
+          // Avoid its state updates until WebKit commits.
           if (businessPurposeComposingRef.current) return;
-          if (!res.ok) {
-            setSave({
-              kind: "error",
-              message: json.error ?? "Save failed",
-            });
-            return;
-          }
-          setApiWarnings(json.warnings ?? []);
+          setApiWarnings(result.warnings);
           setSave({ kind: "saved", at: Date.now() });
           // Do not refresh the route after ordinary field autosaves. A refresh
           // can interrupt an active WebKit IME conversion and steal focus from
           // any text field; the local form state is already authoritative for
           // the editor. Explicit actions and navigation still refresh normally.
-        } catch (error) {
-          if ((error as DOMException | undefined)?.name === "AbortError") return;
-          setSave({ kind: "error", message: "Network error" });
-        }
-      }, SAVE_DEBOUNCE_MS);
-    },
-    [
-      receipt.id,
-      receipt.status,
-      paymentPath,
-      expenseCategoryCode,
-      transactionDate,
-      merchant,
-      amountDisplay,
-      currency,
-      attendees,
-    ],
-  );
+        },
+        (error: Error) => {
+          if (businessPurposeComposingRef.current) return;
+          setSave({ kind: "error", message: error.message });
+        },
+      );
+    }, SAVE_DEBOUNCE_MS);
+  }, [saveQueue]);
 
   const handleBusinessPurposeCompositionStart = useCallback(() => {
     businessPurposeComposingRef.current = true;
+    // The in-flight save is NOT aborted: abort() is client-side only (the
+    // server still applies a sent PATCH), and the queue serializes commits
+    // so there is nothing to cancel. Just hold the pending debounce until
+    // composition ends.
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-    inFlightRef.current?.abort();
   }, []);
+
+  // Wake flush passes that are holding through the composition (B5). Order
+  // matters: commit the value, stop composing, re-arm the save, THEN wake —
+  // the woken pass re-reads the timer and sends the committed value at once.
+  const wakeCompositionWaiters = () => {
+    const waiters = compositionWaitersRef.current;
+    compositionWaitersRef.current = [];
+    for (const wake of waiters) wake();
+  };
 
   const handleBusinessPurposeCompositionEnd = useCallback(
     (value: string) => {
       businessPurposeValueRef.current = value;
       businessPurposeComposingRef.current = false;
-      triggerSave(false);
+      triggerSave();
+      wakeCompositionWaiters();
     },
     [triggerSave],
   );
@@ -394,7 +412,7 @@ export function FormPane(props: FormPaneProps) {
     // so they can't change, but this guards against programmatic state changes
     // and is the explicit "suppress entirely" the lock requires.
     if (isLocked || businessPurposeComposingRef.current) return;
-    triggerSave(false);
+    triggerSave();
   }, [
     paymentPath,
     expenseCategoryCode,
@@ -408,77 +426,144 @@ export function FormPane(props: FormPaneProps) {
   ]);
 
   // ─── keyboard shortcuts ─────────────────────────────────────────────
+  // Save-and-next is an awaited navigation intent like every other one
+  // (cross-review B2): it sets the reviewed rider, then navigates through
+  // the SAME flusher (latest-field drain, including edits made while the
+  // reviewed request is in flight) and the SAME intent supersession (a
+  // newer month/rail intent cancels this target). On failure the flusher
+  // surfaces the badge error and the operator stays with their edits.
+  const reviewedRiderRef = useRef(false);
   const onMarkReviewed = useCallback(() => {
-    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-    // Trigger an immediate save with reviewed status, then navigate
-    void (async () => {
-      setSave({ kind: "saving" });
+    // Cancel the debounce: the flush sends the latest fields immediately.
+    if (saveTimerRef.current) {
+      clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
+    }
+    reviewedRiderRef.current = true; // consumed by the next flush pass
+    void guardedNavigate(() => {
+      if (nextReceiptId) {
+        router.push(`/receipts/review/${nextReceiptId}${queryParams}`);
+      } else {
+        router.push(`/receipts/review${queryParams}`);
+      }
+    });
+  }, [nextReceiptId, queryParams, router]);
+
+  // Flush pending edits NOW and resolve once the LATEST save has committed —
+  // the awaited-navigation contract for every navigation away from this form
+  // (see review-navigation.ts). Semantics (cross-review round 4):
+  //  • Single-flight, but the cached promise is cleared when it SETTLES via
+  //    post-assignment .then handlers — a clean body that completes without
+  //    awaiting must not leave a resolved promise cached forever, or later
+  //    edits/failures on the same mounted form would be acknowledged from a
+  //    stale success (B1).
+  //  • The loop re-checks after every commit: edits made while a request
+  //    was in flight get their own save, and the reviewed rider (set by the
+  //    save-and-next action) rides the first save of its pass (B2).
+  //  • A clean-looking fast path REFUSES while the queue is halted for an
+  //    unknown network outcome — no navigation may be acknowledged safely
+  //    ordered after one (B3).
+  //  • Composition active at ANY pass — including one STARTED while a
+  //    request was in flight — holds navigation and suppresses badge/state
+  //    updates until WebKit commits; the pass after it flushes the
+  //    committed DOM value before acknowledging (B5).
+  // Failures surface the badge error and reject so the caller stays put
+  // with its edits intact.
+  const waitForCompositionEnd = () => {
+    if (!businessPurposeComposingRef.current) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      compositionWaitersRef.current.push(resolve);
+    });
+  };
+
+  const flushingRef = useRef<Promise<void> | null>(null);
+  const flushPendingEdits = useCallback((): Promise<void> => {
+    const existing = flushingRef.current;
+    if (existing) return existing;
+    const flush = (async () => {
       try {
-        let amountMinor: number | null = null;
-        if (amountDisplay.trim()) {
-          const parsed = parseFloat(amountDisplay.replace(/[^0-9.]/g, ""));
-          if (!isNaN(parsed))
-            amountMinor =
-              currency === "JPY"
-                ? Math.round(parsed)
-                : Math.round(parsed * 100);
+        for (;;) {
+          if (businessPurposeComposingRef.current) {
+            await waitForCompositionEnd();
+            continue; // re-read the now-committed value on the next pass
+          }
+          const markReviewed = reviewedRiderRef.current;
+          reviewedRiderRef.current = false;
+          const hadPendingEdits = saveTimerRef.current !== null;
+          if (saveTimerRef.current) {
+            clearTimeout(saveTimerRef.current);
+            saveTimerRef.current = null;
+          }
+          // lastFailed: a failed save leaves unsaved edits with NO timer
+          // armed — a retry navigation must re-attempt, not skip. halted:
+          // an unknown network outcome refuses even a clean pass.
+          if (
+            !hadPendingEdits &&
+            !markReviewed &&
+            saveQueue.idle &&
+            !saveQueue.lastFailed &&
+            !saveQueue.halted
+          ) {
+            return;
+          }
+          setSave({ kind: "saving" });
+          const result = await saveQueue.save(markReviewed);
+          // Composition may have STARTED while the request was in flight —
+          // suppress UI state updates until WebKit commits; the loop head
+          // then flushes the committed value before acknowledging.
+          if (!businessPurposeComposingRef.current) {
+            setApiWarnings(result.warnings);
+            setSave({ kind: "saved", at: Date.now() });
+          }
         }
-        const res = await fetch(`/api/receipts/${receipt.id}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            paymentPath,
-            expenseCategoryCode: expenseCategoryCode || null,
-            transactionDate: transactionDate || null,
-            merchant: merchant.trim() || null,
-            amountMinor,
-            currency,
-            businessPurpose: businessPurposeValueRef.current.trim() || null,
-            attendees: attendees.map((a) => a.trim()).filter(Boolean),
-            // Promote to reviewed only when still in a pre-review state. For an
-            // already-reviewed/reconciled/exported/archived receipt the server
-            // would reject the downgrade; we simply don't send it. Fields still
-            // save and the operator advances to the next queue item.
-            ...(canPromoteToReviewed(receipt.status)
-              ? { status: "reviewed" as ReceiptStatus }
-              : {}),
-          }),
+      } catch (error) {
+        // Hold the error surface through an active composition too, then
+        // show it once WebKit commits (B5) — the operator still stays.
+        if (businessPurposeComposingRef.current) {
+          await waitForCompositionEnd();
+        }
+        setSave({
+          kind: "error",
+          message: error instanceof Error ? error.message : "Save failed",
         });
-        if (!res.ok) {
-          const json = (await res.json().catch(() => ({}))) as {
-            error?: string;
-          };
-          setSave({ kind: "error", message: json.error ?? "Save failed" });
-          return;
-        }
-        const okJson = (await res.json().catch(() => ({}))) as {
-          warnings?: string[];
-        };
-        setApiWarnings(okJson.warnings ?? []);
-        setSave({ kind: "saved", at: Date.now() });
-        if (nextReceiptId) {
-          router.push(`/receipts/review/${nextReceiptId}${queryParams}`);
-        } else {
-          router.push(`/receipts/review${queryParams}`);
-        }
-      } catch {
-        setSave({ kind: "error", message: "Network error" });
+        throw error;
       }
     })();
-  }, [
-    receipt.id,
-    receipt.status,
-    paymentPath,
-    expenseCategoryCode,
-    transactionDate,
-    merchant,
-    amountDisplay,
-    currency,
-    attendees,
-    nextReceiptId,
-    queryParams,
-    router,
-  ]);
+    flushingRef.current = flush;
+    // B1: cleanup must run AFTER the assignment above even when the body
+    // completes synchronously (clean fast path) — a finally INSIDE the
+    // async body would run before the assignment and re-cache the settled
+    // promise. .then handlers are microtasks: always after this block.
+    void flush.then(
+      () => {
+        if (flushingRef.current === flush) flushingRef.current = null;
+      },
+      () => {
+        if (flushingRef.current === flush) flushingRef.current = null;
+      },
+    );
+    return flush;
+  }, [saveQueue]);
+
+  // The single mounted review form publishes its flush to the navigation
+  // guard (queue-rail's j/k + item links call it via guardedNavigate).
+  useEffect(() => registerSaveFlusher(flushPendingEdits), [flushPendingEdits]);
+
+  // Residual net for exits that CANNOT be awaited (browser back/reload,
+  // header scope/search controls outside this form): a pending debounce is
+  // sent immediately, serialized behind any in-flight save. Base parity with
+  // the old behavior (the debounce timer firing after unmount), minus its
+  // 450 ms delay. Fire-and-forget ceiling: a failure here cannot be surfaced
+  // — every awaitable navigation path uses the guard above instead.
+  useEffect(() => {
+    return () => {
+      if (saveTimerRef.current) {
+        clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
+        void saveQueue.save().catch(() => {});
+      }
+    };
+  }, [saveQueue]);
 
   useKeyboardShortcuts({
     s: (e) => {
@@ -501,6 +586,16 @@ export function FormPane(props: FormPaneProps) {
       if (input instanceof HTMLInputElement) input.focus();
     },
   });
+
+  // Skip awaits the same guarded flush as every other navigation caller —
+  // pending edits commit first; on failure the operator stays here with the
+  // honest error badge and the edits intact.
+  function handleSkip() {
+    if (!nextReceiptId) return;
+    void guardedNavigate(() =>
+      router.push(`/receipts/review/${nextReceiptId}${queryParams}`),
+    );
+  }
 
   async function handleDelete() {
     if (!window.confirm(`Soft-delete receipt ${receipt.id.slice(0, 8)}…?`))
@@ -566,6 +661,13 @@ export function FormPane(props: FormPaneProps) {
           {!inView && props.switchToMonth && (
             <Link
               href={`/receipts/review/${receipt.id}?month=${props.switchToMonth}`}
+              onClick={(e) =>
+                guardedLinkClick(
+                  e,
+                  `/receipts/review/${receipt.id}?month=${props.switchToMonth}`,
+                  (h) => router.push(h),
+                )
+              }
               className="font-medium text-amber-600 underline-offset-2 hover:text-amber-700 hover:underline"
             >
               View in {formatReviewMonthLabel(props.switchToMonth)}
@@ -589,6 +691,18 @@ export function FormPane(props: FormPaneProps) {
           </span>
           <Link
             href={`/receipts/review/${props.duplicatePartner.id}`}
+            onClick={(e) => {
+              // Narrow inside the callback — the JSX guard does not flow
+              // into closures over `props`.
+              const partner = props.duplicatePartner;
+              if (partner) {
+                guardedLinkClick(
+                  e,
+                  `/receipts/review/${partner.id}`,
+                  (h) => router.push(h),
+                );
+              }
+            }}
             className="ml-auto shrink-0 font-semibold text-amber-700 underline-offset-2 hover:text-amber-800 hover:underline"
           >
             Compare →
@@ -799,7 +913,7 @@ export function FormPane(props: FormPaneProps) {
               defaultValue={receipt.business_purpose ?? ""}
               onChange={(e) => {
                 businessPurposeValueRef.current = e.currentTarget.value;
-                if (!businessPurposeComposingRef.current) triggerSave(false);
+                if (!businessPurposeComposingRef.current) triggerSave();
               }}
               onCompositionStart={handleBusinessPurposeCompositionStart}
               onCompositionEnd={(e) =>
@@ -808,7 +922,8 @@ export function FormPane(props: FormPaneProps) {
               onBlur={(e) => {
                 businessPurposeValueRef.current = e.currentTarget.value;
                 businessPurposeComposingRef.current = false;
-                triggerSave(false);
+                triggerSave();
+                wakeCompositionWaiters();
               }}
               disabled={isLocked}
               placeholder="e.g. Client dinner — Acme product review"
@@ -884,13 +999,7 @@ export function FormPane(props: FormPaneProps) {
             <Kbd>s</Kbd>
           </span>
           {nextReceiptId && (
-            <Btn
-              kind="ghost"
-              size="md"
-              onClick={() =>
-                router.push(`/receipts/review/${nextReceiptId}${queryParams}`)
-              }
-            >
+            <Btn kind="ghost" size="md" onClick={handleSkip}>
               Skip
             </Btn>
           )}

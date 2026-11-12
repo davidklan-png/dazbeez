@@ -7,6 +7,10 @@ import { Kbd } from "@/components/ui/kbd";
 import { ReceiptThumb } from "@/components/receipts/ui/receipt-thumb";
 import { useKeyboardShortcuts } from "@/lib/receipts/keyboard";
 import { CLOSING_ATTENTION_LABELS } from "@/lib/receipts/attention-codes";
+import {
+  guardedLinkClick,
+  guardedNavigate,
+} from "@/lib/receipts/review-navigation";
 import { useQueueControls } from "@/components/receipts/review/queue-controls";
 
 export function QueueRail({
@@ -49,7 +53,15 @@ export function QueueRail({
     const fallback = delta > 0 ? 0 : items.length - 1;
     const idx = activeIndex < 0 ? fallback : activeIndex;
     const next = items[(idx + delta + items.length) % items.length];
-    if (next) router.push(`/receipts/review/${next.id}${queryParams}`);
+    // Await the review form's pending edits (same-session save contract):
+    // navigating mid-debounce would discard them, and a failing save must
+    // keep the operator on the receipt. On flush failure guardedNavigate
+    // simply does not push — the form stays mounted with its error badge.
+    if (next) {
+      void guardedNavigate(() =>
+        router.push(`/receipts/review/${next.id}${queryParams}`),
+      );
+    }
   }
 
   const doneSoFar = Math.max(0, totalCaptured - totalUnreviewed);
@@ -86,6 +98,17 @@ export function QueueRail({
             <Link
               key={item.id}
               href={`/receipts/review/${item.id}${queryParams}`}
+              // Await the form's pending edits before leaving the receipt.
+              // Modifier clicks (⌘/Ctrl/Shift/Alt) and non-left buttons keep
+              // native open-in-new-tab behavior — guardedLinkClick returns
+              // early for them.
+              onClick={(e) =>
+                guardedLinkClick(
+                  e,
+                  `/receipts/review/${item.id}${queryParams}`,
+                  (h) => router.push(h),
+                )
+              }
               ref={item.id === activeId ? activeRef : null}
               aria-current={item.id === activeId ? "page" : undefined}
               className={[

@@ -10,6 +10,7 @@ import {
 } from "react";
 import { useRouter } from "next/navigation";
 import type { QueueItem } from "@/lib/receipts/queue-items";
+import { guardedNavigate } from "@/lib/receipts/review-navigation";
 import {
   DEFAULT_SORT,
   SORT_OPTIONS,
@@ -145,13 +146,18 @@ export function ReviewSearchControl({
   const router = useRouter();
 
   function push(q: string) {
-    router.push(
-      `/receipts/review${buildReviewControlQuery({
-        month: monthParam,
-        filter,
-        scope,
-        q: q || undefined,
-      })}`,
+    // Search submits/clears can leave the review form mid-debounce — await
+    // its pending edits before navigating (no-op when no form is mounted,
+    // e.g. on the list page). Push semantics preserved.
+    void guardedNavigate(() =>
+      router.push(
+        `/receipts/review${buildReviewControlQuery({
+          month: monthParam,
+          filter,
+          scope,
+          q: q || undefined,
+        })}`,
+      ),
     );
   }
 
