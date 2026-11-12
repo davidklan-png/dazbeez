@@ -32,7 +32,8 @@ export type NotifyResult = { ok: true } | { ok: false; error: string };
 
 /** Plain email send (no attachment). Used by the channel-probe route. `cc` is
  *  optional — null/omitted drops the field from the payload entirely (mirrors
- *  sendDeliveryViaResend; never cc:null/cc:""). Never throws across the
+ *  sendDeliveryViaResend; never cc:null/cc:""). Digest callers omit HTML and
+ *  supply a daily idempotency key. Never throws across the
  *  boundary — returns {ok, error?}. */
 export async function sendViaResend(
   fetchImpl: typeof fetch,
@@ -41,13 +42,16 @@ export async function sendViaResend(
   to: string,
   subject: string,
   text: string,
-  html: string,
+  html: string | undefined,
   cc: string | null = null,
+  idempotencyKey?: string,
 ): Promise<NotifyResult> {
   try {
     const res = await fetchImpl("https://api.resend.com/emails", {
       method: "POST",
-      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json",
+        ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}),
+      },
       body: JSON.stringify({ from, to: [to], cc: cc ? [cc] : undefined, subject, text, html }),
     });
     if (!res.ok) {

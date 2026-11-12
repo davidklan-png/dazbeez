@@ -22,7 +22,14 @@
   // Daily cleanup at 03:00 UTC. Not user-facing; 03:00 UTC (~12:00 JST) avoids
   // the receipts module's statement-finalization window and is quiet hours for
   // inbound mail. See ADR 0011 §6.
+  // Prepared only: recipient/policy confirmation and a separate activation required.
+  // DIGEST_TO is deliberately UNSET. No accountant-recipient fallback.
+  "vars": {
+    "DIGEST_ENABLED": "false",
+    "NOTIFY_FROM_ADDRESS": "receipts@dazbeez.com"
+  },
+  "observability": { "enabled": true, "traces": { "enabled": true } },
   "triggers": {
-    "crons": ["0 3 * * *"]
+    "crons": ["0 3 * * *", "30 23 * * *"]
   }
 }

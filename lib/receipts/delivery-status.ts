@@ -13,14 +13,9 @@
 // never sent) — the state the composer must handle first.
 
 import { listExports, listDeliveriesForMonth } from "@/lib/receipts/db";
-import {
-  deriveMonthDeliveryState,
-  deliveryStateToPill,
-  ATTEMPT_STATE,
-  type AttemptState,
-  type DeliveryState,
-  type DeliveryPillState,
-} from "@/lib/receipts/delivery-state";
+import { deliveryStateToPill, type DeliveryState, type DeliveryPillState } from "./delivery-state";
+import { finalizedMonthsDeliveryState } from "./delivery-status-core";
+export { needsDeliveryAction } from "./delivery-status-core";
 
 // Re-export the pure pill mapping so alert surfaces can import it from the
 // server helper alongside the month-Map; the mapping itself lives in the pure
@@ -46,50 +41,9 @@ export async function deriveFinalizedMonthsDeliveryState(): Promise<
   Map<string, DeliveryState | null>
 > {
   const all = await listExports();
-  // Latest FINALIZED export id per month — tie-broken identically to
-  // getLatestFinalizedExport (revision DESC, then created_at DESC) so this and
-  // the send path always agree on which revision is "current".
-  const latestFinalizedByMonth = new Map<
-    string,
-    { id: string; revision: number; createdAt: string }
-  >();
-  for (const e of all) {
-    if (e.status !== "finalized") continue;
-    const revision = e.export_revision ?? 1;
-    const createdAt = e.created_at;
-    const cur = latestFinalizedByMonth.get(e.export_month);
-    if (
-      !cur ||
-      revision > cur.revision ||
-      (revision === cur.revision && createdAt > cur.createdAt)
-    ) {
-      latestFinalizedByMonth.set(e.export_month, { id: e.id, revision, createdAt });
-    }
-  }
-  const result = new Map<string, DeliveryState | null>();
-  for (const [month, latest] of latestFinalizedByMonth) {
-    const deliveries = await listDeliveriesForMonth(month);
-    const attempts = deliveries
-      .filter((d) => d.export_id === latest.id)
-      .map((d) => ({
-        attemptId: d.attempt_id,
-        // The DB column allows 'ambiguous' at runtime (markDeliveryAmbiguous);
-        // the static type narrows to three values, so cast through the authority.
-        state: (d.state as AttemptState) ?? ATTEMPT_STATE.PENDING,
-        createdAt: d.created_at,
-      }));
-    result.set(month, deriveMonthDeliveryState(attempts));
-  }
-  return result;
-}
-
-/** A finalized month needs operator delivery action when it is NOT delivered —
- *  i.e. sealed_undelivered, pending, or never-attempted (null). Used by the
- *  dashboard banner to list every month that is not yet closed for reporting. */
-export function needsDeliveryAction(
-  state: DeliveryState | null | undefined,
-): boolean {
-  return deliveryStateToPill(state) !== "delivered";
+  const months = [...new Set(all.filter((e) => e.status === "finalized").map((e) => e.export_month))];
+  const deliveries = (await Promise.all(months.map(listDeliveriesForMonth))).flat();
+  return finalizedMonthsDeliveryState(all, deliveries);
 }
 
 export type { DeliveryState };
