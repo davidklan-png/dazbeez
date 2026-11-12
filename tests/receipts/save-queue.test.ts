@@ -14,13 +14,16 @@ import {
 interface DeferredCall {
   init: RequestInit;
   /** Complete the request successfully (default) with a JSON body. */
-  ok: (json?: unknown) => void;
+  ok: (json?: Record<string, unknown>) => void;
   /** Complete the request with an HTTP error status + JSON error body. */
   fail: (error: string) => void;
   /** Complete with an arbitrary status + JSON error body (e.g. 500). */
   failWith: (status: number, error: string) => void;
   /** Complete with 200 but a body that is NOT parseable JSON. */
   okGarbled: () => void;
+  /** Complete with 200 and an arbitrary raw body string (parseable JSON of
+   *  any shape — the R1 boundary cases: `true`, `[]`, error envelopes…). */
+  okRaw: (body: string) => void;
   /** Simulate a network-level failure (fetch rejects). */
   drop: () => void;
 }
@@ -31,9 +34,10 @@ function makeDeferredFetch() {
     new Promise<Response>((resolve, reject) => {
       calls.push({
         init,
-        ok: (json = {}) =>
+        ok: (json: Record<string, unknown> = {}) =>
           resolve(
-            new Response(JSON.stringify(json), {
+            // Default body = the endpoint's ack shape ({ok:true,warnings:[]}).
+            new Response(JSON.stringify({ ok: true, warnings: [], ...json }), {
               status: 200,
               headers: { "Content-Type": "application/json" },
             }),
@@ -51,6 +55,7 @@ function makeDeferredFetch() {
           ),
         okGarbled: () =>
           resolve(new Response("{{not-json", { status: 200 })),
+        okRaw: (body) => resolve(new Response(body, { status: 200 })),
         drop: () => reject(new TypeError("Network request failed")),
       });
     });
@@ -286,6 +291,66 @@ test("SaveQueue: a 200 whose body cannot be parsed is not a usable ack — UNKNO
   // A later well-formed response elsewhere still cannot clear it: nothing
   // else was sent after the halt.
   await assert.rejects(q.save(), /Reload the receipt/);
+});
+
+test("R1: a parseable but UNUSABLE 200 body is not an ack — halts and queued work never claims success", async () => {
+  // Each of these is a syntactically valid 2xx body that the old truthy
+  // check falsely acknowledged. The endpoint's only success body is
+  // { ok: true, warnings: string[] } (route.ts:386) — anything else did not
+  // come from a completed save handler.
+  for (const body of [
+    "true", // primitive
+    "[]", // array
+    '{"error":"mutation not acknowledged"}', // error envelope
+    '{"warnings":{"unexpected":"object"}}', // non-array warnings
+    '{"ok":"yes"}', // ok present but not the endpoint's literal true
+    "null", // JSON null
+  ]) {
+    const { calls, fetchImpl } = makeDeferredFetch();
+    const q = new SaveQueue({ url: "/r", buildBody: () => ({}), fetchImpl });
+    const pA = q.save();
+    await tick();
+    const pB = q.save(true); // newer fields + rider queued behind A
+    calls[0]!.okRaw(body);
+
+    await assert.rejects(
+      pA,
+      /may or may not have reached the server/,
+      `body ${body} must not acknowledge A`,
+    );
+    await assert.rejects(
+      pB,
+      /may or may not have reached the server/,
+      `body ${body} must not let queued B claim success`,
+    );
+    assert.equal(calls.length, 1, `body ${body}: B must never be sent`);
+    assert.equal(q.halted, true, `body ${body}: queue must halt`);
+  }
+});
+
+test("R1: the endpoint's actual success shapes acknowledge and drain", async () => {
+  // route.ts:386 always answers { ok: true, warnings: string[] } — warnings
+  // may be empty or carry the compliance-recompute warning; ok alone (a
+  // defensive future variant) still proves the handler completed.
+  for (const [body, expectedWarnings] of [
+    ['{"ok":true,"warnings":[]}', []],
+    ['{"ok":true,"warnings":["Saved, but compliance checks could not be recomputed."]}', ["Saved, but compliance checks could not be recomputed."]],
+    ['{"ok":true}', []],
+  ] as const) {
+    const { calls, fetchImpl } = makeDeferredFetch();
+    const q = new SaveQueue({ url: "/r", buildBody: () => ({}), fetchImpl });
+    const pA = q.save();
+    await tick();
+    const pB = q.save();
+    calls[0]!.okRaw(body);
+    const result = await pA;
+    assert.deepEqual(result.warnings, [...expectedWarnings], `body ${body}`);
+    await tick();
+    assert.equal(calls.length, 2, `body ${body}: queued B drains normally`);
+    calls[1]!.ok({});
+    await pB;
+    assert.equal(q.halted, false);
+  }
 });
 
 test("SaveQueue: a conclusive PRE-WRITE refusal (422) is a known failure — corrected-input retry stays available", async () => {

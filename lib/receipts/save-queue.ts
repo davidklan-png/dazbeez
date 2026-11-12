@@ -99,6 +99,42 @@ export function isConclusivePreWriteRefusal(status: number): boolean {
   );
 }
 
+/**
+ * Runtime shape check for the success body, derived verbatim from the ONLY
+ * success the receipt PATCH route can emit: `{ ok: true, warnings: string[] }`
+ * (route.ts:386; warnings built as a string array at :375). A 2xx whose body
+ * is anything else — primitive (`true`), array (`[]`), an error envelope
+ * (`{error:…}`), or a non-array `warnings` — did not come from a completed
+ * save handler and is therefore NOT an acknowledgement: it is an UNKNOWN
+ * outcome and halts. No new ack key is invented; `ok: true` is the
+ * endpoint's own.
+ */
+function isUsableSuccessAck(
+  parsed: unknown,
+): parsed is { ok: true; warnings?: string[] } {
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return false;
+  }
+  const body = parsed as { ok?: unknown; warnings?: unknown; error?: unknown };
+  if (body.error !== undefined) return false; // error envelope ≠ success ack
+  if (body.ok !== true) return false; // the endpoint's own acknowledgement
+  if (body.warnings !== undefined && !isStringArray(body.warnings)) {
+    return false; // wrong warnings type = not the endpoint's body
+  }
+  return true;
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((w) => typeof w === "string");
+}
+
+/** `error` text from an error envelope, when present and a string. */
+function errorTextOf(parsed: unknown): string | null {
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const error = (parsed as { error?: unknown }).error;
+  return typeof error === "string" ? error : null;
+}
+
 interface Waiter {
   resolve: (success: SaveSuccess) => void;
   reject: (error: Error) => void;
@@ -199,16 +235,18 @@ export class SaveQueue {
       // Ack boundary: a success ack must be a 2xx WITH a parseable body; a
       // conclusive failure must be one of the route's proven PRE-WRITE
       // statuses. Anything else is an UNKNOWN outcome and halts.
-      let parsed: { error?: string; warnings?: string[] } | null = null;
+      let parsed: unknown = null;
       try {
-        parsed = (await res.json()) as { error?: string; warnings?: string[] };
+        parsed = await res.json();
       } catch {
         parsed = null; // malformed/missing body — not a usable ack
       }
-      if (res.ok && parsed) {
+      if (res.ok && isUsableSuccessAck(parsed)) {
         result = { warnings: parsed.warnings ?? [] };
       } else if (!res.ok && isConclusivePreWriteRefusal(res.status)) {
-        result = new Error(parsed?.error ?? "Save failed");
+        result = new Error(
+          errorTextOf(parsed) ?? "Save failed",
+        );
       } else {
         haltError = new Error(SAVE_HALTED_MESSAGE);
         result = haltError;

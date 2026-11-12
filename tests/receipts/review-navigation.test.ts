@@ -17,7 +17,7 @@ import { SaveQueue, type SaveFetch } from "@/lib/receipts/save-queue";
 // points.
 
 interface DeferredCall {
-  ok: (json?: unknown) => void;
+  ok: (json?: Record<string, unknown>) => void;
   fail: (error: string) => void;
 }
 
@@ -27,8 +27,14 @@ function makeDeferredFetch() {
     new Promise<Response>((resolve, reject) => {
       assert.equal(init.method, "PATCH");
       calls.push({
-        ok: (json = {}) =>
-          resolve(new Response(JSON.stringify(json), { status: 200 })),
+        ok: (json: Record<string, unknown> = {}) =>
+          // Default body = the endpoint's ack shape ({ok:true,warnings:[]}).
+          resolve(
+            new Response(
+              JSON.stringify({ ok: true, warnings: [], ...json }),
+              { status: 200 },
+            ),
+          ),
         fail: (error) =>
           resolve(new Response(JSON.stringify({ error }), { status: 422 })),
       });

@@ -92,10 +92,12 @@ const ITEMS = [
 interface MockRequest {
   url: string;
   body: Record<string, unknown>;
-  ok: (json?: unknown) => void;
+  ok: (json?: Record<string, unknown>) => void;
   fail: (error: string) => void;
   failWith: (status: number, error: string) => void;
   okGarbled: () => void;
+  /** Complete with 200 and an arbitrary raw body string (R1 cases). */
+  okRaw: (raw: string) => void;
   drop: () => void;
 }
 const requests: MockRequest[] = [];
@@ -114,8 +116,15 @@ function installFetchMock() {
       requests.push({
         url,
         body: JSON.parse(init!.body as string) as Record<string, unknown>,
-        ok: (json = {}) =>
-          resolve(new Response(JSON.stringify(json), { status: 200 })),
+        ok: (json: Record<string, unknown> = {}) =>
+          // Default body = the endpoint's actual ack shape
+          // ({ok:true, warnings:[]} — route.ts:386).
+          resolve(
+            new Response(
+              JSON.stringify({ ok: true, warnings: [], ...json }),
+              { status: 200 },
+            ),
+          ),
         fail: (error) =>
           resolve(
             new Response(JSON.stringify({ error }), { status: 422 }),
@@ -123,6 +132,8 @@ function installFetchMock() {
         failWith: (status, error) =>
           resolve(new Response(JSON.stringify({ error }), { status })),
         okGarbled: () => resolve(new Response("{{not-json", { status: 200 })),
+        okRaw: (raw: string) =>
+          resolve(new Response(raw, { status: 200 })),
         drop: () => reject(new TypeError("Simulated transport loss")),
       });
     });
@@ -295,6 +306,9 @@ async function runScenarios(swapReceipt: () => Promise<void>) {
   typeMerchant("m4"); // edit WHILE the reviewed request is in flight
   requests[3].ok({});
   await waitFor(() => requests.length === 5, "S3 second drain PATCH");
+  // N1: the second (late-edit) PATCH is PENDING — a premature push on the
+  // first ack alone would leave this edit racing behind navigation.
+  assert(pushCount() === mark, "S3 pushed before the late edit committed");
   requests[4].ok({});
   await waitFor(() => pushCount() === mark + 1, "S3 push");
   record("B2 edits during the reviewed request are drained before navigating", () => {
@@ -449,6 +463,59 @@ async function runScenarios(swapReceipt: () => Promise<void>) {
     assert(!badgeText().includes("Saved"), "false saved badge after garbled ack");
     assert(pushCount() === mark, "navigated on a garbled ack");
     return "halt guidance shown, no push";
+  });
+
+  // S10 — R1: a 200 whose body is parseable but NOT the endpoint's ack shape
+  // ({"ok":true,"warnings":[…]}) is not an acknowledgement: halt, on a fresh
+  // form. The old truthy check acknowledged `true` and drained.
+  await swapReceipt();
+  typeMerchant("mTruthy");
+  mark = pushCount();
+  buttonByText("Skip").click();
+  await waitFor(() => requests.length === 16, "S10 PATCH");
+  requests[15].okRaw("true");
+  await waitFor(() => badgeText().includes("may or may not have reached"), "S10 halt badge");
+  record("R1 truthy-but-unusable 200 body halts — uncertainty, not success", () => {
+    assert(!badgeText().includes("Saved"), "false saved badge on body `true`");
+    assert(pushCount() === mark, "navigated on an unusable ack");
+    return "halt guidance shown, no push";
+  });
+  typeMerchant("mTruthyB");
+  buttonByText("Skip").click();
+  await tick();
+  await tick();
+  record("R1 halted queue sends nothing further, fields retained", () => {
+    assert(requests.length === 16, "sent a request after the unusable-ack halt");
+    assert(pushCount() === mark, "navigated after the unusable-ack halt");
+    assert(
+      (inputByLabel("Merchant") as HTMLInputElement).value === "mTruthyB",
+      "fields lost after unusable ack",
+    );
+    return "queue frozen, fields retained";
+  });
+
+  // S11 — N1: when the late edit's own drain FAILS, the form must stay with
+  // the honest error and the edit retained (not navigate on the first ack).
+  await swapReceipt();
+  typeMerchant("mLateFail");
+  mark = pushCount();
+  pressKey("s");
+  await waitFor(() => requests.length === 17, "S11 reviewed PATCH");
+  typeMerchant("mLateFail2"); // edit WHILE the reviewed request is in flight
+  requests[16].ok({});
+  await waitFor(() => requests.length === 18, "S11 late-edit drain PATCH");
+  assert(pushCount() === mark, "S11 pushed before the late edit settled");
+  requests[17].fail("Sealed fixture");
+  await waitFor(() => badgeText().includes("Sealed fixture"), "S11 badge error");
+  await tick();
+  await tick();
+  record("N1 late-edit drain failure stays on the form with edits retained", () => {
+    assert(pushCount() === mark, "navigated despite the late-edit failure");
+    assert(
+      (inputByLabel("Merchant") as HTMLInputElement).value === "mLateFail2",
+      "late edit lost on failure",
+    );
+    return "no push, error badge, edit retained";
   });
 }
 
