@@ -229,10 +229,11 @@ export function currentCalendarMonth(): string {
 // time. Some write paths need the SAME semantics inside a single conditional
 // UPDATE (so admission cannot be lost to a race between read and write) —
 // e.g. the render-retry recovery write (render-recovery.ts). These builders
-// emit the exact table/status predicates the JS functions use, including the
-// ADR 0012 unified draft carve-out, so the embedded guard and the JS
-// predicate cannot drift apart in meaning. render-recovery's persistence
-// tests execute BOTH against the same SQLite fixture and assert they agree.
+// restate the JS functions' table/status predicates, including the ADR 0012
+// unified draft carve-out. They are a PARALLEL EXPRESSION, not a shared
+// implementation: when either side changes, update the other — the
+// export-month cases of the embedded guard are pinned against
+// isMonthLockedForEdits by render-recovery's persistence tests.
 
 /**
  * SQL boolean: the month named by `monthExpr` (a SQL expression yielding

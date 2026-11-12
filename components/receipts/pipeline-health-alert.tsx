@@ -23,11 +23,17 @@
 import { useState } from "react";
 import Link from "next/link";
 import type {
+  ActionFailureKind,
   PipelineAttention,
   PipelineClassReport,
   PipelineDetailKind,
 } from "@/lib/receipts/pipeline-health";
-import { formatAge } from "@/lib/receipts/pipeline-health";
+import {
+  formatAge,
+  HEALTH_ACTION_FAILURE_NOTE,
+  isActionDisabledByFailure,
+} from "@/lib/receipts/pipeline-health";
+import { performHealthAction } from "@/lib/receipts/health-action";
 
 interface Props {
   lit: PipelineClassReport[];
@@ -136,58 +142,58 @@ function ActionRow({
   );
 }
 
-type ButtonState = "idle" | "busy" | "done" | "refused" | "error";
+type ButtonState = "idle" | "busy" | "done" | "failed";
+
+interface ActionFailure {
+  kind: ActionFailureKind;
+  /** Safe endpoint-provided message (409 refusal). Null for other kinds. */
+  message: string | null;
+}
 
 /**
- * Shared action-button behavior (B5): 200 → done; 409 → refused with the
- * endpoint's own validated message (never retried blindly); anything else →
- * temporary failure, safe to retry. 5xx bodies are generic strings from the
- * route (no SQL/internal text reaches the UI).
+ * Shared action-button behavior (B5 + R4 + round-2). The request path lives
+ * in performHealthAction (lib/receipts/health-action.ts) so the actual
+ * fetch/parse/classification runs in tests; this hook keeps state wiring:
+ *   refused (409)  → the endpoint's own validated message; action disabled
+ *                    (prohibited in this state until refresh)
+ *   removed (404)  → stale row; reload guidance; action disabled
+ *   auth (401/403) → session lost; sign-in guidance; action disabled
+ *   unconfirmed (5xx / network loss) → the POST may have committed — fixed
+ *                    reload-and-check-current-state note, action disabled
+ *                    until refreshed (never an immediate repeat)
  */
 function useActionButton(endpoint: string): {
   state: ButtonState;
-  message: string | null;
+  failure: ActionFailure | null;
   run: () => Promise<void>;
 } {
   const [state, setState] = useState<ButtonState>("idle");
-  const [message, setMessage] = useState<string | null>(null);
+  const [failure, setFailure] = useState<ActionFailure | null>(null);
   async function run() {
     setState("busy");
-    setMessage(null);
-    try {
-      const res = await fetch(endpoint, { method: "POST" });
-      if (res.ok) {
-        setState("done");
-        return;
-      }
-      const body = (await res.json().catch(() => null)) as { error?: unknown } | null;
-      const text = typeof body?.error === "string" ? body.error : null;
-      if (res.status === 409) {
-        setState("refused");
-        setMessage(text ?? "this receipt is not in the recoverable state");
-      } else {
-        setState("error");
-        setMessage(null); // temporary — no endpoint text needed
-      }
-    } catch {
-      setState("error");
-      setMessage(null);
+    setFailure(null);
+    const outcome = await performHealthAction(endpoint);
+    if (outcome.status === "done") {
+      setState("done");
+      return;
     }
+    setFailure({ kind: outcome.kind, message: outcome.message });
+    setState("failed");
   }
-  return { state, message, run };
+  return { state, failure, run };
 }
 
 function EnqueueButton({ receiptId }: { receiptId: string }) {
-  const { state, message, run } = useActionButton(`/api/receipts/${receiptId}/enqueue`);
-  return <ActionButton state={state} message={message} run={run} label="Enqueue" doneLabel="Enqueued ✓" />;
+  const { state, failure, run } = useActionButton(`/api/receipts/${receiptId}/enqueue`);
+  return <ActionButton state={state} failure={failure} run={run} label="Enqueue" doneLabel="Enqueued ✓" />;
 }
 
 function RetryRenderButton({ receiptId }: { receiptId: string }) {
-  const { state, message, run } = useActionButton(`/api/receipts/${receiptId}/render-retry`);
+  const { state, failure, run } = useActionButton(`/api/receipts/${receiptId}/render-retry`);
   return (
     <ActionButton
       state={state}
-      message={message}
+      failure={failure}
       run={run}
       label="Retry render"
       doneLabel="Retrying next cycle ✓"
@@ -197,13 +203,13 @@ function RetryRenderButton({ receiptId }: { receiptId: string }) {
 
 function ActionButton({
   state,
-  message,
+  failure,
   run,
   label,
   doneLabel,
 }: {
   state: ButtonState;
-  message: string | null;
+  failure: ActionFailure | null;
   run: () => Promise<void>;
   label: string;
   doneLabel: string;
@@ -213,23 +219,24 @@ function ActionButton({
       <span className="shrink-0 font-medium text-green-700">{doneLabel}</span>
     );
   }
+  const kind = failure?.kind ?? null;
   return (
     <>
       <button
         type="button"
         onClick={run}
-        disabled={state === "busy"}
+        disabled={state === "busy" || isActionDisabledByFailure(kind)}
         className="shrink-0 rounded-lg bg-red-500 px-2 py-0.5 text-[11px] font-semibold text-white hover:bg-red-600 disabled:opacity-60"
       >
         {state === "busy" ? "…" : label}
       </button>
-      {state === "refused" && (
-        <span className="max-w-[46ch] truncate text-red-700" title={message ?? undefined}>
-          not allowed — {message}
+      {kind === "refused" && (
+        <span className="max-w-[46ch] truncate text-red-700" title={failure?.message ?? undefined}>
+          not allowed — {failure?.message}
         </span>
       )}
-      {state === "error" && (
-        <span className="shrink-0 text-red-700">temporarily unavailable — try again</span>
+      {kind !== null && kind !== "refused" && (
+        <span className="shrink-0 text-red-700">{HEALTH_ACTION_FAILURE_NOTE[kind]}</span>
       )}
     </>
   );

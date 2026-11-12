@@ -65,7 +65,7 @@ export async function POST(request: Request, { params }: RouteContext) {
     // B5: never echo internals (D1/SQL error text) to the client — log only.
     console.error("[api/receipts/[id]/render-retry] POST failed", error);
     return NextResponse.json(
-      { error: "Render retry failed. The receipt was not modified." },
+      { error: "Render retry failed — refresh the page and check this receipt's current state before trying again." },
       { status: 500 },
     );
   }

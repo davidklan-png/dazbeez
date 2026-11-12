@@ -148,10 +148,11 @@ class TestProcessRenders(unittest.TestCase):
         ok.assert_called_once_with("rid-1", b"%PDF-1.4", "application/pdf")
         fail.assert_not_called()
 
-    def test_terminal_claim_logged_only_when_report_accepted(self):
-        """N2: an UNACCEPTED report (HTTP 503) must not log a contradictory
-        'marked render-failed (terminal)' line — the row was not committed,
-        so it stays retryable and the log says so."""
+    def test_unconfirmed_report_never_claims_terminal_nor_retryable(self):
+        """R3: an UNCONFIRMED report (transport loss / non-2xx) must not log
+        a terminal claim NOR assert the row stays retryable — the commit
+        outcome is unknown (a committed report stops re-rendering). The log
+        must say unconfirmed and point at the dashboard."""
         import contextlib
         import io
 
@@ -168,10 +169,14 @@ class TestProcessRenders(unittest.TestCase):
                 consumer.process_renders(dry_run=False)
         log = err.getvalue()
         self.assertIn("fail-perm-unreported", log)
-        self.assertIn("report NOT accepted", log)
+        self.assertIn("unconfirmed", log)
+        # No terminal claim, and no blanket retryability claim either.
         self.assertNotIn("terminal until Retry render", log)
+        self.assertNotIn("still retryable", log)
+        self.assertNotIn("re-attempt next cycle", log)
 
     def test_terminal_claim_logged_when_report_accepted(self):
+        # Accepted (2xx) is the only outcome that licenses the terminal claim.
         import contextlib
         import io
 
@@ -203,7 +208,9 @@ class TestPostRenderFailed(unittest.TestCase):
         self.assertFalse(accepted)
 
     def test_http_503_is_not_accepted(self):
-        """503 from the endpoint → False (nothing was committed)."""
+        """503 from the endpoint → False (not accepted). NB: a 503 does NOT
+        prove nothing was committed — the outcome is unconfirmed; False only
+        means no acceptance was observed."""
         import requests
         resp = requests.Response()
         resp.status_code = 503

@@ -113,7 +113,7 @@ export async function POST(request: Request, { params }: RouteContext) {
     // B5: never echo internals (D1/SQL error text) to the client — log only.
     console.error("[api/receipts/[id]/render-failed] failed", error);
     return NextResponse.json(
-      { error: "Failed to mark render-failed. The receipt was not modified." },
+      { error: "Failed to mark render-failed — refresh the dashboard to check this receipt's current state." },
       { status: 500 },
     );
   }

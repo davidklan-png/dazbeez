@@ -5,7 +5,10 @@
 //   - only render-pending receipts (needs_render=1) may be marked failed
 //   - only the terminal render-failure state may be retried
 //   - human-advanced rows (reviewed/reconciled/exported/archived — which is
-//     what sealed/finalized months' rows always are) are refused on BOTH paths
+//     sealed-month membership is NOT equivalent to a late status — a sealed
+//     month can hold needs_review rows; the seal itself is enforced by the
+//     month-lock guards inside retryRender's UPDATE, pinned by the
+//     sealed-fixture tests in render-recovery-persistence.test.ts)
 
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -56,7 +59,7 @@ test("admitRenderFailure: non-render receipt (needs_render=0) → 409, not await
   }
 });
 
-test("admitRenderFailure: human-advanced statuses refuse — sealed months are always past needs_review", () => {
+test("admitRenderFailure: human-advanced statuses refuse (seal guards are separate — see persistence tests)", () => {
   for (const status of ["reviewed", "categorized", "reconciled", "exported", "archived"]) {
     const a = admitRenderFailure(receipt({ status: status as ReceiptRecord["status"] }));
     assert.equal(a.ok, false, `${status} must be refused`);

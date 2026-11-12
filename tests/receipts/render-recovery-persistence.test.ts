@@ -1,18 +1,24 @@
 // Real-engine persistence tests for the render-recovery core (round-2 review
-// B1–B4): recordRenderFailure / retryRender run against a REAL SQLite database
-// (node:sqlite DatabaseSync) through a minimal D1-compatible shim, so the
-// actual SQL — atomicity, WHERE-boundary admission re-checks, affected-rows
-// inspection, seal guards — is executed, not mocked.
+// B1–B4 + round-3 R1–R3/N1): recordRenderFailure / retryRender run against a
+// REAL SQLite database (node:sqlite DatabaseSync) through a minimal
+// D1-compatible shim, so the actual SQL — batch transactionality, json_patch
+// merging, WHERE-boundary admission re-checks, affected-rows inspection,
+// seal guards — is executed, not mocked.
 //
-// Race windows are simulated at the SQL boundary: the shim exposes
-// `onBeforeRun`, a hook that fires immediately before each mutating statement
-// executes, letting a test mutate the row BETWEEN the function's read and its
-// conditional write — the exact interleavings the review reproduced.
+// Scope (accurate, per review N2): these exercise the CORE functions the
+// routes call. The route shells add only auth + body parsing + result
+// mapping; their HTTP boundaries are covered by local preview probes and
+// the parser matrix — NOT by this file.
+//
+// Race windows are simulated at the SQL boundary: `onBeforeRun` (sync) and
+// `onBeforeRunAsync` (awaitable) fire immediately before each mutating
+// statement executes — inside batch statements too — letting a test mutate
+// the row or pause one request BETWEEN a function's read and its write, the
+// exact interleavings the review reproduced.
 
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  mergeTerminalRenderPayload,
   parseRenderFailedBody,
   recordRenderFailure,
   retryRender,
@@ -65,6 +71,8 @@ class SqliteD1 {
   readonly db: SqliteDatabase;
   /** Fires immediately before a mutating statement executes (race hook). */
   onBeforeRun: ((sql: string) => void) | null = null;
+  /** Awaitable race hook — holds a statement so a concurrent request runs. */
+  onBeforeRunAsync: ((sql: string) => Promise<void>) | null = null;
 
   constructor() {
     this.db = new DatabaseSync(":memory:");
@@ -76,26 +84,65 @@ class SqliteD1 {
     this.db.prepare(sql).run(...params);
   }
 
+  private async maybeHook(sql: string): Promise<void> {
+    if (!/^\s*(UPDATE|INSERT|DELETE)/i.test(sql)) return;
+    if (this.onBeforeRun) this.onBeforeRun(sql);
+    if (this.onBeforeRunAsync) await this.onBeforeRunAsync(sql);
+  }
+
   prepare(sql: string) {
-    return {
-      bind: (...args: unknown[]) => ({
-        first: async <T>(): Promise<T | null> => {
-          const row = this.db.prepare(sql).get(...args);
-          return (row ?? null) as T | null;
-        },
-        all: async <T>(): Promise<{ results: T[] }> => {
-          const rows = this.db.prepare(sql).all(...args);
-          return { results: rows as T[] };
-        },
-        run: async (): Promise<{ success: true; meta: { changes: number } }> => {
-          if (this.onBeforeRun && /^\s*(UPDATE|INSERT|DELETE)/i.test(sql)) {
-            this.onBeforeRun(sql);
-          }
-          const info = this.db.prepare(sql).run(...args);
-          return { success: true, meta: { changes: Number(info.changes) } };
-        },
-      }),
-    };
+    const make = (args: unknown[]) => ({
+      first: async <T>(): Promise<T | null> => {
+        const row = this.db.prepare(sql).get(...args);
+        return (row ?? null) as T | null;
+      },
+      all: async <T>(): Promise<{ results: T[] }> => {
+        const rows = this.db.prepare(sql).all(...args);
+        return { results: rows as T[] };
+      },
+      run: async (): Promise<{ success: true; meta: { changes: number } }> => {
+        await this.maybeHook(sql);
+        const info = this.db.prepare(sql).run(...args);
+        return { success: true, meta: { changes: Number(info.changes) } };
+      },
+      /** Statement spec for batch() — D1PreparedStatement's executable form. */
+      __spec: { sql, args } as { sql: string; args: unknown[] },
+    });
+    return { bind: (...args: unknown[]) => make(args) };
+  }
+
+  /** D1 batch semantics: statements run in ONE transaction — any failure
+   *  rolls back everything already executed in the batch. Serialized on a
+   *  promise chain (SQLite single-writer, like D1): a concurrent request's
+   *  batch waits for the in-flight one — reads still interleave, so the
+   *  two-request races in these tests are genuine. */
+  private batchChain: Promise<unknown> = Promise.resolve();
+
+  batch(
+    stmts: { __spec: { sql: string; args: unknown[] } }[],
+  ): Promise<{ success: true; meta: { changes: number } }[]> {
+    const run = this.batchChain.then(() => this.runBatch(stmts));
+    this.batchChain = run.catch(() => undefined);
+    return run;
+  }
+
+  private async runBatch(
+    stmts: { __spec: { sql: string; args: unknown[] } }[],
+  ): Promise<{ success: true; meta: { changes: number } }[]> {
+    this.db.exec("BEGIN");
+    try {
+      const results: { success: true; meta: { changes: number } }[] = [];
+      for (const s of stmts) {
+        await this.maybeHook(s.__spec.sql);
+        const info = this.db.prepare(s.__spec.sql).run(...s.__spec.args);
+        results.push({ success: true, meta: { changes: Number(info.changes) } });
+      }
+      this.db.exec("COMMIT");
+      return results;
+    } catch (err) {
+      this.db.exec("ROLLBACK");
+      throw err;
+    }
   }
 
   asD1(): D1Database {
@@ -122,6 +169,9 @@ function seedRenderRow(
   overrides: Partial<Row> & { id?: string } = {},
 ): string {
   const id = overrides.id ?? "r-1";
+  // "extraction_state" in overrides so an EXPLICIT null (legacy rows) is
+  // preserved — `?? "captured"` would coerce it back to a pending state.
+  const state = "extraction_state" in overrides ? overrides.extraction_state! : "captured";
   d1.exec(
     `INSERT INTO receipt_records
        (id, status, extraction_state, extraction_json, needs_render, transaction_date,
@@ -130,7 +180,7 @@ function seedRenderRow(
              '2026-11-01T00:00:00Z', '2026-11-01T00:00:00Z', 'JPY')`,
     id,
     overrides.status ?? "captured",
-    overrides.extraction_state ?? "captured",
+    state,
     overrides.extraction_json ?? null,
   );
   if (overrides.transaction_date !== undefined && overrides.transaction_date !== null) {
@@ -196,20 +246,34 @@ test("B1 repeated report with a DIFFERENT reason is read-only idempotent: first 
   assert.deepEqual(audits(d1, id), auditsFirst); // no repeated audit
 });
 
-test("B1 mergeTerminalRenderPayload: malformed / array / null existing JSON → fresh payload only", () => {
-  const fresh = JSON.parse(mergeTerminalRenderPayload(null, "r", "t"));
-  assert.equal(fresh.reason, "r");
-  const fromArray = JSON.parse(mergeTerminalRenderPayload("[1,2]", "r", "t"));
-  assert.equal(fromArray.failed, true);
-  assert.equal(Object.keys(fromArray).length, 4); // no array items smeared in
+test("R1 SQL merge edge cases: null / array / malformed current JSON → fresh failure payload only", async () => {
+  const d1 = new SqliteD1();
+  const cases: Array<[string, string | null]> = [
+    ["null-json", null],
+    ["array-json", "[1,2]"],
+    ["malformed-json", "{not json"],
+  ];
+  for (const [id, json] of cases) {
+    seedRenderRow(d1, { id, extraction_json: json });
+    const res = await recordRenderFailure({ db: d1.asD1(), receiptId: id, reason: "r", actor: "mlx", now: "2026-11-11T10:00:00Z" });
+    assert.equal(res.kind, "recorded", id);
+    assert.deepEqual(JSON.parse(row(d1, id).extraction_json!), {
+      failed: true,
+      stage: "render",
+      reason: "r",
+      failedAt: "2026-11-11T10:00:00Z",
+    });
+  }
 });
 
 // ─── B2: atomic commit + rollback ────────────────────────────────────────────
 
-test("B2 terminal state and reason commit in ONE statement — injected write failure leaves the row untouched", async () => {
+test("B2 pre-execution write failure leaves the row untouched (no partial commit)", async () => {
   const d1 = new SqliteD1();
   const id = seedRenderRow(d1, { extraction_json: PREEXISTING_JSON });
-  // Fail the terminal UPDATE itself (models D1 error mid-write).
+  // Fail the terminal UPDATE BEFORE it executes (models D1 rejecting the
+  // statement). An error DURING statement execution / later in the batch is
+  // covered by the R3 rollback tests below.
   d1.onBeforeRun = (sql) => {
     if (sql.includes("SET extraction_state = 'failed'")) {
       throw new Error("D1_ERROR: simulated write failure");
@@ -293,13 +357,36 @@ test("B3 review race: status advances before the write → honest conflict namin
   assert.equal(audits(d1, id).length, 0);
 });
 
-test("B3 zero-change double retry: second call is an honest conflict, never a false success", async () => {
+test("B3/R3 double retry: two concurrently ADMITTED requests — one wins, the loser exercises the zero-change UPDATE branch honestly", async () => {
   const d1 = new SqliteD1();
   const id = seedRenderRow(d1, { extraction_state: "failed", extraction_json: JSON.stringify({ failed: true }) });
-  assert.equal((await retryRender({ db: d1.asD1(), receiptId: id, actor: "op" })).kind, "retrying");
-  const second = await retryRender({ db: d1.asD1(), receiptId: id, actor: "op" });
-  assert.equal(second.kind, "conflict");
-  assert.match((second as { error: string }).error, /extraction_state='captured'/);
+  let retryUpdates = 0;
+  d1.onBeforeRunAsync = async (sql) => {
+    if (sql.includes("SET extraction_state = 'captured'")) {
+      retryUpdates += 1;
+      if (retryUpdates === 1) {
+        // Hold request A's UPDATE one macrotask so request B runs its SELECT
+        // AND its admission against the still-failed row — BOTH requests are
+        // admitted; B then commits its full batch before A's UPDATE executes.
+        await new Promise((r) => setImmediate(r));
+      }
+    }
+  };
+  const [ra, rb] = await Promise.all([
+    retryRender({ db: d1.asD1(), receiptId: id, actor: "op", now: "2026-11-11T10:00:00.000Z" }),
+    retryRender({ db: d1.asD1(), receiptId: id, actor: "op", now: "2026-11-11T10:00:00.001Z" }),
+  ]);
+  d1.onBeforeRunAsync = null;
+  // Only one MUTATION won (both requests were admitted); the loser hit
+  // the zero-change UPDATE and
+  // reported the actual (now captured) state — never a false success.
+  const kinds = [ra.kind, rb.kind].sort();
+  assert.deepEqual(kinds, ["conflict", "retrying"]);
+  const loser = ra.kind === "conflict" ? ra : rb;
+  assert.match((loser as { error: string }).error, /changed before/);
+  assert.match((loser as { error: string }).error, /extraction_state='captured'/);
+  assert.equal(row(d1, id).extraction_state, "captured");
+  // The guarded audit INSERT fired exactly once (winner only).
   assert.equal(audits(d1, id).filter((a) => a.action === "receipt.render_retry").length, 1);
 });
 
@@ -391,7 +478,240 @@ test("B3 recordRenderFailure rejects deleted rows as not_found without any write
   assert.equal(audits(d1, id).length, 0);
 });
 
-// ─── B4: request-body runtime-type boundary matrix ──────────────────────────
+// ─── R1: concurrent extraction_json edit survives the terminal write ────────
+
+test("R1 concurrent JSON edit between the read and the UPDATE is PRESERVED (json_patch merges against the current column)", async () => {
+  const d1 = new SqliteD1();
+  const id = seedRenderRow(d1, { extraction_json: PREEXISTING_JSON });
+  d1.onBeforeRun = (sql) => {
+    if (sql.includes("SET extraction_state = 'failed'")) {
+      // An operator/extraction edit lands between recordRenderFailure's read
+      // and its write — same lifecycle fields, different JSON content (the
+      // exact lost-update interleaving from the review).
+      d1.exec(
+        `UPDATE receipt_records SET extraction_json = ?,
+           updated_at = '2026-11-11T09:59:59Z' WHERE id = ?`,
+        JSON.stringify({ operatorNote: "newly saved", amountMinor: 999 }),
+        id,
+      );
+    }
+  };
+  const res = await recordRenderFailure({ db: d1.asD1(), receiptId: id, reason: "perm", actor: "mlx", now: "2026-11-11T10:00:00Z" });
+  d1.onBeforeRun = null;
+  assert.equal(res.kind, "recorded");
+  const stored = JSON.parse(row(d1, id).extraction_json!);
+  // The CONCURRENT edit's values survive — not the stale pre-read snapshot.
+  assert.equal(stored.operatorNote, "newly saved");
+  assert.equal(stored.amountMinor, 999);
+  // Failure keys still win their namespaces.
+  assert.equal(stored.failed, true);
+  assert.equal(stored.stage, "render");
+  assert.equal(stored.reason, "perm");
+  assert.equal(stored.failedAt, "2026-11-11T10:00:00Z");
+});
+
+// ─── Blocker 1: same-millisecond duplicate requests — changes() admits the
+// success audit, so a losing zero-change UPDATE writes none ──────────────────
+
+test("blocker-1 same-ms duplicate failure reports: one winner, ONE success audit (winning actor/reason), loser read-only already_terminal", async () => {
+  const d1 = new SqliteD1();
+  const id = seedRenderRow(d1, { extraction_json: PREEXISTING_JSON });
+  let updates = 0;
+  d1.onBeforeRunAsync = async (sql) => {
+    if (sql.includes("SET extraction_state = 'failed'")) {
+      updates += 1;
+      if (updates === 1) await new Promise((r) => setImmediate(r));
+    }
+  };
+  // IDENTICAL `now` — the timestamp cannot identify the request.
+  const now = "2026-11-11T10:00:00.000Z";
+  const [ra, rb] = await Promise.all([
+    recordRenderFailure({ db: d1.asD1(), receiptId: id, reason: "winner reason", actor: "actor-a", now }),
+    recordRenderFailure({ db: d1.asD1(), receiptId: id, reason: "loser reason", actor: "actor-b", now }),
+  ]);
+  d1.onBeforeRunAsync = null;
+  const winner = ra.kind === "recorded" ? ra : rb;
+  const loser = ra.kind === "recorded" ? rb : ra;
+  assert.equal(winner.kind, "recorded");
+  assert.equal(loser.kind, "already_terminal");
+  assert.equal(loser.reason, "winner reason"); // first committed marker immutable
+  // Exactly ONE success audit — attributed to the WINNING actor.
+  const all = audits(d1, id);
+  assert.equal(all.length, 1);
+  const auditRow = d1.db
+    .prepare(`SELECT actor, new_value_json FROM receipt_audit_log WHERE object_id = ?`)
+    .get(id) as unknown as { actor: string; new_value_json: string };
+  assert.equal(auditRow.actor, "actor-a");
+  assert.match(auditRow.new_value_json, /winner reason/);
+  assert.doesNotMatch(auditRow.new_value_json, /loser reason/);
+});
+
+test("blocker-1 same-ms duplicate retries: one winner, ONE success audit (winning actor), loser honest conflict", async () => {
+  const d1 = new SqliteD1();
+  const id = seedRenderRow(d1, { extraction_state: "failed", extraction_json: JSON.stringify({ failed: true, reason: "x" }) });
+  let updates = 0;
+  d1.onBeforeRunAsync = async (sql) => {
+    if (sql.includes("SET extraction_state = 'captured'")) {
+      updates += 1;
+      if (updates === 1) await new Promise((r) => setImmediate(r));
+    }
+  };
+  const now = "2026-11-11T10:00:00.000Z";
+  const [ra, rb] = await Promise.all([
+    retryRender({ db: d1.asD1(), receiptId: id, actor: "actor-a", now }),
+    retryRender({ db: d1.asD1(), receiptId: id, actor: "actor-b", now }),
+  ]);
+  d1.onBeforeRunAsync = null;
+  const kinds = [ra.kind, rb.kind].sort();
+  assert.deepEqual(kinds, ["conflict", "retrying"]);
+  const all = audits(d1, id);
+  assert.equal(all.length, 1);
+  const auditRow = d1.db
+    .prepare(`SELECT actor FROM receipt_audit_log WHERE object_id = ?`)
+    .get(id) as unknown as { actor: string };
+  assert.equal(auditRow.actor, "actor-a"); // winner only — loser wrote no audit
+  assert.equal(row(d1, id).extraction_state, "captured");
+});
+
+// ─── R2: legacy NULL extraction_state (polled by the consumer) ───────────────
+//
+// SCHEMA FACT (verified against db/receipts/0016_extraction_queue.sql):
+// production extraction_state is `TEXT NOT NULL DEFAULT 'captured'` — NULL
+// rows cannot exist in live D1, so R2's reported failure loop is NOT
+// reachable in production. The consumer's poll predicate keeps a NULL arm
+// anyway (documented NULL-safety), so the terminal write admits the same
+// arm: poll and write predicates cannot diverge if the schema ever changes.
+// This test schema (extraction_state nullable) exercises that arm.
+
+test("R2 NULL extraction_state render row records the permanent failure (matches the consumer's poll predicate)", async () => {
+  const d1 = new SqliteD1();
+  const id = seedRenderRow(d1, { extraction_state: null, extraction_json: PREEXISTING_JSON });
+  const res = await recordRenderFailure({ db: d1.asD1(), receiptId: id, reason: "empty body", actor: "mlx", now: "2026-11-11T10:00:00Z" });
+  assert.equal(res.kind, "recorded");
+  const r = row(d1, id);
+  assert.equal(r.extraction_state, "failed");
+  assert.equal(r.needs_render, 1);
+  const stored = JSON.parse(r.extraction_json!);
+  assert.equal(stored.reason, "empty body");
+  assert.equal(stored.merchant, "已有的商人"); // prior data preserved
+  assert.equal(audits(d1, id).filter((a) => a.action === "receipt.render_failed").length, 1);
+});
+
+test("R2 NULL-state protections: human-advanced and deleted rows are refused without mutation", async () => {
+  const d1 = new SqliteD1();
+  // NULL + reviewed → conflict, and the rejection must NOT reconcile a NULL
+  // state (only explicit pending states participate in that lifecycle fixup).
+  const idRev = seedRenderRow(d1, { id: "rev", status: "reviewed", extraction_state: null });
+  const resRev = await recordRenderFailure({ db: d1.asD1(), receiptId: idRev, reason: "r", actor: "mlx" });
+  assert.equal(resRev.kind, "conflict");
+  assert.equal(row(d1, idRev).extraction_state, null); // untouched
+  // NULL + deleted → not_found.
+  const idDel = seedRenderRow(d1, { id: "del", extraction_state: null });
+  d1.exec(`UPDATE receipt_records SET deleted_at = '2026-11-11T00:00:00Z' WHERE id = 'del'`);
+  assert.equal((await recordRenderFailure({ db: d1.asD1(), receiptId: idDel, reason: "r", actor: "mlx" })).kind, "not_found");
+  // Non-null terminal/processed states stay rejected (regression guard).
+  const idProc = seedRenderRow(d1, { id: "proc", extraction_state: "processed" });
+  const resProc = await recordRenderFailure({ db: d1.asD1(), receiptId: idProc, reason: "r", actor: "mlx" });
+  assert.equal(resProc.kind, "conflict");
+  assert.equal(row(d1, idProc).extraction_state, "processed");
+});
+
+// ─── R3: post-UPDATE audit failure rolls the mutation back (D1 batch) ────────
+
+test("R3 render-failed: audit-statement failure after the terminal UPDATE EXECUTES rolls the whole batch back", async () => {
+  const d1 = new SqliteD1();
+  const id = seedRenderRow(d1, { extraction_json: PREEXISTING_JSON });
+  d1.onBeforeRun = (sql) => {
+    // Throws immediately BEFORE the audit statement executes — after the
+    // preceding UPDATE has executed inside the still-open transaction.
+    if (sql.includes("INSERT INTO receipt_audit_log") && sql.includes("'receipt.render_failed'")) {
+      throw new Error("D1_ERROR: audit write failed after mutation");
+    }
+  };
+  await assert.rejects(
+    recordRenderFailure({ db: d1.asD1(), receiptId: id, reason: "r", actor: "mlx", now: "2026-11-11T10:00:00Z" }),
+    /audit write failed/,
+  );
+  d1.onBeforeRun = null;
+  // The terminal UPDATE had EXECUTED (but was not yet committed — the
+  // throw lands immediately before the audit statement runs) inside the
+  // batch's open transaction, and the rollback removed it: the row is
+  // exactly as it started. This proves rollback of a preceding EXECUTED
+  // statement, not of an error raised inside the audit SQL engine, and not
+  // anything about a lost post-commit acknowledgement.
+  const r = row(d1, id);
+  assert.equal(r.extraction_state, "captured");
+  assert.equal(r.extraction_json, PREEXISTING_JSON);
+  assert.equal(r.extraction_processed_at, null);
+  assert.equal(audits(d1, id).length, 0);
+});
+
+test("R3 render-retry: audit-statement failure after the retry UPDATE EXECUTES rolls the whole batch back", async () => {
+  const d1 = new SqliteD1();
+  const id = seedRenderRow(d1, { extraction_state: "failed", extraction_json: JSON.stringify({ failed: true, reason: "x" }) });
+  d1.onBeforeRun = (sql) => {
+    if (sql.includes("INSERT INTO receipt_audit_log") && sql.includes("'receipt.render_retry'")) {
+      throw new Error("D1_ERROR: audit write failed after mutation");
+    }
+  };
+  await assert.rejects(
+    retryRender({ db: d1.asD1(), receiptId: id, actor: "op", now: "2026-11-11T10:00:00Z" }),
+    /audit write failed/,
+  );
+  d1.onBeforeRun = null;
+  const r = row(d1, id);
+  assert.equal(r.extraction_state, "failed"); // retry rolled back
+  assert.equal(r.updated_at, "2026-11-01T00:00:00Z"); // seed value — we wrote nothing
+  assert.equal(audits(d1, id).length, 0);
+});
+
+// ─── N1: wrong-pipeline rejection must not mutate extraction state ───────────
+
+test("N1 wrong-pipeline rejection (needs_render=0, reviewed, mid-extraction) conflicts WITHOUT touching extraction_state", async () => {
+  const d1 = new SqliteD1();
+  const id = "wrong-pipe";
+  d1.exec(
+    `INSERT INTO receipt_records
+       (id, status, extraction_state, extraction_json, needs_render, transaction_date,
+        original_filename, original_r2_key, captured_at, created_at, updated_at, currency)
+     VALUES (?, 'reviewed', 'processing', NULL, 0, NULL, 'img.jpg', 'k2',
+             '2026-11-01T00:00:00Z', '2026-11-01T00:00:00Z', '2026-11-01T00:00:00Z', 'JPY')`,
+    id,
+  );
+  const res = await recordRenderFailure({ db: d1.asD1(), receiptId: id, reason: "r", actor: "mlx" });
+  assert.equal(res.kind, "conflict");
+  // The row may legitimately be mid-extraction — a wrong-pipeline report
+  // must not advance its state (the round-2 code changed this to processed).
+  assert.equal(row(d1, id).extraction_state, "processing");
+});
+
+test("N1 render-lifecycle rejection still reconciles: reviewed render row with stale pending state → processed + rejected audit", async () => {
+  const d1 = new SqliteD1();
+  const id = seedRenderRow(d1, { status: "reviewed", extraction_state: "queued" });
+  const res = await recordRenderFailure({ db: d1.asD1(), receiptId: id, reason: "r", actor: "mlx" });
+  assert.equal(res.kind, "conflict");
+  assert.equal(row(d1, id).extraction_state, "processed"); // intended fixup
+  const rejected = audits(d1, id).filter((a) => a.action === "receipt.render_failed");
+  assert.equal(rejected.length, 1);
+});
+
+test("N1 deletion race on the rejection fixup: deleted between read and fixup UPDATE → fixup is a no-op", async () => {
+  const d1 = new SqliteD1();
+  const id = seedRenderRow(d1, { status: "reviewed", extraction_state: "queued" });
+  d1.onBeforeRun = (sql) => {
+    if (sql.includes("SET extraction_state = 'processed'")) {
+      d1.exec(`UPDATE receipt_records SET deleted_at = '2026-11-11T00:00:00Z' WHERE id = ?`, id);
+    }
+  };
+  const res = await recordRenderFailure({ db: d1.asD1(), receiptId: id, reason: "r", actor: "mlx" });
+  d1.onBeforeRun = null;
+  assert.equal(res.kind, "conflict");
+  const r = row(d1, id);
+  assert.equal(r.extraction_state, "queued"); // WHERE rechecks refused the fixup
+  assert.ok(r.deleted_at);
+});
+
+
 
 test("B4 parseRenderFailedBody boundary matrix", () => {
   const bad = (v: unknown, why: string) => {
