@@ -4,6 +4,7 @@ import { createAuditEntry } from "@/lib/receipts/audit";
 import { D1_ID_CHUNK_SIZE, nowIso, newUuid, stringifyJson } from "@/lib/receipts/db-utils";
 import {
   assertTransactionMonthEditable,
+  ExportFinalizedError,
   isMonthLockedForEdits,
   transactionMonthOf,
 } from "@/lib/receipts/month-lock";
@@ -3708,7 +3709,8 @@ export async function createExport(
     .bind(month)
     .first<{ id: string }>();
   if (finalized) {
-    throw new Error(
+    throw new ExportFinalizedError(
+      month,
       `Export for ${month} is already finalized. POST /api/receipts/export/${month}?correction=true to create a revision.`,
     );
   }
@@ -3739,8 +3741,25 @@ export async function createExport(
       )
       .bind(month)
       .first<{ id: string }>();
-    if (!raced) throw insertErr;
-    return raced.id;
+    if (raced) return raced.id;
+    // No draft anymore: the contention winner already FINALIZED (and no
+    // correction draft was opened). Surface the canonical friendly conflict —
+    // the correction flow is the only way forward — instead of the raw
+    // constraint error.
+    const sealed = await db
+      .prepare(
+        `SELECT id FROM receipt_exports
+         WHERE export_month = ? AND status = 'finalized' LIMIT 1`,
+      )
+      .bind(month)
+      .first<{ id: string }>();
+    if (sealed) {
+      throw new ExportFinalizedError(
+        month,
+        `Export for ${month} is already finalized. POST /api/receipts/export/${month}?correction=true to create a revision.`,
+      );
+    }
+    throw insertErr;
   }
 
   await createAuditEntry(db, {
