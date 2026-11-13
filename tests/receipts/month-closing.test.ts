@@ -431,11 +431,22 @@ test("gate 3.5: a DIGITAL EUR row blocks (payment-path independence)", () => {
 
 test("gate 3.5: a USD receipt on a JPY AMEX line row does NOT block (0026 memo path stays valid)", () => {
   // The USD receipt's cents never enter totals: the shipped row is the LINE's
-  // (rowType amex_line, JPY). The foreign receipt exists in the month but not
-  // as its own row — no currency blocker may fire.
+  // (rowType amex_line, JPY). The foreign receipt is ATTACHED (present in
+  // bundle.receipts, exactly as buildExportBundle attaches matched evidence)
+  // but ships on the line row only — no currency blocker may fire. Attaching
+  // the USD record is what catches a regression that gates bundle.receipts
+  // (all attached receipts) instead of bundle.rows (what actually exports).
+  const usdReceipt = makeReceipt({
+    id: "r-usd-matched",
+    payment_path: "AMEX",
+    merchant: "CLOUDFLARE",
+    currency: "USD",
+    amount_minor: 10000, // $100.00 in cents — NOT the line's ¥1500
+  });
   const blockers = validateMonthReadyForExportCoreDetailed(
     makeInput({
       bundle: makeBundle({
+        receipts: [usdReceipt],
         rows: [
           makeRow({
             rowType: "amex_line",
@@ -448,11 +459,12 @@ test("gate 3.5: a USD receipt on a JPY AMEX line row does NOT block (0026 memo p
           }),
         ],
       }),
+      receiptFileCounts: new Map([["r-usd-matched", 1]]),
     }),
   );
   assert.ok(
     !blockers.some((b) => b.code === "receipt_foreign_currency"),
-    `a JPY amex_line row must not fire the currency gate: ${JSON.stringify(blockers)}`,
+    `an attached USD receipt shipping on a JPY amex_line row must not fire the currency gate: ${JSON.stringify(blockers)}`,
   );
 });
 
