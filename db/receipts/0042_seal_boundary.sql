@@ -85,13 +85,23 @@ WHEN (
   OR OLD.extraction_state IS NOT NEW.extraction_state
 )
 AND (
-  EXISTS(SELECT 1 FROM receipt_exports ce
-         WHERE ce.status='draft' AND ce.sealing_token IS NOT NULL
-           AND ce.sealing_expires_at IS NOT NULL
-           AND ce.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
-           AND (ce.export_month IS substr(OLD.transaction_date,1,7)
-                OR ce.export_month IS OLD.export_statement_month
-                OR ce.export_month IS OLD.exported_month))
+  -- OLD side scope: calendar month / stored membership apply to the NON-AMEX
+  -- population only (B10 — an unmatched AMEX receipt dated in M cannot affect
+  -- M's bundle or gate and stays editable); exported_month and matched-line
+  -- statement months protect referenced receipts regardless of path.
+  ( (OLD.payment_path IS NULL OR OLD.payment_path <> 'AMEX')
+    AND EXISTS(SELECT 1 FROM receipt_exports ce
+               WHERE ce.status='draft' AND ce.sealing_token IS NOT NULL
+                 AND ce.sealing_expires_at IS NOT NULL
+                 AND ce.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
+                 AND (ce.export_month IS substr(OLD.transaction_date,1,7)
+                      OR ce.export_month IS OLD.export_statement_month)) )
+  OR (OLD.exported_month IS NOT NULL
+      AND EXISTS(SELECT 1 FROM receipt_exports ceE
+                 WHERE ceE.status='draft' AND ceE.sealing_token IS NOT NULL
+                   AND ceE.sealing_expires_at IS NOT NULL
+                   AND ceE.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
+                   AND ceE.export_month IS OLD.exported_month))
   OR EXISTS(SELECT 1 FROM receipt_exports ce2
             WHERE ce2.status='draft' AND ce2.sealing_token IS NOT NULL
               AND ce2.sealing_expires_at IS NOT NULL
@@ -99,13 +109,20 @@ AND (
               AND ce2.export_month IN (SELECT asl.statement_month
                                        FROM amex_statement_lines asl
                                        WHERE asl.matched_receipt_id = OLD.id))
-  OR EXISTS(SELECT 1 FROM receipt_exports ce3
-            WHERE ce3.status='draft' AND ce3.sealing_token IS NOT NULL
-              AND ce3.sealing_expires_at IS NOT NULL
-              AND ce3.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
-              AND (ce3.export_month IS substr(NEW.transaction_date,1,7)
-                   OR ce3.export_month IS NEW.export_statement_month
-                   OR ce3.export_month IS NEW.exported_month))
+  -- NEW side scope (moves INTO a claimed month), same non-AMEX rule.
+  OR ( (NEW.payment_path IS NULL OR NEW.payment_path <> 'AMEX')
+       AND EXISTS(SELECT 1 FROM receipt_exports ce3
+                  WHERE ce3.status='draft' AND ce3.sealing_token IS NOT NULL
+                    AND ce3.sealing_expires_at IS NOT NULL
+                    AND ce3.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
+                    AND (ce3.export_month IS substr(NEW.transaction_date,1,7)
+                         OR ce3.export_month IS NEW.export_statement_month)) )
+  OR (NEW.exported_month IS NOT NULL
+      AND EXISTS(SELECT 1 FROM receipt_exports ceE2
+                 WHERE ceE2.status='draft' AND ceE2.sealing_token IS NOT NULL
+                   AND ceE2.sealing_expires_at IS NOT NULL
+                   AND ceE2.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
+                   AND ceE2.export_month IS NEW.exported_month))
   OR EXISTS(SELECT 1 FROM receipt_exports ce4
             WHERE ce4.status='draft' AND ce4.sealing_token IS NOT NULL
               AND ce4.sealing_expires_at IS NOT NULL
@@ -120,12 +137,13 @@ END;
 
 CREATE TRIGGER IF NOT EXISTS seal_claim_receipt_insert
 BEFORE INSERT ON receipt_records
-WHEN EXISTS(SELECT 1 FROM receipt_exports ce
-            WHERE ce.status='draft' AND ce.sealing_token IS NOT NULL
-              AND ce.sealing_expires_at IS NOT NULL
-              AND ce.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
-              AND (ce.export_month IS substr(NEW.transaction_date,1,7)
-                   OR ce.export_month IS NEW.export_statement_month))
+WHEN (NEW.payment_path IS NULL OR NEW.payment_path <> 'AMEX')
+AND EXISTS(SELECT 1 FROM receipt_exports ce
+           WHERE ce.status='draft' AND ce.sealing_token IS NOT NULL
+             AND ce.sealing_expires_at IS NOT NULL
+             AND ce.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
+             AND (ce.export_month IS substr(NEW.transaction_date,1,7)
+                  OR ce.export_month IS NEW.export_statement_month))
 BEGIN
   SELECT RAISE(ABORT, 'DZ_SEAL_CLAIM_ACTIVE:receipt_records');
 END;
@@ -133,13 +151,19 @@ END;
 CREATE TRIGGER IF NOT EXISTS seal_claim_receipt_delete
 BEFORE DELETE ON receipt_records
 WHEN (
-  EXISTS(SELECT 1 FROM receipt_exports ce
-         WHERE ce.status='draft' AND ce.sealing_token IS NOT NULL
-           AND ce.sealing_expires_at IS NOT NULL
-           AND ce.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
-           AND (ce.export_month IS substr(OLD.transaction_date,1,7)
-                OR ce.export_month IS OLD.export_statement_month
-                OR ce.export_month IS OLD.exported_month))
+  ( (OLD.payment_path IS NULL OR OLD.payment_path <> 'AMEX')
+    AND EXISTS(SELECT 1 FROM receipt_exports ce
+               WHERE ce.status='draft' AND ce.sealing_token IS NOT NULL
+                 AND ce.sealing_expires_at IS NOT NULL
+                 AND ce.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
+                 AND (ce.export_month IS substr(OLD.transaction_date,1,7)
+                      OR ce.export_month IS OLD.export_statement_month)) )
+  OR (OLD.exported_month IS NOT NULL
+      AND EXISTS(SELECT 1 FROM receipt_exports ceE
+                 WHERE ceE.status='draft' AND ceE.sealing_token IS NOT NULL
+                   AND ceE.sealing_expires_at IS NOT NULL
+                   AND ceE.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
+                   AND ceE.export_month IS OLD.exported_month))
   OR EXISTS(SELECT 1 FROM receipt_exports ce2
             WHERE ce2.status='draft' AND ce2.sealing_token IS NOT NULL
               AND ce2.sealing_expires_at IS NOT NULL
@@ -185,6 +209,25 @@ WHEN (
 AND (
   -- Archived payload is terminal.
   OLD.status = 'archived'
+  -- Shipped-in-a-sealed-month lock (B2): the receipt is in a FINALIZED
+  -- export's published item set whose month has no open correction draft.
+  -- Status-independent — it survives unfinalize/unlink of the AMEX
+  -- reconciliation and covers receipts whose only remaining authority is the
+  -- finalized item set (review case: exported receipt, prior-month draft
+  -- open, later month's recon unfinalized and claim unlinked).
+  OR EXISTS(SELECT 1 FROM receipt_export_items i
+            JOIN receipt_exports e ON e.id = i.export_id AND e.status='finalized'
+            WHERE i.item_type='receipt' AND i.item_id IS OLD.id
+              AND NOT EXISTS(SELECT 1 FROM receipt_exports d
+                             WHERE d.status='draft' AND d.export_month IS e.export_month))
+  -- Exported-month lock, status-independent (pre-0017 legacy rows have
+  -- exported_month without item rows): shipped months stay sealed unless a
+  -- correction draft is open for that month.
+  OR (OLD.exported_month IS NOT NULL
+      AND EXISTS(SELECT 1 FROM receipt_exports fe
+                 WHERE fe.status='finalized' AND fe.export_month IS OLD.exported_month)
+      AND NOT EXISTS(SELECT 1 FROM receipt_exports de
+                     WHERE de.status='draft' AND de.export_month IS OLD.exported_month))
   -- Reconciliation lock: matched to a line in a finalized reconciliation whose
   -- statement month is export-locked (identical to
   -- rejectIfReceiptInFinalizedReconciliation + isMonthLockedForEdits).
@@ -198,32 +241,40 @@ AND (
               AND NOT EXISTS(SELECT 1 FROM receipt_exports de
                              WHERE de.status='draft'
                                AND de.export_month IS asl.statement_month))
-  -- Export lock, CASH/DIGITAL: effective (post-update) transaction month or
-  -- stored membership must be open — covers moving OUT of and INTO a locked
-  -- month, and clearing membership/date.
-  OR ((NEW.payment_path='CASH' OR NEW.payment_path='DIGITAL') AND (
-        (EXISTS(SELECT 1 FROM receipt_exports fe
-                WHERE fe.status='finalized'
-                  AND fe.export_month IS substr(NEW.transaction_date,1,7))
+  -- Export lock, CASH/DIGITAL, OLD ∪ NEW (B2): moving OUT of a locked month
+  -- (OLD side — NEW predicates vanish on path/date/membership clears) and
+  -- moving INTO one (NEW side) are both refused. Each side's clause uses that
+  -- side's path/date/membership.
+  OR ((OLD.payment_path='CASH' OR OLD.payment_path='DIGITAL') AND (
+        (OLD.export_statement_month IS NOT NULL
+         AND EXISTS(SELECT 1 FROM receipt_exports fe
+                    WHERE fe.status='finalized'
+                      AND fe.export_month IS OLD.export_statement_month)
          AND NOT EXISTS(SELECT 1 FROM receipt_exports de
                         WHERE de.status='draft'
-                          AND de.export_month IS substr(NEW.transaction_date,1,7)))
-     OR (NEW.export_statement_month IS NOT NULL
+                          AND de.export_month IS OLD.export_statement_month))
+     OR (OLD.transaction_date IS NOT NULL
+         AND EXISTS(SELECT 1 FROM receipt_exports fe
+                    WHERE fe.status='finalized'
+                      AND fe.export_month IS substr(OLD.transaction_date,1,7))
+         AND NOT EXISTS(SELECT 1 FROM receipt_exports de
+                        WHERE de.status='draft'
+                          AND de.export_month IS substr(OLD.transaction_date,1,7)))))
+  OR ((NEW.payment_path='CASH' OR NEW.payment_path='DIGITAL') AND (
+        (NEW.export_statement_month IS NOT NULL
          AND EXISTS(SELECT 1 FROM receipt_exports fe
                     WHERE fe.status='finalized'
                       AND fe.export_month IS NEW.export_statement_month)
          AND NOT EXISTS(SELECT 1 FROM receipt_exports de
                         WHERE de.status='draft'
-                          AND de.export_month IS NEW.export_statement_month))))
-  -- Exported receipt route rule: an 'exported' row is editable only under the
-  -- open-draft carve-out of its exported_month.
-  OR (OLD.status='exported' AND OLD.exported_month IS NOT NULL
-      AND EXISTS(SELECT 1 FROM receipt_exports fe
-                 WHERE fe.status='finalized' AND fe.export_month IS OLD.exported_month)
-      AND NOT EXISTS(SELECT 1 FROM receipt_exports de
-                     WHERE de.status='draft' AND de.export_month IS OLD.exported_month))
-  -- Moving INTO an export-locked month as an exported receipt is not a thing;
-  -- but a CASH/DIGITAL row moving in via OLD-side state is covered above.
+                          AND de.export_month IS NEW.export_statement_month))
+     OR (NEW.transaction_date IS NOT NULL
+         AND EXISTS(SELECT 1 FROM receipt_exports fe
+                    WHERE fe.status='finalized'
+                      AND fe.export_month IS substr(NEW.transaction_date,1,7))
+         AND NOT EXISTS(SELECT 1 FROM receipt_exports de
+                        WHERE de.status='draft'
+                          AND de.export_month IS substr(NEW.transaction_date,1,7)))))
 )
 AND NOT (
   -- Admitted promotion (finalizeExport's exact shape): only lifecycle fields
@@ -310,6 +361,16 @@ CREATE TRIGGER IF NOT EXISTS seal_lock_receipt_delete
 BEFORE DELETE ON receipt_records
 WHEN (
   OLD.status = 'archived'
+  OR EXISTS(SELECT 1 FROM receipt_export_items i
+            JOIN receipt_exports e ON e.id = i.export_id AND e.status='finalized'
+            WHERE i.item_type='receipt' AND i.item_id IS OLD.id
+              AND NOT EXISTS(SELECT 1 FROM receipt_exports d
+                             WHERE d.status='draft' AND d.export_month IS e.export_month))
+  OR (OLD.exported_month IS NOT NULL
+      AND EXISTS(SELECT 1 FROM receipt_exports fe
+                 WHERE fe.status='finalized' AND fe.export_month IS OLD.exported_month)
+      AND NOT EXISTS(SELECT 1 FROM receipt_exports de
+                     WHERE de.status='draft' AND de.export_month IS OLD.exported_month))
   OR EXISTS(SELECT 1 FROM amex_statement_lines asl
             JOIN amex_reconciliations ar
               ON ar.statement_month = asl.statement_month AND ar.status='finalized'
@@ -321,47 +382,63 @@ WHEN (
                              WHERE de.status='draft'
                                AND de.export_month IS asl.statement_month))
   OR ((OLD.payment_path='CASH' OR OLD.payment_path='DIGITAL') AND (
-        (EXISTS(SELECT 1 FROM receipt_exports fe
-                WHERE fe.status='finalized'
-                  AND fe.export_month IS substr(OLD.transaction_date,1,7))
-         AND NOT EXISTS(SELECT 1 FROM receipt_exports de
-                        WHERE de.status='draft'
-                          AND de.export_month IS substr(OLD.transaction_date,1,7)))
-     OR (OLD.export_statement_month IS NOT NULL
+        (OLD.export_statement_month IS NOT NULL
          AND EXISTS(SELECT 1 FROM receipt_exports fe
                     WHERE fe.status='finalized'
                       AND fe.export_month IS OLD.export_statement_month)
          AND NOT EXISTS(SELECT 1 FROM receipt_exports de
                         WHERE de.status='draft'
-                          AND de.export_month IS OLD.export_statement_month))))
-  OR (OLD.status='exported' AND OLD.exported_month IS NOT NULL
-      AND EXISTS(SELECT 1 FROM receipt_exports fe
-                 WHERE fe.status='finalized' AND fe.export_month IS OLD.exported_month)
-      AND NOT EXISTS(SELECT 1 FROM receipt_exports de
-                     WHERE de.status='draft' AND de.export_month IS OLD.exported_month))
+                          AND de.export_month IS OLD.export_statement_month))
+     OR (OLD.transaction_date IS NOT NULL
+         AND EXISTS(SELECT 1 FROM receipt_exports fe
+                    WHERE fe.status='finalized'
+                      AND fe.export_month IS substr(OLD.transaction_date,1,7))
+         AND NOT EXISTS(SELECT 1 FROM receipt_exports de
+                        WHERE de.status='draft'
+                          AND de.export_month IS substr(OLD.transaction_date,1,7)))))
 )
 BEGIN
   SELECT RAISE(ABORT, 'DZ_SEAL_MONTH_LOCKED:receipt_records');
 END;
 
 -- ═══════════════════════════════════════════════════════════════════════════
--- receipt_attendees — same authority as their parent receipt, all events,
--- including direct deletes. Parent guards handle cascade contexts.
+-- receipt_attendees — same authority as their parent receipt, ALL events
+-- (including direct deletes and reparenting). Parent guards handle cascade
+-- contexts. The parent-authority predicates mirror the receipt guards
+-- exactly: claim scope uses the non-AMEX calendar/membership rule plus
+-- exported_month and matched-line months (B10); post-seal authority is the
+-- full OLD∪NEW receipt edit lock incl. finalized item-derived months,
+-- status-independent exported_month, reconciliation lock and archived
+-- terminal (B2/B3).
 -- ═══════════════════════════════════════════════════════════════════════════
 
+-- Claim fences: any relevant roster change under a claim fencing the OLD or
+-- NEW parent (null-safe IS NOT comparisons — no-op updates pass).
 CREATE TRIGGER IF NOT EXISTS seal_claim_attendee_insert
 BEFORE INSERT ON receipt_attendees
 WHEN EXISTS(
   SELECT 1 FROM receipt_records r
-  JOIN receipt_exports ce ON ce.status='draft' AND ce.sealing_token IS NOT NULL
-    AND ce.sealing_expires_at IS NOT NULL
-    AND ce.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
-    AND (ce.export_month IS substr(r.transaction_date,1,7)
-         OR ce.export_month IS r.export_statement_month
-         OR ce.export_month IS r.exported_month
-         OR ce.export_month IN (SELECT asl.statement_month FROM amex_statement_lines asl
-                                WHERE asl.matched_receipt_id = r.id))
   WHERE r.id = NEW.receipt_id
+    AND ( ((r.payment_path IS NULL OR r.payment_path <> 'AMEX')
+           AND EXISTS(SELECT 1 FROM receipt_exports ce
+                      WHERE ce.status='draft' AND ce.sealing_token IS NOT NULL
+                        AND ce.sealing_expires_at IS NOT NULL
+                        AND ce.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
+                        AND (ce.export_month IS substr(r.transaction_date,1,7)
+                             OR ce.export_month IS r.export_statement_month)))
+       OR (r.exported_month IS NOT NULL
+           AND EXISTS(SELECT 1 FROM receipt_exports ceE
+                      WHERE ceE.status='draft' AND ceE.sealing_token IS NOT NULL
+                        AND ceE.sealing_expires_at IS NOT NULL
+                        AND ceE.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
+                        AND ceE.export_month IS r.exported_month))
+       OR EXISTS(SELECT 1 FROM receipt_exports ce2
+                 WHERE ce2.status='draft' AND ce2.sealing_token IS NOT NULL
+                   AND ce2.sealing_expires_at IS NOT NULL
+                   AND ce2.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
+                   AND ce2.export_month IN (SELECT asl.statement_month
+                                            FROM amex_statement_lines asl
+                                            WHERE asl.matched_receipt_id = r.id)) )
 )
 BEGIN
   SELECT RAISE(ABORT, 'DZ_SEAL_CLAIM_ACTIVE:receipt_attendees');
@@ -369,17 +446,37 @@ END;
 
 CREATE TRIGGER IF NOT EXISTS seal_claim_attendee_update
 BEFORE UPDATE ON receipt_attendees
-WHEN EXISTS(
+WHEN (
+     OLD.receipt_id IS NOT NEW.receipt_id
+  OR OLD.attendee_name IS NOT NEW.attendee_name
+  OR OLD.company IS NOT NEW.company
+  OR OLD.relationship IS NOT NEW.relationship
+  OR OLD.is_dazbeez_employee IS NOT NEW.is_dazbeez_employee
+  OR OLD.notes IS NOT NEW.notes
+)
+AND EXISTS(
   SELECT 1 FROM receipt_records r
-  JOIN receipt_exports ce ON ce.status='draft' AND ce.sealing_token IS NOT NULL
-    AND ce.sealing_expires_at IS NOT NULL
-    AND ce.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
-    AND (ce.export_month IS substr(r.transaction_date,1,7)
-         OR ce.export_month IS r.export_statement_month
-         OR ce.export_month IS r.exported_month
-         OR ce.export_month IN (SELECT asl.statement_month FROM amex_statement_lines asl
-                                WHERE asl.matched_receipt_id = r.id))
   WHERE r.id IN (OLD.receipt_id, NEW.receipt_id)
+    AND ( ((r.payment_path IS NULL OR r.payment_path <> 'AMEX')
+           AND EXISTS(SELECT 1 FROM receipt_exports ce
+                      WHERE ce.status='draft' AND ce.sealing_token IS NOT NULL
+                        AND ce.sealing_expires_at IS NOT NULL
+                        AND ce.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
+                        AND (ce.export_month IS substr(r.transaction_date,1,7)
+                             OR ce.export_month IS r.export_statement_month)))
+       OR (r.exported_month IS NOT NULL
+           AND EXISTS(SELECT 1 FROM receipt_exports ceE
+                      WHERE ceE.status='draft' AND ceE.sealing_token IS NOT NULL
+                        AND ceE.sealing_expires_at IS NOT NULL
+                        AND ceE.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
+                        AND ceE.export_month IS r.exported_month))
+       OR EXISTS(SELECT 1 FROM receipt_exports ce2
+                 WHERE ce2.status='draft' AND ce2.sealing_token IS NOT NULL
+                   AND ce2.sealing_expires_at IS NOT NULL
+                   AND ce2.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
+                   AND ce2.export_month IN (SELECT asl.statement_month
+                                            FROM amex_statement_lines asl
+                                            WHERE asl.matched_receipt_id = r.id)) )
 )
 BEGIN
   SELECT RAISE(ABORT, 'DZ_SEAL_CLAIM_ACTIVE:receipt_attendees');
@@ -389,56 +486,130 @@ CREATE TRIGGER IF NOT EXISTS seal_claim_attendee_delete
 BEFORE DELETE ON receipt_attendees
 WHEN EXISTS(
   SELECT 1 FROM receipt_records r
-  JOIN receipt_exports ce ON ce.status='draft' AND ce.sealing_token IS NOT NULL
-    AND ce.sealing_expires_at IS NOT NULL
-    AND ce.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
-    AND (ce.export_month IS substr(r.transaction_date,1,7)
-         OR ce.export_month IS r.export_statement_month
-         OR ce.export_month IS r.exported_month
-         OR ce.export_month IN (SELECT asl.statement_month FROM amex_statement_lines asl
-                                WHERE asl.matched_receipt_id = r.id))
   WHERE r.id = OLD.receipt_id
+    AND ( ((r.payment_path IS NULL OR r.payment_path <> 'AMEX')
+           AND EXISTS(SELECT 1 FROM receipt_exports ce
+                      WHERE ce.status='draft' AND ce.sealing_token IS NOT NULL
+                        AND ce.sealing_expires_at IS NOT NULL
+                        AND ce.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
+                        AND (ce.export_month IS substr(r.transaction_date,1,7)
+                             OR ce.export_month IS r.export_statement_month)))
+       OR (r.exported_month IS NOT NULL
+           AND EXISTS(SELECT 1 FROM receipt_exports ceE
+                      WHERE ceE.status='draft' AND ceE.sealing_token IS NOT NULL
+                        AND ceE.sealing_expires_at IS NOT NULL
+                        AND ceE.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
+                        AND ceE.export_month IS r.exported_month))
+       OR EXISTS(SELECT 1 FROM receipt_exports ce2
+                 WHERE ce2.status='draft' AND ce2.sealing_token IS NOT NULL
+                   AND ce2.sealing_expires_at IS NOT NULL
+                   AND ce2.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
+                   AND ce2.export_month IN (SELECT asl.statement_month
+                                            FROM amex_statement_lines asl
+                                            WHERE asl.matched_receipt_id = r.id)) )
 )
 BEGIN
   SELECT RAISE(ABORT, 'DZ_SEAL_CLAIM_ACTIVE:receipt_attendees');
 END;
 
--- Post-publication: parent receipt's edit authority (draft carve-out applies).
+-- Post-publication parent edit authority (B2/B3): INSERT, UPDATE and DELETE
+-- all carry it; UPDATE checks BOTH the OLD and NEW parent (reparenting into
+-- or out of a locked receipt is refused from either side).
 CREATE TRIGGER IF NOT EXISTS seal_lock_attendee_insert
 BEFORE INSERT ON receipt_attendees
 WHEN EXISTS(
   SELECT 1 FROM receipt_records r
   WHERE r.id = NEW.receipt_id
-    AND (r.status = 'archived'
-     OR EXISTS(SELECT 1 FROM amex_statement_lines asl
-               JOIN amex_reconciliations ar
-                 ON ar.statement_month = asl.statement_month AND ar.status='finalized'
-               WHERE asl.matched_receipt_id = r.id
-                 AND EXISTS(SELECT 1 FROM receipt_exports fe
-                            WHERE fe.status='finalized'
-                              AND fe.export_month IS asl.statement_month)
-                 AND NOT EXISTS(SELECT 1 FROM receipt_exports de
-                                WHERE de.status='draft'
-                                  AND de.export_month IS asl.statement_month))
-     OR ((r.payment_path='CASH' OR r.payment_path='DIGITAL') AND (
-           (EXISTS(SELECT 1 FROM receipt_exports fe
-                   WHERE fe.status='finalized'
-                     AND fe.export_month IS substr(r.transaction_date,1,7))
-            AND NOT EXISTS(SELECT 1 FROM receipt_exports de
-                           WHERE de.status='draft'
-                             AND de.export_month IS substr(r.transaction_date,1,7)))
-        OR (r.export_statement_month IS NOT NULL
-            AND EXISTS(SELECT 1 FROM receipt_exports fe
-                       WHERE fe.status='finalized'
-                         AND fe.export_month IS r.export_statement_month)
-            AND NOT EXISTS(SELECT 1 FROM receipt_exports de
-                           WHERE de.status='draft'
-                             AND de.export_month IS r.export_statement_month))))
-     OR (r.status='exported' AND r.exported_month IS NOT NULL
-         AND EXISTS(SELECT 1 FROM receipt_exports fe
-                    WHERE fe.status='finalized' AND fe.export_month IS r.exported_month)
-         AND NOT EXISTS(SELECT 1 FROM receipt_exports de
-                        WHERE de.status='draft' AND de.export_month IS r.exported_month)))
+    AND ( r.status = 'archived'
+       OR EXISTS(SELECT 1 FROM receipt_export_items i
+                 JOIN receipt_exports e ON e.id = i.export_id AND e.status='finalized'
+                 WHERE i.item_type='receipt' AND i.item_id IS r.id
+                   AND NOT EXISTS(SELECT 1 FROM receipt_exports d
+                                  WHERE d.status='draft' AND d.export_month IS e.export_month))
+       OR (r.exported_month IS NOT NULL
+           AND EXISTS(SELECT 1 FROM receipt_exports fe
+                      WHERE fe.status='finalized' AND fe.export_month IS r.exported_month)
+           AND NOT EXISTS(SELECT 1 FROM receipt_exports de
+                          WHERE de.status='draft' AND de.export_month IS r.exported_month))
+       OR EXISTS(SELECT 1 FROM amex_statement_lines asl
+                 JOIN amex_reconciliations ar
+                   ON ar.statement_month = asl.statement_month AND ar.status='finalized'
+                 WHERE asl.matched_receipt_id = r.id
+                   AND EXISTS(SELECT 1 FROM receipt_exports fe
+                              WHERE fe.status='finalized'
+                                AND fe.export_month IS asl.statement_month)
+                   AND NOT EXISTS(SELECT 1 FROM receipt_exports de
+                                  WHERE de.status='draft'
+                                    AND de.export_month IS asl.statement_month))
+       OR ((r.payment_path='CASH' OR r.payment_path='DIGITAL') AND (
+             (r.export_statement_month IS NOT NULL
+              AND EXISTS(SELECT 1 FROM receipt_exports fe
+                         WHERE fe.status='finalized'
+                           AND fe.export_month IS r.export_statement_month)
+              AND NOT EXISTS(SELECT 1 FROM receipt_exports de
+                             WHERE de.status='draft'
+                               AND de.export_month IS r.export_statement_month))
+          OR (r.transaction_date IS NOT NULL
+              AND EXISTS(SELECT 1 FROM receipt_exports fe
+                         WHERE fe.status='finalized'
+                           AND fe.export_month IS substr(r.transaction_date,1,7))
+              AND NOT EXISTS(SELECT 1 FROM receipt_exports de
+                             WHERE de.status='draft'
+                               AND de.export_month IS substr(r.transaction_date,1,7)))) ) )
+)
+BEGIN
+  SELECT RAISE(ABORT, 'DZ_SEAL_MONTH_LOCKED:receipt_attendees');
+END;
+
+CREATE TRIGGER IF NOT EXISTS seal_lock_attendee_update
+BEFORE UPDATE ON receipt_attendees
+WHEN (
+     OLD.receipt_id IS NOT NEW.receipt_id
+  OR OLD.attendee_name IS NOT NEW.attendee_name
+  OR OLD.company IS NOT NEW.company
+  OR OLD.relationship IS NOT NEW.relationship
+  OR OLD.is_dazbeez_employee IS NOT NEW.is_dazbeez_employee
+  OR OLD.notes IS NOT NEW.notes
+)
+AND EXISTS(
+  SELECT 1 FROM receipt_records r
+  WHERE r.id IN (OLD.receipt_id, NEW.receipt_id)
+    AND ( r.status = 'archived'
+       OR EXISTS(SELECT 1 FROM receipt_export_items i
+                 JOIN receipt_exports e ON e.id = i.export_id AND e.status='finalized'
+                 WHERE i.item_type='receipt' AND i.item_id IS r.id
+                   AND NOT EXISTS(SELECT 1 FROM receipt_exports d
+                                  WHERE d.status='draft' AND d.export_month IS e.export_month))
+       OR (r.exported_month IS NOT NULL
+           AND EXISTS(SELECT 1 FROM receipt_exports fe
+                      WHERE fe.status='finalized' AND fe.export_month IS r.exported_month)
+           AND NOT EXISTS(SELECT 1 FROM receipt_exports de
+                          WHERE de.status='draft' AND de.export_month IS r.exported_month))
+       OR EXISTS(SELECT 1 FROM amex_statement_lines asl
+                 JOIN amex_reconciliations ar
+                   ON ar.statement_month = asl.statement_month AND ar.status='finalized'
+                 WHERE asl.matched_receipt_id = r.id
+                   AND EXISTS(SELECT 1 FROM receipt_exports fe
+                              WHERE fe.status='finalized'
+                                AND fe.export_month IS asl.statement_month)
+                   AND NOT EXISTS(SELECT 1 FROM receipt_exports de
+                                  WHERE de.status='draft'
+                                    AND de.export_month IS asl.statement_month))
+       OR ((r.payment_path='CASH' OR r.payment_path='DIGITAL') AND (
+             (r.export_statement_month IS NOT NULL
+              AND EXISTS(SELECT 1 FROM receipt_exports fe
+                         WHERE fe.status='finalized'
+                           AND fe.export_month IS r.export_statement_month)
+              AND NOT EXISTS(SELECT 1 FROM receipt_exports de
+                             WHERE de.status='draft'
+                               AND de.export_month IS r.export_statement_month))
+          OR (r.transaction_date IS NOT NULL
+              AND EXISTS(SELECT 1 FROM receipt_exports fe
+                         WHERE fe.status='finalized'
+                           AND fe.export_month IS substr(r.transaction_date,1,7))
+              AND NOT EXISTS(SELECT 1 FROM receipt_exports de
+                             WHERE de.status='draft'
+                               AND de.export_month IS substr(r.transaction_date,1,7)))) ) )
 )
 BEGIN
   SELECT RAISE(ABORT, 'DZ_SEAL_MONTH_LOCKED:receipt_attendees');
@@ -449,36 +620,42 @@ BEFORE DELETE ON receipt_attendees
 WHEN EXISTS(
   SELECT 1 FROM receipt_records r
   WHERE r.id = OLD.receipt_id
-    AND (r.status = 'archived'
-     OR EXISTS(SELECT 1 FROM amex_statement_lines asl
-               JOIN amex_reconciliations ar
-                 ON ar.statement_month = asl.statement_month AND ar.status='finalized'
-               WHERE asl.matched_receipt_id = r.id
-                 AND EXISTS(SELECT 1 FROM receipt_exports fe
-                            WHERE fe.status='finalized'
-                              AND fe.export_month IS asl.statement_month)
-                 AND NOT EXISTS(SELECT 1 FROM receipt_exports de
-                                WHERE de.status='draft'
-                                  AND de.export_month IS asl.statement_month))
-     OR ((r.payment_path='CASH' OR r.payment_path='DIGITAL') AND (
-           (EXISTS(SELECT 1 FROM receipt_exports fe
-                   WHERE fe.status='finalized'
-                     AND fe.export_month IS substr(r.transaction_date,1,7))
-            AND NOT EXISTS(SELECT 1 FROM receipt_exports de
-                           WHERE de.status='draft'
-                             AND de.export_month IS substr(r.transaction_date,1,7)))
-        OR (r.export_statement_month IS NOT NULL
-            AND EXISTS(SELECT 1 FROM receipt_exports fe
-                       WHERE fe.status='finalized'
-                         AND fe.export_month IS r.export_statement_month)
-            AND NOT EXISTS(SELECT 1 FROM receipt_exports de
-                           WHERE de.status='draft'
-                             AND de.export_month IS r.export_statement_month))))
-     OR (r.status='exported' AND r.exported_month IS NOT NULL
-         AND EXISTS(SELECT 1 FROM receipt_exports fe
-                    WHERE fe.status='finalized' AND fe.export_month IS r.exported_month)
-         AND NOT EXISTS(SELECT 1 FROM receipt_exports de
-                        WHERE de.status='draft' AND de.export_month IS r.exported_month)))
+    AND ( r.status = 'archived'
+       OR EXISTS(SELECT 1 FROM receipt_export_items i
+                 JOIN receipt_exports e ON e.id = i.export_id AND e.status='finalized'
+                 WHERE i.item_type='receipt' AND i.item_id IS r.id
+                   AND NOT EXISTS(SELECT 1 FROM receipt_exports d
+                                  WHERE d.status='draft' AND d.export_month IS e.export_month))
+       OR (r.exported_month IS NOT NULL
+           AND EXISTS(SELECT 1 FROM receipt_exports fe
+                      WHERE fe.status='finalized' AND fe.export_month IS r.exported_month)
+           AND NOT EXISTS(SELECT 1 FROM receipt_exports de
+                          WHERE de.status='draft' AND de.export_month IS r.exported_month))
+       OR EXISTS(SELECT 1 FROM amex_statement_lines asl
+                 JOIN amex_reconciliations ar
+                   ON ar.statement_month = asl.statement_month AND ar.status='finalized'
+                 WHERE asl.matched_receipt_id = r.id
+                   AND EXISTS(SELECT 1 FROM receipt_exports fe
+                              WHERE fe.status='finalized'
+                                AND fe.export_month IS asl.statement_month)
+                   AND NOT EXISTS(SELECT 1 FROM receipt_exports de
+                                  WHERE de.status='draft'
+                                    AND de.export_month IS asl.statement_month))
+       OR ((r.payment_path='CASH' OR r.payment_path='DIGITAL') AND (
+             (r.export_statement_month IS NOT NULL
+              AND EXISTS(SELECT 1 FROM receipt_exports fe
+                         WHERE fe.status='finalized'
+                           AND fe.export_month IS r.export_statement_month)
+              AND NOT EXISTS(SELECT 1 FROM receipt_exports de
+                             WHERE de.status='draft'
+                               AND de.export_month IS r.export_statement_month))
+          OR (r.transaction_date IS NOT NULL
+              AND EXISTS(SELECT 1 FROM receipt_exports fe
+                         WHERE fe.status='finalized'
+                           AND fe.export_month IS substr(r.transaction_date,1,7))
+              AND NOT EXISTS(SELECT 1 FROM receipt_exports de
+                             WHERE de.status='draft'
+                               AND de.export_month IS substr(r.transaction_date,1,7)))) ) )
 )
 BEGIN
   SELECT RAISE(ABORT, 'DZ_SEAL_MONTH_LOCKED:receipt_attendees');
@@ -503,7 +680,13 @@ END;
 
 CREATE TRIGGER IF NOT EXISTS seal_claim_directory_update
 BEFORE UPDATE ON attendee_directory
-WHEN EXISTS(SELECT 1 FROM receipt_exports ce
+-- Relevant-change set: identity/company/title edits fence; no-op updates pass.
+WHEN (
+     OLD.name IS NOT NEW.name
+  OR OLD.company IS NOT NEW.company
+  OR OLD.title IS NOT NEW.title
+)
+AND EXISTS(SELECT 1 FROM receipt_exports ce
             WHERE ce.status='draft' AND ce.sealing_token IS NOT NULL
               AND ce.sealing_expires_at IS NOT NULL
               AND ce.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER))
@@ -565,17 +748,28 @@ AND (
   -- Cross-month: the OLD or NEW matched receipt is fenced by a claim via its
   -- own membership/calendar scope or via a DIFFERENT line's statement month.
   OR EXISTS(SELECT 1 FROM receipt_records r
-            JOIN receipt_exports ce2 ON ce2.status='draft' AND ce2.sealing_token IS NOT NULL
-              AND ce2.sealing_expires_at IS NOT NULL
-              AND ce2.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
-              AND (ce2.export_month IS substr(r.transaction_date,1,7)
-                   OR ce2.export_month IS r.export_statement_month
-                   OR ce2.export_month IS r.exported_month
-                   OR ce2.export_month IN (SELECT asl.statement_month
-                                            FROM amex_statement_lines asl
-                                            WHERE asl.matched_receipt_id = r.id
-                                              AND asl.id IS NOT OLD.id))
-            WHERE r.id IN (OLD.matched_receipt_id, NEW.matched_receipt_id))
+            WHERE r.id IN (OLD.matched_receipt_id, NEW.matched_receipt_id)
+              AND ( ((r.payment_path IS NULL OR r.payment_path <> 'AMEX')
+                     AND EXISTS(SELECT 1 FROM receipt_exports ce2
+                                WHERE ce2.status='draft' AND ce2.sealing_token IS NOT NULL
+                                  AND ce2.sealing_expires_at IS NOT NULL
+                                  AND ce2.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
+                                  AND (ce2.export_month IS substr(r.transaction_date,1,7)
+                                       OR ce2.export_month IS r.export_statement_month)))
+                   OR (r.exported_month IS NOT NULL
+                       AND EXISTS(SELECT 1 FROM receipt_exports ceE
+                                  WHERE ceE.status='draft' AND ceE.sealing_token IS NOT NULL
+                                    AND ceE.sealing_expires_at IS NOT NULL
+                                    AND ceE.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
+                                    AND ceE.export_month IS r.exported_month))
+                   OR EXISTS(SELECT 1 FROM receipt_exports ce3
+                             WHERE ce3.status='draft' AND ce3.sealing_token IS NOT NULL
+                               AND ce3.sealing_expires_at IS NOT NULL
+                               AND ce3.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
+                               AND ce3.export_month IN (SELECT asl.statement_month
+                                                        FROM amex_statement_lines asl
+                                                        WHERE asl.matched_receipt_id = r.id
+                                              AND asl.id IS NOT OLD.id)) ))
 )
 BEGIN
   SELECT RAISE(ABORT, 'DZ_SEAL_CLAIM_ACTIVE:amex_statement_lines');
@@ -590,16 +784,27 @@ WHEN (
            AND ce.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
            AND ce.export_month IS NEW.statement_month)
   OR EXISTS(SELECT 1 FROM receipt_records r
-            JOIN receipt_exports ce2 ON ce2.status='draft' AND ce2.sealing_token IS NOT NULL
-              AND ce2.sealing_expires_at IS NOT NULL
-              AND ce2.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
-              AND (ce2.export_month IS substr(r.transaction_date,1,7)
-                   OR ce2.export_month IS r.export_statement_month
-                   OR ce2.export_month IS r.exported_month
-                   OR ce2.export_month IN (SELECT asl.statement_month
-                                            FROM amex_statement_lines asl
-                                            WHERE asl.matched_receipt_id = r.id))
-            WHERE r.id IS NEW.matched_receipt_id)
+            WHERE r.id IS NEW.matched_receipt_id
+              AND ( ((r.payment_path IS NULL OR r.payment_path <> 'AMEX')
+                     AND EXISTS(SELECT 1 FROM receipt_exports ce2
+                                WHERE ce2.status='draft' AND ce2.sealing_token IS NOT NULL
+                                  AND ce2.sealing_expires_at IS NOT NULL
+                                  AND ce2.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
+                                  AND (ce2.export_month IS substr(r.transaction_date,1,7)
+                                       OR ce2.export_month IS r.export_statement_month)))
+                   OR (r.exported_month IS NOT NULL
+                       AND EXISTS(SELECT 1 FROM receipt_exports ceE
+                                  WHERE ceE.status='draft' AND ceE.sealing_token IS NOT NULL
+                                    AND ceE.sealing_expires_at IS NOT NULL
+                                    AND ceE.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
+                                    AND ceE.export_month IS r.exported_month))
+                   OR EXISTS(SELECT 1 FROM receipt_exports ce3
+                             WHERE ce3.status='draft' AND ce3.sealing_token IS NOT NULL
+                               AND ce3.sealing_expires_at IS NOT NULL
+                               AND ce3.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
+                               AND ce3.export_month IN (SELECT asl.statement_month
+                                                        FROM amex_statement_lines asl
+                                                        WHERE asl.matched_receipt_id = r.id)) ))
 )
 BEGIN
   SELECT RAISE(ABORT, 'DZ_SEAL_CLAIM_ACTIVE:amex_statement_lines');
@@ -614,20 +819,76 @@ WHEN (
            AND ce.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
            AND ce.export_month IS OLD.statement_month)
   OR EXISTS(SELECT 1 FROM receipt_records r
-            JOIN receipt_exports ce2 ON ce2.status='draft' AND ce2.sealing_token IS NOT NULL
-              AND ce2.sealing_expires_at IS NOT NULL
-              AND ce2.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
-              AND (ce2.export_month IS substr(r.transaction_date,1,7)
-                   OR ce2.export_month IS r.export_statement_month
-                   OR ce2.export_month IS r.exported_month
-                   OR ce2.export_month IN (SELECT asl.statement_month
-                                            FROM amex_statement_lines asl
-                                            WHERE asl.matched_receipt_id = r.id
-                                              AND asl.id IS NOT OLD.id))
-            WHERE r.id IS OLD.matched_receipt_id)
+            WHERE r.id IS OLD.matched_receipt_id
+              AND ( ((r.payment_path IS NULL OR r.payment_path <> 'AMEX')
+                     AND EXISTS(SELECT 1 FROM receipt_exports ce2
+                                WHERE ce2.status='draft' AND ce2.sealing_token IS NOT NULL
+                                  AND ce2.sealing_expires_at IS NOT NULL
+                                  AND ce2.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
+                                  AND (ce2.export_month IS substr(r.transaction_date,1,7)
+                                       OR ce2.export_month IS r.export_statement_month)))
+                   OR (r.exported_month IS NOT NULL
+                       AND EXISTS(SELECT 1 FROM receipt_exports ceE
+                                  WHERE ceE.status='draft' AND ceE.sealing_token IS NOT NULL
+                                    AND ceE.sealing_expires_at IS NOT NULL
+                                    AND ceE.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
+                                    AND ceE.export_month IS r.exported_month))
+                   OR EXISTS(SELECT 1 FROM receipt_exports ce3
+                             WHERE ce3.status='draft' AND ce3.sealing_token IS NOT NULL
+                               AND ce3.sealing_expires_at IS NOT NULL
+                               AND ce3.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
+                               AND ce3.export_month IN (SELECT asl.statement_month
+                                                        FROM amex_statement_lines asl
+                                                        WHERE asl.matched_receipt_id = r.id
+                                              AND asl.id IS NOT OLD.id)) ))
 )
 BEGIN
   SELECT RAISE(ABORT, 'DZ_SEAL_CLAIM_ACTIVE:amex_statement_lines');
+END;
+
+-- ─── Cross-month finalized confirmed-claim authority (B4) ────────────────────
+-- The canonical JS precheck (updateAmexReconciliation's sealedClaim query)
+-- restated at write time: a receipt already confirmed against a line in a
+-- DIFFERENT statement month whose reconciliation is FINALIZED cannot be
+-- claimed by another month — an export correction draft does not relax this,
+-- and a request paused after the JS precheck cannot create the claim after
+-- the other month finalizes. Fires only when the write establishes/changes
+-- the confirmed claim (matching the JS guard's own condition); field edits
+-- on an existing same-month confirmation stay with the guards around this.
+CREATE TRIGGER IF NOT EXISTS seal_lock_line_crossmonth_claim_insert
+BEFORE INSERT ON amex_statement_lines
+WHEN NEW.match_status = 'confirmed'
+ AND NEW.matched_receipt_id IS NOT NULL
+ AND EXISTS(
+   SELECT 1 FROM amex_statement_lines o
+   JOIN amex_reconciliations ar
+     ON ar.statement_month = o.statement_month AND ar.status = 'finalized'
+   WHERE o.matched_receipt_id IS NEW.matched_receipt_id
+     AND o.match_status = 'confirmed'
+     AND o.id IS NOT NEW.id
+     AND o.statement_month IS NOT NEW.statement_month
+ )
+BEGIN
+  SELECT RAISE(ABORT, 'DZ_SEAL_RECON_LOCKED:amex_statement_lines');
+END;
+
+CREATE TRIGGER IF NOT EXISTS seal_lock_line_crossmonth_claim_update
+BEFORE UPDATE ON amex_statement_lines
+WHEN NEW.match_status = 'confirmed'
+ AND NEW.matched_receipt_id IS NOT NULL
+ AND (OLD.matched_receipt_id IS NOT NEW.matched_receipt_id
+      OR OLD.match_status IS NOT NEW.match_status)
+ AND EXISTS(
+   SELECT 1 FROM amex_statement_lines o
+   JOIN amex_reconciliations ar
+     ON ar.statement_month = o.statement_month AND ar.status = 'finalized'
+   WHERE o.matched_receipt_id IS NEW.matched_receipt_id
+     AND o.match_status = 'confirmed'
+     AND o.id IS NOT NEW.id
+     AND o.statement_month IS NOT NEW.statement_month
+ )
+BEGIN
+  SELECT RAISE(ABORT, 'DZ_SEAL_RECON_LOCKED:amex_statement_lines');
 END;
 
 -- Post-publication: strict finalized-reconciliation seal for OLD/NEW statement
@@ -749,7 +1010,8 @@ BEGIN
 END;
 
 -- ═══════════════════════════════════════════════════════════════════════════
--- amex_statement_artifacts — freeze selection-relevant fields under a claim;
+-- amex_statement_artifacts — freeze selection-relevant fields under a claim
+-- (created_at included: getAmexArtifactByMonth selects ORDER BY created_at DESC);
 -- after publication, identity fields of artifacts retained by a prior seal are
 -- immutable (the sealed manifest names key/hash/filename; the finalized
 -- reconciliation anchors selection). import_status bookkeeping (replacement)
@@ -769,6 +1031,7 @@ WHEN (
   OR OLD.row_count IS NOT NEW.row_count
   OR OLD.transaction_count IS NOT NEW.transaction_count
   OR OLD.file_size_bytes IS NOT NEW.file_size_bytes
+  OR OLD.created_at IS NOT NEW.created_at
 )
 AND EXISTS(SELECT 1 FROM receipt_exports ce
            WHERE ce.status='draft' AND ce.sealing_token IS NOT NULL
@@ -915,26 +1178,41 @@ END;
 -- manifests are R2 CSVs that are never rewritten.
 -- ═══════════════════════════════════════════════════════════════════════════
 
+-- B7: the UPDATE guard covers BOTH OLD and NEW object scopes for receipt AND
+-- artifact ownership (a row moved into an artifact owned by a claimed month
+-- is fenced, not only rows moved out of one).
 CREATE TRIGGER IF NOT EXISTS seal_claim_file_insert
 BEFORE INSERT ON receipt_files
 WHEN EXISTS(
   SELECT 1 FROM receipt_records r
-  JOIN receipt_exports ce ON ce.status='draft' AND ce.sealing_token IS NOT NULL
-    AND ce.sealing_expires_at IS NOT NULL
-    AND ce.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
-    AND (ce.export_month IS substr(r.transaction_date,1,7)
-         OR ce.export_month IS r.export_statement_month
-         OR ce.export_month IS r.exported_month
-         OR ce.export_month IN (SELECT asl.statement_month FROM amex_statement_lines asl
-                                WHERE asl.matched_receipt_id = r.id))
   WHERE NEW.object_type='receipt' AND r.id = NEW.object_id
+    AND ( ((r.payment_path IS NULL OR r.payment_path <> 'AMEX')
+       AND EXISTS(SELECT 1 FROM receipt_exports ce
+                  WHERE ce.status='draft' AND ce.sealing_token IS NOT NULL
+                    AND ce.sealing_expires_at IS NOT NULL
+                    AND ce.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
+                    AND (ce.export_month IS substr(r.transaction_date,1,7)
+                         OR ce.export_month IS r.export_statement_month)))
+     OR (r.exported_month IS NOT NULL
+         AND EXISTS(SELECT 1 FROM receipt_exports ceE
+                    WHERE ceE.status='draft' AND ceE.sealing_token IS NOT NULL
+                      AND ceE.sealing_expires_at IS NOT NULL
+                      AND ceE.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
+                      AND ceE.export_month IS r.exported_month))
+     OR EXISTS(SELECT 1 FROM receipt_exports ceL
+               WHERE ceL.status='draft' AND ceL.sealing_token IS NOT NULL
+                 AND ceL.sealing_expires_at IS NOT NULL
+                 AND ceL.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
+                 AND ceL.export_month IN (SELECT asl.statement_month
+                                          FROM amex_statement_lines asl
+                                          WHERE asl.matched_receipt_id = r.id)) )
 )
 OR EXISTS(
   SELECT 1 FROM amex_statement_artifacts a
-  JOIN receipt_exports ce2 ON ce2.status='draft' AND ce2.sealing_token IS NOT NULL
-    AND ce2.sealing_expires_at IS NOT NULL
-    AND ce2.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
-    AND ce2.export_month IS a.statement_month
+  JOIN receipt_exports cea ON cea.status='draft' AND cea.sealing_token IS NOT NULL
+    AND cea.sealing_expires_at IS NOT NULL
+    AND cea.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
+    AND cea.export_month IS a.statement_month
   WHERE NEW.object_type='amex_statement_artifact' AND a.id = NEW.object_id
 )
 BEGIN
@@ -943,38 +1221,86 @@ END;
 
 CREATE TRIGGER IF NOT EXISTS seal_claim_file_update
 BEFORE UPDATE ON receipt_files
-WHEN EXISTS(
-  SELECT 1 FROM receipt_records r
-  JOIN receipt_exports ce ON ce.status='draft' AND ce.sealing_token IS NOT NULL
-    AND ce.sealing_expires_at IS NOT NULL
-    AND ce.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
-    AND (ce.export_month IS substr(r.transaction_date,1,7)
-         OR ce.export_month IS r.export_statement_month
-         OR ce.export_month IS r.exported_month
-         OR ce.export_month IN (SELECT asl.statement_month FROM amex_statement_lines asl
-                                WHERE asl.matched_receipt_id = r.id))
-  WHERE OLD.object_type='receipt' AND r.id IN (OLD.object_id, NEW.object_id)
+-- Relevant-change set (null-safe): a no-op UPDATE never fences.
+WHEN (
+     OLD.object_type IS NOT NEW.object_type
+  OR OLD.object_id IS NOT NEW.object_id
+  OR OLD.role IS NOT NEW.role
+  OR OLD.r2_bucket IS NOT NEW.r2_bucket
+  OR OLD.r2_key IS NOT NEW.r2_key
+  OR OLD.original_filename IS NOT NEW.original_filename
+  OR OLD.content_type IS NOT NEW.content_type
+  OR OLD.file_size_bytes IS NOT NEW.file_size_bytes
+  OR OLD.sha256_hash IS NOT NEW.sha256_hash
+  OR OLD.uploaded_by IS NOT NEW.uploaded_by
+  OR OLD.uploaded_at IS NOT NEW.uploaded_at
+  OR OLD.is_original IS NOT NEW.is_original
 )
-OR EXISTS(
-  SELECT 1 FROM receipt_records r
-  JOIN receipt_exports ce3 ON ce3.status='draft' AND ce3.sealing_token IS NOT NULL
-    AND ce3.sealing_expires_at IS NOT NULL
-    AND ce3.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
-    AND (ce3.export_month IS substr(r.transaction_date,1,7)
-         OR ce3.export_month IS r.export_statement_month
-         OR ce3.export_month IS r.exported_month
-         OR ce3.export_month IN (SELECT asl.statement_month FROM amex_statement_lines asl
-                                 WHERE asl.matched_receipt_id = r.id))
-  WHERE NEW.object_type='receipt' AND r.id = NEW.object_id
-)
-OR EXISTS(
+AND (
+  EXISTS(
+    SELECT 1 FROM receipt_records r
+    WHERE OLD.object_type='receipt' AND r.id IN (OLD.object_id, NEW.object_id)
+      AND ( ((r.payment_path IS NULL OR r.payment_path <> 'AMEX')
+       AND EXISTS(SELECT 1 FROM receipt_exports ce
+                  WHERE ce.status='draft' AND ce.sealing_token IS NOT NULL
+                    AND ce.sealing_expires_at IS NOT NULL
+                    AND ce.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
+                    AND (ce.export_month IS substr(r.transaction_date,1,7)
+                         OR ce.export_month IS r.export_statement_month)))
+     OR (r.exported_month IS NOT NULL
+         AND EXISTS(SELECT 1 FROM receipt_exports ceE
+                    WHERE ceE.status='draft' AND ceE.sealing_token IS NOT NULL
+                      AND ceE.sealing_expires_at IS NOT NULL
+                      AND ceE.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
+                      AND ceE.export_month IS r.exported_month))
+     OR EXISTS(SELECT 1 FROM receipt_exports ceL
+               WHERE ceL.status='draft' AND ceL.sealing_token IS NOT NULL
+                 AND ceL.sealing_expires_at IS NOT NULL
+                 AND ceL.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
+                 AND ceL.export_month IN (SELECT asl.statement_month
+                                          FROM amex_statement_lines asl
+                                          WHERE asl.matched_receipt_id = r.id)) )
+  )
+  OR EXISTS(
+    SELECT 1 FROM receipt_records r
+    WHERE NEW.object_type='receipt' AND r.id = NEW.object_id
+      AND ( ((r.payment_path IS NULL OR r.payment_path <> 'AMEX')
+       AND EXISTS(SELECT 1 FROM receipt_exports ce
+                  WHERE ce.status='draft' AND ce.sealing_token IS NOT NULL
+                    AND ce.sealing_expires_at IS NOT NULL
+                    AND ce.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
+                    AND (ce.export_month IS substr(r.transaction_date,1,7)
+                         OR ce.export_month IS r.export_statement_month)))
+     OR (r.exported_month IS NOT NULL
+         AND EXISTS(SELECT 1 FROM receipt_exports ceE
+                    WHERE ceE.status='draft' AND ceE.sealing_token IS NOT NULL
+                      AND ceE.sealing_expires_at IS NOT NULL
+                      AND ceE.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
+                      AND ceE.export_month IS r.exported_month))
+     OR EXISTS(SELECT 1 FROM receipt_exports ceL
+               WHERE ceL.status='draft' AND ceL.sealing_token IS NOT NULL
+                 AND ceL.sealing_expires_at IS NOT NULL
+                 AND ceL.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
+                 AND ceL.export_month IN (SELECT asl.statement_month
+                                          FROM amex_statement_lines asl
+                                          WHERE asl.matched_receipt_id = r.id)) )
+  )
+  OR EXISTS(
   SELECT 1 FROM amex_statement_artifacts a
-  JOIN receipt_exports ce4 ON ce4.status='draft' AND ce4.sealing_token IS NOT NULL
-    AND ce4.sealing_expires_at IS NOT NULL
-    AND ce4.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
-    AND ce4.export_month IS a.statement_month
-  WHERE OLD.object_type='amex_statement_artifact'
-    AND a.id IN (OLD.object_id, NEW.object_id)
+  JOIN receipt_exports cea ON cea.status='draft' AND cea.sealing_token IS NOT NULL
+    AND cea.sealing_expires_at IS NOT NULL
+    AND cea.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
+    AND cea.export_month IS a.statement_month
+  WHERE OLD.object_type='amex_statement_artifact' AND a.id IN (OLD.object_id, NEW.object_id)
+)
+  OR EXISTS(
+  SELECT 1 FROM amex_statement_artifacts a
+  JOIN receipt_exports cea ON cea.status='draft' AND cea.sealing_token IS NOT NULL
+    AND cea.sealing_expires_at IS NOT NULL
+    AND cea.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
+    AND cea.export_month IS a.statement_month
+  WHERE NEW.object_type='amex_statement_artifact' AND a.id = NEW.object_id
+)
 )
 BEGIN
   SELECT RAISE(ABORT, 'DZ_SEAL_CLAIM_ACTIVE:receipt_files');
@@ -984,22 +1310,34 @@ CREATE TRIGGER IF NOT EXISTS seal_claim_file_delete
 BEFORE DELETE ON receipt_files
 WHEN EXISTS(
   SELECT 1 FROM receipt_records r
-  JOIN receipt_exports ce ON ce.status='draft' AND ce.sealing_token IS NOT NULL
-    AND ce.sealing_expires_at IS NOT NULL
-    AND ce.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
-    AND (ce.export_month IS substr(r.transaction_date,1,7)
-         OR ce.export_month IS r.export_statement_month
-         OR ce.export_month IS r.exported_month
-         OR ce.export_month IN (SELECT asl.statement_month FROM amex_statement_lines asl
-                                WHERE asl.matched_receipt_id = r.id))
   WHERE OLD.object_type='receipt' AND r.id = OLD.object_id
+    AND ( ((r.payment_path IS NULL OR r.payment_path <> 'AMEX')
+       AND EXISTS(SELECT 1 FROM receipt_exports ce
+                  WHERE ce.status='draft' AND ce.sealing_token IS NOT NULL
+                    AND ce.sealing_expires_at IS NOT NULL
+                    AND ce.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
+                    AND (ce.export_month IS substr(r.transaction_date,1,7)
+                         OR ce.export_month IS r.export_statement_month)))
+     OR (r.exported_month IS NOT NULL
+         AND EXISTS(SELECT 1 FROM receipt_exports ceE
+                    WHERE ceE.status='draft' AND ceE.sealing_token IS NOT NULL
+                      AND ceE.sealing_expires_at IS NOT NULL
+                      AND ceE.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
+                      AND ceE.export_month IS r.exported_month))
+     OR EXISTS(SELECT 1 FROM receipt_exports ceL
+               WHERE ceL.status='draft' AND ceL.sealing_token IS NOT NULL
+                 AND ceL.sealing_expires_at IS NOT NULL
+                 AND ceL.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
+                 AND ceL.export_month IN (SELECT asl.statement_month
+                                          FROM amex_statement_lines asl
+                                          WHERE asl.matched_receipt_id = r.id)) )
 )
 OR EXISTS(
   SELECT 1 FROM amex_statement_artifacts a
-  JOIN receipt_exports ce2 ON ce2.status='draft' AND ce2.sealing_token IS NOT NULL
-    AND ce2.sealing_expires_at IS NOT NULL
-    AND ce2.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
-    AND ce2.export_month IS a.statement_month
+  JOIN receipt_exports cea ON cea.status='draft' AND cea.sealing_token IS NOT NULL
+    AND cea.sealing_expires_at IS NOT NULL
+    AND cea.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
+    AND cea.export_month IS a.statement_month
   WHERE OLD.object_type='amex_statement_artifact' AND a.id = OLD.object_id
 )
 BEGIN
@@ -1172,6 +1510,25 @@ BEGIN
   SELECT RAISE(ABORT, 'DZ_SEAL_EXPORT_CLAIM:receipt_exports');
 END;
 
+-- B5/B8: deleting a SEALED export row is authorized only through the
+-- committed deletion script's audited transaction (the typed `export.deleted`
+-- marker, written transactionally before any row removal). An out-of-band
+-- DELETE without the marker refuses here — with the items guard above, the
+-- 0017 FK cascade then never runs, so both the parent and its retained item
+-- set survive. Draft rows stay deletable (no sealed payload to protect).
+CREATE TRIGGER IF NOT EXISTS seal_export_sealed_delete
+BEFORE DELETE ON receipt_exports
+WHEN OLD.status = 'finalized'
+ AND NOT EXISTS(
+   SELECT 1 FROM receipt_audit_log a
+   WHERE a.action = 'export.deleted'
+     AND a.object_type = 'export'
+     AND a.object_id IS OLD.id
+ )
+BEGIN
+  SELECT RAISE(ABORT, 'DZ_SEAL_EXPORT_SEALED:receipt_exports');
+END;
+
 -- ═══════════════════════════════════════════════════════════════════════════
 -- receipt_export_items — publication-only output. No active-claim trigger: the
 -- owned publication batch replaces the draft's item set INSIDE the transaction
@@ -1193,6 +1550,27 @@ CREATE TRIGGER IF NOT EXISTS seal_items_update
 BEFORE UPDATE ON receipt_export_items
 WHEN EXISTS(SELECT 1 FROM receipt_exports e
             WHERE e.id IN (OLD.export_id, NEW.export_id) AND e.status='finalized')
+BEGIN
+  SELECT RAISE(ABORT, 'DZ_SEAL_ITEMS_FROZEN:receipt_export_items');
+END;
+
+-- B5: independent DELETE of a finalized export's item set is refused. The
+-- ONLY admitted deletion path is the committed, audited deletion script: it
+-- writes the typed `export.deleted` audit INSIDE its D1 transaction BEFORE
+-- deleting rows, so the marker's presence authorizes exactly that
+-- transaction (a later statement failure rolls the marker back with it). A
+-- parent FK cascade outside that path sees the marker absent and refuses
+-- here, keeping the retained-evidence item rows with the surviving parent.
+CREATE TRIGGER IF NOT EXISTS seal_items_delete
+BEFORE DELETE ON receipt_export_items
+WHEN EXISTS(SELECT 1 FROM receipt_exports e
+            WHERE e.id = OLD.export_id AND e.status='finalized')
+ AND NOT EXISTS(
+   SELECT 1 FROM receipt_audit_log a
+   WHERE a.action = 'export.deleted'
+     AND a.object_type = 'export'
+     AND a.object_id IS OLD.export_id
+ )
 BEGIN
   SELECT RAISE(ABORT, 'DZ_SEAL_ITEMS_FROZEN:receipt_export_items');
 END;
