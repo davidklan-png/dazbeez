@@ -67,8 +67,8 @@ test("§1 route: the one-shot finalize path requires the decision (wired to oneS
   const acquireIdx = src.indexOf("await acquireSealClaim(db, {");
   assert.ok(acquireIdx > -1, "the route acquires the build claim via acquireSealClaim");
   assert.ok(
-    /operatorMessage: body\.finalize \? operatorMessage : undefined/.test(src),
-    "the finalize decision value rides the acquisition statement",
+    /operatorMessage: body\.finalize \? finalizeDecision : undefined/.test(src),
+    "the finalize decision value rides the acquisition statement (the explicit request decision, never a row re-read)",
   );
   const validateIdx = src.indexOf("await validateMonthReadyForExport(", acquireIdx);
   assert.ok(validateIdx > acquireIdx, "claim acquisition (with the decision) precedes validate on the finalize path");
