@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { requireReceiptsActor } from "@/lib/receipts/auth";
+import { isSealBoundaryConflict } from "@/lib/receipts/month-lock";
 import { getAmexArtifactById } from "@/lib/receipts/db";
 import { contentDispositionInline } from "@/lib/receipts/export";
 import { getReceiptsBucket, getReceiptsDb } from "@/lib/cloudflare-runtime";
@@ -43,6 +44,12 @@ export async function GET(request: Request, { params }: RouteContext) {
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("Unauthorized")) {
       return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
+    }
+    if (isSealBoundaryConflict(error)) {
+      return NextResponse.json(
+        { error: error instanceof Error ? error.message : "Conflicts with an active build or a sealed month." },
+        { status: 409 },
+      );
     }
     console.error("[api/receipts/amex/artifacts/[id]] GET failed", error);
     return NextResponse.json(

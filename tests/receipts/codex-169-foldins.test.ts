@@ -59,10 +59,19 @@ test("§1 route: the one-shot finalize path requires the decision (wired to oneS
     /if \(!decision\.ok\)/.test(src),
     "the route returns 400 when no decision was supplied",
   );
-  // And the decision is written before validate (sets the timestamp the gate reads).
-  const writeIdx = src.indexOf("updateExportOperatorMessage(exportId, operatorMessage)");
-  const validateIdx = src.indexOf("validateMonthReadyForExport(", writeIdx);
-  assert.ok(writeIdx > -1 && validateIdx > writeIdx, "decision-write precedes validate on the finalize path");
+  // UPDATED for the seal boundary (0042, 2026-11): the decision is no longer a
+  // separate updateExportOperatorMessage call — it rides the claim-acquisition
+  // UPDATE (acquireSealClaim with operatorMessage + decisionAt), which sets the
+  // timestamp the gate reads, atomically with the lease. Acquisition must still
+  // run BEFORE validate on the finalize path.
+  const acquireIdx = src.indexOf("await acquireSealClaim(db, {");
+  assert.ok(acquireIdx > -1, "the route acquires the build claim via acquireSealClaim");
+  assert.ok(
+    /operatorMessage: body\.finalize \? operatorMessage : undefined/.test(src),
+    "the finalize decision value rides the acquisition statement",
+  );
+  const validateIdx = src.indexOf("await validateMonthReadyForExport(", acquireIdx);
+  assert.ok(validateIdx > acquireIdx, "claim acquisition (with the decision) precedes validate on the finalize path");
 });
 
 // ─── §2: a verified save refreshes the server-rendered gate; a failed save does not ──

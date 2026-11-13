@@ -469,6 +469,160 @@ export async function collectOpenComplianceCheckReceiptIds(
 }
 
 /**
+ * Source-computed open-check summary for the export finalize gate (seal
+ * boundary §C). Same population contract as {@link summarizeOpenChecksForExport}
+ * — (a) non-AMEX receipts anchored in `month` by transaction_date or
+ * exported_month, UNION (b) `extraReceiptIds` (the bundle's receipts,
+ * including matched AMEX receipts dated outside the statement month) — but the
+ * check results come from running the PURE engine ({@link computeReceiptChecks})
+ * against the protected receipt/attendee/file rows and ONE settings snapshot,
+ * NOT from the persisted receipt_compliance_checks cache.
+ *
+ * Why: the cache is a UI convenience refreshed on review-page load; a delayed
+ * or stale refresh must not be able to turn a just-sealed gate decision into a
+ * cache-dependent pass. The persisted rows stay untouched (no writes here) —
+ * this adds fresh evaluation, it does not add a new check engine.
+ *
+ * Attendee presence is the only attendee fact the engine reads, so names are
+ * loaded per receipt id; files may be preloaded by the caller (the export
+ * build reads manifests once into an ID map shared by proof selection, this
+ * summary, and the final manifest).
+ */
+export async function summarizeOpenChecksFromSource(
+  db: D1Database,
+  month: string,
+  extraReceiptIds: string[],
+  settings: ComplianceSettings,
+  filesByReceiptId?: Map<string, ReceiptFile[]>,
+): Promise<ComplianceSummary> {
+  // Population (a): month-anchored non-AMEX receipts, not deleted.
+  const monthResult = await db
+    .prepare(
+      `SELECT * FROM receipt_records
+       WHERE deleted_at IS NULL
+         AND payment_path <> 'AMEX'
+         AND (transaction_date LIKE ? OR exported_month = ?)`,
+    )
+    .bind(`${month}%`, month)
+    .all<ReceiptRecord>();
+
+  const byId = new Map<string, ReceiptRecord>();
+  for (const r of monthResult.results ?? []) byId.set(r.id, r);
+
+  // Population (b): bundle receipt ids, chunked (D1 bind cap).
+  const extraIds = [...new Set(extraReceiptIds)];
+  for (let i = 0; i < extraIds.length; i += 50) {
+    const chunk = extraIds.slice(i, i + 50);
+    const placeholders = chunk.map(() => "?").join(",");
+    const idResult = await db
+      .prepare(
+        `SELECT * FROM receipt_records
+         WHERE deleted_at IS NULL AND id IN (${placeholders})`,
+      )
+      .bind(...chunk)
+      .all<ReceiptRecord>();
+    for (const r of idResult.results ?? []) byId.set(r.id, r);
+  }
+
+  const receiptIds = [...byId.keys()];
+  const attendeeCountByReceipt = await countAttendeesByReceiptIds(db, receiptIds);
+  // Files: use the caller's protected snapshot when provided (the export build
+  // reads manifests once), else read them now.
+  const filesByReceipt = filesByReceiptId ?? (await listFilesForIds(db, receiptIds));
+
+  const summary: ComplianceSummary = {
+    blockers: 0,
+    warnings: 0,
+    info: 0,
+    total: 0,
+    byType: {},
+  };
+  const blockerRows: Array<{
+    object_id: string;
+    merchant: string | null;
+    severity: ComplianceCheckSeverity;
+    check_type: string;
+  }> = [];
+
+  for (const id of receiptIds) {
+    const receipt = byId.get(id)!;
+    const computed = computeReceiptChecks({
+      receipt,
+      attendees: Array.from({ length: attendeeCountByReceipt.get(id) ?? 0 }),
+      files: filesByReceipt.get(id) ?? [],
+      settings,
+    });
+    for (const check of computed) {
+      summary.total++;
+      if (check.severity === "blocker") summary.blockers++;
+      else if (check.severity === "warning") summary.warnings++;
+      else summary.info++;
+      summary.byType[check.checkType] = (summary.byType[check.checkType] ?? 0) + 1;
+      if (check.severity === "blocker") {
+        blockerRows.push({
+          object_id: id,
+          merchant: receipt.merchant,
+          severity: check.severity,
+          check_type: check.checkType,
+        });
+      }
+    }
+  }
+  const blockerReceipts = buildBlockerReceipts(blockerRows);
+  if (blockerReceipts.length > 0) summary.blockerReceipts = blockerReceipts;
+  return summary;
+}
+
+/** Attendee presence per receipt id (the only attendee fact the engine reads). */
+async function countAttendeesByReceiptIds(
+  db: D1Database,
+  receiptIds: string[],
+): Promise<Map<string, number>> {
+  const counts = new Map<string, number>();
+  for (let i = 0; i < receiptIds.length; i += 50) {
+    const chunk = receiptIds.slice(i, i + 50);
+    const placeholders = chunk.map(() => "?").join(",");
+    const result = await db
+      .prepare(
+        `SELECT receipt_id, COUNT(*) AS n FROM receipt_attendees
+         WHERE receipt_id IN (${placeholders}) GROUP BY receipt_id`,
+      )
+      .bind(...chunk)
+      .all<{ receipt_id: string; n: number }>();
+    for (const row of result.results ?? []) counts.set(row.receipt_id, row.n);
+  }
+  return counts;
+}
+
+/** receipt_files rows grouped by receipt id (object_type='receipt'), chunked. */
+async function listFilesForIds(
+  db: D1Database,
+  receiptIds: string[],
+): Promise<Map<string, ReceiptFile[]>> {
+  const out = new Map<string, ReceiptFile[]>();
+  for (let i = 0; i < receiptIds.length; i += 50) {
+    const chunk = receiptIds.slice(i, i + 50);
+    const placeholders = chunk.map(() => "?").join(",");
+    const result = await db
+      .prepare(
+        `SELECT * FROM receipt_files
+         WHERE object_type = 'receipt' AND object_id IN (${placeholders})`,
+      )
+      .bind(...chunk)
+      .all<ReceiptFile>();
+    for (const f of result.results ?? []) {
+      let arr = out.get(f.object_id);
+      if (!arr) {
+        arr = [];
+        out.set(f.object_id, arr);
+      }
+      arr.push(f);
+    }
+  }
+  return out;
+}
+
+/**
  * High-level helper: load the receipt + attendees + files + settings, run
  * the engine, persist results, and return the computed checks.
  */

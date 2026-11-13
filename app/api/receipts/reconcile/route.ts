@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { requireReceiptsActor } from "@/lib/receipts/auth";
+import { isSealBoundaryConflict } from "@/lib/receipts/month-lock";
 import { updateAmexReconciliation } from "@/lib/receipts/db";
 import type { AmexMatchStatus } from "@/lib/receipts/types";
 
@@ -56,6 +57,12 @@ export async function POST(request: Request) {
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("Unauthorized")) {
       return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
+    }
+    if (isSealBoundaryConflict(error)) {
+      return NextResponse.json(
+        { error: error instanceof Error ? error.message : "Conflicts with an active build or a sealed month." },
+        { status: 409 },
+      );
     }
     // 409: receipt already confirmed against a different AMEX line (race guard in db.ts)
     if (error instanceof Error && error.message.startsWith("Receipt already confirmed against another AMEX line")) {

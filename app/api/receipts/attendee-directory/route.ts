@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { requireReceiptsActor } from "@/lib/receipts/auth";
+import { isSealBoundaryConflict } from "@/lib/receipts/month-lock";
 import {
   listAttendeeDirectory,
   createAttendeeDirectoryEntry,
@@ -58,6 +59,12 @@ export async function POST(request: Request) {
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("Unauthorized")) {
       return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
+    }
+    if (isSealBoundaryConflict(error)) {
+      return NextResponse.json(
+        { error: error instanceof Error ? error.message : "Conflicts with an active build or a sealed month." },
+        { status: 409 },
+      );
     }
     // UNIQUE(name) violation → 409 "already registered" (friendly, actionable).
     const msg = error instanceof Error ? error.message : String(error);

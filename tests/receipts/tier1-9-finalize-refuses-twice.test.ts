@@ -30,25 +30,38 @@ import { readFileSync } from "node:fs";
 // it pass — that silently reintroduces the exact gap this test exists to close.
 // This is the #175 failure mode: nobody wrote down what the test was for. ***
 
-test("T1-9: finalizeExport's finalize UPDATE guards on status='draft' AND throws on 0 changes (refuses to run twice)", () => {
-  const src = readFileSync("lib/receipts/db.ts", "utf8");
-  // Scope to finalizeExport's own body (recordExportBundle also has a
-  // status='draft' WHERE, but for staging — a different UPDATE). The refuse-twice
-  // guard is the one that SETs status='finalized'.
-  const start = src.indexOf("export async function finalizeExport");
-  assert.ok(start > -1, "finalizeExport not found");
+// UPDATED for the seal boundary (0042, 2026-11): finalizeExport is gone; the
+// sealing authority is publishExportBundle (lib/receipts/export-publication.ts).
+// The refuse-twice guard is stronger now: the publication UPDATE flips to
+// 'finalized' only WHERE the row is still 'draft' AND holds THIS attempt's
+// token AND an unexpired lease, and the IMMEDIATELY-following audit INSERT
+// asserts changes()=1 through receipt_audit_log.actor NOT NULL — a zero-row
+// CAS (already finalized, lost token, expired lease) becomes a SQL error that
+// rolls back the whole publication batch. Same doctrine, new formulation.
+
+test("T1-9: the publication CAS flips to 'finalized' only on a live draft+token lease, and a zero-row CAS fails in SQL (refuses to run twice)", () => {
+  const src = readFileSync("lib/receipts/export-publication.ts", "utf8");
+  const start = src.indexOf("export async function publishExportBundle");
+  assert.ok(start > -1, "publishExportBundle not found");
   const end = src.indexOf("export async function", start + 1);
   const body = src.slice(start, end);
 
-  // The guard: flip to 'finalized' only where the row is still 'draft'. Removing
-  // `AND status = 'draft'` would let a re-finalize match the sealed row.
+  // The guard: flip to 'finalized' only where the row is still 'draft' under
+  // this attempt's live lease. Removing any arm lets a re-finalize or a loser
+  // match the sealed row.
   assert.ok(
-    /SET status = 'finalized'[\s\S]*?WHERE id = \? AND status = 'draft'/m.test(body),
-    "the finalize UPDATE must SET status='finalized' only WHERE status='draft' — the refuse-twice guard",
+    /status = 'finalized'[\s\S]*?WHERE id = \?[\s\S]*?AND status = 'draft'[\s\S]*?AND sealing_token = \?[\s\S]*?AND sealing_expires_at > CAST\(strftime\('%s','now'\) AS INTEGER\)/m.test(body),
+    "the publication UPDATE must seal only a still-draft row holding this token with an unexpired lease",
   );
-  // The enforcement: throw when the guard matches 0 rows (already finalized).
+  // The enforcement: the audit INSERT immediately after asserts changes()=1 via
+  // the NOT NULL actor — a lost CAS is a SQL error inside the batch, not a
+  // silent no-op. Do not weaken this to INSERT OR IGNORE.
   assert.ok(
-    /could not be finalized/i.test(body),
-    "finalizeExport must throw when 0 rows match (the row is already finalized) — sealed immutability",
+    /CASE WHEN changes\(\) = 1 THEN \? ELSE NULL END/.test(body),
+    "the audit assertion must turn a zero-row CAS into a NOT NULL constraint failure",
+  );
+  assert.ok(
+    !/INSERT OR IGNORE INTO receipt_audit_log/.test(body),
+    "never INSERT OR IGNORE the assertion audit — that would swallow the CAS loss",
   );
 });

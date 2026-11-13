@@ -97,7 +97,11 @@ const deliveries = d1(
 
 const result = planExportDeletion(
   { exportId, month, legalHoldException: reason },
-  { exportRow: exportRow as never, deliveries },
+  {
+    exportRow: exportRow as never,
+    deliveries,
+    nowEpochSeconds: Math.floor(Date.now() / 1000),
+  },
 );
 
 if (!result.ok) {

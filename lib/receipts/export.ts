@@ -285,20 +285,36 @@ export async function hashCsvContent(csvText: string): Promise<string> {
     .join("");
 }
 
-export function buildArchiveKey(month: string, exportId: string): string {
-  return `exports/${month}/${exportId}-receipts.csv`;
+// ─── Bundle artifact keys (seal boundary, migration 0042) ──────────────────────
+// Every build attempt stages its ten artifacts into a PRIVATE, immutable
+// namespace: exports/<month>/<exportId>/<buildId>/<file>. The buildId is the
+// attempt's claim token while building and is persisted as
+// receipt_exports.bundle_build_id only when publication wins — so a losing or
+// expired attempt can never overwrite a winner's objects (B2/B7: a lease is
+// not an R2 fencing mechanism; unique keys are). buildId=NULL selects the
+// legacy export-ID paths used by every row sealed before 0042 — old sealed
+// objects are never rewritten and never move.
+
+function buildArtifactDir(month: string, exportId: string, buildId: string | null): string {
+  return buildId
+    ? `exports/${month}/${exportId}/${buildId}`
+    : `exports/${month}`;
 }
 
-export function buildManifestKey(month: string, exportId: string): string {
-  return `exports/${month}/${exportId}-manifest.csv`;
+export function buildArchiveKey(month: string, exportId: string, buildId: string | null = null): string {
+  return `${buildArtifactDir(month, exportId, buildId)}/${exportId}-receipts.csv`;
 }
 
-export function buildSummaryKey(month: string, exportId: string): string {
-  return `exports/${month}/${exportId}-summary.csv`;
+export function buildManifestKey(month: string, exportId: string, buildId: string | null = null): string {
+  return `${buildArtifactDir(month, exportId, buildId)}/${exportId}-manifest.csv`;
 }
 
-export function buildAttendeesKey(month: string, exportId: string): string {
-  return `exports/${month}/${exportId}-attendees.csv`;
+export function buildSummaryKey(month: string, exportId: string, buildId: string | null = null): string {
+  return `${buildArtifactDir(month, exportId, buildId)}/${exportId}-summary.csv`;
+}
+
+export function buildAttendeesKey(month: string, exportId: string, buildId: string | null = null): string {
+  return `${buildArtifactDir(month, exportId, buildId)}/${exportId}-attendees.csv`;
 }
 
 /**
@@ -329,8 +345,8 @@ export function buildAttendeesExportCsv(
   return [header, ...body].join("\n");
 }
 
-export function buildProofsKey(month: string, exportId: string): string {
-  return `exports/${month}/${exportId}-proofs.zip`;
+export function buildProofsKey(month: string, exportId: string, buildId: string | null = null): string {
+  return `${buildArtifactDir(month, exportId, buildId)}/${exportId}-proofs.zip`;
 }
 
 /**
@@ -341,24 +357,24 @@ export function buildProofsKey(month: string, exportId: string): string {
  * shared entries are byte-identical by construction. Draft-only convenience;
  * never sealed (finalize seals only the WithReceipts proofs zip).
  */
-export function buildProofsNoReceiptsKey(month: string, exportId: string): string {
-  return `exports/${month}/${exportId}-proofs-noreceipts.zip`;
+export function buildProofsNoReceiptsKey(month: string, exportId: string, buildId: string | null = null): string {
+  return `${buildArtifactDir(month, exportId, buildId)}/${exportId}-proofs-noreceipts.zip`;
 }
 
 // ─── Reconciliation-file keys (monthly closing review #2) ────────────────────
 // Derived keys like summary/attendees — no column on receipt_exports. Old
 // sealed revisions predate these artifacts and simply 404 from R2.
 
-export function buildAmexReconciliationKey(month: string, exportId: string): string {
-  return `exports/${month}/${exportId}-amex-reconciliation.csv`;
+export function buildAmexReconciliationKey(month: string, exportId: string, buildId: string | null = null): string {
+  return `${buildArtifactDir(month, exportId, buildId)}/${exportId}-amex-reconciliation.csv`;
 }
 
-export function buildCashReconciliationKey(month: string, exportId: string): string {
-  return `exports/${month}/${exportId}-cash-reconciliation.csv`;
+export function buildCashReconciliationKey(month: string, exportId: string, buildId: string | null = null): string {
+  return `${buildArtifactDir(month, exportId, buildId)}/${exportId}-cash-reconciliation.csv`;
 }
 
-export function buildDigitalReconciliationKey(month: string, exportId: string): string {
-  return `exports/${month}/${exportId}-digital-reconciliation.csv`;
+export function buildDigitalReconciliationKey(month: string, exportId: string, buildId: string | null = null): string {
+  return `${buildArtifactDir(month, exportId, buildId)}/${exportId}-digital-reconciliation.csv`;
 }
 
 export function buildManifestCsv(
@@ -471,8 +487,8 @@ export function buildManifestCsv(
   return lines.join("\n");
 }
 
-export function buildReadmeKey(month: string, exportId: string): string {
-  return `exports/${month}/${exportId}-README.txt`;
+export function buildReadmeKey(month: string, exportId: string, buildId: string | null = null): string {
+  return `${buildArtifactDir(month, exportId, buildId)}/${exportId}-README.txt`;
 }
 
 // ─── Bundle download resolution ───────────────────────────────────────────────
@@ -592,6 +608,9 @@ export function resolveExportDownload(
     archive_r2_key: string | null;
     manifest_r2_key: string | null;
     proofs_r2_key?: string | null;
+    /** Published build namespace (seal boundary 0042). NULL on legacy rows
+     *  selects the old export-ID key paths — sealed objects never move. */
+    bundle_build_id?: string | null;
     /** AMEX payment-due date snapshotted when this revision's bundle was built
      *  (0035). Names the AMEX 照合CSV download so it matches the file sealed
      *  inside this revision's proofs ZIP — independent of the current statement
@@ -618,7 +637,7 @@ export function resolveExportDownload(
       };
     case "summary":
       return {
-        r2Key: buildSummaryKey(month, exportRecord.id),
+        r2Key: buildSummaryKey(month, exportRecord.id, exportRecord.bundle_build_id ?? null),
         contentType: csv,
         filename: `export-${month}-summary.csv`,
       };
@@ -626,13 +645,13 @@ export function resolveExportDownload(
       // Derived key (like summary — no column on receipt_exports). Old sealed
       // revisions predate this artifact and simply 404 from R2.
       return {
-        r2Key: buildAttendeesKey(month, exportRecord.id),
+        r2Key: buildAttendeesKey(month, exportRecord.id, exportRecord.bundle_build_id ?? null),
         contentType: csv,
         filename: `export-${month}-attendees.csv`,
       };
     case "readme":
       return {
-        r2Key: buildReadmeKey(month, exportRecord.id),
+        r2Key: buildReadmeKey(month, exportRecord.id, exportRecord.bundle_build_id ?? null),
         contentType: "text/plain; charset=utf-8",
         filename: `export-${month}-readme.txt`,
       };
@@ -662,19 +681,19 @@ export function resolveExportDownload(
       // so it matches the file inside this revision's ZIP; legacy rows (NULL
       // snapshot, pre-0035) fall back to a stable ASCII name.
       return {
-        r2Key: buildAmexReconciliationKey(month, exportRecord.id),
+        r2Key: buildAmexReconciliationKey(month, exportRecord.id, exportRecord.bundle_build_id ?? null),
         contentType: csv,
         filename: amexReconDownloadName(month, exportRecord.payment_due_date ?? null),
       };
     case "cash":
       return {
-        r2Key: buildCashReconciliationKey(month, exportRecord.id),
+        r2Key: buildCashReconciliationKey(month, exportRecord.id, exportRecord.bundle_build_id ?? null),
         contentType: csv,
         filename: buildPackNames(month, null, false).cashReconciliationCsv,
       };
     case "digital":
       return {
-        r2Key: buildDigitalReconciliationKey(month, exportRecord.id),
+        r2Key: buildDigitalReconciliationKey(month, exportRecord.id, exportRecord.bundle_build_id ?? null),
         contentType: csv,
         filename: buildPackNames(month, null, false).digitalReconciliationCsv,
       };
@@ -705,6 +724,8 @@ export type DownloadExportRecord = {
   archive_r2_key: string | null;
   manifest_r2_key: string | null;
   proofs_r2_key?: string | null;
+  /** Published build namespace (0042); NULL on rows sealed before it. */
+  bundle_build_id?: string | null;
   /** NULL until the draft is rebuilt (recordExportBundle sets it). */
   bundle_built_at?: string | null;
   /** AMEX payment-due date snapshotted at bundle-build (0035); names the AMEX
@@ -772,7 +793,7 @@ export function resolveBundleDownload(opts: {
       if (file === "draft_wr") {
         return {
           ok: true,
-          r2Key: buildProofsKey(month, draftRecord.id),
+          r2Key: buildProofsKey(month, draftRecord.id, draftRecord.bundle_build_id ?? null),
           contentType: "application/zip",
           filename: `${yyyymm}_Draft_WithReceipts.zip`,
           exportId: draftRecord.id,
@@ -781,7 +802,7 @@ export function resolveBundleDownload(opts: {
       }
       return {
         ok: true,
-        r2Key: buildProofsNoReceiptsKey(month, draftRecord.id),
+        r2Key: buildProofsNoReceiptsKey(month, draftRecord.id, draftRecord.bundle_build_id ?? null),
         contentType: "application/zip",
         filename: `${yyyymm}_Draft_NoReceipts.zip`,
         exportId: draftRecord.id,

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { isSealBoundaryConflict } from "@/lib/receipts/month-lock";
 import { requireReceiptsActor } from "@/lib/receipts/auth";
 import {
   parseAmexNetanswer,
@@ -507,6 +508,12 @@ export async function POST(request: Request) {
         newValueJson: JSON.stringify({ statementMonth, sha256, fileSize: file.size }),
       });
     } catch (manifestErr) {
+      // Seal boundary (§F): a manifest write rejected by the 0042 fences (an
+      // active build claim on this artifact's month) must NOT be swallowed
+      // into an "uploaded ✓" — the artifact row exists without its evidence
+      // manifest. Surface it; ordinary transient failures keep the old
+      // log-and-continue behavior.
+      if (isSealBoundaryConflict(manifestErr)) throw manifestErr;
       console.error("[amex/import] file manifest write failed", manifestErr);
     }
 

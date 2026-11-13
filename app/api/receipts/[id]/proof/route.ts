@@ -1,14 +1,13 @@
 import { NextResponse } from "next/server";
 import { requireReceiptsActor } from "@/lib/receipts/auth";
 import { getReceiptRecord } from "@/lib/receipts/db";
-import { createAuditEntry } from "@/lib/receipts/audit";
-import { stringifyJson } from "@/lib/receipts/db-utils";
-import { createReceiptFile, deleteProofCopyForReceipt } from "@/lib/receipts/files";
 import {
   computeSha256Hex,
-  proofCopyR2Key,
-  putProofCopy,
+  proofCopyVersionedKey,
+  putDerivativeImmutable,
 } from "@/lib/receipts/storage";
+import { newUuid, nowIso, stringifyJson } from "@/lib/receipts/db-utils";
+import { isSealBoundaryConflict } from "@/lib/receipts/month-lock";
 import { getReceiptsDb, getReceiptsProcessorKey } from "@/lib/cloudflare-runtime";
 
 type RouteContext = { params: Promise<{ id: string }> };
@@ -89,42 +88,66 @@ export async function POST(request: Request, { params }: RouteContext) {
 
     const sha256 = await computeSha256Hex(bytes);
     const sizeBytes = bytes.byteLength;
-    const r2Key = proofCopyR2Key(id, ext);
+    // Seal boundary §D: every derivative write goes to a UNIQUE versioned key
+    // with IMMUTABLE bytes — the old stable-key overwrite could clobber an
+    // object still referenced by a sealed manifest's receipt_files row.
+    const r2Key = proofCopyVersionedKey(id, ext, newUuid());
     const db = getReceiptsDb();
+    const now = nowIso();
 
-    // Upsert: clear any prior proof_copy row (r2_key UNIQUE), overwrite the R2
-    // object, then insert the fresh row. R2 + D1 are not in one transaction —
-    // if the insert fails after the put, the orphaned object is harmless (a
-    // later retry overwrites it at the same stable key).
-    await deleteProofCopyForReceipt(db, id);
-    await putProofCopy(r2Key, bytes, contentType);
-    await createReceiptFile(db, {
-      objectType: "receipt",
-      objectId: id,
-      role: "proof_copy",
-      r2Bucket: "receipts",
-      r2Key,
-      originalFilename: `proof.${ext}`,
-      contentType,
-      fileSizeBytes: sizeBytes,
-      sha256Hash: sha256,
-      uploadedBy: actor,
-      isOriginal: false,
-    });
-
-    await createAuditEntry(db, {
-      actor,
-      action: "receipt.proof_uploaded",
-      objectType: "receipt",
-      objectId: id,
-      newValueJson: stringifyJson({
-        r2Key,
-        sha256,
-        sizeBytes,
-        contentType,
-        via: isProcessor ? "mlx_consumer" : "human",
-      }),
-    });
+    // Upload the immutable object FIRST; then switch the current manifest
+    // atomically. A fence rejection (active build claim on this receipt, DZ_*)
+    // leaves the OLD manifest intact and the new object merely unreferenced —
+    // no bytes of a sealed reference are ever rewritten.
+    await putDerivativeImmutable(r2Key, bytes, contentType);
+    await db.batch([
+      db
+        .prepare(
+          `DELETE FROM receipt_files
+           WHERE object_type = 'receipt' AND object_id = ? AND role = 'proof_copy'`,
+        )
+        .bind(id),
+      db
+        .prepare(
+          `INSERT INTO receipt_files
+            (id, object_type, object_id, role, r2_bucket, r2_key,
+             original_filename, content_type, file_size_bytes, sha256_hash,
+             uploaded_by, uploaded_at, is_original, created_at, updated_at)
+           VALUES (?, 'receipt', ?, 'proof_copy', 'receipts', ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+        )
+        .bind(
+          newUuid(),
+          id,
+          r2Key,
+          `proof.${ext}`,
+          contentType,
+          sizeBytes,
+          sha256,
+          actor,
+          now,
+          now,
+          now,
+        ),
+      db
+        .prepare(
+          `INSERT INTO receipt_audit_log
+            (id, actor, action, object_type, object_id, old_value_json, new_value_json, created_at)
+           VALUES (?, ?, 'receipt.proof_uploaded', 'receipt', ?, NULL, ?, ?)`,
+        )
+        .bind(
+          newUuid(),
+          actor,
+          id,
+          stringifyJson({
+            r2Key,
+            sha256,
+            sizeBytes,
+            contentType,
+            via: isProcessor ? "mlx_consumer" : "human",
+          }),
+          now,
+        ),
+    ]);
 
     return NextResponse.json(
       { ok: true, r2Key, sha256, sizeBytes },
@@ -133,6 +156,12 @@ export async function POST(request: Request, { params }: RouteContext) {
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("Unauthorized")) {
       return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
+    }
+    if (isSealBoundaryConflict(error)) {
+      return NextResponse.json(
+        { error: error instanceof Error ? error.message : "Proof upload conflict." },
+        { status: 409 },
+      );
     }
     console.error("[api/receipts/[id]/proof] POST failed", error);
     return NextResponse.json(

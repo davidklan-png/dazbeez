@@ -39,20 +39,22 @@ function functionBody(src: string, name: string): string {
 
 const DB = stripCommentLines(readFileSync("lib/receipts/db.ts", "utf8"));
 
-test("recordExportBundle (rebuild + finalize) advances bundle_built_at but NOT operator_message_updated_at", () => {
-  const body = functionBody(DB, "recordExportBundle");
-  // A rebuild clears message_stale by advancing bundle_built_at past the save
-  // timestamp — that is the ONLY timestamp it touches.
+test("bundle publication (rebuild + finalize) advances bundle_built_at but NOT operator_message_updated_at", () => {
+  // UPDATED for the seal boundary (0042, 2026-11): recordExportBundle is gone;
+  // bundle_built_at is written by the one-transaction publication helper. Same
+  // doctrine: a rebuild clears message_stale by advancing bundle_built_at past
+  // the save timestamp — that is the ONLY timestamp it touches.
+  const pub = stripCommentLines(readFileSync("lib/receipts/export-publication.ts", "utf8"));
   assert.ok(
-    /bundle_built_at\s*=/.test(body),
-    "recordExportBundle advances bundle_built_at (this is what clears message_stale on rebuild)",
+    /bundle_built_at\s*=/.test(pub),
+    "publication advances bundle_built_at (this is what clears message_stale on rebuild)",
   );
   // …and it must NOT write the decision timestamp. The old lockstep wrote both
   // to now; that forged a decision at rebuild and is why NULL could not be
   // trusted as "never decided."
   assert.ok(
-    !/operator_message_updated_at\s*=/.test(body),
-    "recordExportBundle must NOT write operator_message_updated_at — a rebuild/finalize forging a decision would destroy the NULL signal message_not_reviewed depends on",
+    !/operator_message_updated_at\s*=/.test(pub),
+    "publication must NOT write operator_message_updated_at — a rebuild/finalize forging a decision would destroy the NULL signal message_not_reviewed depends on",
   );
 });
 
@@ -61,7 +63,12 @@ test("updateExportOperatorMessage is the SOLE writer of operator_message_updated
     /operator_message_updated_at\s*=/.test(functionBody(DB, "updateExportOperatorMessage")),
     "updateExportOperatorMessage must write the decision timestamp (save / 'no message')",
   );
-  // And nothing outside db.ts writes it.
+  // And the writer SET is exactly the two explicit-decision paths. UPDATED for
+  // the seal boundary (0042, 2026-11): db.ts updateExportOperatorMessage (the
+  // PATCH /message route) and month-lock.ts acquireSealClaim — the one-shot
+  // finalize decision rides the claim-acquisition UPDATE (same semantics: an
+  // explicit operator decision, value + timestamp, written atomically with the
+  // lease). Publication (export-publication.ts) deliberately never writes it.
   const writers = execFileSync(
     "grep",
     ["-rlE", "operator_message_updated_at\\s*=", "lib/", "app/"],
@@ -69,11 +76,12 @@ test("updateExportOperatorMessage is the SOLE writer of operator_message_updated
   )
     .trim()
     .split("\n")
-    .filter(Boolean);
+    .filter(Boolean)
+    .sort();
   assert.deepEqual(
     writers,
-    ["lib/receipts/db.ts"],
-    "operator_message_updated_at may be written only in db.ts (by updateExportOperatorMessage)",
+    ["lib/receipts/db.ts", "lib/receipts/month-lock.ts"],
+    "operator_message_updated_at may be written only by the two explicit-decision paths: updateExportOperatorMessage and the finalize claim acquisition",
   );
 });
 

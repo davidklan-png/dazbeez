@@ -149,28 +149,34 @@ export async function updateComplianceSettings(
   const db = getReceiptsDb();
   const now = nowIso();
   const entries = Object.entries(updates).filter(([, v]) => v !== undefined);
-  for (const [key, value] of entries) {
-    // Arrays (homebase_signals) serialize as JSON; booleans as true/false;
-    // everything else via String(). The previous `String(value)` would have
-    // stored an array as a comma-joined string, corrupting the round-trip.
-    const stringValue =
-      typeof value === "boolean"
-        ? value
-          ? "true"
-          : "false"
-        : Array.isArray(value)
-          ? JSON.stringify(value)
-          : String(value);
-    await db
-      .prepare(
-        `INSERT INTO receipt_settings (key, value, updated_at, updated_by)
-         VALUES (?, ?, ?, ?)
-         ON CONFLICT (key) DO UPDATE SET value = excluded.value,
-           updated_at = excluded.updated_at, updated_by = excluded.updated_by`,
-      )
-      .bind(key, stringValue, now, actor)
-      .run();
-  }
+  if (entries.length === 0) return getComplianceSettings();
+  // One db.batch (single transaction) for the whole multi-key save (seal
+  // boundary §B): a save must not commit HALF its keys — a build claim could
+  // otherwise be acquired against a partially committed config, and the 0042
+  // settings fence would reject the second half after the first committed.
+  await db.batch(
+    entries.map(([key, value]) => {
+      // Arrays (homebase_signals) serialize as JSON; booleans as true/false;
+      // everything else via String(). The previous `String(value)` would have
+      // stored an array as a comma-joined string, corrupting the round-trip.
+      const stringValue =
+        typeof value === "boolean"
+          ? value
+            ? "true"
+            : "false"
+          : Array.isArray(value)
+            ? JSON.stringify(value)
+            : String(value);
+      return db
+        .prepare(
+          `INSERT INTO receipt_settings (key, value, updated_at, updated_by)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT (key) DO UPDATE SET value = excluded.value,
+             updated_at = excluded.updated_at, updated_by = excluded.updated_by`,
+        )
+        .bind(key, stringValue, now, actor);
+    }),
+  );
   return getComplianceSettings();
 }
 

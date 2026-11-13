@@ -58,20 +58,22 @@ test("export-finalize-staleness: one-shot finalizeExport is passed in-memory key
   const raw = readFileSync(ROUTE_PATH, "utf8");
   const src = stripComments(raw);
 
-  // getExport(month) is the only export-row read on the path; it must exist
-  // (revision metadata + stored operator_message), and it must NOT feed sealed
-  // bundle identity into finalizeExport.
-  assert.ok(/getExport\(month\)/.test(src), "the one-shot path reads revision metadata via getExport(month)");
+  // UPDATED for the seal boundary (0042, 2026-11): finalizeExport is gone; the
+  // one-shot path publishes via publishExportBundle. The export-row read is
+  // getExportById(exportId) — the EXACT acquired draft — supplying revision
+  // metadata + stored operator_message only; it must NOT feed sealed bundle
+  // identity into the publication.
+  assert.ok(/getExportById\(exportId\)/.test(src), "the one-shot path reads revision metadata via getExportById(exportId)");
 
-  const args = stripComments(extractCallArgs(src, "finalizeExport"));
+  const args = stripComments(extractCallArgs(src, "publishExportBundle"));
   assert.ok(
     !/exportRecord/.test(args),
-    "finalizeExport must seal in-memory values computed this request — never values read back from the export row (that is the staleness gap)",
+    "publishExportBundle must seal in-memory values computed this request — never values read back from the export row (that is the staleness gap)",
   );
   // Positive anchor: the freshly-built locals are what get sealed.
   assert.ok(
-    /archiveKey/.test(args) && /sha256/.test(args),
-    "finalizeExport seals the freshly-built archiveKey + archive sha256 locals",
+    /archiveKey/.test(args) && /archiveSha256: sha256/.test(args),
+    "publishExportBundle seals the freshly-built archiveKey + archive sha256 locals",
   );
 });
 

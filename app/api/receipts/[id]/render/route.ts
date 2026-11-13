@@ -1,17 +1,13 @@
 import { NextResponse } from "next/server";
 import { requireReceiptsActor } from "@/lib/receipts/auth";
 import { getReceiptRecord } from "@/lib/receipts/db";
-import { createAuditEntry } from "@/lib/receipts/audit";
-import { nowIso, stringifyJson } from "@/lib/receipts/db-utils";
-import {
-  createReceiptFile,
-  deleteProcessedForReceipt,
-} from "@/lib/receipts/files";
 import {
   computeSha256Hex,
-  renderedR2Key,
-  putRenderedDerivative,
+  renderedVersionedKey,
+  putDerivativeImmutable,
 } from "@/lib/receipts/storage";
+import { newUuid, nowIso, stringifyJson } from "@/lib/receipts/db-utils";
+import { isSealBoundaryConflict } from "@/lib/receipts/month-lock";
 import { enqueueExtractionJob, buildExtractionJob } from "@/lib/receipts/queue";
 import { getReceiptsDb, getReceiptsProcessorKey } from "@/lib/cloudflare-runtime";
 
@@ -93,62 +89,114 @@ export async function POST(request: Request, { params }: RouteContext) {
 
     const sha256 = await computeSha256Hex(bytes);
     const sizeBytes = bytes.byteLength;
-    const r2Key = renderedR2Key(id, ext);
+    // Seal boundary §D: unique versioned key, immutable bytes, atomic manifest
+    // switch. The old stable-key overwrite could clobber an object still
+    // referenced by a sealed manifest.
+    const r2Key = renderedVersionedKey(id, ext, newUuid());
     const db = getReceiptsDb();
     const now = nowIso();
 
-    // Upsert the derivative (r2_key UNIQUE): clear prior processed row, overwrite
-    // the R2 object, insert the fresh row. R2 + D1 are not in one transaction.
-    await deleteProcessedForReceipt(db, id);
-    await putRenderedDerivative(r2Key, bytes, contentType);
-    await createReceiptFile(db, {
-      objectType: "receipt",
-      objectId: id,
-      role: "processed",
-      r2Bucket: "receipts",
-      r2Key,
-      originalFilename: `rendered.${ext}`,
-      contentType,
-      fileSizeBytes: sizeBytes,
-      sha256Hash: sha256,
-      uploadedBy: actor,
-      isOriginal: false,
-    });
+    // Upload the immutable object first; the manifest switch, receipt pointer
+    // update and audit commit as ONE D1 batch. A fence rejection (active build
+    // claim, DZ_*) leaves the old manifest intact, needs_render untouched, and
+    // the new object unreferenced.
+    await putDerivativeImmutable(r2Key, bytes, contentType);
+    await db.batch([
+      db
+        .prepare(
+          `DELETE FROM receipt_files
+           WHERE object_type = 'receipt' AND object_id = ? AND role = 'processed'`,
+        )
+        .bind(id),
+      db
+        .prepare(
+          `INSERT INTO receipt_files
+            (id, object_type, object_id, role, r2_bucket, r2_key,
+             original_filename, content_type, file_size_bytes, sha256_hash,
+             uploaded_by, uploaded_at, is_original, created_at, updated_at)
+           VALUES (?, 'receipt', ?, 'processed', 'receipts', ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+        )
+        .bind(
+          newUuid(),
+          id,
+          r2Key,
+          `rendered.${ext}`,
+          contentType,
+          sizeBytes,
+          sha256,
+          actor,
+          now,
+          now,
+          now,
+        ),
+      // Record the pointer and clear needs_render. extraction_state lands at
+      // 'captured' (the honest pre-enqueue state); the enqueue runs only after
+      // this batch is ADMITTED — queue work must not exist for a rejected
+      // publication. A successful enqueue advances the state in a follow-up
+      // best-effort write.
+      db
+        .prepare(
+          `UPDATE receipt_records
+             SET extraction_r2_key = ?,
+                 needs_render = 0,
+                 extraction_state = 'captured',
+                 extraction_enqueued_at = NULL,
+                 updated_at = ?
+           WHERE id = ?`,
+        )
+        .bind(r2Key, now, id),
+      db
+        .prepare(
+          `INSERT INTO receipt_audit_log
+            (id, actor, action, object_type, object_id, old_value_json, new_value_json, created_at)
+           VALUES (?, ?, 'receipt.render_uploaded', 'receipt', ?, NULL, ?, ?)`,
+        )
+        .bind(
+          newUuid(),
+          actor,
+          id,
+          stringifyJson({
+            r2Key,
+            sha256,
+            sizeBytes,
+            contentType,
+            via: isProcessor ? "mlx_consumer" : "human",
+          }),
+          now,
+        ),
+    ]);
 
-    // Enqueue for MLX extraction (best-effort, same contract as the upload
-    // routes), then record extraction_r2_key, clear needs_render, and advance
-    // extraction_state. The job's r2Key is the derivative; the consumer fetches
-    // via /file/{id} which serves extraction_r2_key ?? original_r2_key.
-    const enqueued = await enqueueExtractionJob(
-      buildExtractionJob({ receiptId: id, r2Key, contentType, enqueuedAt: now }),
-    );
-    await db
-      .prepare(
-        `UPDATE receipt_records
-           SET extraction_r2_key = ?,
-               needs_render = 0,
-               extraction_state = ?,
-               extraction_enqueued_at = ?,
-               updated_at = ?
-         WHERE id = ?`,
-      )
-      .bind(r2Key, enqueued ? "queued" : "captured", enqueued ? now : null, now, id)
-      .run();
-
-    await createAuditEntry(db, {
-      actor,
-      action: "receipt.render_uploaded",
-      objectType: "receipt",
-      objectId: id,
-      newValueJson: stringifyJson({
-        r2Key,
-        sha256,
-        sizeBytes,
-        contentType,
-        enqueued,
-        via: isProcessor ? "mlx_consumer" : "human",
-      }),
-    });
+    // Publication admitted → best-effort enqueue (same contract as the upload
+    // routes). Failure leaves the receipt at 'captured' (visible as
+    // never-enqueued, recoverable by the ordinary enqueue path).
+    let enqueued = false;
+    try {
+      enqueued = await enqueueExtractionJob(
+        buildExtractionJob({ receiptId: id, r2Key, contentType, enqueuedAt: nowIso() }),
+      );
+    } catch (enqueueErr) {
+      console.error("[api/receipts/[id]/render] extraction enqueue failed", enqueueErr);
+      enqueued = false;
+    }
+    if (enqueued) {
+      try {
+        await db
+          .prepare(
+            `UPDATE receipt_records
+               SET extraction_state = 'queued',
+                   extraction_enqueued_at = ?,
+                   updated_at = ?
+             WHERE id = ?`,
+          )
+          .bind(now, now, id)
+          .run();
+      } catch (stateErr) {
+        // The job is queued; only the state label lagged (e.g. a build claim
+        // fenced this second write). The consumer processes the queued job
+        // regardless; /extract heals the state. Never fail the upload for it.
+        console.error("[api/receipts/[id]/render] post-enqueue state update failed", stateErr);
+      }
+    }
 
     return NextResponse.json(
       { ok: true, r2Key, sha256, sizeBytes, enqueued, extractionState: enqueued ? "queued" : "captured" },
@@ -157,6 +205,12 @@ export async function POST(request: Request, { params }: RouteContext) {
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("Unauthorized")) {
       return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
+    }
+    if (isSealBoundaryConflict(error)) {
+      return NextResponse.json(
+        { error: error instanceof Error ? error.message : "Render upload conflict." },
+        { status: 409 },
+      );
     }
     console.error("[api/receipts/[id]/render] POST failed", error);
     return NextResponse.json(

@@ -107,19 +107,25 @@ test("one-shot message_stale: the gate SKIPS message_stale when bundleRebuiltInR
   );
 });
 
-test("one-shot route: the finalize branch writes the operator message BEFORE validating and builds AFTER (the combo-producing ordering the option exists to defuse)", () => {
+test("one-shot route: the finalize decision (claim acquisition) runs BEFORE validating, and the build/stage runs AFTER acquisition", () => {
+  // UPDATED for the seal boundary (0042, 2026-11): the separate
+  // updateExportOperatorMessage write is gone — the decision value + timestamp
+  // ride the claim-acquisition UPDATE, which still runs BEFORE validate (the
+  // gate reads the fresh decision timestamp). The first build/stage side-effect
+  // is now the archive upload (putText of archiveKey); it must follow
+  // acquisition, and the whole build runs under the claim.
   const route = readFileSync(ROUTE, "utf8");
-  const msgWrite = route.indexOf("updateExportOperatorMessage(");
-  const validate = route.indexOf("validateMonthReadyForExport(");
-  const build = route.indexOf("archiveBundle("); // the first build/stage side-effect
-  assert.ok(msgWrite > -1 && validate > -1 && build > -1, "expected all three call sites present");
+  const acquire = route.indexOf("await acquireSealClaim(db, {");
+  const validate = route.indexOf("await validateMonthReadyForExport(");
+  const build = route.indexOf("await putText(archiveKey"); // the first build/stage side-effect
+  assert.ok(acquire > -1 && validate > -1 && build > -1, "expected all three call sites present");
   assert.ok(
-    msgWrite < validate,
-    "the operator-message write (bumps operator_message_updated_at to now) runs BEFORE validate",
+    acquire < validate,
+    "claim acquisition (which writes the decision timestamp) runs BEFORE validate",
   );
   assert.ok(
-    validate < build,
-    "validate runs BEFORE the build/stage — without the option this would emit message_stale",
+    acquire < build,
+    "the build/stage runs AFTER acquisition — the whole build is under the claim",
   );
 });
 

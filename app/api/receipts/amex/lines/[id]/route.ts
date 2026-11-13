@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { requireReceiptsActor } from "@/lib/receipts/auth";
+import { isSealBoundaryConflict } from "@/lib/receipts/month-lock";
 import { updateAmexLineCategory, replaceAmexLineAttendees } from "@/lib/receipts/db";
 import { parseAmexLinePatch, type AmexLinePatchBody } from "@/lib/receipts/api/amex-line-patch";
 
@@ -34,6 +35,12 @@ export async function PATCH(request: Request, { params }: RouteContext) {
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("Unauthorized")) {
       return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
+    }
+    if (isSealBoundaryConflict(error)) {
+      return NextResponse.json(
+        { error: error instanceof Error ? error.message : "Conflicts with an active build or a sealed month." },
+        { status: 409 },
+      );
     }
     // 409: month's reconciliation is finalized — edits blocked
     if (error instanceof Error && error.message.includes("is finalized")) {
