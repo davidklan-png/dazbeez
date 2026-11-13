@@ -12,9 +12,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { createExport, getExportById } from "@/lib/receipts/db";
-import { publishExportBundle } from "@/lib/receipts/export-publication";
+import { publishExportBundle, PublicationConflictError } from "@/lib/receipts/export-publication";
 import {
   acquireSealClaim,
+  ExportFinalizedError,
   releaseSealClaim,
   SealClaimConflictError,
 } from "@/lib/receipts/month-lock";
@@ -230,7 +231,9 @@ test("A7 expired lease: edits flow, expired attempt cannot publish, successor ca
   // A's publication loses: CAS requires the unexpired lease.
   await assert.rejects(
     publishExportBundle(db, candidate(d1, { buildId: stale })),
-    (err: unknown) => /DZ_|constraint|NOT NULL/i.test((err as Error).message),
+    (err: unknown) =>
+      err instanceof PublicationConflictError ||
+      /DZ_|constraint|NOT NULL/i.test((err as Error).message),
   );
   const afterLoser = d1.db.prepare(`SELECT bundle_build_id, status FROM receipt_exports WHERE id='ex'`).get() as never as { bundle_build_id: string | null; status: string };
   assert.equal(afterLoser?.bundle_build_id ?? null, null, "expired attempt published nothing");
@@ -439,3 +442,102 @@ test("getExportById returns the exact row (never a 'latest' row)", async () => {
   assert.equal(row?.id, "ex1");
   assert.equal(row?.status, "finalized");
 });
+
+// ─── Review round 2: CAS arms, promotion/audit-tail rollback, creation race ──
+
+test("R2 missing/deleted draft CAS: the assertion turns a zero-row CAS into the typed conflict", async () => {
+  const d1 = new SqliteD1();
+  const db = d1.asD1();
+  // No item rows (an FK failure on a ghost parent would fire first and is
+  // itself a correct rollback) — this isolates the CAS arm: the UPDATE
+  // matches nothing and the audit assertion raises through actor NOT NULL.
+  await assert.rejects(
+    publishExportBundle(db, candidate(d1, { exportId: "ghost", buildId: "tok", items: [] })),
+    (err: unknown) => err instanceof PublicationConflictError,
+  );
+  assert.equal((d1.db.prepare(`SELECT COUNT(*) AS n FROM receipt_audit_log`).get() as { n: number }).n, 0);
+  // Deleted draft (real row removed while the attempt was suspended — its
+  // lease expired, an authorized draft deletion ran, then the attempt
+  // resumed): the stale token hits zero rows → typed conflict.
+  seedReceipt(d1, "r1", "2026-01");
+  seedExportDraft(d1, "ex", "2026-01");
+  const tok = await acquireSealClaim(db, { exportId: "ex", finalize: false });
+  await releaseSealClaim(db, "ex", tok);
+  d1.db.prepare(`DELETE FROM receipt_exports WHERE id='ex'`).run();
+  await assert.rejects(
+    publishExportBundle(db, candidate(d1, { buildId: tok, items: [] })),
+    (err: unknown) => err instanceof PublicationConflictError,
+  );
+  assert.equal((d1.db.prepare(`SELECT COUNT(*) AS n FROM receipt_export_items`).get() as { n: number }).n, 0);
+});
+
+test("R2 promotion-tail injection: a failure in the promotion UPDATE or any promotion audit rolls the WHOLE seal back", async () => {
+  for (const match of [
+    /UPDATE receipt_records\s+SET status = 'exported'/,
+    /'receipt\.exported', 'receipt'/,
+  ]) {
+    const d1 = new SqliteD1();
+    seedReceipt(d1, "r1", "2026-01", "reviewed");
+    seedExportDraft(d1, "ex", "2026-01");
+    seedPriorBuild(d1, "ex", "r1");
+    const db = d1.asD1();
+    const tok = await acquireSealClaim(db, { exportId: "ex", finalize: true, operatorMessage: null, decisionAt: "2026-02-01T00:00:00Z" });
+    const beforeRow = d1.db.prepare(`SELECT status, bundle_build_id, archive_r2_key, bundle_built_at FROM receipt_exports WHERE id='ex'`).get();
+    const beforeItems = d1.db.prepare(`SELECT item_id FROM receipt_export_items WHERE export_id='ex' ORDER BY item_id`).all();
+    const beforeStatus = d1.db.prepare(`SELECT status FROM receipt_records WHERE id='r1'`).get();
+
+    d1.injectFailure = (sql) => (match.test(sql) ? new Error("injected promotion-tail failure") : null);
+    await assert.rejects(
+      publishExportBundle(
+        db,
+        candidate(d1, {
+          buildId: tok,
+          finalize: true,
+          items: [{ itemType: "receipt", itemId: "r1" }],
+          promotableReceiptIds: ["r1"],
+        }),
+      ),
+      /injected promotion-tail failure/,
+    );
+    d1.injectFailure = null;
+
+    assert.deepEqual(
+      d1.db.prepare(`SELECT status, bundle_build_id, archive_r2_key, bundle_built_at FROM receipt_exports WHERE id='ex'`).get(),
+      beforeRow,
+      `seal/metadata rolled back for ${match}`,
+    );
+    assert.deepEqual(
+      d1.db.prepare(`SELECT item_id FROM receipt_export_items WHERE export_id='ex' ORDER BY item_id`).all(),
+      beforeItems,
+      `items rolled back for ${match}`,
+    );
+    assert.deepEqual(
+      d1.db.prepare(`SELECT status FROM receipt_records WHERE id='r1'`).get(),
+      beforeStatus,
+      `promotion rolled back for ${match}`,
+    );
+    assert.equal(audits(d1, "ex").length, 0, `no export audit survives for ${match}`);
+    assert.equal(audits(d1, "r1").length, 0, `no promotion audit survives for ${match}`);
+  }
+});
+
+test("R2 creation race: a winner that FINALIZED before the loser's re-read yields the friendly typed conflict, not a raw constraint error", async () => {
+  const d1 = new SqliteD1();
+  const db = d1.asD1();
+  // Racer A wins the insert and seals before Racer B's losing re-read runs.
+  const winnerId = await createExport("2026-01", "op-a", db);
+  const tok = await acquireSealClaim(db, { exportId: winnerId, finalize: false });
+  await publishExportBundle(db, candidate(d1, { exportId: winnerId, buildId: tok, finalize: true }));
+  // B's INSERT now collides with the (month, revision) unique index and finds
+  // no draft — only the finalized row.
+  const loserId = await createExport("2026-01", "op-b", db).then(
+    (id) => id,
+    (err: unknown) => {
+      assert.ok(err instanceof ExportFinalizedError, `expected the friendly conflict, got: ${String(err)}`);
+      return null;
+    },
+  );
+  assert.equal(loserId, null);
+  assert.equal((d1.db.prepare(`SELECT COUNT(*) AS n FROM receipt_exports WHERE export_month='2026-01'`).get() as { n: number }).n, 1);
+});
+
