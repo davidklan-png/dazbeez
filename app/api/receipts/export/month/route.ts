@@ -63,6 +63,7 @@ import { getReceiptsDb } from "@/lib/cloudflare-runtime";
 import { getAmexArtifactByMonth } from "@/lib/receipts/db";
 import { getComplianceSettings } from "@/lib/receipts/settings";
 import { loadCompliancePopulation } from "@/lib/receipts/compliance";
+import { loadReceiptFilesMap } from "@/lib/receipts/files";
 import type { AmexReconciliation, ReceiptExport, ReceiptFile } from "@/lib/receipts/types";
 
 export async function POST(request: Request) {
@@ -207,30 +208,10 @@ export async function POST(request: Request) {
       month,
       bundle.receipts.map((r) => r.id),
     );
-    const filesByReceiptId = new Map<string, ReceiptFile[]>();
-    {
-      const mapIds = [...compliancePopulation.keys()];
-      const CHUNK_SIZE = 90;
-      for (let i = 0; i < mapIds.length; i += CHUNK_SIZE) {
-        const chunk = mapIds.slice(i, i + CHUNK_SIZE);
-        const placeholders = chunk.map(() => "?").join(",");
-        const result = await db
-          .prepare(
-            `SELECT * FROM receipt_files
-             WHERE object_type = 'receipt' AND object_id IN (${placeholders})`,
-          )
-          .bind(...chunk)
-          .all<ReceiptFile>();
-        for (const f of result.results ?? []) {
-          let arr = filesByReceiptId.get(f.object_id);
-          if (!arr) {
-            arr = [];
-            filesByReceiptId.set(f.object_id, arr);
-          }
-          arr.push(f);
-        }
-      }
-    }
+    const filesByReceiptId = await loadReceiptFilesMap(
+      db,
+      [...compliancePopulation.keys()],
+    );
 
     if (body.finalize) {
       reconciliation = await getFinalizedReconciliationForMonth(month);

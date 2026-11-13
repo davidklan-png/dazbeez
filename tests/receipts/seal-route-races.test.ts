@@ -50,6 +50,9 @@ class SqliteD1 {
   readonly db: RawDb = mkRawDb();
   /** Async hook before EVERY statement (reads included) — the pause point. */
   onBeforeStatement: ((sql: string) => Promise<void>) | null = null;
+  /** Async hook AFTER a statement executed (its result already captured) —
+   *  used to suspend a caller between its unlocked read and its next step. */
+  onAfterStatement: ((sql: string) => Promise<void>) | null = null;
   /** When set, a statement matching this predicate throws BEFORE running. */
   injectFailure: ((sql: string) => Error | null) | null = null;
   private chain: Promise<unknown> = Promise.resolve();
@@ -62,11 +65,15 @@ class SqliteD1 {
       return {
         first: async <T>(): Promise<T | null> => {
           await this.onBeforeStatement?.(sql);
-          return (this.db.prepare(sql).get(...args) ?? null) as T | null;
+          const row = (this.db.prepare(sql).get(...args) ?? null) as T | null;
+          await this.onAfterStatement?.(sql);
+          return row;
         },
         all: async <T>(): Promise<{ results: T[] }> => {
           await this.onBeforeStatement?.(sql);
-          return { results: this.db.prepare(sql).all(...args) as T[] };
+          const rows = { results: this.db.prepare(sql).all(...args) as T[] };
+          await this.onAfterStatement?.(sql);
+          return rows;
         },
         run: async (): Promise<{ success: true; meta: { changes: number } }> => {
           await this.onBeforeStatement?.(sql);
@@ -635,6 +642,7 @@ guardedTest("R2-A1 writer matrix fenced at EVERY archive-put boundary; unmatched
       ["category", `UPDATE receipt_records SET expense_category_code='travel_transportation' WHERE id='r1'`],
       ["date", `UPDATE receipt_records SET transaction_date='2026-01-11' WHERE id='r1'`],
       ["payment path", `UPDATE receipt_records SET payment_path='DIGITAL' WHERE id='r1'`],
+      ["receipt identity rename", `UPDATE receipt_records SET id='r1-renamed' WHERE id='r1'`],
       ["membership", `UPDATE receipt_records SET export_statement_month='2026-02' WHERE id='r1'`],
       ["extraction_state", `UPDATE receipt_records SET extraction_state='processed' WHERE id='r1'`],
       ["attendee add", `INSERT INTO receipt_attendees (id,receipt_id,attendee_name,created_at) VALUES ('at','r1','x','t')`],
@@ -659,7 +667,7 @@ guardedTest("R2-A1 writer matrix fenced at EVERY archive-put boundary; unmatched
 
 // ─── Acceptance 2: a writer paused AFTER its JS prechecks, resumed post-seal ──
 
-guardedTest("R2-A2 pre-admitted PATCH writer (paused after JS prechecks) is denied by SQL after the seal", async () => {
+guardedTest("R3-A2 pre-admitted PATCH: parked AFTER its unlocked precheck read, mutation SQL attempted and rejected post-seal", async () => {
   freshContext();
   const patchRoute = await import("@/app/api/receipts/[id]/route");
   const patchReq = () =>
@@ -669,35 +677,58 @@ guardedTest("R2-A2 pre-admitted PATCH writer (paused after JS prechecks) is deni
       body: JSON.stringify({ amountMinor: 4242 }),
     });
 
-  // Park the PATCH AFTER its JS prechecks (the isMonthLockedForEdits read is
-  // the last pre-batch statement in updateReceiptRecord's export-lock check)
-  // and BEFORE its mutation batch issues. Holding a READ paused (not a batch)
-  // keeps the shim's serialized write chain free for the seal below.
-  let paused = false;
-  let releasePatch!: () => void;
-  const patchGate = new Promise<void>((r) => (releasePatch = r));
-  ctx.d1.onBeforeStatement = async (sql) => {
+  // Deterministic gates:
+  //  - `unlocked` resolves when the PATCH's LAST precheck read (the export-lock
+  //    SELECT in assertTransactionMonthEditable) has EXECUTED and its result is
+  //    captured — the shim's onAfterStatement fires after the row is read, so
+  //    the PATCH is suspended with its prechecks PASSED and its batch unissued.
+  //  - `updateAttempted` flips when the batch's receipt UPDATE statement is
+  //    issued (onBeforeStatement inside the batch) — proving the mutation SQL
+  //    was attempted, not short-circuited by a JS precheck.
+  let unlockedResolve!: () => void;
+  const unlocked = new Promise<void>((r) => (unlockedResolve = r));
+  let parkResolve!: () => void;
+  const park = new Promise<void>((r) => (parkResolve = r));
+  let precheckReadDone = false;
+  let updateAttempted = false;
+  ctx.d1.onAfterStatement = async (sql) => {
     if (
-      !paused &&
+      !precheckReadDone &&
       /SELECT CASE/i.test(sql) &&
       sql.includes("receipt_exports") &&
       sql.includes("AS locked")
     ) {
-      paused = true;
-      await patchGate;
+      precheckReadDone = true;
+      unlockedResolve();
+      // Hold the PATCH here (result captured, batch not yet issued) while the
+      // seal below completes against the now-unprotected month; resuming is a
+      // deterministic parkResolve() (the shim's first() promise cannot resolve
+      // until this hook returns, so the batch is never issued while parked).
+      await park;
     }
   };
-  const patchInFlight = patchRoute.PATCH(patchReq(), { params: Promise.resolve({ id: "r1" }) });
-  await new Promise((r) => setTimeout(r, 40)); // let the PATCH reach its precheck read
+  ctx.d1.onBeforeStatement = async (sql) => {
+    if (
+      !updateAttempted &&
+      /UPDATE receipt_records SET /.test(sql) &&
+      sql.includes("amount_minor")
+    ) {
+      updateAttempted = true;
+    }
+  };
 
-  // Complete the seal while the PATCH is parked between precheck and SQL.
+  const patchInFlight = patchRoute.PATCH(patchReq(), { params: Promise.resolve({ id: "r1" }) });
+  await unlocked; // prechecks passed, result captured
+
   const sealed = await runRoute({ month: "2026-01", finalize: true, operatorMessage: null });
   assert.equal(sealed.status, 200);
 
-  releasePatch();
+  // Resume the parked PATCH: its batch now runs against the sealed month.
+  parkResolve();
   const patchRes = await patchInFlight;
   ctx.d1.onBeforeStatement = null;
-  assert.equal(patchRes.status, 409, "the resumed writer is denied by SQL authority");
+  assert.equal(patchRes.status, 409, "SQL authority rejects the resumed writer");
+  assert.ok(updateAttempted, "the mutation UPDATE was actually attempted (not stopped by the JS precheck)");
   const amt = (ctx.d1.db.prepare(`SELECT amount_minor FROM receipt_records WHERE id='r1'`).get() as never as { amount_minor: number }).amount_minor;
   assert.equal(amt, 500, "the sealed amount is unchanged");
 });
@@ -786,6 +817,7 @@ guardedTest("R2-B8 plan→acquire→execute race: the claim acquired after plann
       actor: "delete-sealed-export.ts",
       nowIso: new Date().toISOString(),
       auditId: "audit-1",
+      assertId: "assert-1",
       auditValueJson: (plan.ok ? plan.plan.audit.newValueJson : "{}"),
     }),
     (err: unknown) => /DZ_SEAL|constraint|NOT NULL/i.test((err as Error).message),
@@ -806,6 +838,7 @@ guardedTest("R2-B8 plan→acquire→execute race: the claim acquired after plann
     actor: "delete-sealed-export.ts",
     nowIso: new Date().toISOString(),
     auditId: "audit-2",
+    assertId: "assert-2",
     auditValueJson: plan.ok ? plan.plan.audit.newValueJson : "{}",
   });
   assert.equal(executed.exportRowsDeleted, 1);
@@ -842,6 +875,7 @@ guardedTest("R2-B8 a FINALIZED export refuses deletion without the marker (guard
     actor: "delete-sealed-export.ts",
     nowIso: new Date().toISOString(),
     auditId: "audit-3",
+    assertId: "assert-3",
     auditValueJson: "{}",
   });
   assert.equal(executed.exportRowsDeleted, 1);
@@ -1017,5 +1051,371 @@ guardedTest("R2-A11 queue spy: a FENCED render publishes zero queue work; an adm
   assert.equal(queueSends.length, 1, "admitted render enqueued exactly once");
   const okBody = (await ok.json()) as { enqueued: boolean };
   assert.equal(okBody.enqueued, true);
+});
+
+
+// ─── Round 3: F1 identity bypass at the route boundary ───────────────────────
+
+guardedTest("R3-F1 renaming the in-build receipt mid-flight is fenced; the seal cannot publish an item for an absent id", async () => {
+  freshContext();
+  const [reached, release] = ctx.archive.armPauseAt(3);
+  const inFlight = runRoute({ month: "2026-01", finalize: true, operatorMessage: null });
+  await reached;
+  assert.throws(
+    () => ctx.d1.db.prepare(`UPDATE receipt_records SET id='renamed' WHERE id='r1'`).run(),
+    /DZ_SEAL_CLAIM_ACTIVE/,
+    "identity mutation is fenced under the live claim",
+  );
+  release();
+  const res = await inFlight;
+  assert.equal(res.status, 200);
+  // The published item still names the PRESENT receipt, and its promotion
+  // audit names the same id (no false audit for an absent row).
+  const items = ctx.d1.db.prepare(`SELECT item_id FROM receipt_export_items WHERE item_type='receipt'`).all() as never as { item_id: string }[];
+  assert.deepEqual(items.map((i) => i.item_id), ["r1"]);
+  const audits = (ctx.d1.db.prepare(`SELECT object_id FROM receipt_audit_log WHERE action='receipt.exported'`).all() as never as { object_id: string }[]).map((a) => a.object_id);
+  assert.deepEqual(audits, ["r1"]);
+});
+
+guardedTest("R3-F1 renaming a receipt AFTER sealing is fenced; the finalized item keeps a live target", async () => {
+  freshContext();
+  const sealed = await runRoute({ month: "2026-01", finalize: true, operatorMessage: null });
+  assert.equal(sealed.status, 200);
+  assert.throws(
+    () => ctx.d1.db.prepare(`UPDATE receipt_records SET id='renamed' WHERE id='r1'`).run(),
+    /DZ_SEAL_MONTH_LOCKED/,
+    "identity mutation is fenced after publication",
+  );
+});
+
+// ─── Round 3: F7 canonical file-map ordering + created_at fence ──────────────
+
+guardedTest("R3-F7 the shared manifest map preserves canonical original-first/created-at order (reverse insertion)", async () => {
+  freshContext();
+  const { loadReceiptFilesMap } = await import("@/lib/receipts/files");
+  // A SECOND original for r1, inserted later but stamped EARLIER — the map
+  // must pick the earlier created_at first, exactly like listFilesForObject.
+  ctx.d1.db.prepare(
+    `INSERT INTO receipt_files
+       (id,object_type,object_id,role,r2_bucket,r2_key,original_filename,content_type,
+        file_size_bytes,sha256_hash,uploaded_by,uploaded_at,is_original,created_at,updated_at)
+     VALUES ('f0','receipt','r1','original','receipts','receipts/2026/01/r1/orig-old.jpg','orig-old.jpg',
+        'image/jpeg',10,'74f81fe167d99b4cb41d6d0ccda82278caee9f3e2f25d5e5a3936ff3dcec60d0','op','2026-01-02T00:00:00Z',1,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`,
+  ).run();
+  ctx.receipts.objects.set("receipts/2026/01/r1/orig-old.jpg", new Uint8Array([1, 2, 3, 4, 5]));
+  const map = await loadReceiptFilesMap(ctx.d1.asD1(), ["r1"]);
+  const files = map.get("r1")!;
+  assert.equal(files.length, 2);
+  assert.equal(files[0]!.r2_key, "receipts/2026/01/r1/orig-old.jpg", "earlier created_at original comes first");
+  // Proof selection from the map uses the same first-match rule.
+  const chosen = files.find((f) => f.role === "proof_copy") ?? files.find((f) => f.role === "original");
+  assert.equal(chosen!.r2_key, "receipts/2026/01/r1/orig-old.jpg");
+  // And the build uses the same chosen file: the sealed proofs ZIP's evidence
+  // name is derived from the map's first original (same bytes → same hash).
+  const res = await runRoute({ month: "2026-01", finalize: false });
+  assert.equal(res.status, 200);
+  const manifest = ctx.archive.objects.get(
+    (ctx.d1.db.prepare(`SELECT manifest_r2_key FROM receipt_exports WHERE export_month='2026-01'`).get() as never as { manifest_r2_key: string }).manifest_r2_key,
+  );
+  const manifestText = new TextDecoder().decode(manifest!);
+  assert.ok(manifestText.includes("receipts/2026/01/r1/orig-old.jpg"), "the map's first original is the manifest's selected proof");
+});
+
+guardedTest("R3-F7 created_at on receipt_files is fenced under an active claim (ordering input protected)", async () => {
+  freshContext();
+  const db = ctx.d1.asD1();
+  const dbMod = await import("@/lib/receipts/db");
+  const exportId = await dbMod.createExport("2026-01", "op", db);
+  await (await loadLock()).acquireSealClaim(db, { exportId, finalize: false });
+  assert.throws(
+    () => ctx.d1.db.prepare(`UPDATE receipt_files SET created_at='2025-01-01T00:00:00Z' WHERE id='f1'`).run(),
+    /DZ_SEAL_CLAIM_ACTIVE/,
+  );
+});
+
+// ─── Round 3: B9 extraction retryable classification at the actual route ─────
+
+guardedTest("R3-B9 /extract answers a temporary claim conflict 503 + Retry-After (consumer 4xx-terminal safety)", async () => {
+  freshContext();
+  const extractRoute = await import("@/app/api/receipts/[id]/extract/route");
+  // A captured receipt the consumer would legitimately extract.
+  ctx.d1.db.prepare(
+    `INSERT INTO receipt_records
+       (id,captured_at,captured_by,payment_path,transaction_date,status,original_r2_key,
+        original_sha256,original_content_type,original_size_bytes,created_at,updated_at,
+        export_statement_month,extraction_state)
+     VALUES ('r9','2026-01-05T00:00:00Z','op','CASH',NULL,'captured','k9','sh9','image/jpeg',9,'t','t','2026-01','captured')`,
+  ).run();
+  const db = ctx.d1.asD1();
+  const dbMod = await import("@/lib/receipts/db");
+  const exportId = await dbMod.createExport("2026-01", "op", db);
+  await (await loadLock()).acquireSealClaim(db, { exportId, finalize: false });
+  const res = await extractRoute.POST(
+    new Request("http://localhost/api/receipts/r9/extract", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-receipts-processor-key": "test-processor-key" },
+      body: JSON.stringify({ rawText: "テスト商店 2026-01-12 1,000円", model: "mlx_local:test" }),
+    }),
+    { params: Promise.resolve({ id: "r9" }) },
+  );
+  assert.equal(res.status, 503, "temporary claim conflicts are retryable, never 409 (4xx would ack+drop)");
+  assert.equal(res.headers.get("Retry-After"), "60");
+  const body = (await res.json()) as { retryable: boolean };
+  assert.equal(body.retryable, true);
+  // Nothing was applied by the rejected extraction.
+  const row = ctx.d1.db.prepare(`SELECT merchant, amount_minor FROM receipt_records WHERE id='r9'`).get() as never as { merchant: string | null; amount_minor: number | null };
+  assert.equal(row.merchant, null);
+  assert.equal(row.amount_minor, null);
+});
+
+// ─── Round 3: expired-A / resumed-after-B publication race ────────────────────
+
+guardedTest("R3-A7 suspended builder A (lease expired) loses at every put boundary; B's and legacy bytes unchanged, no losing audits/promotions", async () => {
+  const lockMod = await loadLock();
+  const dbMod = await import("@/lib/receipts/db");
+  for (const putsByA of [0, 1, 3]) {
+    freshContext();
+    const db = ctx.d1.asD1();
+    const exportId = await dbMod.createExport("2026-01", "op", db);
+    // Builder A acquires a SHORT lease (the real claim primitive; the route's
+    // own 600s lease cannot be fast-forwarded) and stages `putsByA` objects
+    // into its private namespace — the suspended-mid-build state.
+    const tokenA = await lockMod.acquireSealClaim(db, { exportId, finalize: false, leaseSeconds: 1 });
+    for (let i = 0; i < putsByA; i += 1) {
+      await ctx.archive.put(
+        `exports/2026-01/${exportId}/${tokenA}/staged-${i}.csv`,
+        new TextEncoder().encode(`A-object-${i}`),
+        { onlyIf: { etagDoesNotMatch: "*" } },
+      );
+    }
+    await new Promise((r) => setTimeout(r, 1100)); // A's lease expires
+
+    // Builder B (the actual route) acquires over the expired lease and seals.
+    const before = new Map(ctx.archive.objects);
+    const sealed = await runRoute({ month: "2026-01", finalize: true, operatorMessage: null });
+    assert.equal(sealed.status, 200, `putsByA=${putsByA}: B seals`);
+    const afterB = new Map(ctx.archive.objects);
+
+    // A resumes and attempts to publish its staged bundle.
+    const dbModPub = await import("@/lib/receipts/export-publication");
+    await assert.rejects(
+      dbModPub.publishExportBundle(
+        db,
+        {
+          exportId,
+          month: "2026-01",
+          buildId: tokenA,
+          actor: "builder-a",
+          finalize: false,
+          rowCount: 1,
+          archiveKey: `exports/2026-01/${exportId}/${tokenA}/a.csv`,
+          manifestKey: `exports/2026-01/${exportId}/${tokenA}/m.csv`,
+          archiveSha256: "AA",
+          manifestSha256: "MM",
+          proofsKey: `exports/2026-01/${exportId}/${tokenA}/p.zip`,
+          proofsSha256: "PP",
+          paymentDueDate: null,
+          operatorMessage: null,
+          items: [{ itemType: "receipt", itemId: "r1" }],
+          promotableReceiptIds: ["r1"],
+        },
+      ),
+      // Against B's FINALIZED row the attempt is fenced outright (items guard);
+      // against a still-draft B the pure expired-CAS arm yields the typed
+      // conflict. Both mean A published nothing — asserted by the state checks
+      // below; the draft arm additionally asserts the typed class.
+      (err: unknown) =>
+        err instanceof dbModPub.PublicationConflictError ||
+        /DZ_SEAL_ITEMS_FROZEN/.test((err as Error).message),
+      `putsByA=${putsByA}: the expired attempt cannot publish`,
+    );
+
+    // Byte-for-byte: B's and legacy objects unchanged by A's failed attempt.
+    const afterA = new Map(ctx.archive.objects);
+    assert.deepEqual([...afterA.keys()].sort(), [...afterB.keys()].sort(), `putsByA=${putsByA}: A added/removed no objects`);
+    for (const [k, v] of afterB) {
+      assert.deepEqual(afterA.get(k), v, `putsByA=${putsByA}: ${k} byte-identical`);
+    }
+    // A's staged objects survive unreferenced (bounded cost) but B's set is a
+    // superset of the pre-B state minus nothing.
+    for (const [k, v] of before) assert.deepEqual(afterA.get(k), v, `legacy object ${k} untouched`);
+    // Audits/promotions: exactly B's — no losing audits, single promotion.
+    const exportAudits = (ctx.d1.db.prepare(`SELECT action, new_value_json FROM receipt_audit_log WHERE object_type='export' AND action LIKE 'export.%' ORDER BY rowid`).all() as never as { action: string; new_value_json: string | null }[]).map((a) => a.action);
+    assert.equal(exportAudits.filter((a) => a === "export.finalized").length, 1);
+    assert.equal(exportAudits.filter((a) => a === "export.generated").length, 0);
+    const promoted = (ctx.d1.db.prepare(`SELECT object_id FROM receipt_audit_log WHERE action='receipt.exported'`).all() as never as { object_id: string }[]).map((a) => a.object_id);
+    assert.deepEqual(promoted, ["r1"], `putsByA=${putsByA}: exactly one promotion (B's)`);
+    const row = ctx.d1.db.prepare(`SELECT status, bundle_build_id FROM receipt_exports WHERE id=?`).get(exportId) as never as Record<string, string | null>;
+    assert.equal(row.status, "finalized");
+    assert.notEqual(row.bundle_build_id, tokenA);
+  }
+
+  // The pure expired-CAS arm: B only REBUILDS (row stays draft), so A's
+  // attempt reaches its own CAS and loses with the TYPED conflict.
+  {
+    freshContext();
+    const db = ctx.d1.asD1();
+    const exportId = await dbMod.createExport("2026-01", "op", db);
+    const tokenA = await lockMod.acquireSealClaim(db, { exportId, finalize: false, leaseSeconds: 1 });
+    await ctx.archive.put(`exports/2026-01/${exportId}/${tokenA}/staged.csv`, new TextEncoder().encode("A"), { onlyIf: { etagDoesNotMatch: "*" } });
+    await new Promise((r) => setTimeout(r, 1100));
+    const rebuilt = await runRoute({ month: "2026-01", finalize: false });
+    assert.equal(rebuilt.status, 200);
+    const dbModPub = await import("@/lib/receipts/export-publication");
+    await assert.rejects(
+      dbModPub.publishExportBundle(db, {
+        exportId, month: "2026-01", buildId: tokenA, actor: "builder-a", finalize: false,
+        rowCount: 1, archiveKey: `exports/2026-01/${exportId}/${tokenA}/a.csv`,
+        manifestKey: `exports/2026-01/${exportId}/${tokenA}/m.csv`, archiveSha256: "AA",
+        manifestSha256: "MM", proofsKey: `exports/2026-01/${exportId}/${tokenA}/p.zip`,
+        proofsSha256: "PP", paymentDueDate: null, operatorMessage: null,
+        items: [{ itemType: "receipt", itemId: "r1" }], promotableReceiptIds: [],
+      }),
+      (err: unknown) => err instanceof dbModPub.PublicationConflictError,
+      "draft arm: expired CAS is the typed conflict",
+    );
+    const row = ctx.d1.db.prepare(`SELECT status, bundle_build_id, archive_r2_key FROM receipt_exports WHERE id=?`).get(exportId) as never as Record<string, string | null>;
+    assert.equal(row.status, "draft");
+    assert.notEqual(row.bundle_build_id, tokenA, "B's build identity holds");
+    assert.ok(!row.archive_r2_key!.includes(tokenA), "metadata untouched by A");
+  }
+});
+
+// ─── Round 3: F2/F3 deletion admission revalidation + rollback ───────────────
+
+guardedTest("R3-F2 a delivery that reached the recipient AFTER planning refuses the whole deletion", async () => {
+  freshContext();
+  const { executeExportDeletion } = await import("@/lib/receipts/export-deletion");
+  const db = ctx.d1.asD1();
+  const build = await runRoute({ month: "2026-01", finalize: true, operatorMessage: null });
+  const { exportId } = (await build.json()) as { exportId: string };
+  const row = ctx.d1.db.prepare(`SELECT * FROM receipt_exports WHERE id=?`).get(exportId) as never as Record<string, unknown>;
+  // The plan was legal (no deliveries); a 'sent' delivery lands before execution.
+  ctx.d1.db.prepare(
+    `INSERT INTO export_deliveries (id,export_id,attempt_id,idempotency_key,state,to_address,subject,body,zip_filename,zip_sha256,zip_bytes,created_at)
+     VALUES ('d1',?,'a1','k1','sent','x@y','s','b','z.zip','zh',1,'t')`,
+  ).run(exportId);
+  await assert.rejects(
+    executeExportDeletion(db, {
+      exportId,
+      month: "2026-01",
+      plannedStatus: "finalized",
+      actor: "delete-sealed-export.ts",
+      nowIso: new Date().toISOString(),
+      auditId: "audit-f2",
+      assertId: "assert-f2",
+      auditValueJson: "{}",
+      plannedIdentity: {
+        bundleBuildId: (row.bundle_build_id as string | null) ?? null,
+        archiveKey: (row.archive_r2_key as string | null) ?? null,
+        manifestKey: (row.manifest_r2_key as string | null) ?? null,
+        proofsKey: (row.proofs_r2_key as string | null) ?? null,
+      },
+    }),
+    (err: unknown) => /constraint|NOT NULL|DZ_SEAL/i.test((err as Error).message),
+    "admission fails in-transaction (marker 0 rows → assertion)",
+  );
+  // Everything intact: export, delivery history, items; no stray audits.
+  assert.equal((ctx.d1.db.prepare(`SELECT COUNT(*) AS n FROM receipt_exports WHERE id=?`).get(exportId) as never as { n: number }).n, 1);
+  assert.equal((ctx.d1.db.prepare(`SELECT COUNT(*) AS n FROM export_deliveries WHERE export_id=?`).get(exportId) as never as { n: number }).n, 1);
+  assert.equal((ctx.d1.db.prepare(`SELECT COUNT(*) AS n FROM receipt_export_items WHERE export_id=?`).get(exportId) as never as { n: number }).n, 1);
+  assert.equal((ctx.d1.db.prepare(`SELECT COUNT(*) AS n FROM receipt_audit_log WHERE object_id=? AND action LIKE 'export.deleted%'`).get(exportId) as never as { n: number }).n, 0);
+});
+
+guardedTest("R3-F2 an intervening rebuild (different published build) refuses the planned deletion", async () => {
+  freshContext();
+  const { executeExportDeletion } = await import("@/lib/receipts/export-deletion");
+  const db = ctx.d1.asD1();
+  const build1 = await runRoute({ month: "2026-01", finalize: false });
+  const { exportId } = (await build1.json()) as { exportId: string };
+  const row1 = ctx.d1.db.prepare(`SELECT * FROM receipt_exports WHERE id=?`).get(exportId) as never as Record<string, unknown>;
+  // A completed rebuild substitutes a different bundle before execution.
+  const build2 = await runRoute({ month: "2026-01", finalize: true, operatorMessage: null });
+  assert.equal(build2.status, 200);
+  await assert.rejects(
+    executeExportDeletion(db, {
+      exportId,
+      month: "2026-01",
+      plannedStatus: "draft",
+      actor: "delete-sealed-export.ts",
+      nowIso: new Date().toISOString(),
+      auditId: "audit-f2b",
+      assertId: "assert-f2b",
+      auditValueJson: "{}",
+      plannedIdentity: {
+        bundleBuildId: (row1.bundle_build_id as string | null) ?? null,
+        archiveKey: (row1.archive_r2_key as string | null) ?? null,
+        manifestKey: (row1.manifest_r2_key as string | null) ?? null,
+        proofsKey: (row1.proofs_r2_key as string | null) ?? null,
+      },
+    }),
+    (err: unknown) => /constraint|NOT NULL|DZ_SEAL/i.test((err as Error).message),
+    "stale planned build identity refuses admission",
+  );
+  assert.equal((ctx.d1.db.prepare(`SELECT COUNT(*) AS n FROM receipt_exports WHERE id=?`).get(exportId) as never as { n: number }).n, 1, "the rebuilt export survives");
+});
+
+guardedTest("R3-F3 zero-row admission (draft, wrong planned month) rolls back EVERYTHING — no partial deletion, no stray audit", async () => {
+  freshContext();
+  const { executeExportDeletion } = await import("@/lib/receipts/export-deletion");
+  const db = ctx.d1.asD1();
+  const build = await runRoute({ month: "2026-01", finalize: false });
+  const { exportId } = (await build.json()) as { exportId: string };
+  const before = {
+    exports: (ctx.d1.db.prepare(`SELECT COUNT(*) AS n FROM receipt_exports`).get() as never as { n: number }).n,
+    items: (ctx.d1.db.prepare(`SELECT COUNT(*) AS n FROM receipt_export_items`).get() as never as { n: number }).n,
+    audits: (ctx.d1.db.prepare(`SELECT COUNT(*) AS n FROM receipt_audit_log`).get() as never as { n: number }).n,
+  };
+  await assert.rejects(
+    executeExportDeletion(db, {
+      exportId,
+      month: "2099-12", // never matches → marker inserts 0 rows → assertion
+      plannedStatus: "draft",
+      actor: "x",
+      nowIso: "t",
+      auditId: "audit-f3",
+      assertId: "assert-f3",
+      auditValueJson: "{}",
+    }),
+    (err: unknown) => /constraint|NOT NULL/i.test((err as Error).message),
+  );
+  assert.equal((ctx.d1.db.prepare(`SELECT COUNT(*) AS n FROM receipt_exports`).get() as never as { n: number }).n, before.exports, "draft NOT deleted");
+  assert.equal((ctx.d1.db.prepare(`SELECT COUNT(*) AS n FROM receipt_export_items`).get() as never as { n: number }).n, before.items, "items NOT deleted");
+  assert.equal((ctx.d1.db.prepare(`SELECT COUNT(*) AS n FROM receipt_audit_log`).get() as never as { n: number }).n, before.audits, "no marker, no admission row");
+});
+
+guardedTest("R3-F3 an injected failure at the deliveries/parent tail rolls the marker and admission back with everything else", async () => {
+  freshContext();
+  const { executeExportDeletion } = await import("@/lib/receipts/export-deletion");
+  const db = ctx.d1.asD1();
+  const build = await runRoute({ month: "2026-01", finalize: true, operatorMessage: null });
+  const { exportId } = (await build.json()) as { exportId: string };
+  const row = ctx.d1.db.prepare(`SELECT * FROM receipt_exports WHERE id=?`).get(exportId) as never as Record<string, unknown>;
+  for (const match of [/DELETE FROM export_deliveries/, /DELETE FROM receipt_exports WHERE id/]) {
+    ctx.d1.injectFailure = (sql: string) => (match.test(sql) ? new Error("injected deletion-tail failure") : null);
+    await assert.rejects(
+      executeExportDeletion(db, {
+        exportId,
+        month: "2026-01",
+        plannedStatus: "finalized",
+        actor: "x",
+        nowIso: "t",
+        auditId: `audit-f3b-${match.source}`,
+        assertId: `assert-f3b-${match.source}`,
+        auditValueJson: "{}",
+        plannedIdentity: {
+          bundleBuildId: (row.bundle_build_id as string | null) ?? null,
+          archiveKey: (row.archive_r2_key as string | null) ?? null,
+          manifestKey: (row.manifest_r2_key as string | null) ?? null,
+          proofsKey: (row.proofs_r2_key as string | null) ?? null,
+        },
+      }),
+      /injected deletion-tail failure/,
+    );
+    ctx.d1.injectFailure = null;
+    assert.equal((ctx.d1.db.prepare(`SELECT COUNT(*) AS n FROM receipt_exports WHERE id=?`).get(exportId) as never as { n: number }).n, 1, `export intact for ${match}`);
+    assert.equal((ctx.d1.db.prepare(`SELECT COUNT(*) AS n FROM receipt_export_items WHERE export_id=?`).get(exportId) as never as { n: number }).n, 1, `items intact for ${match}`);
+    assert.equal((ctx.d1.db.prepare(`SELECT COUNT(*) AS n FROM receipt_audit_log WHERE object_id=? AND action LIKE 'export.deleted%'`).get(exportId) as never as { n: number }).n, 0, `no audit rows survive for ${match}`);
+  }
 });
 

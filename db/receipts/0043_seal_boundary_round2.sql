@@ -113,7 +113,8 @@ DROP TRIGGER IF EXISTS seal_lock_reconciliation_update;
 CREATE TRIGGER IF NOT EXISTS seal_claim_receipt_update
 BEFORE UPDATE ON receipt_records
 WHEN (
-     OLD.payment_path IS NOT NEW.payment_path
+     OLD.id IS NOT NEW.id
+  OR OLD.payment_path IS NOT NEW.payment_path
   OR OLD.transaction_date IS NOT NEW.transaction_date
   OR OLD.export_statement_month IS NOT NEW.export_statement_month
   OR OLD.exported_month IS NOT NEW.exported_month
@@ -236,7 +237,8 @@ END;
 CREATE TRIGGER IF NOT EXISTS seal_lock_receipt_update
 BEFORE UPDATE ON receipt_records
 WHEN (
-     OLD.payment_path IS NOT NEW.payment_path
+     OLD.id IS NOT NEW.id
+  OR OLD.payment_path IS NOT NEW.payment_path
   OR OLD.transaction_date IS NOT NEW.transaction_date
   OR OLD.export_statement_month IS NOT NEW.export_statement_month
   OR OLD.exported_month IS NOT NEW.exported_month
@@ -333,7 +335,8 @@ AND NOT (
   -- change, the row leaves a pre-export status, and the receiving export is
   -- FINALIZED with this receipt in its published item set. Evaluated inside
   -- the publication transaction, so the just-written items justify it.
-  NEW.status = 'exported'
+  NEW.id IS OLD.id
+  AND NEW.status = 'exported'
   AND OLD.status IN ('captured','needs_review','reviewed','reconciled')
   AND NEW.payment_path IS OLD.payment_path
   AND NEW.transaction_date IS OLD.transaction_date
@@ -363,6 +366,7 @@ AND NOT (
   -- Permitted archive maintenance: exported -> archived with lifecycle/preservation
   -- fields only, accounting/membership/original values unchanged, no deletion.
   OLD.status='exported' AND NEW.status='archived'
+  AND NEW.id IS OLD.id
   AND NEW.payment_path IS OLD.payment_path
   AND NEW.transaction_date IS OLD.transaction_date
   AND NEW.export_statement_month IS OLD.export_statement_month
@@ -734,7 +738,8 @@ CREATE TRIGGER IF NOT EXISTS seal_claim_directory_update
 BEFORE UPDATE ON attendee_directory
 -- Relevant-change set: identity/company/title edits fence; no-op updates pass.
 WHEN (
-     OLD.name IS NOT NEW.name
+     OLD.id IS NOT NEW.id
+  OR OLD.name IS NOT NEW.name
   OR OLD.company IS NOT NEW.company
   OR OLD.title IS NOT NEW.title
 )
@@ -768,7 +773,8 @@ END;
 CREATE TRIGGER IF NOT EXISTS seal_claim_line_update
 BEFORE UPDATE ON amex_statement_lines
 WHEN (
-     OLD.statement_month IS NOT NEW.statement_month
+     OLD.id IS NOT NEW.id
+  OR OLD.statement_month IS NOT NEW.statement_month
   OR OLD.matched_receipt_id IS NOT NEW.matched_receipt_id
   OR OLD.match_status IS NOT NEW.match_status
   OR OLD.receipt_status IS NOT NEW.receipt_status
@@ -1287,6 +1293,7 @@ WHEN (
   OR OLD.uploaded_by IS NOT NEW.uploaded_by
   OR OLD.uploaded_at IS NOT NEW.uploaded_at
   OR OLD.is_original IS NOT NEW.is_original
+  OR OLD.created_at IS NOT NEW.created_at
 )
 AND (
   EXISTS(
@@ -1606,23 +1613,23 @@ BEGIN
   SELECT RAISE(ABORT, 'DZ_SEAL_ITEMS_FROZEN:receipt_export_items');
 END;
 
--- B5: independent DELETE of a finalized export's item set is refused. The
--- ONLY admitted deletion path is the committed, audited deletion script: it
--- writes the typed `export.deleted` audit INSIDE its D1 transaction BEFORE
--- deleting rows, so the marker's presence authorizes exactly that
--- transaction (a later statement failure rolls the marker back with it). A
--- parent FK cascade outside that path sees the marker absent and refuses
--- here, keeping the retained-evidence item rows with the surviving parent.
+-- B5/F6: independent DELETE of a finalized export's item set is refused —
+-- including behind a committed audit marker. The only admitted removal is
+-- the parent FK cascade of the sanctioned, marker-gated parent deletion;
+-- during that cascade the parent row is already absent, so the trigger's
+-- parent-existence test admits it (see seal_items_delete below).
 CREATE TRIGGER IF NOT EXISTS seal_items_delete
 BEFORE DELETE ON receipt_export_items
+-- F6: a finalized export's item set is retained evidence — never
+-- independently deletable, not even behind a committed export.deleted audit
+-- marker (a marker is durable ordinary data and grants no lasting
+-- permission). The ONLY admitted removal is the parent FK cascade of the
+-- sanctioned, marker-gated parent deletion — and during that cascade SQLite
+-- executes child triggers with the parent row ALREADY ABSENT (verified
+-- empirically under PRAGMA foreign_keys=ON), so parent-EXISTENCE is exactly
+-- the cascade/direct discriminator.
 WHEN EXISTS(SELECT 1 FROM receipt_exports e
             WHERE e.id = OLD.export_id AND e.status='finalized')
- AND NOT EXISTS(
-   SELECT 1 FROM receipt_audit_log a
-   WHERE a.action = 'export.deleted'
-     AND a.object_type = 'export'
-     AND a.object_id IS OLD.export_id
- )
 BEGIN
   SELECT RAISE(ABORT, 'DZ_SEAL_ITEMS_FROZEN:receipt_export_items');
 END;

@@ -51,6 +51,41 @@ export async function createReceiptFile(
   return id;
 }
 
+/**
+ * The export build's ONE file-manifest map (seal boundary §C/F7): receipt
+ * files for the given ids, preserving the canonical selection order
+ * (is_original DESC, created_at ASC) WITHIN each id — the same order
+ * listFilesForObject has always used, so proof selection from the shared map
+ * picks the same original/derivative the ordered helper would.
+ */
+export async function loadReceiptFilesMap(
+  db: D1Database,
+  objectIds: string[],
+): Promise<Map<string, ReceiptFile[]>> {
+  const out = new Map<string, ReceiptFile[]>();
+  for (let i = 0; i < objectIds.length; i += D1_ID_CHUNK_SIZE) {
+    const chunk = objectIds.slice(i, i + D1_ID_CHUNK_SIZE);
+    const placeholders = chunk.map(() => "?").join(",");
+    const result = await db
+      .prepare(
+        `SELECT * FROM receipt_files
+         WHERE object_type = 'receipt' AND object_id IN (${placeholders})
+         ORDER BY object_id, is_original DESC, created_at ASC`,
+      )
+      .bind(...chunk)
+      .all<ReceiptFile>();
+    for (const f of result.results ?? []) {
+      let arr = out.get(f.object_id);
+      if (!arr) {
+        arr = [];
+        out.set(f.object_id, arr);
+      }
+      arr.push(f);
+    }
+  }
+  return out;
+}
+
 export async function listFilesForObject(
   objectType: string,
   objectId: string,

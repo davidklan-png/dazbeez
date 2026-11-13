@@ -507,20 +507,24 @@ test("R2-B4 cross-month finalized confirmed claim is fenced in SQL; same-month s
   );
 });
 
-test("R2-B5 finalized item DELETE refuses without the authorized marker; parent delete keeps items; marker path deletes all", () => {
+test("R3-F6 finalized item DELETE refuses even WITH a committed marker; only the sanctioned parent cascade removes items", () => {
   const db = mk();
   seedExport(db, "e", "2026-06", "draft");
   db.prepare(`INSERT INTO receipt_export_items (id,export_id,item_type,item_id,created_at) VALUES ('i','e','receipt','r','t')`).run();
   db.prepare(`UPDATE receipt_exports SET status='finalized' WHERE id='e'`).run();
-  assert.equal(R(db, `DELETE FROM receipt_export_items WHERE id='i'`), "DZ_SEAL_ITEMS_FROZEN");
+  assert.equal(R(db, `DELETE FROM receipt_export_items WHERE id='i'`), "DZ_SEAL_ITEMS_FROZEN", "unmarked independent delete");
   // Parent delete without the marker: refused BEFORE the FK cascade, items survive.
   assert.equal(R(db, `DELETE FROM receipt_exports WHERE id='e'`), "DZ_SEAL_EXPORT_SEALED");
   assert.equal(db.prepare(`SELECT COUNT(*) AS n FROM receipt_export_items`).get().n, 1);
   assert.equal(db.prepare(`SELECT COUNT(*) AS n FROM receipt_exports`).get().n, 1);
-  // The authorized path writes the marker first — then both delete (cascade verified).
+  // F6: a committed marker does NOT authorize an independent item delete.
   db.prepare(`INSERT INTO receipt_audit_log (id,actor,action,object_type,object_id,created_at) VALUES ('au','op','export.deleted','export','e','t')`).run();
-  assert.equal(R(db, `DELETE FROM receipt_export_items WHERE id='i'`), true);
-  assert.equal(R(db, `DELETE FROM receipt_exports WHERE id='e'`), true);
+  assert.equal(R(db, `DELETE FROM receipt_export_items WHERE id='i'`), "DZ_SEAL_ITEMS_FROZEN", "marked independent delete still refused");
+  // The sanctioned path: marker-gated parent DELETE whose FK cascade removes
+  // the items (child triggers see the parent already absent).
+  assert.equal(R(db, `DELETE FROM receipt_exports WHERE id='e'`), true, "marked parent delete cascades");
+  assert.equal(db.prepare(`SELECT COUNT(*) AS n FROM receipt_export_items`).get().n, 0);
+  assert.equal(db.prepare(`SELECT COUNT(*) AS n FROM receipt_exports`).get().n, 0);
 });
 
 test("R2-B6 artifact selection ordering (created_at) is frozen under a claim", () => {
@@ -594,4 +598,47 @@ test("R2 post-seal full payload/date/key escape matrix on a shipped receipt", ()
     assert.equal(R(db, stmt), "DZ_SEAL_MONTH_LOCKED", stmt);
   }
   assert.equal(R(db, `DELETE FROM receipt_records WHERE id='r6'`), "DZ_SEAL_MONTH_LOCKED");
+});
+
+// ─── Round 3: F1 identity inventory / F7 ordering input ──────────────────────
+
+test("R3-F1 receipt identity (id) is fenced under claim AND after seal; promotion cannot ride an id change", () => {
+  const db = mk();
+  seedReceipt(db, "r6", "2026-06");
+  seedExport(db, "e6", "2026-06", "draft", "tok", 600);
+  assert.equal(R(db, `UPDATE receipt_records SET id='r6b' WHERE id='r6'`), "DZ_SEAL_CLAIM_ACTIVE", "claim-time rename");
+  // Post-seal rename (reviewer's second probe): the finalized item keeps a live target.
+  db.prepare(`INSERT INTO receipt_export_items (id,export_id,item_type,item_id,created_at) VALUES ('i','e6','receipt','r6','t')`).run();
+  db.prepare(`UPDATE receipt_exports SET status='finalized', sealing_token=NULL, sealing_expires_at=NULL WHERE id='e6'`).run();
+  assert.equal(R(db, `UPDATE receipt_records SET id='r6c' WHERE id='r6'`), "DZ_SEAL_MONTH_LOCKED", "post-seal rename");
+  // The promotion exception pins identity: an item-justified export shape
+  // riding an id change is refused.
+  assert.equal(
+    R(db, `UPDATE receipt_records SET id='r6d', status='exported', exported_month='2026-06', updated_at='t2' WHERE id='r6'`),
+    "DZ_SEAL_MONTH_LOCKED",
+    "promotion exception requires NEW.id IS OLD.id",
+  );
+});
+
+test("R3-F1 line identity (id) is fenced under claim; directory id too", () => {
+  const db = mk();
+  seedReceipt(db, "rM", "2026-06", "AMEX", { export_statement_month: null });
+  db.prepare(`INSERT INTO amex_statement_lines (id,statement_month,transaction_date,merchant,amount_minor,currency,match_status,raw_json,created_at) VALUES ('LM','2026-06','2026-06-01','m',1,'JPY','unmatched','{}','t')`).run();
+  seedExport(db, "e6", "2026-06", "draft", "tok", 600);
+  assert.equal(R(db, `UPDATE amex_statement_lines SET id='LM2' WHERE id='LM'`), "DZ_SEAL_CLAIM_ACTIVE", "line rename");
+  assert.equal(
+    R(db, `UPDATE attendee_directory SET id=12345 WHERE id=1`),
+    "DZ_SEAL_CLAIM_ACTIVE",
+    "directory identity rename (global claim fence)",
+  );
+  assert.equal(R(db, `UPDATE attendee_directory SET company=company WHERE id=1`), true, "no-op still passes");
+});
+
+test("R3-F7 receipt_files.created_at (selection ordering input) is fenced under a claim", () => {
+  const db = mk();
+  seedReceipt(db, "r7", "2026-07");
+  db.prepare(`INSERT INTO receipt_files (id,object_type,object_id,role,r2_bucket,r2_key,original_filename,content_type,file_size_bytes,sha256_hash,uploaded_by,uploaded_at,is_original,created_at,updated_at) VALUES ('f7','receipt','r7','original','receipts','kf7','f','image/jpeg',1,'h','u','t',1,'t','t')`).run();
+  seedExport(db, "e7", "2026-07", "draft", "tok", 600);
+  assert.equal(R(db, `UPDATE receipt_files SET created_at='2025-01-01T00:00:00Z' WHERE id='f7'`), "DZ_SEAL_CLAIM_ACTIVE");
+  assert.equal(R(db, `UPDATE receipt_files SET updated_at=updated_at WHERE id='f7'`), true, "no-op passes");
 });

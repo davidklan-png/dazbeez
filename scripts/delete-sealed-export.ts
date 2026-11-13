@@ -122,65 +122,145 @@ if (confirmDelete !== exportId) {
   process.exit(1);
 }
 
-// ─── Execute (B8): D1 transaction FIRST, R2 only after confirmed deletion ───
-// The deletion statements come from the shared, tested builder
-// (lib/receipts/export-deletion.ts buildExportDeletionStatements): the typed
-// export.deleted marker is written INSIDE the transaction, gated on the
-// planned identity and the absence of a live build claim — so a claim
-// acquired after planning aborts the whole transaction (the 0042 guards
-// refuse the sealed rows without the marker) and nothing is deleted. R2
-// objects are removed only after the transaction reports the export row
-// deleted; any uncertain outcome retains them.
+// ─── Execute (B8/F2-F5): D1 transaction FIRST, R2 only after CONFIRMED
+// deletion. The statements come from the shared, tested builder
+// (buildExportDeletionStatements): the export.deleted marker + in-transaction
+// admission assertion (identity, claim-free, delivery-refusal-free, and the
+// planned published build/key identity rechecked at write time), then the
+// deliveries delete and the parent delete whose FK cascade removes the items.
+//
+// TRANSPORT NOTE (F4): wrangler's `d1 execute --json --file` returns a
+// SINGLE AGGREGATE result (human-readable stats row + aggregate meta), not
+// per-statement metadata — it cannot prove which statements committed, and a
+// nonzero exit can even FOLLOW a committed import (lost acknowledgement).
+// Success is therefore CONFIRMED by re-reading D1 afterwards: the exact
+// unique audit-marker id present AND the export row absent. Anything else is
+// reported as refused/unconfirmed with ALL R2 objects retained.
+
+/** One-pass placeholder rendering (F5): substitutes each `?` at its ORIGINAL
+ *  position exactly once, so a legal-hold reason containing `?`, `$&`, `'`,
+ *  or newlines can neither absorb later arguments nor be re-substituted. */
+function renderSql(sql: string, args: unknown[]): string {
+  const parts = sql.split("?");
+  if (parts.length - 1 !== args.length) {
+    throw new Error(
+      `placeholder mismatch: ${parts.length - 1} placeholders vs ${args.length} args`,
+    );
+  }
+  let out = parts[0] ?? "";
+  for (let i = 0; i < args.length; i += 1) {
+    out += esc(args[i] as string | number | null) + (parts[i + 1] ?? "");
+  }
+  return out;
+}
+
 console.log("\n[WRITE] executing deletion transaction...");
-const plannedStatus = String((exportRow as Record<string, unknown>).status ?? "");
+const plannedRow = exportRow as Record<string, unknown>;
+const plannedStatus = String(plannedRow.status ?? "");
+const auditId = globalThis.crypto.randomUUID();
+const assertId = globalThis.crypto.randomUUID();
 const stmts = buildExportDeletionStatements({
   exportId,
   month,
   plannedStatus,
   actor: ACTOR,
   nowIso: new Date().toISOString(),
-  auditId: globalThis.crypto.randomUUID(),
+  auditId,
+  assertId,
   auditValueJson: plan.audit.newValueJson,
+  plannedIdentity: {
+    bundleBuildId: (plannedRow.bundle_build_id as string | null) ?? null,
+    archiveKey: (plannedRow.archive_r2_key as string | null) ?? null,
+    manifestKey: (plannedRow.manifest_r2_key as string | null) ?? null,
+    proofsKey: (plannedRow.proofs_r2_key as string | null) ?? null,
+  },
 });
-const sqlText = stmts
-  .map((st) =>
-    st.args.reduce<string>(
-      (sql, arg) => sql.replace("?", esc(arg as string | number | null)),
-      st.sql,
-    ),
-  )
-  .join(";\n");
+const sqlText = stmts.map((st) => renderSql(st.sql, st.args)).join(";\n");
 const tmpFile = `/tmp/delete-sealed-export-${exportId}.sql`;
 writeFileSync(tmpFile, sqlText + ";\n");
-let markerWritten = false;
-let exportRowsDeleted = 0;
+
+let importError: Error | null = null;
 try {
-  const raw = execFileSync(
+  execFileSync(
     "npx",
     ["wrangler", "d1", "execute", DB, "--remote", "--json", "--file", tmpFile],
     { encoding: "utf8", maxBuffer: 256 * 1024 * 1024 },
   );
-  const parsed = JSON.parse(raw);
-  const results = (Array.isArray(parsed) ? parsed[0] : parsed)?.results ?? [];
-  // wrangler --json reports one entry per statement; the marker is first and
-  // the export DELETE last. A guard abort surfaces as a nonzero exit (caught
-  // below) — nothing is deleted.
-  markerWritten = (results[0]?.meta?.changes ?? 0) === 1;
-  exportRowsDeleted = results[results.length - 1]?.meta?.changes ?? 0;
 } catch (err) {
-  console.error(`  [d1] REFUSED/FAILED: the deletion transaction did not commit (guard refusal or execution error). NOTHING was deleted and NO R2 object was touched.`);
-  console.error(`  detail: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
-  process.exit(2);
-} finally {
-  try { rmSync(tmpFile, { force: true }); } catch { /* best effort */ }
+  // A nonzero exit does NOT prove rollback (the import may have committed
+  // before the error/acknowledgement was lost) — confirmation below decides.
+  importError = err instanceof Error ? err : new Error(String(err));
 }
-if (!markerWritten || exportRowsDeleted !== 1) {
-  console.error(
-    `  [d1] REFUSED: transactional identity/claim check did not confirm the planned deletion (marker=${markerWritten}, exportRowsDeleted=${exportRowsDeleted}). Rows are unchanged and all R2 objects are RETAINED — re-run the dry-run to re-plan.`,
-  );
+try { rmSync(tmpFile, { force: true }); } catch { /* best effort */ }
+
+type ConfirmState =
+  | { kind: "committed" }
+  | { kind: "not-committed" }
+  | { kind: "unreadable"; detail: string };
+
+function confirmByRead(): ConfirmState {
+  try {
+    const markerRaw = execFileSync(
+      "npx",
+      [
+        "wrangler",
+        "d1",
+        "execute",
+        DB,
+        "--remote",
+        "--json",
+        "--command",
+        `SELECT id FROM receipt_audit_log WHERE id = ${esc(auditId)}`,
+      ],
+      { encoding: "utf8", maxBuffer: 256 * 1024 * 1024 },
+    );
+    const rowRaw = execFileSync(
+      "npx",
+      [
+        "wrangler",
+        "d1",
+        "execute",
+        DB,
+        "--remote",
+        "--json",
+        "--command",
+        `SELECT id FROM receipt_exports WHERE id = ${esc(exportId)}`,
+      ],
+      { encoding: "utf8", maxBuffer: 256 * 1024 * 1024 },
+    );
+    const markerRows = ((JSON.parse(markerRaw)[0] ?? JSON.parse(markerRaw))?.results ?? []) as unknown[];
+    const rowRows = ((JSON.parse(rowRaw)[0] ?? JSON.parse(rowRaw))?.results ?? []) as unknown[];
+    const markerPresent = markerRows.length === 1;
+    const exportAbsent = rowRows.length === 0;
+    if (markerPresent && exportAbsent) return { kind: "committed" };
+    return { kind: "not-committed" };
+  } catch (err) {
+    return {
+      kind: "unreadable",
+      detail: err instanceof Error ? err.message.split("\n")[0] : String(err),
+    };
+  }
+}
+
+const confirm = confirmByRead();
+if (confirm.kind === "committed") {
+  if (importError) {
+    console.log("  [d1] import reported an error but the committed deletion is confirmed by re-read (commit-before-error acknowledged).");
+  }
+} else if (confirm.kind === "unreadable") {
+  console.error(`  [d1] UNCONFIRMED: the deletion result could not be verified (${confirm.detail}). NO R2 object was touched — re-run the confirmation read before any retry; do NOT assume either outcome.`);
+  process.exit(2);
+} else if (importError) {
+  console.error(`  [d1] REFUSED/ROLLED BACK: the deletion transaction did not commit (guard refusal or admission assertion). NOTHING was deleted and NO R2 object was touched.`);
+  console.error(`  detail: ${importError.message.split("\n")[0]}`);
+  process.exit(2);
+} else {
+  // Import reported success but the re-read does not show a committed
+  // deletion — treat as unconfirmed, never as "unchanged" without evidence.
+  console.error(`  [d1] UNCONFIRMED: the import returned but the committed state could not be verified by re-read (marker/export state unexpected). NO R2 object was touched — investigate before retrying.`);
   process.exit(2);
 }
-console.log("  [d1] deleted the export row, its deliveries, and its item set in one transaction (export.deleted audited)");
+console.log("  [d1] deletion transaction CONFIRMED by re-read (unique audit marker present, export row absent; items cascaded, deliveries removed, admission audited)");
 
 let removed = 0;
 for (const key of plan.r2Objects) {
@@ -191,5 +271,5 @@ for (const key of plan.r2Objects) {
     console.log(`  [r2] absent (tolerated) ${BUCKET}/${key}`);
   }
 }
-console.log(`  [audit] export.deleted recorded transactionally (removed ${removed} R2 object(s))`);
+console.log(`  [audit] export.deleted + admission recorded transactionally (removed ${removed} R2 object(s))`);
 console.log(`\n[WRITE] done. R2 removed: ${removed}.`);
