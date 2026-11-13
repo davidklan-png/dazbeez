@@ -5,6 +5,7 @@
 // the user click a button and discover the 409 in a toast.
 
 import { getReceiptsDb } from "@/lib/cloudflare-runtime";
+import { newUuid } from "@/lib/receipts/db-utils";
 
 export type MonthLock = {
   /** True when the month is finalized (no further edits allowed). */
@@ -267,4 +268,147 @@ export function receiptInFinalizedReconciliationSql(
     `WHERE asl.matched_receipt_id = ${receiptIdExpr} ` +
     `AND ${monthLockedForEditsSql("ar.statement_month")})`
   );
+}
+
+// ─── Build claim (seal boundary, migration 0042) ─────────────────────────────
+//
+// An ACTIVE build claim is an expiring lease on a receipt_exports DRAFT row:
+// sealing_token (a fresh unpredictable build id per attempt) + sealing_expires_at
+// (unix epoch seconds, D1-clock derived, SEAL_LEASE_SECONDS ahead). While the
+// lease is unexpired, the 0042 triggers fence every protected input to the
+// claimed month. Ownership is TOKEN PLUS UNEXPIRED LEASE, never the token
+// alone: every predicate in SQL ignores expired claims, so expiry needs no
+// write, heals admission automatically, and an expired attempt can never
+// publish (the publication CAS requires the unexpired lease in its WHERE).
+//
+// Ten minutes is a retry limit, not proof the previous Worker died — an
+// expired attempt may keep running, but it cannot publish or clear a
+// successor's lease.
+
+/** Lease duration in seconds. Derived from D1 time inside the acquisition SQL. */
+export const SEAL_LEASE_SECONDS = 600;
+
+/** Typed error for claim contention: an active claim blocks acquisition, or
+ *  the row is not an acquirable draft. Routes surface this as 409. */
+export class SealClaimConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SealClaimConflictError";
+  }
+}
+
+/** Minimal D1 shape the claim helpers need (bindable + first/run). */
+export interface ClaimD1 {
+  prepare(sql: string): {
+    bind(...args: unknown[]): {
+      first<T = unknown>(): Promise<T | null>;
+      run(): Promise<{ success: true; meta: { changes: number } }>;
+    };
+  };
+}
+
+/**
+ * Acquire (or re-acquire over an absent/expired claim) the build lease on a
+ * draft export row, in ONE conditional UPDATE — changes=1 or the attempt never
+ * starts. The lease expiry is derived from D1 time inside the statement.
+ *
+ * On finalize, the request's explicit message decision (value + decision
+ * timestamp) rides this SAME statement, exactly as updateExportOperatorMessage
+ * would write it — so the gate sees a real decision and no separate pre-gate
+ * write exists that a claim fence could reject. On rebuild, the stored
+ * message/decision are left untouched at acquisition; a supplied override is
+ * resolved in memory and published only with successful outputs.
+ *
+ * Returns the fresh token (also the build id / R2 namespace for this attempt).
+ */
+export async function acquireSealClaim(
+  db: ClaimD1,
+  opts: {
+    exportId: string;
+    finalize: boolean;
+    /** Finalize only: the resolved message decision (null = "no message"). */
+    operatorMessage?: string | null;
+    /** Finalize only: decision timestamp (JS nowIso, like the PATCH route). */
+    decisionAt?: string;
+    /** TESTS ONLY: lease duration override. A negative value deterministically
+     *  models an ALREADY-EXPIRED claim (acquisition over an absent prior claim
+     *  is allowed; every predicate then ignores the lease). Production callers
+     *  omit it and get SEAL_LEASE_SECONDS. */
+    leaseSeconds?: number;
+  },
+): Promise<string> {
+  const token = newUuid();
+  const lease = opts.leaseSeconds ?? SEAL_LEASE_SECONDS;
+  const leaseExpireExpr = `CAST(strftime('%s','now') AS INTEGER) + ${lease}`;
+  const reclaimable = `(sealing_token IS NULL OR sealing_expires_at IS NULL OR sealing_expires_at <= CAST(strftime('%s','now') AS INTEGER))`;
+  const result = opts.finalize
+    ? await db
+        .prepare(
+          `UPDATE receipt_exports
+             SET sealing_token = ?,
+                 sealing_expires_at = ${leaseExpireExpr},
+                 operator_message = ?,
+                 operator_message_updated_at = ?
+           WHERE id = ? AND status = 'draft' AND ${reclaimable}`,
+        )
+        .bind(token, opts.operatorMessage ?? null, opts.decisionAt ?? null, opts.exportId)
+        .run()
+    : await db
+        .prepare(
+          `UPDATE receipt_exports
+             SET sealing_token = ?,
+                 sealing_expires_at = ${leaseExpireExpr}
+           WHERE id = ? AND status = 'draft' AND ${reclaimable}`,
+        )
+        .bind(token, opts.exportId)
+        .run();
+  if ((result.meta.changes ?? 0) !== 1) {
+    throw new SealClaimConflictError(
+      `Another build is already in progress for this month (or the draft is no longer acquirable). Retry in a moment.`,
+    );
+  }
+  return token;
+}
+
+/**
+ * Conditionally release an OWNED claim (ID + token), so a loser can never
+ * clear a successor's lease. Never touches a finalized row or another
+ * attempt's claim: the WHERE matches only this exact token on a draft.
+ */
+export async function releaseSealClaim(
+  db: ClaimD1,
+  exportId: string,
+  token: string,
+): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE receipt_exports
+         SET sealing_token = NULL, sealing_expires_at = NULL
+       WHERE id = ? AND sealing_token = ? AND status = 'draft'`,
+    )
+    .bind(exportId, token)
+    .run();
+}
+
+// ─── Friendly conflict mapping (stable ASCII identifiers) ────────────────────
+//
+// The 0042 triggers RAISE stable ASCII identifiers (DZ_SEAL_*); drivers wrap
+// them in vendor-specific text (e.g. "D1_ERROR: DZ_SEAL_CLAIM_ACTIVE:receipt_
+// records: SQLITE_CONSTRAINT…"). Match ONLY the identifier, never a full
+// message, and map every seal-boundary rejection to a 409 conflict response.
+
+const SEAL_BOUNDARY_CODE = /DZ_SEAL_[A-Z_]+/;
+
+/** The stable trigger identifier carried by this error, or null. */
+export function sealBoundaryErrorCode(error: unknown): string | null {
+  if (error instanceof Error) {
+    const m = SEAL_BOUNDARY_CODE.exec(error.message);
+    if (m) return m[0];
+  }
+  return null;
+}
+
+/** True when this error is a seal-boundary trigger rejection (→ 409). */
+export function isSealBoundaryConflict(error: unknown): boolean {
+  return sealBoundaryErrorCode(error) !== null;
 }
