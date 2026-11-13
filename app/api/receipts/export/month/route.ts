@@ -1,15 +1,9 @@
 import { NextResponse } from "next/server";
 import { requireReceiptsActor } from "@/lib/receipts/auth";
-import { createAuditEntry } from "@/lib/receipts/audit";
-import { stringifyJson } from "@/lib/receipts/db-utils";
 import {
   createExport,
-  finalizeExport,
-  getExport,
+  getExportById,
   getFinalizedReconciliationForMonth,
-  recordExportBundle,
-  replaceExportItems,
-  updateExportOperatorMessage,
 } from "@/lib/receipts/db";
 import {
   bomPrefixedCrlf,
@@ -31,7 +25,14 @@ import {
   buildCashReconciliationKey,
   buildDigitalReconciliationKey,
 } from "@/lib/receipts/export";
+import { publishExportBundle } from "@/lib/receipts/export-publication";
 import { resolveOperatorMessageForRebuild, oneShotFinalizeDecision, findGeneratedHeadingInOperatorMessage } from "@/lib/receipts/operator-message";
+import {
+  acquireSealClaim,
+  releaseSealClaim,
+  isSealBoundaryConflict,
+  SealClaimConflictError,
+} from "@/lib/receipts/month-lock";
 import {
   buildEvidenceAssignments,
   buildAmexReconciliationCsv,
@@ -42,7 +43,7 @@ import {
   type AmexLineAppend,
 } from "@/lib/receipts/reconciliation-files";
 import { decodeAmexBuffer } from "@/lib/receipts/validation";
-import { archiveBundle, archiveManifest, getReceiptFile, computeSha256Hex } from "@/lib/receipts/storage";
+import { getReceiptFile, computeSha256Hex, putArchiveImmutable } from "@/lib/receipts/storage";
 import {
   assembleProofsZip,
   verifyProofFileSha256,
@@ -51,19 +52,28 @@ import {
   type ProofPaymentPath,
 } from "@/lib/receipts/proofs";
 import { buildPackNames } from "@/lib/receipts/pack-naming";
-import { listFilesForObject } from "@/lib/receipts/files";
 import { requiresAttendees } from "@/lib/receipts/categories";
 import {
   buildExportBundle,
   validateMonthReadyForExport,
   computeEarlierOpenMonthWarnings,
 } from "@/lib/receipts/month-closing";
-import { getReceiptsDb, getReceiptsArchiveBucket } from "@/lib/cloudflare-runtime";
+import { getReceiptsDb } from "@/lib/cloudflare-runtime";
 import { getAmexArtifactByMonth } from "@/lib/receipts/db";
-import { retentionMetadata } from "@/lib/receipts/retention";
+import { getComplianceSettings } from "@/lib/receipts/settings";
 import type { AmexReconciliation, ReceiptFile } from "@/lib/receipts/types";
 
 export async function POST(request: Request) {
+  // ── Admission (seal boundary §A) ─────────────────────────────────────────
+  // Parse + validate the request AND the explicit one-shot message decision
+  // (incl. structural-heading validation) BEFORE creating a draft or touching
+  // any input. Then resolve/create the canonical draft, acquire the build
+  // claim in ONE conditional UPDATE, and only then build/gate/read. Inputs
+  // committing before the claim are included; protected mutations after it
+  // fail in SQL (migration 0042 triggers) — including writes whose JS
+  // prechecks ran before the claim existed.
+  let claim: { exportId: string; buildId: string } | null = null;
+  let published = false;
   try {
     const actor = await requireReceiptsActor(request.headers);
 
@@ -77,38 +87,13 @@ export async function POST(request: Request) {
       );
     }
 
-    // Build the bundle ONCE — single shared row-assembly authority
-    // (lib/receipts/month-closing.ts buildExportBundle). The route and the
-    // validator both consume the same rows so a draft the operator previews
-    // is bit-identical to the bundle that ships on finalize. Audit A4.
-    const bundle = await buildExportBundle(month);
-
-    if (bundle.rows.length === 0) {
-      return NextResponse.json(
-        { error: `No exportable activity found for ${month}.` },
-        { status: 400 },
-      );
-    }
-
-    // Export blocking validation — single authority is validateMonthReadyForExport
-    // (lib/receipts/month-closing.ts). Do NOT inline a second finalize gate here;
-    // any divergence between this route and /api/receipts/export/[month] reopens
-    // the audit-9 drift where one path could finalize a month the other blocks.
-    //
-    // Fetch the reconciliation ONCE so we can both pass it into the validator
-    // (avoiding its internal round-trip) and use the same row for the manifest
-    // pointer below. Pre-1102-storm profiling showed finalize did two identical
-    // SELECTs against amex_reconciliations; this collapses them to one.
-    let reconciliation: AmexReconciliation | null = null;
+    // §1 (Codex P1 on #169): the one-shot finalize path must not bypass
+    // message_not_reviewed. The caller must state the decision explicitly
+    // (operatorMessage text, or null/"" for "no message this month"). The
+    // decision rides the claim-acquisition statement below — written exactly
+    // as the message PATCH would write it, atomically with the lease.
+    let finalizeDecision: string | null = null;
     if (body.finalize) {
-      reconciliation = await getFinalizedReconciliationForMonth(month);
-      // §1 (Codex P1 on #169): the one-shot finalize path must not bypass
-      // message_not_reviewed. That gate keys on operator_message_updated_at,
-      // which is NULL on a freshly created draft — so the caller must state the
-      // decision explicitly (operatorMessage text, or null/"" for "no message").
-      // Omitted ⇒ 400. The decision is WRITTEN (setting the timestamp, exactly
-      // as the message route would) before validate, below — so the gate sees a
-      // real decision and the one-shot path stays usable, not silently unblockable.
       const decision = oneShotFinalizeDecision(body.operatorMessage);
       if (!decision.ok) {
         return NextResponse.json(
@@ -134,13 +119,106 @@ export async function POST(request: Request) {
           { status: 400 },
         );
       }
+      finalizeDecision = decision.operatorMessage;
+    }
+
+    // Resolve/create the canonical draft (first-create uniqueness contention
+    // is handled inside createExport: the race loser re-reads the winner's
+    // draft). Every subsequent write targets this EXACT id.
+    const db = getReceiptsDb();
+    const exportId = await createExport(month, actor);
+    const exportRecord = await getExportById(exportId);
+    if (!exportRecord || exportRecord.status !== "draft") {
+      return NextResponse.json(
+        { error: `Export for ${month} is not an open draft.` },
+        { status: 409 },
+      );
+    }
+    const exportRevision = exportRecord.export_revision ?? 1;
+    const supersedesExportId = exportRecord.supersedes_export_id ?? null;
+    const correctionReason = exportRecord.correction_reason ?? null;
+
+    // E1/A2: a rebuild that OMITS operatorMessage keeps the stored value; an
+    // explicit empty string CLEARS it. Resolved in memory — published only
+    // with successful outputs, never at acquisition, and never forging a
+    // decision timestamp.
+    const operatorMessage = body.finalize
+      ? finalizeDecision
+      : resolveOperatorMessageForRebuild(
+          body.operatorMessage,
+          exportRecord.operator_message ?? null,
+        );
+
+    // Acquire the build claim (token = this attempt's build id / R2
+    // namespace). One conditional UPDATE: draft + absent/expired prior claim.
+    // The finalize decision (value + timestamp) rides this statement.
+    const decisionAt = new Date().toISOString();
+    const buildId = await acquireSealClaim(db, {
+      exportId,
+      finalize: Boolean(body.finalize),
+      operatorMessage: body.finalize ? operatorMessage : undefined,
+      decisionAt,
+    });
+    claim = { exportId, buildId };
+
+    // ── Build (§C: one protected input snapshot) ────────────────────────────
+    // Build the bundle ONCE — single shared row-assembly authority
+    // (lib/receipts/month-closing.ts buildExportBundle). The route and the
+    // validator both consume the same rows so a draft the operator previews
+    // is bit-identical to the bundle that ships on finalize. Audit A4.
+    const bundle = await buildExportBundle(month);
+
+    if (bundle.rows.length === 0) {
+      return NextResponse.json(
+        { error: `No exportable activity found for ${month}.` },
+        { status: 400 },
+      );
+    }
+
+    // Fetch the reconciliation ONCE so we can both pass it into the validator
+    // and use the same row for the manifest pointer below.
+    let reconciliation: AmexReconciliation | null = null;
+
+    // One settings snapshot for the whole attempt (gate + compliance engine).
+    const settings = await getComplianceSettings();
+
+    if (body.finalize) {
+      reconciliation = await getFinalizedReconciliationForMonth(month);
+      // The full gate: same single authority (validateMonthReadyForExport),
+      // now with the gate's compliance summary computed from the protected
+      // source rows + the one settings snapshot, and the exportBuild read from
+      // the EXACT acquired row (the decision just written in acquisition).
+      // bundleRebuiltInRequest is a property of THIS code path — the one-shot
+      // rebuilds + seals within the same POST, so message_stale (whose remedy
+      // is a rebuild) is inapplicable; every other gate still runs.
+      const blockers = await validateMonthReadyForExport(
+        month,
+        bundle,
+        reconciliation,
+        {
+          bundleRebuiltInRequest: true,
+          preloadedExportBuild: {
+            bundleBuiltAt: exportRecord.bundle_built_at ?? null,
+            operatorMessageUpdatedAt: body.finalize
+              ? decisionAt
+              : exportRecord.operator_message_updated_at ?? null,
+          },
+          preloadedSettings: settings,
+        },
+      );
+      if (blockers.length > 0) {
+        return NextResponse.json(
+          { error: "Export blocked — resolve these issues first.", blockers },
+          { status: 422 },
+        );
+      }
     }
 
     // Generate CSV. The pure form is what tests assert against; the route
     // applies UTF-8 BOM + CRLF (audit A5) before hashing and upload so the
-    // SHA-256 in the manifest matches the bytes in R2 exactly. The
-    // accountant opens this CSV in Excel on Windows — without BOM/CRLF the
-    // Japanese merchant names render as mojibake.
+    // SHA-256 in the manifest matches the bytes in R2 exactly. The accountant
+    // opens this CSV in Excel on Windows — without BOM/CRLF the Japanese
+    // merchant names render as mojibake.
     const csvPure = buildMonthlyExportCsv(
       bundle.rows,
       bundle.attendeeMap,
@@ -179,83 +257,48 @@ export async function POST(request: Request) {
     const attendeesShipped = bomPrefixedCrlf(attendeesPure);
     const attendeesSha256 = await hashCsvContent(attendeesShipped);
 
-    // Create or retrieve export record, then reload to pick up revision
-    // metadata (export_revision / supersedes_export_id / correction_reason).
-    // createExport() returns just the id; the row's revision fields are needed
-    // to label the manifest and README correctly when reusing a draft created
-    // by createExportRevision() — otherwise revision N ships with a README
-    // claiming "Revision: 1 (initial)".
-    const exportId = await createExport(month, actor);
-    const exportRecord = await getExport(month);
-    const exportRevision = exportRecord?.export_revision ?? 1;
-    const supersedesExportId = exportRecord?.supersedes_export_id ?? null;
-    const correctionReason = exportRecord?.correction_reason ?? null;
-    // E1/A2: the operator message must survive a rebuild that OMITS it from the
-    // request body, but an explicit empty string must CLEAR it. The old
-    // `body.operatorMessage ?? stored` collapsed those two (an empty string,
-    // which is present, overwrote the stored value — the same shape as the
-    // 2026-06 loss). Resolve by field PRESENCE via the shared pure helper.
-    // Trim + the 2000-char cap are enforced by the PATCH writer; the rebuild
-    // only carries the resolved value forward verbatim.
-    const operatorMessage = resolveOperatorMessageForRebuild(
-      body.operatorMessage,
-      exportRecord?.operator_message ?? null,
-    );
-
-    // §1 (Codex P1 on #169): on the one-shot finalize path, write the explicit
-    // decision at creation time → sets operator_message_updated_at (the decision
-    // timestamp), exactly as PATCH /message would (a VERIFIED write — throws on
-    // 0 rows). THEN run the full gate: it now sees a real decision, so
-    // message_not_reviewed does not fire. Validating here (after create + the
-    // decision-write, before any R2 upload) means a blocked one-shot returns 422
-    // with no side effects. The rebuild path (finalize:false) is unchanged.
-    // §1 (Codex P1 on #169): on the one-shot finalize path, write the explicit
-    // decision at creation time → sets operator_message_updated_at (the decision
-    // timestamp), exactly as PATCH /message would (a VERIFIED write — throws on
-    // 0 rows). THEN run the full gate: it now sees a real decision, so
-    // message_not_reviewed does not fire. Validating here (after create + the
-    // decision-write, before any R2 upload) means a blocked one-shot returns 422
-    // with no side effects. The rebuild path (finalize:false) is unchanged.
-    if (body.finalize) {
-      await updateExportOperatorMessage(exportId, operatorMessage);
-      // bundleRebuiltInRequest is a property of THIS code path, not a client
-      // preference: the one-shot rebuilds + seals within the same POST (the
-      // build/stage runs below, after this gate), so message_stale — whose remedy
-      // is a rebuild — is inapplicable (the message is re-baked into the bytes
-      // that get sealed). Set here, at the one finalize call site; every other
-      // gate still runs, and the rebuild-only path (finalize:false) does not call
-      // this gate at all.
-      const blockers = await validateMonthReadyForExport(
-        month,
-        bundle,
-        reconciliation,
-        { bundleRebuiltInRequest: true },
-      );
-      if (blockers.length > 0) {
-        return NextResponse.json(
-          { error: "Export blocked — resolve these issues first.", blockers },
-          { status: 422 },
-        );
+    // ── File manifests: read ONCE into an ID map (§C) ───────────────────────
+    // The same selection feeds proof-choice, the finalize gate's compliance
+    // summary (via the source-computed engine), and the manifest's per-file
+    // hash table. Claim-frozen after acquisition.
+    const includedReceiptIds = bundle.receipts.map((r) => r.id);
+    const filesByReceiptId = new Map<string, ReceiptFile[]>();
+    {
+      const CHUNK_SIZE = 90;
+      for (let i = 0; i < includedReceiptIds.length; i += CHUNK_SIZE) {
+        const chunk = includedReceiptIds.slice(i, i + CHUNK_SIZE);
+        const placeholders = chunk.map(() => "?").join(",");
+        const result = await db
+          .prepare(
+            `SELECT * FROM receipt_files
+             WHERE object_type = 'receipt' AND object_id IN (${placeholders})`,
+          )
+          .bind(...chunk)
+          .all<ReceiptFile>();
+        for (const f of result.results ?? []) {
+          let arr = filesByReceiptId.get(f.object_id);
+          if (!arr) {
+            arr = [];
+            filesByReceiptId.set(f.object_id, arr);
+          }
+          arr.push(f);
+        }
       }
     }
 
-    // Record exactly which receipts and AMEX lines ship in this bundle. The
-    // one-draft-per-month invariant means an existing draft's items get
-    // replaced on rebuild — the (export_id, item_type, item_id) UNIQUE on
-    // receipt_export_items makes this idempotent.
-    await replaceExportItems(exportId, bundle.items);
-
-    const archiveKey = buildArchiveKey(month, exportId);
-    const manifestKey = buildManifestKey(month, exportId);
-    const summaryKey = buildSummaryKey(month, exportId);
-    const attendeesKey = buildAttendeesKey(month, exportId);
-
-    // Upload CSV to archive bucket
+    // All artifact keys live in THIS attempt's private build namespace
+    // (§D): exports/<month>/<exportId>/<buildId>/… — conditional no-overwrite
+    // puts, so a losing/expired attempt can never overwrite a winner's bytes.
+    const archiveKey = buildArchiveKey(month, exportId, buildId);
+    const manifestKey = buildManifestKey(month, exportId, buildId);
+    const summaryKey = buildSummaryKey(month, exportId, buildId);
+    const attendeesKey = buildAttendeesKey(month, exportId, buildId);
     const encoder = new TextEncoder();
-    await archiveBundle(
-      archiveKey,
-      encoder.encode(csvShipped).buffer as ArrayBuffer,
-    );
+    const putText = (key: string, text: string, contentType: string) =>
+      putArchiveImmutable(key, encoder.encode(text).buffer as ArrayBuffer, contentType);
+
+    // Upload the receipts CSV to the archive bucket.
+    await putText(archiveKey, csvShipped, "text/csv; charset=utf-8");
 
     // ── Evidence numbering (review #2) ────────────────────────────────────
     // Single numbering authority: one 科目＆No per receipt, assigned per
@@ -263,22 +306,15 @@ export async function POST(request: Request) {
     // receipts, then CASH rows, then DIGITAL rows in bundle order. The
     // assignments feed the AMEX/CASH/DIGITAL reconciliation CSVs AND the
     // proofs ZIP entry names, so the join key cannot drift.
-    //
-    // Pass A resolves each receipt's proof file meta (ext is part of the
-    // evidence filename); bytes are fetched in the proofs loop below.
     const receiptById = new Map(bundle.receipts.map((r) => [r.id, r]));
     const chosenFileByReceiptId = new Map<string, ReceiptFile>();
-    {
-      const seen = new Set<string>();
-      for (const row of bundle.rows) {
-        if (!row.receiptId || seen.has(row.receiptId)) continue;
-        seen.add(row.receiptId);
-        const receiptFiles = await listFilesForObject("receipt", row.receiptId);
-        const chosen =
-          receiptFiles.find((f) => f.role === "proof_copy") ??
-          receiptFiles.find((f) => f.role === "original");
-        if (chosen) chosenFileByReceiptId.set(row.receiptId, chosen);
-      }
+    for (const [receiptId, files] of filesByReceiptId) {
+      const row = bundle.rows.find((r) => r.receiptId === receiptId);
+      if (!row) continue;
+      const chosen =
+        files.find((f) => f.role === "proof_copy") ??
+        files.find((f) => f.role === "original");
+      if (chosen) chosenFileByReceiptId.set(receiptId, chosen);
     }
 
     const amexRowsInStatementOrder = bundle.rows
@@ -461,19 +497,12 @@ export async function POST(request: Request) {
         buildAmexReconciliationCsv(statementText, appends),
       );
     }
-    const amexReconKey = buildAmexReconciliationKey(month, exportId);
+    const amexReconKey = buildAmexReconciliationKey(month, exportId, buildId);
     const amexReconSha256 = amexReconShipped
       ? await hashCsvContent(amexReconShipped)
       : null;
     if (amexReconShipped) {
-      await getReceiptsArchiveBucket().put(
-        amexReconKey,
-        encoder.encode(amexReconShipped).buffer as ArrayBuffer,
-        {
-          httpMetadata: { contentType: "text/csv; charset=utf-8" },
-          customMetadata: retentionMetadata(),
-        },
-      );
+      await putText(amexReconKey, amexReconShipped, "text/csv; charset=utf-8");
     }
 
     const buildPathFile = (path: "CASH" | "DIGITAL") => {
@@ -490,8 +519,8 @@ export async function POST(request: Request) {
     };
     const cashReconShipped = buildPathFile("CASH");
     const digitalReconShipped = buildPathFile("DIGITAL");
-    const cashReconKey = buildCashReconciliationKey(month, exportId);
-    const digitalReconKey = buildDigitalReconciliationKey(month, exportId);
+    const cashReconKey = buildCashReconciliationKey(month, exportId, buildId);
+    const digitalReconKey = buildDigitalReconciliationKey(month, exportId, buildId);
     const cashReconSha256 = cashReconShipped
       ? await hashCsvContent(cashReconShipped)
       : null;
@@ -503,14 +532,7 @@ export async function POST(request: Request) {
       [digitalReconKey, digitalReconShipped],
     ] as const) {
       if (!shipped) continue;
-      await getReceiptsArchiveBucket().put(
-        key,
-        encoder.encode(shipped).buffer as ArrayBuffer,
-        {
-          httpMetadata: { contentType: "text/csv; charset=utf-8" },
-          customMetadata: retentionMetadata(),
-        },
-      );
+      await putText(key, shipped, "text/csv; charset=utf-8");
     }
 
     // ── Proofs ZIP assembly ───────────────────────────────────────────────
@@ -529,7 +551,7 @@ export async function POST(request: Request) {
       operatorMessage: operatorMessage ?? undefined,
     };
 
-    const proofsKey = buildProofsKey(month, exportId);
+    const proofsKey = buildProofsKey(month, exportId, buildId);
     const proofsZipBytes = assembleProofsZip(
       packNames,
       proofsEntries,
@@ -542,10 +564,7 @@ export async function POST(request: Request) {
       },
     );
     const proofsSha256 = await computeSha256Hex(proofsZipBytes);
-    await getReceiptsArchiveBucket().put(proofsKey, proofsZipBytes, {
-      httpMetadata: { contentType: "application/zip" },
-      customMetadata: retentionMetadata(),
-    });
+    await putArchiveImmutable(proofsKey, proofsZipBytes, "application/zip");
 
     // ── NoReceipts draft variant (D) ──────────────────────────────────────
     // The SAME assembleProofsZip call as above with `entries: []` — identical
@@ -553,10 +572,9 @@ export async function POST(request: Request) {
     // entries. Built here at rebuild (where those arguments are in scope) rather
     // than at download time: it guarantees the shared entries (照合CSVs + 集計 +
     // ご連絡) are byte-identical to the WithReceipts pack by construction, and
-    // keeps the download route a thin verbatim R2 proxy. The notice still reads
-    // 証憑ファイル数: <receiptCount> — the counts describe the month, not the
-    // zip you're holding (decision 1). Draft-only; finalize never seals this.
-    const proofsNoReceiptsKey = buildProofsNoReceiptsKey(month, exportId);
+    // keeps the download route a thin verbatim R2 proxy. Draft-only; finalize
+    // never seals this.
+    const proofsNoReceiptsKey = buildProofsNoReceiptsKey(month, exportId, buildId);
     const proofsNoReceiptsBytes = assembleProofsZip(
       packNames,
       [],
@@ -568,34 +586,14 @@ export async function POST(request: Request) {
         digital: digitalReconShipped,
       },
     );
-    await getReceiptsArchiveBucket().put(proofsNoReceiptsKey, proofsNoReceiptsBytes, {
-      httpMetadata: { contentType: "application/zip" },
-      customMetadata: retentionMetadata(),
-    });
+    await putArchiveImmutable(proofsNoReceiptsKey, proofsNoReceiptsBytes, "application/zip");
 
-    // Gather all file-manifest entries for receipts included in this export
-    // plus the AMEX statement artifact. This builds the per-file SHA-256
-    // section of the manifest so an accountant can verify every artifact.
-    const db = getReceiptsDb();
-    const includedReceiptIds = bundle.receipts.map((r) => r.id);
-    const fileRows: ReceiptFile[] = [];
-    if (includedReceiptIds.length > 0) {
-      const CHUNK_SIZE = 90;
-      for (let i = 0; i < includedReceiptIds.length; i += CHUNK_SIZE) {
-        const chunk = includedReceiptIds.slice(i, i + CHUNK_SIZE);
-        const placeholders = chunk.map(() => "?").join(",");
-        const result = await db
-          .prepare(
-            `SELECT * FROM receipt_files
-             WHERE object_type = 'receipt' AND object_id IN (${placeholders})`,
-          )
-          .bind(...chunk)
-          .all<ReceiptFile>();
-        fileRows.push(...(result.results ?? []));
-      }
-    }
-    // Generate and upload manifest (amexArtifact fetched above for the
-    // reconciliation passthrough — same row feeds the manifest pointer here)
+    // Manifest — per-file hash table from the SAME file-manifest map used for
+    // proof selection and the compliance gate (§C). The AMEX artifact row
+    // fetched above for the reconciliation passthrough feeds the pointer here.
+    const fileRows: ReceiptFile[] = includedReceiptIds.flatMap(
+      (id) => filesByReceiptId.get(id) ?? [],
+    );
     const manifest = buildManifestCsv(
       exportId,
       month,
@@ -638,32 +636,17 @@ export async function POST(request: Request) {
         correctionReason,
       },
     );
-    const manifestBytes = encoder.encode(manifest);
     const manifestSha256 = await hashCsvContent(manifest);
-    await archiveManifest(manifestKey, manifestBytes.buffer as ArrayBuffer);
+    await putText(manifestKey, manifest, "text/csv; charset=utf-8");
 
     // Summary CSV (集計) — same bytes embedded in the proofs ZIP. Uploaded as
     // the standalone summary artifact; BOM+CRLF for Excel on Windows.
-    await getReceiptsArchiveBucket().put(
-      summaryKey,
-      encoder.encode(summaryShipped).buffer as ArrayBuffer,
-      {
-        httpMetadata: { contentType: "text/csv; charset=utf-8" },
-        customMetadata: retentionMetadata(),
-      },
-    );
+    await putText(summaryKey, summaryShipped, "text/csv; charset=utf-8");
 
     // Attendees CSV (参加者一覧) — retained internally, no longer embedded in the
-    // proofs ZIP (D9: not delivered). Derived key like summary (no column on
-    // receipt_exports); csv content type + retention metadata, mirroring summary.
-    await getReceiptsArchiveBucket().put(
-      attendeesKey,
-      encoder.encode(attendeesShipped).buffer as ArrayBuffer,
-      {
-        httpMetadata: { contentType: "text/csv; charset=utf-8" },
-        customMetadata: retentionMetadata(),
-      },
-    );
+    // proofs ZIP (D9: not delivered). Derived key like summary; csv content type
+    // + retention metadata, mirroring summary.
+    await putText(attendeesKey, attendeesShipped, "text/csv; charset=utf-8");
 
     // README accompanies every bundle. Disclaimer text + revision context.
     const readme = buildExportReadme({
@@ -683,82 +666,57 @@ export async function POST(request: Request) {
       cashReconciliationSha256: cashReconSha256,
       digitalReconciliationSha256: digitalReconSha256,
     });
-    const readmeKey = buildReadmeKey(month, exportId);
-    await getReceiptsArchiveBucket().put(
-      readmeKey,
-      encoder.encode(readme).buffer as ArrayBuffer,
-      {
-        httpMetadata: { contentType: "text/plain; charset=utf-8" },
-        customMetadata: retentionMetadata(),
-      },
-    );
+    const readmeKey = buildReadmeKey(month, exportId, buildId);
+    await putText(readmeKey, readme, "text/plain; charset=utf-8");
 
-    // Persist the staged bundle, then finalize if requested. On the rebuild
-    // path (finalize=false) recordExportBundle is the only row write — it
-    // stores the R2 keys + SHAs + bundle_built_at so the finalize-only route
-    // (/api/receipts/export/[month]) finds them present and "Last draft built"
-    // advances on every rebuild. On the finalize path finalizeExport calls
-    // recordExportBundle internally, so we do NOT call it here again (that
-    // would double-write the bundle columns).
+    // ── Publication (§E): one D1 batch for items, metadata, seal fields,
+    // audits and (finalize) promotions. The candidate values above were
+    // assembled entirely in memory while objects uploaded; nothing but the
+    // claim touched the export row until now.
+    await publishExportBundle(db, {
+      exportId,
+      month,
+      buildId,
+      actor,
+      finalize: Boolean(body.finalize),
+      rowCount: bundle.rows.length,
+      archiveKey,
+      manifestKey,
+      archiveSha256: sha256,
+      manifestSha256,
+      proofsKey,
+      proofsSha256,
+      paymentDueDate: amexArtifact?.payment_due_date ?? null,
+      operatorMessage,
+      items: bundle.items,
+      // Claim-frozen statuses are the committed ones; only pre-export rows
+      // promote (already-exported/archived rows keep today's behavior).
+      promotableReceiptIds: bundle.receipts
+        .filter((r) =>
+          ["captured", "needs_review", "reviewed", "reconciled"].includes(r.status),
+        )
+        .map((r) => r.id),
+    });
+    published = true;
+
     const finalizeWarnings: string[] = [...reconciliationWarnings];
     if (body.finalize) {
-      await finalizeExport(
-        exportId,
-        archiveKey,
-        manifestKey,
-        sha256,
-        actor,
-        manifestSha256,
-        proofsKey,
-        proofsSha256,
-        // Phase B P1 fix: the one-shot finalize path previously omitted these,
-        // so the required (since this fix) finalizeExport params bound undefined
-        // → recordExportBundle nulled them, overwriting the values the build
-        // captured. Pass the same in-scope values the rebuild path uses so a
-        // month finalized in one shot is deliverable (payment_due_date drives
-        // the preflight date check + pack naming; operator_message drives the
-        // O7 one-message-two-surfaces check #19).
-        amexArtifact?.payment_due_date ?? null,
-        operatorMessage,
-      );
       // A7: non-blocking warning when an earlier statement month is still
       // open. Surfaced in the finalize response so the operator's toast on
-      // "Finalize succeeded" can also say "but March is still open."
-      finalizeWarnings.push(...(await computeEarlierOpenMonthWarnings(month)));
+      // "Finalize succeeded" can also say "but March is still open." Runs
+      // AFTER confirmed publication — a warning failure must not turn a
+      // sealed month into a reported failure.
+      try {
+        finalizeWarnings.push(...(await computeEarlierOpenMonthWarnings(month)));
+      } catch (warnErr) {
+        console.error("[api/receipts/export/month] earlier-month warning failed", warnErr);
+        finalizeWarnings.push(
+          "Finalized, but the earlier-open-month check could not run — reload the export page to review open months.",
+        );
+      }
 
       // Phase B (D1/D2): finalize SEALS — it no longer sends any email.
-      // Delivery is the operator's explicit POST /api/receipts/export/{month}/send
-      // (see lib/receipts/delivery-state.ts + the send route). A freshly
-      // finalized month has delivery_state NULL (never attempted), not
-      // sealed_undelivered; reporting-close waits on a successful delivery.
-    } else {
-      await recordExportBundle(
-        exportId,
-        archiveKey,
-        manifestKey,
-        sha256,
-        manifestSha256,
-        proofsKey,
-        proofsSha256,
-        amexArtifact?.payment_due_date ?? null,
-        operatorMessage,
-      );
-      // Audit the rebuild (finalize:false) — "export.generated" was defined
-      // for this. The finalize:true path is audited by finalizeExport
-      // ("export.finalized"); recordExportBundle runs inside it there, so we
-      // only audit the standalone rebuild here.
-      await createAuditEntry(getReceiptsDb(), {
-        actor,
-        action: "export.generated",
-        objectType: "export",
-        objectId: exportId,
-        newValueJson: stringifyJson({
-          archiveKey,
-          sha256,
-          manifestSha256,
-          rowCount: bundle.rows.length,
-        }),
-      });
+      // Delivery is the operator's explicit POST /api/receipts/export/{month}/send.
     }
 
     return NextResponse.json(
@@ -792,10 +750,63 @@ export async function POST(request: Request) {
     if (error instanceof Error && error.message.startsWith("Unauthorized")) {
       return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
     }
+    // Lost-acknowledgement check (§E): a failure AFTER publication (e.g. an
+    // interrupted success response) or a thrown batch that may still have
+    // committed. Re-read the exact export/build identity — a matching
+    // published build id confirms success; otherwise the failure is real and
+    // an owned, unpublished claim is released (never a successor's, never a
+    // finalized row).
+    if (claim) {
+      try {
+        const db = getReceiptsDb();
+        const row = await getExportById(claim.exportId);
+        if (row?.bundle_build_id === claim.buildId) {
+          return NextResponse.json(
+            {
+              exportId: claim.exportId,
+              buildId: claim.buildId,
+              finalized: row.status === "finalized",
+              outcome: "published",
+              note: "The bundle committed but the response was interrupted — reload the export page to see the published state.",
+            },
+            { status: 200 },
+          );
+        }
+        if (!published) {
+          await releaseSealClaim(db, claim.exportId, claim.buildId);
+        }
+      } catch (recheckErr) {
+        console.error("[api/receipts/export/month] post-failure recheck failed", recheckErr);
+        // Outcome unconfirmed: do NOT delete candidate objects, do NOT assume
+        // rollback — the lease will expire on its own and heal admission.
+      }
+    }
+    if (error instanceof SealClaimConflictError) {
+      return NextResponse.json({ error: error.message }, { status: 409 });
+    }
+    if (isSealBoundaryConflict(error)) {
+      return NextResponse.json(
+        { error: error instanceof Error ? error.message : "Export conflict." },
+        { status: 409 },
+      );
+    }
     console.error("[api/receipts/export/month] failed", error);
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Export failed." },
       { status: 500 },
     );
+  } finally {
+    // Conditional release of an OWNED, unpublished claim (early returns like
+    // the 422 gate, staging errors, interruptions). After a publication the
+    // token is already NULL, so this is a no-op; a loser can never clear a
+    // successor's lease (ID + token), and a finalized row is never touched.
+    // A failure HERE must not mask the original outcome.
+    if (claim && !published) {
+      try {
+        await releaseSealClaim(getReceiptsDb(), claim.exportId, claim.buildId);
+      } catch (releaseErr) {
+        console.error("[api/receipts/export/month] claim release failed", releaseErr);
+      }
+    }
   }
 }

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { requireReceiptsActor } from "@/lib/receipts/auth";
-import { getReceiptRecord, updateReceiptRecord, listAttendees, createAttendees, softDeleteReceipt } from "@/lib/receipts/db";
+import { getReceiptRecord, updateReceiptRecord, listAttendees, softDeleteReceipt } from "@/lib/receipts/db";
 import type { CreateAttendeeInput, ExpenseType, PaymentPath, ReceiptStatus } from "@/lib/receipts/types";
 import {
   validateAmountMinor,
@@ -9,7 +9,6 @@ import {
 } from "@/lib/receipts/validation";
 import { isCanonicalCode } from "@/lib/receipts/categories";
 import { getReceiptsDb } from "@/lib/cloudflare-runtime";
-import { createAuditEntry } from "@/lib/receipts/audit";
 import { loadSealedExportMonths } from "@/lib/receipts/membership";
 import {
   runComplianceChecksForReceipt,
@@ -19,7 +18,7 @@ import { getComplianceSettings } from "@/lib/receipts/settings";
 import {
   validateInvoiceRegistrationNumber,
 } from "@/lib/receipts/invoice";
-import { ExportFinalizedError, isMonthLockedForEdits } from "@/lib/receipts/month-lock";
+import { ExportFinalizedError, isMonthLockedForEdits, isSealBoundaryConflict } from "@/lib/receipts/month-lock";
 import type {
   QualifiedInvoiceStatus,
   SourceType,
@@ -341,31 +340,39 @@ export async function PATCH(request: Request, { params }: RouteContext) {
       taxRate,
       qualifiedInvoiceStatus,
     });
-    await updateReceiptRecord(id, receiptUpdate, actor);
+    // One mutation batch (seal boundary §B): receipt fields, automatic/explicit
+    // membership, the override audit, attendee replacement and every success
+    // audit commit together. A fence rejection (DZ_SEAL_* trigger — an active
+    // build claim or a sealed month) fails the WHOLE PATCH instead of being
+    // swallowed at the membership hook and reported as success.
+    const attendeeInputs: CreateAttendeeInput[] | undefined = Array.isArray(body.attendees)
+      ? body.attendees
+          .filter((name) => typeof name === "string" && name.trim())
+          .map((name) => ({ attendeeName: name.trim().slice(0, 120) }))
+      : undefined;
 
-    // ADR 0006 §D6: dedicated audit for the override (old → new month + actor),
-    // separate from the generic receipt.updated entry updateReceiptRecord writes.
-    if ("exportStatementMonth" in body) {
-      await createAuditEntry(getReceiptsDb(), {
-        actor,
-        action: "receipt.export_statement_month_overridden",
-        objectType: "receipt",
-        objectId: id,
-        oldValueJson: JSON.stringify({
-          export_statement_month: receipt.export_statement_month ?? null,
-        }),
-        newValueJson: JSON.stringify({
-          export_statement_month: exportStatementMonth,
-        }),
-      });
-    }
-
-    if (Array.isArray(body.attendees)) {
-      const attendeeInputs: CreateAttendeeInput[] = body.attendees
-        .filter((name) => typeof name === "string" && name.trim())
-        .map((name) => ({ attendeeName: name.trim().slice(0, 120) }));
-      await createAttendees(id, attendeeInputs, actor);
-    }
+    await updateReceiptRecord(
+      id,
+      receiptUpdate,
+      actor,
+      {
+        attendees: attendeeInputs,
+        // ADR 0006 §D6: dedicated audit for the override (old → new month +
+        // actor), separate from the generic receipt.updated entry.
+        overrideAudit:
+          "exportStatementMonth" in body
+            ? {
+                oldValueJson: JSON.stringify({
+                  export_statement_month: receipt.export_statement_month ?? null,
+                }),
+                newValueJson: JSON.stringify({
+                  export_statement_month: exportStatementMonth,
+                }),
+              }
+            : undefined,
+      },
+      getReceiptsDb(),
+    );
 
     // Re-run compliance checks so the review UI reflects the new state.
     // Audit B4: previously swallowed silently — a stuck failure meant the
@@ -390,6 +397,14 @@ export async function PATCH(request: Request, { params }: RouteContext) {
     }
     if (error instanceof ExportFinalizedError) {
       return NextResponse.json({ error: error.message }, { status: 409 });
+    }
+    if (isSealBoundaryConflict(error)) {
+      // SQL-authority rejection from the 0042 triggers (active build claim on
+      // this month, or a sealed-month edit). The whole PATCH rolled back.
+      return NextResponse.json(
+        { error: error instanceof Error ? error.message : "Save conflict." },
+        { status: 409 },
+      );
     }
     if (error instanceof Error && error.message.includes("finalized reconciliation")) {
       return NextResponse.json({ error: error.message }, { status: 409 });
