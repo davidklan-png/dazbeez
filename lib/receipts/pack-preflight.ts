@@ -131,6 +131,27 @@ function parseAmountCell(cell: string): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
+/** A yen amount cell is an integer. A decimal point with digits on both sides
+ *  ("100.00", "1,705.00") means foreign minor units — or corruption — are
+ *  sitting in a yen CSV: parseAmountCell strips the "." and would bless false
+ *  yen (audit finding 5, 2026-11-09: USD 100.00 summed as ¥10,000 and the
+ *  category check "reconciled"). Returns the offending cell text, else null. */
+function decimalAmountCell(cell: string): string | null {
+  return /\d\.\d/.test(cell) ? cell.trim() : null;
+}
+
+/** Format a decimal-amount-cell failure for a check detail string, naming the
+ *  CSV, the cell, and the row (1-based, as parsed). Single-sourced so the
+ *  AMEX-total boundary (sumReconChargeAmounts → delivery-preflight) and the
+ *  category-reconciliation check report the same shape. */
+export function describeDecimalCellFailure(opts: {
+  label: string;
+  cell: string;
+  rowIndex: number;
+}): string {
+  return `${opts.label} recon CSV: decimal amount cell "${opts.cell}" (row ${opts.rowIndex + 1}) — yen amounts are integers; a foreign-currency row cannot ship in this pack`;
+}
+
 /** Reverse of circledNumber (① → 1 … ㊿ → 50; "(n)" → n). */
 const CIRCLED_REVERSE = new Map<string, number>();
 for (let n = 1; n <= 50; n++) CIRCLED_REVERSE.set(circledNumber(n), n);
@@ -174,15 +195,15 @@ function evidenceByFolder(entries: PackPreflightEntry[]): Map<string, string[]> 
 // Charge rows carry the appended columns (≥ the header's width); total/metadata
 // rows do not, so a width check excludes them. (P2 #2 — the gate must pass a
 // real pack, not just the flat test fixture.)
-function reconChargeRows(rows: string[][]): string[][] {
+function reconChargeRows(rows: string[][]): Array<{ row: string[]; index: number }> {
   const headerIdx = rows.findIndex((r) => r.includes("科目＆No."));
   if (headerIdx === -1) return [];
   const width = rows[headerIdx]!.length;
-  const out: string[][] = [];
+  const out: Array<{ row: string[]; index: number }> = [];
   for (let i = headerIdx + 1; i < rows.length; i++) {
     const row = rows[i]!;
     if (row.length < width) continue; // total / blank / metadata row (narrower)
-    out.push(row);
+    out.push({ row, index: i });
   }
   return out;
 }
@@ -255,7 +276,8 @@ export function describeAmountColumnFailure(opts: {
  *  reconcile" instead of "the parser is broken." On any failure to resolve the
  *  amount column (or the recon header) it returns `ok: false` carrying the actual
  *  header cells + matches so the caller can surface a named, diagnosis-ready
- *  check failure. */
+ *  check failure. Same for a DECIMAL amount cell (audit finding 5): a yen CSV
+ *  never carries one, and summing it as minor units would bless false yen. */
 export type ReconAmountSumResult =
   | { ok: true; total: number }
   | {
@@ -263,7 +285,8 @@ export type ReconAmountSumResult =
       kind: "no-header" | "zero" | "multiple";
       headerCells: string[];
       matches: string[];
-    };
+    }
+  | { ok: false; kind: "decimal-cell"; cell: string; rowIndex: number };
 
 export function sumReconChargeAmounts(csvText: string): ReconAmountSumResult {
   const rows = parseCsvRows(csvText);
@@ -277,8 +300,13 @@ export function sumReconChargeAmounts(csvText: string): ReconAmountSumResult {
     return { ok: false, kind: col.kind, headerCells: header, matches: col.matches };
   }
   let sum = 0;
-  for (const row of reconChargeRows(rows)) {
-    sum += parseAmountCell(row[col.index] ?? "") ?? 0;
+  for (const { row, index } of reconChargeRows(rows)) {
+    const cell = row[col.index] ?? "";
+    const decimal = decimalAmountCell(cell);
+    if (decimal !== null) {
+      return { ok: false, kind: "decimal-cell", cell: decimal, rowIndex: index };
+    }
+    sum += parseAmountCell(cell) ?? 0;
   }
   return { ok: true, total: sum };
 }
@@ -319,7 +347,7 @@ function referencedEvidence(
 ): Set<string> {
   const out = new Set<string>();
   for (const csv of reconCsvs) {
-    for (const row of reconChargeRows(parseCsvRows(csv.text))) {
+    for (const { row } of reconChargeRows(parseCsvRows(csv.text))) {
       if (row.length < 2) continue;
       const cell = row[row.length - 1]!.trim();
       if (!cell || cell.startsWith("領収書なし")) continue;
@@ -675,9 +703,26 @@ const checks: { key: string; run: Check }[] = [
             }),
           };
         }
-        for (const row of reconChargeRows(rows)) {
+        for (const { row, index } of reconChargeRows(rows)) {
           const label = row[kamokuIdx] ?? "";
-          const amount = parseAmountCell(row[col.index] ?? "") ?? 0;
+          const cell = row[col.index] ?? "";
+          // A decimal amount cell is a foreign-currency row in a yen CSV (audit
+          // finding 5): parseAmountCell would strip the "." and the equally-
+          // wrong 集計 total would "reconcile" against it. Fail naming the CSV,
+          // cell, and row — never bless false yen.
+          const decimal = decimalAmountCell(cell);
+          if (decimal !== null) {
+            return {
+              check: "summary-category-reconciles",
+              passed: false,
+              detail: describeDecimalCellFailure({
+                label: csv.label,
+                cell: decimal,
+                rowIndex: index,
+              }),
+            };
+          }
+          const amount = parseAmountCell(cell) ?? 0;
           // Category = label with the MonYYYY+circled suffix removed.
           const m = label.match(/^(.*?)[A-Z][a-z]{2}\d{4}/);
           const cat = m ? m[1]! : label;

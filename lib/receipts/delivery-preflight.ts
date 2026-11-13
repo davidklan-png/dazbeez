@@ -12,6 +12,7 @@ import {
   sumReconChargeAmounts,
   parseSummaryTotals,
   describeAmountColumnFailure,
+  describeDecimalCellFailure,
   type AmexStatementTotal,
   type PackPreflightEntry,
   type PackPreflightInput,
@@ -99,6 +100,18 @@ export async function runPreflightOnSealedZip(opts: {
             return {
               kind: "parse-error",
               detail: `AMEX recon CSV: no 科目＆No. header row found; first row: [${r.headerCells.join(" | ")}]`,
+            };
+          }
+          if (r.kind === "decimal-cell") {
+            // Audit finding 5: a yen AMEX statement never carries a decimal
+            // amount — summing it as minor units would bless false yen.
+            return {
+              kind: "parse-error",
+              detail: describeDecimalCellFailure({
+                label: "AMEX",
+                cell: r.cell,
+                rowIndex: r.rowIndex,
+              }),
             };
           }
           return {

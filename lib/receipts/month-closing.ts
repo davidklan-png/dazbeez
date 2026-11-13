@@ -332,7 +332,8 @@ export interface ExportBlocker {
     | "cross_month"
     | "missing_proof_file"
     | "message_stale"
-    | "message_not_reviewed";
+    | "message_not_reviewed"
+    | "receipt_foreign_currency";
   message: string;
   /** In-app destination that lets the operator clear this blocker. */
   href?: string;
@@ -505,6 +506,24 @@ export function validateMonthReadyForExportCoreDetailed(
         });
       }
     }
+  }
+
+  // (3.5) Foreign-currency receipt rows (audit finding 5, 2026-11-09). The 集計,
+  // recon CSVs and delivery email are yen-denominated; a non-JPY row's
+  // amount_minor is foreign minor units (USD 100.00 → 10000) and would sum as
+  // false yen. AMEX-line rows are exempt: they carry the LINE's JPY amount —
+  // a USD receipt matched via the memo path (0026) ships as evidence on a yen
+  // line and is correct. Case-normalized like reconciliation.ts — stored
+  // currency case is unreliable.
+  for (const row of bundle.rows) {
+    if (row.rowType !== "receipt") continue;
+    const cur = (row.currency ?? "JPY").toUpperCase();
+    if (cur === "JPY") continue;
+    blockers.push({
+      code: "receipt_foreign_currency",
+      message: `Receipt ${row.merchant ?? row.receiptId}: currency is ${cur} — the pack requires JPY amounts; resolve this receipt before finalizing (e.g. hold it out of the month)`,
+      href: row.receiptId ? reviewHref(row.receiptId, month) : undefined,
+    });
   }
 
   // (4) AMEX-line checks. validateAmexLinesForSignoffDetailed tags each
