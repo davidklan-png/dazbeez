@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   amountColumnIndex,
   describeAmountColumnFailure,
+  describeDecimalCellFailure,
   sumReconChargeAmounts,
 } from "@/lib/receipts/pack-preflight";
 import { PAYMENT_PATH_CSV_HEADERS } from "@/lib/receipts/reconciliation-files";
@@ -124,5 +125,28 @@ test("sumReconChargeAmounts: an AMEX CSV whose amount cell is absent → ok:fals
   if (!r.ok) {
     assert.equal(r.kind, "zero");
     assert.ok(r.headerCells.length > 0, "carries the actual header cells for the detail");
+  }
+});
+
+test("sumReconChargeAmounts: a DECIMAL amount cell → ok:false (kind decimal-cell) naming cell and row", () => {
+  // Audit finding 5: a yen AMEX statement never carries a decimal amount —
+  // "100.00" must not be stripped to 10000 false yen.
+  const amex = [
+    "カード名称,カード",
+    "利用日,ご利用店名及び商品名,会員区分,支払区分名称,分割区分,金額,備考,科目＆No.,事業目的,人数,領収書ファイル名",
+    '2026/04/17,小田原みなと食堂,,1回,,6490,,会議費Jun2026①,打ち合わせ,1,"会議費Jun2026①小田原みなと食堂￥6,490.jpg"',
+    "2026/05/02,FOREIGN CO,,1回,,100.00,,会議費Jun2026②,,1,x.jpg",
+  ].join("\r\n");
+  const r = sumReconChargeAmounts(amex);
+  assert.equal(r.ok, false, "a decimal cell must fail loudly, not sum as minor units");
+  if (!r.ok && r.kind === "decimal-cell") {
+    assert.equal(r.cell, "100.00");
+    assert.equal(r.rowIndex, 3, "0-based parsed-row index of the offending charge row");
+    assert.match(
+      describeDecimalCellFailure({ label: "AMEX", cell: r.cell, rowIndex: r.rowIndex }),
+      /AMEX recon CSV: decimal amount cell "100\.00" \(row 4\)/,
+    );
+  } else {
+    assert.fail(`expected kind decimal-cell, got ${JSON.stringify(r)}`);
   }
 });

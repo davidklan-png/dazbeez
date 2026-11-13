@@ -214,6 +214,39 @@ test("summary-payment-path-reconciles: AMEX total ≠ statement total fails", ()
   failsOnly(runPackPreflight(input), "summary-payment-path-reconciles");
 });
 
+// ─── Audit finding 5 (2026-11-09): foreign amounts as false yen ─────────────
+// The CASH/DIGITAL recon CSV writes a foreign row's amount as "100.00"
+// (amountMinor/100, reconciliation-files.ts); the 集計 sums raw amountMinor
+// (10000). Pre-fix, parseAmountCell stripped the "." → recon 10000 == 集計
+// 10000 → the check PASSED and blessed a ¥10,000 total for a $100.00 receipt.
+// The fixture below is exactly that internally-consistent false-yen pack.
+test("summary-category-reconciles: a foreign decimal that reconstructs the false-yen 集計 FAILS, naming the CSV and cell", () => {
+  const input = clone(baseInput());
+  const summary = input.csvs.find((c) => c.label === "集計")!;
+  summary.text = summary.text
+    .replace("消耗品費,1,1200", "消耗品費,1,10000")
+    .replace("現金,1,1200", "現金,1,10000")
+    .replace("総合計,2,7690", "総合計,2,16490");
+  const cash = input.csvs.find((c) => c.label === "CASH")!;
+  cash.text = cash.text.replace(",1200,消耗品費", ",100.00,消耗品費");
+  const report = runPackPreflight(input);
+  const check = report.results.find((r) => r.check === "summary-category-reconciles")!;
+  assert.equal(check.passed, false, "the false-yen reconstruction must not reconcile");
+  assert.match(check.detail!, /CASH recon CSV: decimal amount cell "100\.00"/);
+  assert.match(check.detail!, /row 2/);
+  assert.match(check.detail!, /foreign-currency row cannot ship/);
+});
+
+test("summary-category-reconciles: a quoted comma-grouped yen cell stays legal", () => {
+  // "1,200" is the normal comma-grouped yen form — the decimal rejection must
+  // not tighten into a comma rejection.
+  const input = clone(baseInput());
+  const cash = input.csvs.find((c) => c.label === "CASH")!;
+  cash.text = cash.text.replace(",1200,消耗品費", ',"1,200",消耗品費');
+  const check = runPackPreflight(input).results.find((r) => r.check === "summary-category-reconciles")!;
+  assert.equal(check.passed, true, `comma-grouped yen must still reconcile: ${check.detail}`);
+});
+
 test("notice-counts-match-pack: a wrong 明細行数 in the notice fails", () => {
   const input = clone(baseInput());
   input.noticeText = input.noticeText.replace("明細行数: 2", "明細行数: 99");

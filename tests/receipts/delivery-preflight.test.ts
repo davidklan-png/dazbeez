@@ -107,3 +107,24 @@ test("runPreflightOnSealedZip: a pack whose 集計 total drifts from the AMEX ch
     "the drifted total must trip the payment-path reconciliation",
   );
 });
+
+// Audit finding 5: a decimal amount cell in the AMEX 照合CSV is a foreign-
+// currency (or corrupted) row in a yen statement. The statement-total
+// resolution must fail loudly with the named cell instead of stripping the
+// "." and blessing false yen.
+test("runPreflightOnSealedZip: a decimal AMEX amount cell fails preflight naming the cell", async () => {
+  const decimalAmex = AMEX_REALISTIC.replace(",,108341,,", ",,1083.41,,");
+  const { report } = await runPreflightOnSealedZip({
+    zipBytes: buildPack(decimalAmex),
+    month: "2026-06",
+    paymentDueDate: "2026-06-04",
+    maxPackBytes: 100_000_000,
+  });
+  assert.equal(report.passed, false);
+  const check = report.results.find(
+    (r) => !r.passed && r.check === "summary-payment-path-reconciles",
+  );
+  assert.ok(check, `the decimal AMEX cell must fail the payment-path check: ${JSON.stringify(report.results.filter((r) => !r.passed))}`);
+  assert.match(check!.detail!, /AMEX recon CSV: decimal amount cell "1083\.41"/);
+  assert.match(check!.detail!, /yen amounts are integers/);
+});

@@ -10,6 +10,7 @@ import { computeExportBlockers } from "@/lib/receipts/blockers";
 import type {
   AmexReconciliation,
   AmexStatementLine,
+  ExportRow,
   ReceiptRecord,
 } from "@/lib/receipts/types";
 
@@ -342,6 +343,130 @@ test("gate 3b: CASH receipt with all attendees resolved passes (no directory blo
   assert.ok(
     !blockers.some((b) => b.includes("not registered in the attendee directory")),
     `resolved attendees must not block: ${JSON.stringify(blockers)}`,
+  );
+});
+
+// (3.5) Foreign-currency receipt rows (audit finding 5, 2026-11-09). The 集計,
+// recon CSVs and delivery email are yen-denominated; a non-JPY receipt row's
+// amount_minor is foreign minor units and would sum as false yen. The gate
+// inspects bundle.rows (what ships), NOT bundle.receipts — a foreign receipt
+// matched to a JPY AMEX line ships on the line row and must NOT block.
+function makeRow(overrides: Partial<ExportRow> = {}): ExportRow {
+  return {
+    rowType: "receipt",
+    lineId: null,
+    rawCsvLineNumber: null,
+    matchStatus: null,
+    receiptStatus: null,
+    missingReceiptReason: null,
+    cardholderName: null,
+    businessTripStatus: null,
+    receiptId: "r-1",
+    status: "reviewed",
+    originalR2Key: "receipts/2026/06/r-1/f.jpg",
+    transactionDate: "2026-06-15",
+    merchant: "Test Merchant",
+    amountMinor: 10000,
+    currency: "JPY",
+    expenseType: "misc",
+    expenseCategoryCode: "supplies",
+    expenseCategoryJa: "消耗品費",
+    expenseCategoryEn: "Supplies",
+    paymentPath: "CASH",
+    businessPurpose: null,
+    attendees: [],
+    invoiceRegistrationNumber: null,
+    qualifiedInvoiceStatus: null,
+    taxRate: null,
+    taxAmountMinor: null,
+    sourceType: null,
+    counterpartyName: null,
+    ...overrides,
+  };
+}
+
+test("gate 3.5: a USD CASH receipt row blocks with receipt_foreign_currency and a review href", () => {
+  const blockers = validateMonthReadyForExportCoreDetailed(
+    makeInput({
+      bundle: makeBundle({
+        rows: [makeRow({ receiptId: "r-usd", merchant: "Anthropic", currency: "USD", amountMinor: 10000 })],
+      }),
+    }),
+  );
+  const fx = blockers.find((b) => b.code === "receipt_foreign_currency");
+  assert.ok(fx, `expected receipt_foreign_currency; got ${JSON.stringify(blockers)}`);
+  assert.equal(fx!.href, `/receipts/review/r-usd?month=${MONTH}`);
+  assert.match(fx!.message, /USD/);
+});
+
+test("gate 3.5: a JPY+USD month blocks ONLY the USD row", () => {
+  const blockers = validateMonthReadyForExportCoreDetailed(
+    makeInput({
+      bundle: makeBundle({
+        rows: [
+          makeRow({ receiptId: "r-jpy", merchant: "LAWSON", currency: "JPY", amountMinor: 1200 }),
+          makeRow({ receiptId: "r-usd", merchant: "Anthropic", currency: "USD", amountMinor: 10000 }),
+        ],
+      }),
+    }),
+  );
+  const fx = blockers.filter((b) => b.code === "receipt_foreign_currency");
+  assert.equal(fx.length, 1, `exactly one currency blocker: ${JSON.stringify(fx)}`);
+  assert.match(fx[0]!.message, /Anthropic/);
+});
+
+test("gate 3.5: a DIGITAL EUR row blocks (payment-path independence)", () => {
+  const blockers = validateMonthReadyForExportCoreDetailed(
+    makeInput({
+      bundle: makeBundle({
+        rows: [makeRow({ receiptId: "r-eur", merchant: "Cloudflare", currency: "EUR", paymentPath: "DIGITAL" })],
+      }),
+    }),
+  );
+  assert.ok(
+    blockers.some((b) => b.code === "receipt_foreign_currency" && b.message.includes("EUR")),
+    `DIGITAL EUR must block: ${JSON.stringify(blockers)}`,
+  );
+});
+
+test("gate 3.5: a USD receipt on a JPY AMEX line row does NOT block (0026 memo path stays valid)", () => {
+  // The USD receipt's cents never enter totals: the shipped row is the LINE's
+  // (rowType amex_line, JPY). The foreign receipt exists in the month but not
+  // as its own row — no currency blocker may fire.
+  const blockers = validateMonthReadyForExportCoreDetailed(
+    makeInput({
+      bundle: makeBundle({
+        rows: [
+          makeRow({
+            rowType: "amex_line",
+            lineId: "line-1",
+            receiptId: "r-usd-matched",
+            merchant: "CLOUDFLARE",
+            currency: "JPY",
+            amountMinor: 1500,
+            paymentPath: "AMEX",
+          }),
+        ],
+      }),
+    }),
+  );
+  assert.ok(
+    !blockers.some((b) => b.code === "receipt_foreign_currency"),
+    `a JPY amex_line row must not fire the currency gate: ${JSON.stringify(blockers)}`,
+  );
+});
+
+test("gate 3.5: lowercase stored 'usd' blocks (currency case is normalized)", () => {
+  const blockers = validateMonthReadyForExportCoreDetailed(
+    makeInput({
+      bundle: makeBundle({
+        rows: [makeRow({ receiptId: "r-lower", merchant: "OpenAI", currency: "usd" })],
+      }),
+    }),
+  );
+  assert.ok(
+    blockers.some((b) => b.code === "receipt_foreign_currency" && b.message.includes("USD")),
+    `lowercase 'usd' must block as USD: ${JSON.stringify(blockers)}`,
   );
 });
 

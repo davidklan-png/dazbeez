@@ -132,6 +132,18 @@ test("Review with gate blockers ⇒ Review BLOCKED, carries the blockers", () =>
   assert.equal(s.finalize.status, "pending", "a blocked Review must not let Finalize read done/pending-green");
 });
 
+test("§2: receipt_foreign_currency is a Review blocker (audit finding 5) — the stage pipeline inherits the new gate", () => {
+  // The currency gate's remedy is fixing the receipt (hold it out of the
+  // month), a Review-stage action — so it must land on Review like every other
+  // gate blocker, not be special-cased or silently dropped by the partition.
+  const s = byKey(
+    derive(input({ reconciled: true, draftBuilt: true, reviewBlockers: [blocker("receipt_foreign_currency")] })),
+  );
+  assert.equal(s.review.status, "blocked");
+  assert.deepEqual(s.review.blockers?.map((b) => b.code), ["receipt_foreign_currency"]);
+  assert.equal(s.finalize.status, "pending");
+});
+
 // ─── §2 blocker placement: a blocker sits on the stage whose ACTION clears it ──
 
 test("§2: message_stale is a Draft ADVISORY (rebuild refreshes the preview), never a blocker — it never gates Review/Finalize", () => {
