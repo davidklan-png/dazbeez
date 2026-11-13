@@ -9,9 +9,9 @@ import {
 } from "@/lib/receipts/month-lock";
 import { shouldOverwriteMerchant } from "@/lib/receipts/reconciliation";
 import { retentionUntilIso } from "@/lib/receipts/retention";
-import { assignMembershipForReceipt, postPatchMembershipDate } from "@/lib/receipts/membership";
+import { assignMembershipForReceipt, loadSealedExportMonths, postPatchMembershipDate } from "@/lib/receipts/membership";
+import { assignReceiptMembership } from "@/lib/receipts/statement-window";
 import { assertExactlyOneRowWritten } from "@/lib/receipts/operator-message";
-import { deleteAmexArtifact } from "@/lib/receipts/storage";
 import { PENDING_EXTRACTION_STATES } from "@/lib/receipts/types";
 import {
   buildReviewSearchSql,
@@ -368,13 +368,33 @@ export function buildReceiptUpdateSets(
   return { sets, binds };
 }
 
+/**
+ * Extras that ride the SAME mutation batch as the receipt-field UPDATE (seal
+ * boundary §B "complete mutation"): the attendee roster replacement and the
+ * membership-override audit. Previously these were split across separate
+ * awaited statements at the route (`route.ts` PATCH) and a membership fence
+ * failure was swallowed at the assignment hook — a partially-committed PATCH
+ * could return success. One db.batch = one transaction: a fence rejection
+ * (DZ_SEAL_* trigger) rolls back fields, membership, attendees AND their
+ * audits together, and no success audit survives a rejected admission.
+ */
+export interface ReceiptMutationExtras {
+  /** Replace the receipt's attendee roster atomically (route PATCH). */
+  attendees?: CreateAttendeeInput[];
+  /** Dedicated membership-override audit (ADR 0008 §D6), written by the route. */
+  overrideAudit?: {
+    oldValueJson: string | null;
+    newValueJson: string | null;
+  };
+}
+
 export async function updateReceiptRecord(
   id: string,
   input: UpdateReceiptInput,
   actor: string,
+  extras: ReceiptMutationExtras = {},
+  db: D1Database = getReceiptsDb(),
 ): Promise<void> {
-  const db = getReceiptsDb();
-
   const before = await db
     .prepare(`SELECT * FROM receipt_records WHERE id = ? LIMIT 1`)
     .bind(id)
@@ -385,7 +405,9 @@ export async function updateReceiptRecord(
   // Split lock (audit A5): for CASH/DIGITAL receipts, also check the
   // export-finalized gate against the EFFECTIVE transaction month (input
   // override wins, else the existing row's date). AMEX-path receipts skip
-  // this — they're covered by the reconciliation-sealed gate above.
+  // this — they're covered by the reconciliation-sealed gate above. The 0042
+  // triggers re-assert these semantics at write time — these prechecks give
+  // the friendly error, the SQL gives the guarantee.
   const effectivePaymentPath = input.paymentPath ?? before.payment_path;
   if (effectivePaymentPath === "CASH" || effectivePaymentPath === "DIGITAL") {
     const effectiveDate =
@@ -394,40 +416,69 @@ export async function updateReceiptRecord(
   }
 
   const { sets, binds } = buildReceiptUpdateSets(input, before);
+  const now = nowIso();
 
+  const stmts: D1PreparedStatement[] = [];
+
+  if (sets.length > 0) {
+    sets.push("updated_at = ?");
+    binds.push(now);
+    binds.push(id);
+    stmts.push(
+      db.prepare(`UPDATE receipt_records SET ${sets.join(", ")} WHERE id = ?`).bind(...binds),
+    );
+    // Generic audit — inside the same transaction, so a rejected admission
+    // (fence failure on any later statement) leaves no false success audit.
+    stmts.push(
+      db
+        .prepare(
+          `INSERT INTO receipt_audit_log
+            (id, actor, action, object_type, object_id, old_value_json, new_value_json, created_at)
+           VALUES (?, ?, 'receipt.updated', 'receipt', ?, ?, ?, ?)`,
+        )
+        .bind(
+          newUuid(),
+          actor,
+          id,
+          stringifyJson(before),
+          stringifyJson(input),
+          now,
+        ),
+    );
+  }
   // No receipt-field changes (e.g. an attendees-only PATCH after compaction):
-  // do NOT run a synthetic/empty UPDATE and do NOT emit a generic receipt.updated
-  // audit. The attendee mutation's own audit (written by the route via
-  // createAttendees) is authoritative; the membership hook is skipped too (no
-  // assignment on a no-op). The route still performs the attendee mutation and
-  // returns the receipt.
-  if (sets.length === 0) return;
+  // no synthetic UPDATE, no generic audit — the attendee mutation's own audit
+  // below is authoritative.
 
-  sets.push("updated_at = ?");
-  binds.push(nowIso());
-  binds.push(id);
-
-  await db
-    .prepare(`UPDATE receipt_records SET ${sets.join(", ")} WHERE id = ?`)
-    .bind(...binds)
-    .run();
-
-  await createAuditEntry(db, {
-    actor,
-    action: "receipt.updated",
-    objectType: "receipt",
-    objectId: id,
-    oldValueJson: stringifyJson(before),
-    newValueJson: stringifyJson(input),
-  });
+  if (extras.overrideAudit) {
+    stmts.push(
+      db
+        .prepare(
+          `INSERT INTO receipt_audit_log
+            (id, actor, action, object_type, object_id, old_value_json, new_value_json, created_at)
+           VALUES (?, ?, 'receipt.export_statement_month_overridden', 'receipt', ?, ?, ?, ?)`,
+        )
+        .bind(
+          newUuid(),
+          actor,
+          id,
+          extras.overrideAudit.oldValueJson,
+          extras.overrideAudit.newValueJson,
+          now,
+        ),
+    );
+  }
 
   // ADR 0008: assign membership whenever a CASH/DIGITAL receipt with a date has
   // NULL export_statement_month after a PATCH — regardless of which field the
   // PATCH touched (see postPatchMembershipDate). This closes the UNKNOWN→CASH
   // classification path: extraction sets the date while payment_path=UNKNOWN,
   // then the operator classifies UNKNOWN→CASH in a PATCH that does NOT touch the
-  // date — the previous condition (required "transactionDate" in input) never
-  // fired for that flow. Sticky + override-safe (explicit override wins).
+  // date. Sticky + override-safe (explicit override wins). The conditional
+  // UPDATE and its audit ride the same batch: a fence rejection fails the WHOLE
+  // PATCH (never swallowed, never a partial commit), and the audit inserts only
+  // when the assignment actually landed (INSERT..SELECT gated on changes()=1 —
+  // a sticky/lost-race no-op writes no false assignment audit and no error).
   const membershipDate = postPatchMembershipDate({
     effectivePaymentPath,
     beforeExportStatementMonth: before.export_statement_month ?? null,
@@ -436,12 +487,90 @@ export async function updateReceiptRecord(
       (input.transactionDate !== undefined ? input.transactionDate : before.transaction_date) ?? null,
   });
   if (membershipDate) {
-    try {
-      await assignMembershipForReceipt(id, membershipDate, actor);
-    } catch (assignErr) {
-      console.error("[updateReceiptRecord] membership assignment failed", assignErr);
+    const sealedMonths = await loadSealedExportMonths(db);
+    const assignment = assignReceiptMembership(membershipDate, sealedMonths, {
+      rollForward: true,
+    });
+    if (assignment) {
+      stmts.push(
+        db
+          .prepare(
+            `UPDATE receipt_records SET export_statement_month = ?, updated_at = ?
+             WHERE id = ? AND export_statement_month IS NULL`,
+          )
+          .bind(assignment.month, now, id),
+      );
+      stmts.push(
+        db
+          .prepare(
+            `INSERT INTO receipt_audit_log
+              (id, actor, action, object_type, object_id, old_value_json, new_value_json, created_at)
+             SELECT ?, ?, ?, 'receipt', ?, NULL, ?, ?
+              WHERE changes() = 1`,
+          )
+          .bind(
+            newUuid(),
+            actor,
+            assignment.reason === "roll-forward"
+              ? "receipt.export_statement_month_rolled_forward"
+              : "receipt.export_statement_month_assigned",
+            id,
+            JSON.stringify({
+              export_statement_month: assignment.month,
+              reason: assignment.reason,
+              rolledFrom: assignment.rolledFrom ?? null,
+            }),
+            now,
+          ),
+      );
     }
   }
+
+  // Attendee roster replacement (atomic like createAttendees: DELETE + INSERTs
+  // in one transaction; a mid-insert failure rolls back to the previous roster).
+  if (extras.attendees !== undefined) {
+    stmts.push(
+      db.prepare(`DELETE FROM receipt_attendees WHERE receipt_id = ?`).bind(id),
+    );
+    for (const a of extras.attendees) {
+      stmts.push(
+        db
+          .prepare(
+            `INSERT INTO receipt_attendees
+              (id, receipt_id, attendee_name, company, relationship, is_dazbeez_employee, notes, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .bind(
+            newUuid(),
+            id,
+            a.attendeeName,
+            a.company ?? null,
+            a.relationship ?? null,
+            a.isDazbeezEmployee ? 1 : 0,
+            a.notes ?? null,
+            now,
+          ),
+      );
+    }
+    stmts.push(
+      db
+        .prepare(
+          `INSERT INTO receipt_audit_log
+            (id, actor, action, object_type, object_id, old_value_json, new_value_json, created_at)
+           VALUES (?, ?, 'receipt.updated', 'receipt', ?, NULL, ?, ?)`,
+        )
+        .bind(
+          newUuid(),
+          actor,
+          id,
+          stringifyJson({ attendees: extras.attendees.map((a) => a.attendeeName) }),
+          now,
+        ),
+    );
+  }
+
+  if (stmts.length === 0) return;
+  await db.batch(stmts);
 }
 
 export async function rejectIfReceiptInFinalizedReconciliation(
@@ -2156,17 +2285,12 @@ export async function purgeFailedAmexArtifactsByHash(
 
   const staleIds = staleRows.map((r) => r.id);
 
-  // Best-effort R2 cleanup. Failure here does not block the DB purge.
-  for (const row of staleRows) {
-    try {
-      await deleteAmexArtifact(row.r2_key);
-    } catch (err) {
-      console.error(
-        `[purgeFailedAmexArtifactsByHash] R2 delete failed for key ${row.r2_key}`,
-        err,
-      );
-    }
-  }
+  // NO R2 deletion before (or after) the D1 purge (seal boundary §D): D1 and
+  // R2 are not transactional, so deleting the object first could destroy
+  // source evidence the guarded D1 batch then refuses to delete — a failed/
+  // replaced artifact row can still be referenced by a sealed manifest, and
+  // the 0042 triggers may reject the row delete. Retaining abandoned keys is
+  // the minimum safe choice; cleanup is explicitly deferred.
 
   // Atomic DB cleanup: delete manifest rows first (FK-ish reference via
   // object_type/object_id, no formal FK constraint), then the artifact
@@ -3560,8 +3684,8 @@ export async function getExpenseCategories(): Promise<ExpenseCategoryDbRow[]> {
 export async function createExport(
   month: string,
   actor: string,
+  db: D1Database = getReceiptsDb(),
 ): Promise<string> {
-  const db = getReceiptsDb();
 
   // Prefer reusing a pending draft. If there's no draft but a finalized
   // export already exists for the month, callers must explicitly request a
@@ -3592,14 +3716,32 @@ export async function createExport(
   const id = newUuid();
   const now = nowIso();
 
-  await db
-    .prepare(
-      `INSERT INTO receipt_exports
-        (id, export_month, status, created_by, created_at, retention_until, legal_hold)
-       VALUES (?, ?, 'draft', ?, ?, ?, 1)`,
-    )
-    .bind(id, month, actor, now, retentionUntilIso(now))
-    .run();
+  try {
+    await db
+      .prepare(
+        `INSERT INTO receipt_exports
+          (id, export_month, status, created_by, created_at, retention_until, legal_hold)
+         VALUES (?, ?, 'draft', ?, ?, ?, 1)`,
+      )
+      .bind(id, month, actor, now, retentionUntilIso(now))
+      .run();
+  } catch (insertErr) {
+    // First-create uniqueness contention (seal boundary §A.2): two concurrent
+    // first-ever builds both see no draft and both INSERT; the 0017 partial
+    // unique index (one draft per month) rejects exactly one. The loser
+    // re-reads the canonical draft and competes for its claim — never an
+    // unhandled constraint error, never two drafts.
+    const raced = await db
+      .prepare(
+        `SELECT id FROM receipt_exports
+         WHERE export_month = ? AND status = 'draft'
+         ORDER BY COALESCE(export_revision, 1) DESC LIMIT 1`,
+      )
+      .bind(month)
+      .first<{ id: string }>();
+    if (!raced) throw insertErr;
+    return raced.id;
+  }
 
   await createAuditEntry(db, {
     actor,
@@ -3610,6 +3752,21 @@ export async function createExport(
   });
 
   return id;
+}
+
+/**
+ * Read one export row by its EXACT id. The build flow must target the draft it
+ * resolved/created — never a separately chosen "latest" row, which can be a
+ * different revision after a concurrent correction.
+ */
+export async function getExportById(
+  exportId: string,
+  db: D1Database = getReceiptsDb(),
+): Promise<ReceiptExport | null> {
+  return db
+    .prepare(`SELECT * FROM receipt_exports WHERE id = ?`)
+    .bind(exportId)
+    .first<ReceiptExport>();
 }
 
 export async function getExport(month: string): Promise<ReceiptExport | null> {
@@ -3668,38 +3825,6 @@ export async function listExports(): Promise<ReceiptExport[]> {
 // (export_id, item_type, item_id) makes this idempotent per-export.
 
 /**
- * Replace the item set for an export. Deletes existing rows for the
- * export then inserts the new set. Caller must ensure exportId exists.
- */
-export async function replaceExportItems(
-  exportId: string,
-  items: Array<{ itemType: "receipt" | "amex_line"; itemId: string }>,
-): Promise<void> {
-  const db = getReceiptsDb();
-  const now = nowIso();
-  await db
-    .prepare(`DELETE FROM receipt_export_items WHERE export_id = ?`)
-    .bind(exportId)
-    .run();
-  if (items.length === 0) return;
-  // Batch via db.batch for a single transaction.
-  const stmts = items.map((it) =>
-    db
-      .prepare(
-        `INSERT OR IGNORE INTO receipt_export_items
-          (id, export_id, item_type, item_id, created_at)
-         VALUES (?, ?, ?, ?, ?)`,
-      )
-      .bind(newUuid(), exportId, it.itemType, it.itemId, now),
-  );
-  // D1 limits batches to ~30 statements; chunk to stay safe.
-  const CHUNK = 30;
-  for (let i = 0; i < stmts.length; i += CHUNK) {
-    await db.batch(stmts.slice(i, i + CHUNK));
-  }
-}
-
-/**
  * Receipt IDs that shipped in the given export. Used by finalizeExport to
  * mark receipts status='exported' (audit A5).
  */
@@ -3737,107 +3862,18 @@ export async function listExportsContainingReceipt(
 }
 
 /**
- * Persist the staged-bundle metadata onto a draft row: the R2 keys, the
- * archive + manifest SHA-256s, and bundle_built_at (when the bundle was
- * last (re)built). Shared between the rebuild path (POST
- * /api/receipts/export/month with finalize=false) and finalizeExport so a
- * draft built via the rebuild route carries the same persisted fields the
- * finalize-only route (/api/receipts/export/[month]) checks before
- * finalizing — without it, Rebuild→Finalize always 400s with
- * "Export bundle has not been generated yet."
- *
- * Guarded on status='draft' so a finalized row is left untouched, matching
- * finalizeExport's own guard (callers already reject finalized months with a
- * 409 before reaching here). This also keeps the no-op-on-finalized behavior
- * intact: if the row is already finalized, nothing is written.
- */
-export async function recordExportBundle(
-  exportId: string,
-  archiveR2Key: string,
-  manifestR2Key: string,
-  archiveSha256: string,
-  // The sealed-bundle params are REQUIRED (nullable, not optional). TS forbids
-  // a required param after an optional one, so making paymentDueDate +
-  // operatorMessage required (the Phase B P1 fix) promotes these too. More
-  // importantly it is correct: this UPDATE re-writes sealed columns, so an
-  // omitted value would bind `?? null` and overwrite a correct one — requiring
-  // the value (null is still allowed) makes omission a compile error.
-  manifestSha256: string | null,
-  proofsR2Key: string | null,
-  proofsSha256: string | null,
-  /** AMEX payment-due date to snapshot onto this revision (0035). The build
-   *  path passes the just-fetched artifact date; finalizeExport passes the
-   *  draft row's existing snapshot (a no-op re-write of the same value).
-   *
-   *  REQUIRED (nullable, not optional): this UPDATE re-writes the sealed bundle
-   *  columns, so an omitted value binds as `?? null` and OVERWRITES a correct
-   *  value written moments earlier in the same request. Making the param
-   *  required turns omission into a compile error rather than a silent null —
-   *  the Phase B P1 fix (the one-shot finalize path was nulling both columns). */
-  paymentDueDate: string | null,
-  /** Operator free-text message for the month (0037). One stored value, two
-   *  surfaces (O7): the build passes it so the pack notice carries it inside
-   *  the sealed ZIP; finalizeExport re-writes the draft's existing value.
-   *  Sealed with the row by the WHERE status='draft' guard below — mutating it
-   *  post-seal requires a rebuild (new revision), same doctrine as every other
-   *  sealed value (ADR 0009). The O7 preflight check (19th) verifies the
-   *  notice's 【今月のご連絡】 matches this stored value at send time.
-   *
-   *  REQUIRED (nullable) for the same reason as paymentDueDate.
-   *
-   *  NOTE: this writes operator_message (the VALUE — O7 needs it sealed into the
-   *  bytes) but deliberately does NOT write operator_message_updated_at. That
-   *  timestamp is the message-DECISION signal (NULL = the operator never decided
-   *  ⇒ the message_not_reviewed finalize blocker); only updateExportOperatorMessage
-   *  (an explicit save / "no message") sets it. message_stale still clears on
-   *  rebuild because bundle_built_at advances past the save timestamp. */
-  operatorMessage: string | null,
-): Promise<void> {
-  const db = getReceiptsDb();
-  const now = nowIso();
-  await db
-    .prepare(
-      `UPDATE receipt_exports
-       SET archive_r2_key = ?,
-           manifest_r2_key = ?,
-           archive_sha256 = ?,
-           manifest_sha256 = ?,
-           proofs_r2_key = ?,
-           proofs_sha256 = ?,
-           bundle_built_at = ?,
-           payment_due_date = ?,
-           operator_message = ?
-       WHERE id = ? AND status = 'draft'`,
-    )
-    .bind(
-      archiveR2Key,
-      manifestR2Key,
-      archiveSha256,
-      manifestSha256 ?? null,
-      proofsR2Key ?? null,
-      proofsSha256 ?? null,
-      now,
-      paymentDueDate ?? null,
-      operatorMessage ?? null,
-      exportId,
-    )
-    .run();
-}
-
-/**
  * Update ONLY operator_message on an open draft revision (E1 — the editable
  * preface). Deliberately touches no other column: it must NOT advance
  * bundle_built_at (that would mask the staleness the finalize gate detects —
- * E3) and must not re-write the sealed bundle columns the way recordExportBundle
- * does. The WHERE status='draft' guard means a sealed month is never mutated;
+ * E3) and must not re-write sealed bundle columns. The WHERE status='draft' guard means a sealed month is never mutated;
  * the PATCH /message caller checks for an open draft first and 409s otherwise,
  * so this update should always match exactly one draft row. Trim + the 2000-char
  * cap are applied by the caller; null clears the column (buildPackNotice then
  * omits the whole 【今月のご連絡】 heading).
  *
  * After the 2026-06 message-loss incident: this is the ONLY writer of
- * operator_message_updated_at (the message-DECISION timestamp; recordExportBundle
- * no longer touches it). So a successful return here is the single signal that
+ * operator_message_updated_at (the message-DECISION timestamp; bundle
+ * publication never touches it). So a successful return here is the single signal that
  * the operator made a message decision (save text, or "no message" with a NULL
  * value) — which clears the message_not_reviewed finalize blocker.
  *
@@ -3864,133 +3900,6 @@ export async function updateExportOperatorMessage(
   const rowsWritten = result.meta?.changes ?? 0;
   assertExactlyOneRowWritten(rowsWritten, `updateExportOperatorMessage(${exportId})`);
   return { rowsWritten };
-}
-
-export async function finalizeExport(
-  exportId: string,
-  archiveR2Key: string,
-  manifestR2Key: string,
-  archiveSha256: string,
-  actor: string,
-  // Sealed-bundle params REQUIRED (nullable) — see recordExportBundle. The
-  // one-shot finalize path passes the just-fetched values; the two-step path
-  // passes the draft row's stored snapshots.
-  manifestSha256: string | null,
-  proofsR2Key: string | null,
-  proofsSha256: string | null,
-  /** AMEX payment-due date snapshot for this revision (0035); the caller passes
-   *  the draft row's existing value so the finalize re-stage writes the same
-   *  date the build captured. REQUIRED (nullable, not optional) — see
-   *  recordExportBundle. The one-shot finalize path (export/month/route.ts)
-   *  passes the just-fetched artifact date; the two-step path
-   *  (export/[month]/route.ts) passes the draft row's stored snapshot. */
-  paymentDueDate: string | null,
-  /** Operator message re-written from the draft row's stored value (0037).
-   *  REQUIRED (nullable) — see recordExportBundle. */
-  operatorMessage: string | null,
-): Promise<void> {
-  const db = getReceiptsDb();
-  const now = nowIso();
-
-  // Record the staged bundle (R2 keys + SHAs + bundle_built_at) via the
-  // shared helper so the finalize:true path leaves the same persisted bundle
-  // metadata as the rebuild path. The UPDATE below flips only the
-  // finalize-specific fields — each column is written exactly once (no
-  // double-write) and the end-state is identical to the pre-refactor single
-  // UPDATE, plus the new bundle_built_at column.
-  await recordExportBundle(
-    exportId,
-    archiveR2Key,
-    manifestR2Key,
-    archiveSha256,
-    manifestSha256,
-    proofsR2Key,
-    proofsSha256,
-    paymentDueDate,
-    operatorMessage,
-  );
-
-  const result = await db
-    .prepare(
-      `UPDATE receipt_exports
-       SET status = 'finalized',
-           finalization_hash = ?,
-           finalized_by = ?,
-           finalized_at = ?
-       WHERE id = ? AND status = 'draft'`,
-    )
-    .bind(manifestSha256 ?? archiveSha256, actor, now, exportId)
-    .run();
-
-  if ((result.meta.changes ?? 0) === 0) {
-    throw new Error(
-      `Export ${exportId} could not be finalized — it may already be finalized or not found.`,
-    );
-  }
-
-  await createAuditEntry(db, {
-    actor,
-    action: "export.finalized",
-    objectType: "export",
-    objectId: exportId,
-    newValueJson: stringifyJson({
-      archiveR2Key,
-      archiveSha256,
-      manifestSha256: manifestSha256 ?? null,
-      proofsR2Key: proofsR2Key ?? null,
-      proofsSha256: proofsSha256 ?? null,
-    }),
-  });
-
-  // A5 lifecycle: mark every receipt that shipped in this bundle as
-  // status='exported' and exported_month=<the export's month>. Both
-  // columns already existed but were dead before receipt_export_items
-  // gave finalizeExport a row set to act on. Audit-log each promotion so
-  // the receipt's lifecycle trail explains why it's no longer editable.
-  //
-  // Idempotent across re-runs only because finalizeExport itself refuses
-  // to run twice (status='draft' guard above). Re-entering here after a
-  // partial failure would re-UPDATE the same rows harmlessly.
-  const exportRow = await db
-    .prepare(`SELECT export_month FROM receipt_exports WHERE id = ?`)
-    .bind(exportId)
-    .first<{ export_month: string }>();
-  const exportMonth = exportRow?.export_month;
-  if (exportMonth) {
-    const exportedReceiptIds = await listReceiptIdsForExport(exportId);
-    if (exportedReceiptIds.length > 0) {
-      // Promote status + stamp exported_month. The status CHECK constraint
-      // allows 'exported'. We do NOT touch 'archived' rows — once archived
-      // the lifecycle is terminal and a re-finalize shouldn't unwind it.
-      // Chunk to respect D1's parameter limit per statement. This query binds
-      // two fixed values (exportMonth, now) plus the ID list, so a full 90-ID
-      // chunk uses 92 of D1's 100-bind ceiling — within the ten-slot headroom.
-      for (let i = 0; i < exportedReceiptIds.length; i += D1_ID_CHUNK_SIZE) {
-        const chunk = exportedReceiptIds.slice(i, i + D1_ID_CHUNK_SIZE);
-        const placeholders = chunk.map(() => "?").join(",");
-        await db
-          .prepare(
-            `UPDATE receipt_records
-               SET status = 'exported',
-                   exported_month = ?,
-                   updated_at = ?
-             WHERE id IN (${placeholders})
-               AND status IN ('captured','needs_review','reviewed','reconciled')`,
-          )
-          .bind(exportMonth, now, ...chunk)
-          .run();
-      }
-      for (const receiptId of exportedReceiptIds) {
-        await createAuditEntry(db, {
-          actor,
-          action: "receipt.exported",
-          objectType: "receipt",
-          objectId: receiptId,
-          newValueJson: stringifyJson({ exportId, exportedMonth: exportMonth }),
-        });
-      }
-    }
-  }
 }
 
 // ─── Delivery records (Phase B; 0036_export_deliveries) ──────────────────────

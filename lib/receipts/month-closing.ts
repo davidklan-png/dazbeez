@@ -16,7 +16,7 @@ import {
 } from "@/lib/receipts/membership";
 import { getComplianceSettings } from "@/lib/receipts/settings";
 import {
-  summarizeOpenChecksForExport,
+  summarizeOpenChecksFromSource,
   type ComplianceBlockerReceipt,
 } from "@/lib/receipts/compliance";
 import { getReceiptsDb } from "@/lib/cloudflare-runtime";
@@ -24,7 +24,9 @@ import { resolveLineCategory } from "@/lib/receipts/line-classification";
 import type {
   AmexReconciliation,
   AmexStatementLine,
+  ComplianceSettings,
   ExportRow,
+  ReceiptFile,
   ReceiptRecord,
 } from "@/lib/receipts/types";
 import { validateAmexLinesForSignoffDetailed } from "@/lib/receipts/reconciliation-signoff";
@@ -304,6 +306,16 @@ export interface ValidateMonthReadyInput {
  *  via the async wrappers. See {@link ValidateMonthReadyInput.bundleRebuiltInRequest}. */
 export interface ValidateMonthOptions {
   bundleRebuiltInRequest?: boolean;
+  /**
+   * Seal boundary §C — one protected input snapshot. The one-shot finalize
+   * path, which holds the build claim, passes the exact draft row it acquired
+   * (message decision timestamps), the settings snapshot it will seal under,
+   * and the file-manifest map shared with proof reads and the final manifest.
+   * Without these the wrapper loads each input itself (other callers/tests).
+   */
+  preloadedExportBuild?: { bundleBuiltAt: string | null; operatorMessageUpdatedAt: string | null } | null;
+  preloadedSettings?: { export_block_on_warnings: boolean };
+  preloadedFilesByReceipt?: Map<string, ReceiptFile[]>;
 }
 
 /**
@@ -674,12 +686,18 @@ export async function validateMonthReadyForExportDetailed(
   const amexAttendees = bundle.amexAttendees;
 
   // (5) Compliance — month filter UNION bundle receipt IDs (matched receipts
-  // may be dated outside the statement month; Codex P1).
-  const settings = await getComplianceSettings();
-  const summary = await summarizeOpenChecksForExport(
+  // may be dated outside the statement month; Codex P1). SOURCE-COMPUTED (seal
+  // boundary §C): the pure engine runs against protected receipt/attendee/file
+  // rows and one settings snapshot; the persisted receipt_compliance_checks
+  // cache is a UI convenience and must not hold gate authority (a delayed
+  // refresh cannot retroactively justify or doom a seal).
+  const settings = opts.preloadedSettings ?? (await getComplianceSettings());
+  const summary = await summarizeOpenChecksFromSource(
     db,
     month,
     bundle.receipts.map((r) => r.id),
+    settings as ComplianceSettings,
+    opts.preloadedFilesByReceipt,
   );
 
   // (6) Cross-month match integrity.
@@ -704,14 +722,20 @@ export async function validateMonthReadyForExportDetailed(
   );
 
   // (1.5) Message staleness (E3): the open draft's build vs operator-message
-  // timestamps. getExport returns the current row (draft iff one is open).
-  const exportRecord = await getExport(month);
-  const exportBuild = exportRecord
-    ? {
-        bundleBuiltAt: exportRecord.bundle_built_at ?? null,
-        operatorMessageUpdatedAt: exportRecord.operator_message_updated_at ?? null,
-      }
-    : null;
+  // timestamps. The claiming caller passes its exact acquired row; others read
+  // the current row (draft iff one is open).
+  const exportBuild =
+    opts.preloadedExportBuild !== undefined
+      ? opts.preloadedExportBuild
+      : await (async () => {
+          const exportRecord = await getExport(month);
+          return exportRecord
+            ? {
+                bundleBuiltAt: exportRecord.bundle_built_at ?? null,
+                operatorMessageUpdatedAt: exportRecord.operator_message_updated_at ?? null,
+              }
+            : null;
+        })();
 
   return validateMonthReadyForExportCoreDetailed({
     month,
