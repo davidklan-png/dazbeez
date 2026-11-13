@@ -146,6 +146,7 @@ export type AuditAction =
   | "export.revision_created"
   | "export.downloaded"
   | "export.deleted"
+  | "export.deleted.admitted"
   | "export.message_updated"
   | "export.notification_sent"
   | "export.notification_failed"

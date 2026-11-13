@@ -239,13 +239,13 @@ export interface ExportDeletionExecutionInput {
   /** The planner's audit payload (legal-hold exception recorded verbatim). */
   auditValueJson: string;
   /**
-   * F2: the planned published build/key identity. When provided, admission
-   * also requires the row's bundle_build_id and the three stored artifact
-   * keys to be unchanged (null-safe) — a completed rebuild between plan and
-   * execution refuses the deletion instead of silently deleting a different
-   * bundle's row.
+   * F2 (REQUIRED): the planned published build/key identity. Admission also
+   * requires the row's bundle_build_id and the three stored artifact keys to
+   * be unchanged (null-safe) — a completed rebuild between plan and execution
+   * refuses the deletion instead of silently deleting a different bundle's
+   * row. Required so no caller can silently omit part of deletion admission.
    */
-  plannedIdentity?: ExportDeletionPlannedIdentity;
+  plannedIdentity: ExportDeletionPlannedIdentity;
 }
 
 export interface ExportDeletionExecutionResult {
@@ -266,15 +266,11 @@ export function buildExportDeletionStatements(
   input: ExportDeletionExecutionInput,
 ): Array<{ sql: string; args: unknown[] }> {
   const identity = input.plannedIdentity;
-  const identitySql = identity
-    ? ` AND e.bundle_build_id IS ?
+  const identitySql = ` AND e.bundle_build_id IS ?
                AND e.archive_r2_key IS ?
                AND e.manifest_r2_key IS ?
-               AND e.proofs_r2_key IS ?`
-    : "";
-  const identityArgs = identity
-    ? [identity.bundleBuildId, identity.archiveKey, identity.manifestKey, identity.proofsKey]
-    : [];
+               AND e.proofs_r2_key IS ?`;
+  const identityArgs = [identity.bundleBuildId, identity.archiveKey, identity.manifestKey, identity.proofsKey];
   return [
     {
       // Admission (marker + CAS): inserts only when the row still matches the

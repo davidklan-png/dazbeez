@@ -642,3 +642,102 @@ test("R3-F7 receipt_files.created_at (selection ordering input) is fenced under 
   assert.equal(R(db, `UPDATE receipt_files SET created_at='2025-01-01T00:00:00Z' WHERE id='f7'`), "DZ_SEAL_CLAIM_ACTIVE");
   assert.equal(R(db, `UPDATE receipt_files SET updated_at=updated_at WHERE id='f7'`), true, "no-op passes");
 });
+
+// ─── Round 4: R1 exported_month scope + R2 remaining identities ──────────────
+
+test("R4-R1 exported_month-only INSERT is fenced under a claim and permanently", () => {
+  // Claim arm: a receipt whose ONLY month relationship to the claimed month is
+  // exported_month (the compliance gate's population includes it).
+  {
+    const db = mk();
+    seedReceipt(db, "r1", "2026-01");
+    seedExport(db, "e1", "2026-01", "draft", "tok", 600);
+    assert.equal(
+      R(db, `INSERT INTO receipt_records (id,captured_at,captured_by,payment_path,transaction_date,status,original_r2_key,original_sha256,original_content_type,original_size_bytes,created_at,updated_at,exported_month) VALUES ('rx','2026-02-01T00:00:00Z','a','CASH','2026-02-01','captured','k','s','image/jpeg',1,'t','t','2026-01')`),
+      "DZ_SEAL_CLAIM_ACTIVE",
+      "claim arm: exported_month alone is gate scope",
+    );
+  }
+  // Permanent arm (no claim): sealed month, no correction draft.
+  {
+    const db = mk();
+    seedExport(db, "e2", "2026-01", "finalized");
+    assert.equal(
+      R(db, `INSERT INTO receipt_records (id,captured_at,captured_by,payment_path,transaction_date,status,original_r2_key,original_sha256,original_content_type,original_size_bytes,created_at,updated_at,exported_month) VALUES ('rz','2026-02-01T00:00:00Z','a','CASH','2026-02-01','captured','k','s','image/jpeg',1,'t','t','2026-01')`),
+      "DZ_SEAL_MONTH_LOCKED",
+      "permanent arm: fresh INSERT into a sealed exported_month",
+    );
+    // A correction draft releases it (per-month carve-out preserved).
+    seedExport(db, "e2d", "2026-01", "draft", undefined, undefined, 2);
+    assert.equal(
+      R(db, `INSERT INTO receipt_records (id,captured_at,captured_by,payment_path,transaction_date,status,original_r2_key,original_sha256,original_content_type,original_size_bytes,created_at,updated_at,exported_month) VALUES ('rz2','2026-02-01T00:00:00Z','a','CASH','2026-02-01','captured','k','s','image/jpeg',1,'t','t','2026-01')`),
+      true,
+      "correction carve-out releases the exported_month insert",
+    );
+  }
+});
+
+test("R4-R1 UPDATE INTO a sealed exported_month is fenced (NEW side); the exact promotion still passes", () => {
+  const db = mk();
+  seedReceipt(db, "ry", "2026-03"); // open month
+  seedExport(db, "e1", "2026-01", "draft");
+  db.prepare(`INSERT INTO receipt_export_items (id,export_id,item_type,item_id,created_at) VALUES ('i1','e1','receipt','ry','t')`).run();
+  db.prepare(`UPDATE receipt_exports SET status='finalized' WHERE id='e1'`).run();
+  assert.equal(
+    R(db, `UPDATE receipt_records SET exported_month='2026-01' WHERE id='ry'`),
+    "DZ_SEAL_MONTH_LOCKED",
+    "moving INTO a sealed exported_month without a published item",
+  );
+  // The exact exporter promotion (item-justified, identity-pinned) still passes.
+  assert.equal(
+    R(db, `UPDATE receipt_records SET status='exported', exported_month='2026-01', updated_at='t2' WHERE id='ry' AND status IN ('captured','needs_review','reviewed','reconciled')`),
+    true,
+  );
+});
+
+test("R4-R2 export id: legacy itemless finalized rename, unbuilt claimed rename, and sealed rename are fenced", () => {
+  const db = mk();
+  // Legacy sealed row with NO item rows (pre-0017 population).
+  db.prepare(`INSERT INTO receipt_exports (id,export_month,status,created_by,created_at,retention_until,legal_hold,export_revision) VALUES ('legacy','2025-12','finalized','a','t','t',1,1)`).run();
+  assert.equal(R(db, `UPDATE receipt_exports SET id='legacy-renamed' WHERE id='legacy'`), "DZ_SEAL_EXPORT_SEALED");
+  // Unbuilt claimed draft: identity is the claim/release target.
+  seedReceipt(db, "r7", "2026-07");
+  seedExport(db, "e7", "2026-07", "draft", "tok", 600);
+  assert.equal(R(db, `UPDATE receipt_exports SET id='e7b' WHERE id='e7'`), "DZ_SEAL_EXPORT_CLAIM");
+  // Owned release still works (identity pinned inside the exception).
+  assert.equal(R(db, `UPDATE receipt_exports SET sealing_token=NULL, sealing_expires_at=NULL WHERE id='e7' AND sealing_token='tok'`), true);
+  // Owned publication still works.
+  db.prepare(`UPDATE receipt_exports SET sealing_token='tok2', sealing_expires_at=? WHERE id='e7'`).run(Math.floor(Date.now() / 1000) + 600);
+  assert.equal(
+    R(db, `UPDATE receipt_exports SET bundle_build_id='tok2', sealing_token=NULL, sealing_expires_at=NULL, operator_message='v', status='draft', archive_r2_key='a', bundle_built_at='t2' WHERE id='e7'`),
+    true,
+  );
+});
+
+test("R4-R2 artifact id rename under a claim is fenced, so artifact-owned manifest scope cannot be silently detached", () => {
+  const db = mk();
+  // Artifact pre-exists the claim (reviewer's probe order).
+  db.prepare(`INSERT INTO amex_statement_artifacts (id,statement_month,r2_key,sha256_hash,file_size_bytes,uploaded_by,uploaded_at,created_at,updated_at,import_status) VALUES ('art','2026-07','ak','sh',1,'a','t','t','t','parsed')`).run();
+  db.prepare(`INSERT INTO receipt_files (id,object_type,object_id,role,r2_bucket,r2_key,original_filename,content_type,file_size_bytes,sha256_hash,uploaded_by,uploaded_at,is_original,created_at,updated_at) VALUES ('fa','amex_statement_artifact','art','original','receipts','fka','f','text/csv',1,'h','u','t',1,'t','t')`).run();
+  seedReceipt(db, "r7", "2026-07");
+  seedExport(db, "e7", "2026-07", "draft", "tok", 600);
+  assert.equal(R(db, `UPDATE amex_statement_artifacts SET id='art2' WHERE id='art'`), "DZ_SEAL_CLAIM_ACTIVE", "rename under claim");
+  // The artifact-owned file row keeps its parent join → manifest edits stay fenced.
+  assert.equal(R(db, `UPDATE receipt_files SET sha256_hash='new' WHERE id='fa'`), "DZ_SEAL_CLAIM_ACTIVE", "manifest edit on artifact-owned row stays fenced");
+});
+
+test("R4-R2 reconciliation unfinalize exception pins identity", () => {
+  const db = mk();
+  db.prepare(`INSERT INTO amex_statement_lines (id,statement_month,transaction_date,merchant,amount_minor,currency,match_status,raw_json,created_at) VALUES ('L9','2026-09','2026-09-01','m',1,'JPY','unmatched','{}','t')`).run();
+  db.prepare(`INSERT INTO amex_reconciliations (id,statement_month,status,line_count,matched_count,no_receipt_count,created_by,created_at) VALUES ('ar9','2026-09','finalized',1,0,0,'a','t')`).run();
+  assert.equal(
+    R(db, `UPDATE amex_reconciliations SET status='draft', finalized_by=NULL, finalized_at=NULL, id='ar9-renamed' WHERE id='ar9'`),
+    "DZ_SEAL_RECON_LOCKED",
+    "unfinalize riding an id change",
+  );
+  assert.equal(
+    R(db, `UPDATE amex_reconciliations SET status='draft', finalized_by=NULL, finalized_at=NULL WHERE id='ar9'`),
+    true,
+    "exact unfinalize shape still admitted",
+  );
+});

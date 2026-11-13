@@ -196,7 +196,8 @@ AND EXISTS(SELECT 1 FROM receipt_exports ce
              AND ce.sealing_expires_at IS NOT NULL
              AND ce.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
              AND (ce.export_month IS substr(NEW.transaction_date,1,7)
-                  OR ce.export_month IS NEW.export_statement_month))
+                  OR ce.export_month IS NEW.export_statement_month
+                  OR ce.export_month IS NEW.exported_month))
 BEGIN
   SELECT RAISE(ABORT, 'DZ_SEAL_CLAIM_ACTIVE:receipt_records');
 END;
@@ -274,14 +275,21 @@ AND (
             WHERE i.item_type='receipt' AND i.item_id IS OLD.id
               AND NOT EXISTS(SELECT 1 FROM receipt_exports d
                              WHERE d.status='draft' AND d.export_month IS e.export_month))
-  -- Exported-month lock, status-independent (pre-0017 legacy rows have
-  -- exported_month without item rows): shipped months stay sealed unless a
-  -- correction draft is open for that month.
+  -- Exported-month lock, status-independent, OLD ∪ NEW (R1: pre-0017 legacy
+  -- rows have exported_month without item rows, and the compliance gate's
+  -- population includes receipts by exported_month alone, so a receipt moving
+  -- INTO a sealed exported_month — not just out of one — is a gate-scope
+  -- change): shipped months stay sealed unless a correction draft is open.
   OR (OLD.exported_month IS NOT NULL
       AND EXISTS(SELECT 1 FROM receipt_exports fe
                  WHERE fe.status='finalized' AND fe.export_month IS OLD.exported_month)
       AND NOT EXISTS(SELECT 1 FROM receipt_exports de
                      WHERE de.status='draft' AND de.export_month IS OLD.exported_month))
+  OR (NEW.exported_month IS NOT NULL
+      AND EXISTS(SELECT 1 FROM receipt_exports feN
+                 WHERE feN.status='finalized' AND feN.export_month IS NEW.exported_month)
+      AND NOT EXISTS(SELECT 1 FROM receipt_exports deN
+                     WHERE deN.status='draft' AND deN.export_month IS NEW.exported_month))
   -- Reconciliation lock: matched to a line in a finalized reconciliation whose
   -- statement month is export-locked (identical to
   -- rejectIfReceiptInFinalizedReconciliation + isMonthLockedForEdits).
@@ -397,17 +405,25 @@ END;
 -- assertTransactionMonthEditable at capture).
 CREATE TRIGGER IF NOT EXISTS seal_lock_receipt_insert
 BEFORE INSERT ON receipt_records
-WHEN (NEW.payment_path='CASH' OR NEW.payment_path='DIGITAL')
-AND (
-  (EXISTS(SELECT 1 FROM receipt_exports fe
-          WHERE fe.status='finalized' AND fe.export_month IS substr(NEW.transaction_date,1,7))
-   AND NOT EXISTS(SELECT 1 FROM receipt_exports de
-                  WHERE de.status='draft' AND de.export_month IS substr(NEW.transaction_date,1,7)))
-  OR (NEW.export_statement_month IS NOT NULL
-      AND EXISTS(SELECT 1 FROM receipt_exports fe
-                 WHERE fe.status='finalized' AND fe.export_month IS NEW.export_statement_month)
-      AND NOT EXISTS(SELECT 1 FROM receipt_exports de
-                     WHERE de.status='draft' AND de.export_month IS NEW.export_statement_month))
+WHEN (
+  ((NEW.payment_path='CASH' OR NEW.payment_path='DIGITAL')
+   AND (
+    (EXISTS(SELECT 1 FROM receipt_exports fe
+            WHERE fe.status='finalized' AND fe.export_month IS substr(NEW.transaction_date,1,7))
+     AND NOT EXISTS(SELECT 1 FROM receipt_exports de
+                    WHERE de.status='draft' AND de.export_month IS substr(NEW.transaction_date,1,7)))
+    OR (NEW.export_statement_month IS NOT NULL
+        AND EXISTS(SELECT 1 FROM receipt_exports fe
+                   WHERE fe.status='finalized' AND fe.export_month IS NEW.export_statement_month)
+        AND NOT EXISTS(SELECT 1 FROM receipt_exports de
+                       WHERE de.status='draft' AND de.export_month IS NEW.export_statement_month))))
+  -- Exported-month, any path (R1): exported_month alone adds a receipt to a
+  -- sealed month's gate population, and a fresh INSERT can carry it.
+  OR (NEW.exported_month IS NOT NULL
+      AND EXISTS(SELECT 1 FROM receipt_exports feE
+                 WHERE feE.status='finalized' AND feE.export_month IS NEW.exported_month)
+      AND NOT EXISTS(SELECT 1 FROM receipt_exports deE
+                     WHERE deE.status='draft' AND deE.export_month IS NEW.exported_month))
 )
 BEGIN
   SELECT RAISE(ABORT, 'DZ_SEAL_MONTH_LOCKED:receipt_records');
@@ -1080,7 +1096,8 @@ END;
 CREATE TRIGGER IF NOT EXISTS seal_claim_artifact_update
 BEFORE UPDATE ON amex_statement_artifacts
 WHEN (
-     OLD.statement_month IS NOT NEW.statement_month
+     OLD.id IS NOT NEW.id
+  OR OLD.statement_month IS NOT NEW.statement_month
   OR OLD.r2_key IS NOT NEW.r2_key
   OR OLD.sha256_hash IS NOT NEW.sha256_hash
   OR OLD.original_filename IS NOT NEW.original_filename
@@ -1131,7 +1148,8 @@ END;
 CREATE TRIGGER IF NOT EXISTS seal_lock_artifact_update
 BEFORE UPDATE ON amex_statement_artifacts
 WHEN (
-     OLD.r2_key IS NOT NEW.r2_key
+     OLD.id IS NOT NEW.id
+  OR OLD.r2_key IS NOT NEW.r2_key
   OR OLD.sha256_hash IS NOT NEW.sha256_hash
   OR OLD.original_filename IS NOT NEW.original_filename
   OR OLD.payment_due_date IS NOT NEW.payment_due_date
@@ -1169,7 +1187,22 @@ END;
 
 CREATE TRIGGER IF NOT EXISTS seal_claim_reconciliation_update
 BEFORE UPDATE ON amex_reconciliations
-WHEN EXISTS(SELECT 1 FROM receipt_exports ce
+-- Any relevant field, incl. identity: the unfinalize/claim transitions below
+-- and the line seals key on the reconciliation's exact id/month.
+WHEN (
+     OLD.id IS NOT NEW.id
+  OR OLD.statement_month IS NOT NEW.statement_month
+  OR OLD.statement_artifact_id IS NOT NEW.statement_artifact_id
+  OR OLD.status IS NOT NEW.status
+  OR OLD.manifest_r2_key IS NOT NEW.manifest_r2_key
+  OR OLD.manifest_sha256 IS NOT NEW.manifest_sha256
+  OR OLD.line_count IS NOT NEW.line_count
+  OR OLD.matched_count IS NOT NEW.matched_count
+  OR OLD.no_receipt_count IS NOT NEW.no_receipt_count
+  OR OLD.finalized_by IS NOT NEW.finalized_by
+  OR OLD.finalized_at IS NOT NEW.finalized_at
+)
+AND EXISTS(SELECT 1 FROM receipt_exports ce
             WHERE ce.status='draft' AND ce.sealing_token IS NOT NULL
               AND ce.sealing_expires_at IS NOT NULL
               AND ce.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
@@ -1205,8 +1238,11 @@ CREATE TRIGGER IF NOT EXISTS seal_lock_reconciliation_update
 BEFORE UPDATE ON amex_reconciliations
 WHEN OLD.status='finalized'
 AND NOT (
-  -- Explicit unfinalize: exactly status/finalized_by/finalized_at change.
+  -- Explicit unfinalize: identity fixed, exactly status/finalized_by/
+  -- finalized_at change (R2: an id change riding the exception would strand
+  -- line seals and the finalized index against a renamed row).
   NEW.status='draft'
+  AND NEW.id IS OLD.id
   AND NEW.finalized_by IS NULL
   AND NEW.finalized_at IS NULL
   AND NEW.statement_month IS OLD.statement_month
@@ -1489,7 +1525,8 @@ WHEN (
   AND OLD.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)
 )
 AND (
-     OLD.sealing_token IS NOT NEW.sealing_token
+     OLD.id IS NOT NEW.id
+  OR OLD.sealing_token IS NOT NEW.sealing_token
   OR OLD.sealing_expires_at IS NOT NEW.sealing_expires_at
   OR OLD.operator_message IS NOT NEW.operator_message
   OR OLD.operator_message_updated_at IS NOT NEW.operator_message_updated_at
@@ -1506,6 +1543,7 @@ AND NOT (
   -- timestamp may not.
   NEW.sealing_token IS NULL
   AND NEW.sealing_expires_at IS NULL
+  AND NEW.id IS OLD.id
   AND NEW.bundle_build_id = OLD.sealing_token
   AND NEW.operator_message_updated_at IS OLD.operator_message_updated_at
   AND NEW.export_month IS OLD.export_month
@@ -1517,6 +1555,7 @@ AND NOT (
   -- (b) owned conditional release: clears the claim, touches nothing else.
   NEW.sealing_token IS NULL
   AND NEW.sealing_expires_at IS NULL
+  AND NEW.id IS OLD.id
   AND NEW.bundle_build_id IS OLD.bundle_build_id
   AND NEW.operator_message IS OLD.operator_message
   AND NEW.operator_message_updated_at IS OLD.operator_message_updated_at
@@ -1534,7 +1573,8 @@ CREATE TRIGGER IF NOT EXISTS seal_export_sealed_update
 BEFORE UPDATE ON receipt_exports
 WHEN OLD.status='finalized'
 AND (
-     OLD.status IS NOT NEW.status
+     OLD.id IS NOT NEW.id
+  OR OLD.status IS NOT NEW.status
   OR OLD.archive_r2_key IS NOT NEW.archive_r2_key
   OR OLD.manifest_r2_key IS NOT NEW.manifest_r2_key
   OR OLD.archive_sha256 IS NOT NEW.archive_sha256
@@ -1562,6 +1602,8 @@ END;
 -- the builder may still be staging objects).
 CREATE TRIGGER IF NOT EXISTS seal_export_claim_delete
 BEFORE DELETE ON receipt_exports
+-- (Identity is not mutable: OLD.id IS NEW.id is enforced on UPDATE, so the
+-- delete target is always the exact claimed row.)
 WHEN OLD.sealing_token IS NOT NULL
  AND OLD.sealing_expires_at IS NOT NULL
  AND OLD.sealing_expires_at > CAST(strftime('%s','now') AS INTEGER)

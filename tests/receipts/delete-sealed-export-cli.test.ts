@@ -37,8 +37,10 @@ const SCRIPT = join(process.cwd(), "scripts", "delete-sealed-export.ts");
  *  - `r2 object delete` → appends the key to r2.log.
  */
 function writeShim(dir: string, scenario: {
-  fileImport: "aggregate-success" | "exit1-committed" | "exit1-rolledback";
-  confirm: "committed" | "rolledback" | "unreadable";
+  fileImport: "aggregate-success" | "exit1-committed" | "exit1-rolledback" | "exit1-late-commit";
+  confirm: "committed" | "rolledback" | "unreadable" | "inconsistent" | "late-commit";
+  /** The combined confirmation query's single row (marker_n, export_n). */
+  confirmState?: { marker_n: number; export_n: number };
   exportRow: Record<string, unknown>;
 }): void {
   const shim = `#!/usr/bin/env node
@@ -48,6 +50,7 @@ const cmdIdx = args.indexOf("--command");
 const fileIdx = args.indexOf("--file");
 const capture = process.env.WR_SHIM_DIR;
 function out(o) { process.stdout.write(JSON.stringify([o])); }
+const CONFIRM_STATE = CONFIRM_STATE_JSON;
 if (args.includes("object") && args.includes("delete")) {
   const key = args[args.length - 2];
   fs.appendFileSync(join0(capture, "r2.log"), key + "\\n");
@@ -56,12 +59,20 @@ if (args.includes("object") && args.includes("delete")) {
 if (fileIdx >= 0) {
   const f = args[fileIdx + 1];
   fs.copyFileSync(f, join0(capture, "import-" + fs.readdirSync(capture).length + ".sql"));
+  if (${JSON.stringify(scenario.fileImport)} === "exit1-late-commit") {
+    // Lost acknowledgement: the import STARTED, exited 1, and the deletion
+    // transaction commits AFTER the operator's first confirmation read runs.
+    fs.writeFileSync(join0(capture, "late-commit"), "pending");
+    process.stderr.write("wrangler: exit 1 (acknowledgement lost)" + String.fromCharCode(10));
+    process.exit(1);
+  }
   if (${JSON.stringify(scenario.fileImport)} === "aggregate-success") {
     // Wrangler 4.83.0 file-import shape: ONE aggregate result.
     out({ results: [{ duration_ms: 12.3, rows_read: 9, rows_written: 9 }], meta: { changes: 0, duration_ms: 12.3, rows_read: 9, rows_written: 9, total_changes: 9 } });
     process.exit(0);
   }
-  process.stderr.write("wrangler: exit 1 (simulated)\\n");
+  // A DEFINITE statement/admission rejection carries the constraint text.
+  process.stderr.write("wrangler: exit 1 - D1_ERROR: NOT NULL constraint failed: receipt_audit_log.actor (admission refusal)" + String.fromCharCode(10));
   process.exit(1);
 }
 if (cmdIdx >= 0) {
@@ -71,14 +82,21 @@ if (cmdIdx >= 0) {
     out({ results: ${JSON.stringify([scenario.exportRow])} });
     process.exit(0);
   }
-  if (/SELECT id FROM receipt_exports WHERE id/.test(sql)) {
-    // Confirmation read: absence ⇔ committed deletion.
-    if (${JSON.stringify(scenario.confirm)} === "unreadable") { process.stderr.write("d1 unavailable\\n"); process.exit(1); }
-    out({ results: ${JSON.stringify(scenario.confirm === "committed" ? [] : [{ id: "exp-1" }])} });
+  if (sql.includes("AS marker_n") && sql.includes("AS export_n")) {
+    // Single combined confirmation query (marker + parent observed together).
+    if (${JSON.stringify(scenario.confirm)} === "unreadable") { process.stderr.write("d1 unavailable" + String.fromCharCode(10)); process.exit(1); }
+    if (${JSON.stringify(scenario.confirm)} === "late-commit") {
+      // First read observes pre-commit state; the deletion lands after it.
+      const p = join0(capture, "late-commit");
+      if (fs.existsSync(p)) { fs.rmSync(p); out({ results: [{ marker_n: 0, export_n: 1 }] }); process.exit(0); }
+      out({ results: [{ marker_n: 1, export_n: 0 }] });
+      process.exit(0);
+    }
+    out({ results: [CONFIRM_STATE] });
     process.exit(0);
   }
   if (sql.includes("FROM receipt_audit_log WHERE id")) {
-    if (${JSON.stringify(scenario.confirm)} === "unreadable") { process.stderr.write("d1 unavailable\\n"); process.exit(1); }
+    if (${JSON.stringify(scenario.confirm)} === "unreadable") { process.stderr.write("d1 unavailable" + String.fromCharCode(10)); process.exit(1); }
     out({ results: ${JSON.stringify(scenario.confirm === "committed" ? [{ id: "planned-audit-id" }] : [])} });
     process.exit(0);
   }
@@ -88,12 +106,17 @@ if (cmdIdx >= 0) {
 }
 function join0(a, b) { return a + "/" + b; }
 `;
-  writeFileSync(join(dir, "npx"), shim, { mode: 0o755 });
+  writeFileSync(
+    join(dir, "npx"),
+    shim.replace("CONFIRM_STATE_JSON", JSON.stringify(scenario.confirmState ?? { marker_n: 0, export_n: 1 })),
+    { mode: 0o755 },
+  );
 }
 
 function runCli(scenario: {
-  fileImport: "aggregate-success" | "exit1-committed" | "exit1-rolledback";
-  confirm: "committed" | "rolledback" | "unreadable";
+  fileImport: "aggregate-success" | "exit1-committed" | "exit1-rolledback" | "exit1-late-commit";
+  confirm: "committed" | "rolledback" | "unreadable" | "inconsistent" | "late-commit";
+  confirmState?: { marker_n: number; export_n: number };
   reason?: string;
 }) {
   const dir = mkdtempSync(join(tmpdir(), "dse-cli-"));
@@ -108,7 +131,12 @@ function runCli(scenario: {
     retention_until: "t",
     legal_hold: 1,
   };
-  writeShim(dir, { ...scenario, exportRow });
+  const confirmState =
+    scenario.confirmState ??
+    (scenario.confirm === "committed"
+      ? { marker_n: 1, export_n: 0 }
+      : { marker_n: 0, export_n: 1 });
+  writeShim(dir, { ...scenario, exportRow, confirmState });
   const reason = scenario.reason ?? "test cleanup";
   const res = spawnSync(
     process.execPath,
@@ -159,11 +187,14 @@ test("CLI aggregate-success + committed confirmation proceeds to R2 deletion", (
   } finally { cleanup(r.dir); }
 });
 
-test("CLI aggregate-success but unconfirmed re-read reports UNCONFIRMED and retains R2", () => {
+test("CLI aggregate-success but state shows not-committed reports ROLLED BACK and retains R2", () => {
+  // Import returned success, no import error, and the combined read shows
+  // marker absent + export present: the transaction definitely did not commit.
   const r = runCli({ fileImport: "aggregate-success", confirm: "rolledback" });
   try {
     assert.equal(r.code, 2);
-    assert.match(r.stdout + r.stderr, /UNCONFIRMED/);
+    assert.match(r.stdout + r.stderr, /REFUSED\/ROLLED BACK/);
+    assert.ok(!/UNCONFIRMED/.test(r.stdout + r.stderr), "a clean not-committed read with a successful import is a definite refusal, not uncertainty");
     assert.equal(r.r2Log, "", "no R2 object touched");
   } finally { cleanup(r.dir); }
 });
@@ -177,11 +208,37 @@ test("CLI commit-before-error: file import exits 1 but the committed deletion is
   } finally { cleanup(r.dir); }
 });
 
-test("CLI rolled-back import (exit 1, nothing committed) reports REFUSED/ROLLED BACK and retains R2", () => {
+test("CLI rolled-back import (definite admission rejection) reports REFUSED/ROLLED BACK and retains R2", () => {
   const r = runCli({ fileImport: "exit1-rolledback", confirm: "rolledback" });
   try {
     assert.equal(r.code, 2);
     assert.match(r.stdout + r.stderr, /REFUSED\/ROLLED BACK/);
+    assert.ok(!/UNCONFIRMED/.test(r.stdout + r.stderr), "a definite rejection is NOT reported unconfirmed");
+    assert.equal(r.r2Log, "");
+  } finally { cleanup(r.dir); }
+});
+
+test("CLI R3 late commit between reads: unclassified import error + absent-now state is UNCONFIRMED, never a claimed rollback", () => {
+  // The import lost its acknowledgement (exit 1, unclassified). The combined
+  // confirmation read happens BEFORE the deletion transaction lands and
+  // observes marker-absent/export-present — absence now does NOT prove the
+  // pending import cannot commit later. The CLI must report UNCONFIRMED.
+  const r = runCli({ fileImport: "exit1-late-commit", confirm: "late-commit" });
+  try {
+    assert.equal(r.code, 2);
+    assert.match(r.stdout + r.stderr, /UNCONFIRMED/);
+    assert.ok(!/ROLLED BACK/.test(r.stdout + r.stderr), "must NOT claim a definite rollback on unresolved evidence");
+    assert.equal(r.r2Log, "", "R2 retained");
+  } finally { cleanup(r.dir); }
+});
+
+test("CLI R3 inconsistent confirmation state is UNCONFIRMED", () => {
+  // marker present AND export still present: not committed, not provably
+  // rolled back — an in-flight or partially observed state.
+  const r = runCli({ fileImport: "exit1-rolledback", confirm: "inconsistent", confirmState: { marker_n: 1, export_n: 1 } });
+  try {
+    assert.equal(r.code, 2);
+    assert.match(r.stdout + r.stderr, /UNCONFIRMED/);
     assert.equal(r.r2Log, "");
   } finally { cleanup(r.dir); }
 });

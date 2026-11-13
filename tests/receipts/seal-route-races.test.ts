@@ -819,6 +819,12 @@ guardedTest("R2-B8 plan→acquire→execute race: the claim acquired after plann
       auditId: "audit-1",
       assertId: "assert-1",
       auditValueJson: (plan.ok ? plan.plan.audit.newValueJson : "{}"),
+      plannedIdentity: {
+        bundleBuildId: (rowBefore.bundle_build_id as string | null) ?? null,
+        archiveKey: (rowBefore.archive_r2_key as string | null) ?? null,
+        manifestKey: (rowBefore.manifest_r2_key as string | null) ?? null,
+        proofsKey: (rowBefore.proofs_r2_key as string | null) ?? null,
+      },
     }),
     (err: unknown) => /DZ_SEAL|constraint|NOT NULL/i.test((err as Error).message),
     "the guarded transaction aborts (marker refused the live claim)",
@@ -840,6 +846,12 @@ guardedTest("R2-B8 plan→acquire→execute race: the claim acquired after plann
     auditId: "audit-2",
     assertId: "assert-2",
     auditValueJson: plan.ok ? plan.plan.audit.newValueJson : "{}",
+      plannedIdentity: {
+        bundleBuildId: (rowBefore.bundle_build_id as string | null) ?? null,
+        archiveKey: (rowBefore.archive_r2_key as string | null) ?? null,
+        manifestKey: (rowBefore.manifest_r2_key as string | null) ?? null,
+        proofsKey: (rowBefore.proofs_r2_key as string | null) ?? null,
+      },
   });
   assert.equal(executed.exportRowsDeleted, 1);
   assert.equal(executed.markerWritten, true);
@@ -868,6 +880,7 @@ guardedTest("R2-B8 a FINALIZED export refuses deletion without the marker (guard
   assert.equal((ctx.d1.db.prepare(`SELECT COUNT(*) AS n FROM receipt_export_items WHERE export_id=?`).get(exportId) as never as { n: number }).n, 1);
   assert.equal(ctx.archive.objects.size, objectsBefore, "R2 untouched by the refused D1 attempt");
 
+  const finRow = ctx.d1.db.prepare(`SELECT * FROM receipt_exports WHERE id=?`).get(exportId) as never as Record<string, unknown>;
   const executed = await executeExportDeletion(db, {
     exportId,
     month: "2026-01",
@@ -877,6 +890,12 @@ guardedTest("R2-B8 a FINALIZED export refuses deletion without the marker (guard
     auditId: "audit-3",
     assertId: "assert-3",
     auditValueJson: "{}",
+    plannedIdentity: {
+      bundleBuildId: (finRow.bundle_build_id as string | null) ?? null,
+      archiveKey: (finRow.archive_r2_key as string | null) ?? null,
+      manifestKey: (finRow.manifest_r2_key as string | null) ?? null,
+      proofsKey: (finRow.proofs_r2_key as string | null) ?? null,
+    },
   });
   assert.equal(executed.exportRowsDeleted, 1);
   assert.equal(executed.markerWritten, true);
@@ -1170,118 +1189,105 @@ guardedTest("R3-B9 /extract answers a temporary claim conflict 503 + Retry-After
 
 // ─── Round 3: expired-A / resumed-after-B publication race ────────────────────
 
-guardedTest("R3-A7 suspended builder A (lease expired) loses at every put boundary; B's and legacy bytes unchanged, no losing audits/promotions", async () => {
+guardedTest("R4-A7 ACTUAL route A suspended at every before/after-put boundary, inputs changed, route B finalizes, A resumes: winner/legacy bytes unchanged, no losing audits", async () => {
   const lockMod = await loadLock();
   const dbMod = await import("@/lib/receipts/db");
-  for (const putsByA of [0, 1, 3]) {
+  // Suspend route A deterministically inside put k+1 (after exactly k of the
+  // route's 8 artifact puts completed), take its claim away, edit the receipt
+  // inputs, run actual route B to completion, then resume A. The
+  // after-ALL-puts boundary (suspended between staging and publication) is
+  // covered by the pure expired-lease CAS arm at the end of this test.
+  const boundaries = [0, 1, 2, 3, 4, 5, 6, 7] as const;
+  let exportId = "";
+  for (const boundary of boundaries) {
     freshContext();
     const db = ctx.d1.asD1();
-    const exportId = await dbMod.createExport("2026-01", "op", db);
-    // Builder A acquires a SHORT lease (the real claim primitive; the route's
-    // own 600s lease cannot be fast-forwarded) and stages `putsByA` objects
-    // into its private namespace — the suspended-mid-build state.
-    const tokenA = await lockMod.acquireSealClaim(db, { exportId, finalize: false, leaseSeconds: 1 });
-    for (let i = 0; i < putsByA; i += 1) {
-      await ctx.archive.put(
-        `exports/2026-01/${exportId}/${tokenA}/staged-${i}.csv`,
-        new TextEncoder().encode(`A-object-${i}`),
-        { onlyIf: { etagDoesNotMatch: "*" } },
-      );
-    }
-    await new Promise((r) => setTimeout(r, 1100)); // A's lease expires
 
-    // Builder B (the actual route) acquires over the expired lease and seals.
-    const before = new Map(ctx.archive.objects);
-    const sealed = await runRoute({ month: "2026-01", finalize: true, operatorMessage: null });
-    assert.equal(sealed.status, 200, `putsByA=${putsByA}: B seals`);
+    // A seeded LEGACY sealed object for the same month (pre-namespace bytes).
+    // (Seeded BEFORE arming the pause so its own put does not consume an
+    // ordinal — the boundaries below index the ROUTE's puts.)
+    const legacyKey = "exports/2026-01/legacy-old/legacy-summary.csv";
+    await ctx.archive.put(legacyKey, new TextEncoder().encode("legacy-bytes-2026-01"), {});
+    const legacyBytes = ctx.archive.objects.get(legacyKey)!;
+    const basePuts = ctx.archive.putCallCount;
+
+    // Route A starts and is parked deterministically inside put boundary+1
+    // (its bytes not yet stored), i.e. after exactly `boundary` puts completed.
+    const [reachedPut, releasePut] = ctx.archive.armPauseAt(basePuts + boundary + 1);
+    const reachedP: Promise<void> = reachedPut.then(() => undefined);
+    const routeA = runRoute({ month: "2026-01", finalize: true, operatorMessage: "from-A" });
+    await reachedP;
+
+    // Suspend-then-lose: A's claim is taken away (owned release by A's own
+    // token — the SQL authority refuses a raw lease rewrite, and for A's
+    // resumed publication the outcome is identical to expiry: its CAS no
+    // longer matches). The pure expired-lease CAS arm is asserted at the end
+    // of this test. Then edit the receipt inputs B will build — A's snapshot
+    // is stale in every way that matters.
+    const claimRow = ctx.d1.db.prepare(`SELECT id, sealing_token FROM receipt_exports WHERE export_month='2026-01' AND sealing_token IS NOT NULL`).get() as never as { id: string; sealing_token: string } | undefined;
+    assert.ok(claimRow, `boundary=${boundary}: route A holds a claim`);
+    exportId = claimRow!.id;
+    await lockMod.releaseSealClaim(db, exportId, claimRow!.sealing_token);
+    ctx.d1.db
+      .prepare(`UPDATE receipt_records SET business_purpose = 'changed-after-A' WHERE id='r1'`)
+      .run();
+
+    // Actual route B (fresh request) finalizes once A's claim is gone.
+    const routeB = await runRoute({ month: "2026-01", finalize: true, operatorMessage: "from-B" });
+    assert.equal(routeB.status, 200, `boundary=${boundary}: route B finalizes`);
     const afterB = new Map(ctx.archive.objects);
+    const bBuild = ctx.d1.db.prepare(`SELECT bundle_build_id, operator_message FROM receipt_exports WHERE export_month='2026-01'`).get() as never as Record<string, string | null>;
 
-    // A resumes and attempts to publish its staged bundle.
-    const dbModPub = await import("@/lib/receipts/export-publication");
-    await assert.rejects(
-      dbModPub.publishExportBundle(
-        db,
-        {
-          exportId,
-          month: "2026-01",
-          buildId: tokenA,
-          actor: "builder-a",
-          finalize: false,
-          rowCount: 1,
-          archiveKey: `exports/2026-01/${exportId}/${tokenA}/a.csv`,
-          manifestKey: `exports/2026-01/${exportId}/${tokenA}/m.csv`,
-          archiveSha256: "AA",
-          manifestSha256: "MM",
-          proofsKey: `exports/2026-01/${exportId}/${tokenA}/p.zip`,
-          proofsSha256: "PP",
-          paymentDueDate: null,
-          operatorMessage: null,
-          items: [{ itemType: "receipt", itemId: "r1" }],
-          promotableReceiptIds: ["r1"],
-        },
-      ),
-      // Against B's FINALIZED row the attempt is fenced outright (items guard);
-      // against a still-draft B the pure expired-CAS arm yields the typed
-      // conflict. Both mean A published nothing — asserted by the state checks
-      // below; the draft arm additionally asserts the typed class.
-      (err: unknown) =>
-        err instanceof dbModPub.PublicationConflictError ||
-        /DZ_SEAL_ITEMS_FROZEN/.test((err as Error).message),
-      `putsByA=${putsByA}: the expired attempt cannot publish`,
-    );
+    // Resume A: its build runs to its publication, which must lose.
+    releasePut();
+    const aResult = await routeA;
+    assert.equal(aResult.status, 409, `boundary=${boundary}: suspended route A is refused, never a silent overwrite`);
 
-    // Byte-for-byte: B's and legacy objects unchanged by A's failed attempt.
+    // Winner bytes and the seeded legacy bytes unchanged by A's loss.
     const afterA = new Map(ctx.archive.objects);
-    assert.deepEqual([...afterA.keys()].sort(), [...afterB.keys()].sort(), `putsByA=${putsByA}: A added/removed no objects`);
     for (const [k, v] of afterB) {
-      assert.deepEqual(afterA.get(k), v, `putsByA=${putsByA}: ${k} byte-identical`);
+      assert.deepEqual(afterA.get(k), v, `boundary=${boundary}: B object byte-identical: ${k}`);
     }
-    // A's staged objects survive unreferenced (bounded cost) but B's set is a
-    // superset of the pre-B state minus nothing.
-    for (const [k, v] of before) assert.deepEqual(afterA.get(k), v, `legacy object ${k} untouched`);
-    // Audits/promotions: exactly B's — no losing audits, single promotion.
-    const exportAudits = (ctx.d1.db.prepare(`SELECT action, new_value_json FROM receipt_audit_log WHERE object_type='export' AND action LIKE 'export.%' ORDER BY rowid`).all() as never as { action: string; new_value_json: string | null }[]).map((a) => a.action);
-    assert.equal(exportAudits.filter((a) => a === "export.finalized").length, 1);
-    assert.equal(exportAudits.filter((a) => a === "export.generated").length, 0);
+    assert.deepEqual(afterA.get(legacyKey), legacyBytes, `boundary=${boundary}: legacy object untouched`);
+    // B's published identity/message hold.
+    const row = ctx.d1.db.prepare(`SELECT bundle_build_id, operator_message FROM receipt_exports WHERE export_month='2026-01'`).get() as never as Record<string, string | null>;
+    assert.equal(row.operator_message, "from-B", `boundary=${boundary}: B's message holds`);
+    assert.equal(row.bundle_build_id, bBuild.bundle_build_id, `boundary=${boundary}: B's build id holds`);
+    // Exactly one promotion + exactly B's audits — no losing audit rows.
     const promoted = (ctx.d1.db.prepare(`SELECT object_id FROM receipt_audit_log WHERE action='receipt.exported'`).all() as never as { object_id: string }[]).map((a) => a.object_id);
-    assert.deepEqual(promoted, ["r1"], `putsByA=${putsByA}: exactly one promotion (B's)`);
-    const row = ctx.d1.db.prepare(`SELECT status, bundle_build_id FROM receipt_exports WHERE id=?`).get(exportId) as never as Record<string, string | null>;
-    assert.equal(row.status, "finalized");
-    assert.notEqual(row.bundle_build_id, tokenA);
+    assert.deepEqual(promoted, ["r1"], `boundary=${boundary}: exactly one promotion`);
+    const exportAudits = (ctx.d1.db.prepare(`SELECT action FROM receipt_audit_log WHERE object_type='export' AND action LIKE 'export.%' ORDER BY rowid`).all() as never as { action: string }[]).map((a) => a.action);
+    assert.equal(exportAudits.filter((a) => a === "export.finalized").length, 1, `boundary=${boundary}: exactly one finalize audit (B's)`);
   }
 
-  // The pure expired-CAS arm: B only REBUILDS (row stays draft), so A's
-  // attempt reaches its own CAS and loses with the TYPED conflict.
+  // The PURE expired-lease CAS arm: an attempt whose lease genuinely lapsed
+  // (test seam) loses its publication with the typed conflict, publishing
+  // nothing — the same CAS the suspended routes above ran into.
   {
     freshContext();
     const db = ctx.d1.asD1();
-    const exportId = await dbMod.createExport("2026-01", "op", db);
-    const tokenA = await lockMod.acquireSealClaim(db, { exportId, finalize: false, leaseSeconds: 1 });
-    await ctx.archive.put(`exports/2026-01/${exportId}/${tokenA}/staged.csv`, new TextEncoder().encode("A"), { onlyIf: { etagDoesNotMatch: "*" } });
-    await new Promise((r) => setTimeout(r, 1100));
+    const id = await dbMod.createExport("2026-01", "op", db);
+    const staleToken = await lockMod.acquireSealClaim(db, { exportId: id, finalize: false, leaseSeconds: -5 });
+    await ctx.archive.put(`exports/2026-01/${id}/${staleToken}/staged.csv`, new TextEncoder().encode("A"), { onlyIf: { etagDoesNotMatch: "*" } });
     const rebuilt = await runRoute({ month: "2026-01", finalize: false });
     assert.equal(rebuilt.status, 200);
     const dbModPub = await import("@/lib/receipts/export-publication");
     await assert.rejects(
       dbModPub.publishExportBundle(db, {
-        exportId, month: "2026-01", buildId: tokenA, actor: "builder-a", finalize: false,
-        rowCount: 1, archiveKey: `exports/2026-01/${exportId}/${tokenA}/a.csv`,
-        manifestKey: `exports/2026-01/${exportId}/${tokenA}/m.csv`, archiveSha256: "AA",
-        manifestSha256: "MM", proofsKey: `exports/2026-01/${exportId}/${tokenA}/p.zip`,
+        exportId: id, month: "2026-01", buildId: staleToken, actor: "builder-a", finalize: false,
+        rowCount: 1, archiveKey: `exports/2026-01/${id}/${staleToken}/a.csv`,
+        manifestKey: `exports/2026-01/${id}/${staleToken}/m.csv`, archiveSha256: "AA",
+        manifestSha256: "MM", proofsKey: `exports/2026-01/${id}/${staleToken}/p.zip`,
         proofsSha256: "PP", paymentDueDate: null, operatorMessage: null,
         items: [{ itemType: "receipt", itemId: "r1" }], promotableReceiptIds: [],
       }),
       (err: unknown) => err instanceof dbModPub.PublicationConflictError,
-      "draft arm: expired CAS is the typed conflict",
+      "true expired lease → typed CAS conflict",
     );
-    const row = ctx.d1.db.prepare(`SELECT status, bundle_build_id, archive_r2_key FROM receipt_exports WHERE id=?`).get(exportId) as never as Record<string, string | null>;
-    assert.equal(row.status, "draft");
-    assert.notEqual(row.bundle_build_id, tokenA, "B's build identity holds");
-    assert.ok(!row.archive_r2_key!.includes(tokenA), "metadata untouched by A");
+    const row = ctx.d1.db.prepare(`SELECT archive_r2_key FROM receipt_exports WHERE id=?`).get(id) as never as { archive_r2_key: string };
+    assert.ok(!row.archive_r2_key.includes(staleToken), "metadata untouched by the expired attempt");
   }
 });
-
-// ─── Round 3: F2/F3 deletion admission revalidation + rollback ───────────────
 
 guardedTest("R3-F2 a delivery that reached the recipient AFTER planning refuses the whole deletion", async () => {
   freshContext();
@@ -1322,16 +1328,20 @@ guardedTest("R3-F2 a delivery that reached the recipient AFTER planning refuses 
   assert.equal((ctx.d1.db.prepare(`SELECT COUNT(*) AS n FROM receipt_audit_log WHERE object_id=? AND action LIKE 'export.deleted%'`).get(exportId) as never as { n: number }).n, 0);
 });
 
-guardedTest("R3-F2 an intervening rebuild (different published build) refuses the planned deletion", async () => {
+guardedTest("R4-F2 a same-STATUS draft→draft rebuild with a different published build refuses the planned deletion (build identity, not status, is the guard)", async () => {
   freshContext();
   const { executeExportDeletion } = await import("@/lib/receipts/export-deletion");
   const db = ctx.d1.asD1();
+  // Build 1 (draft, unbuilt→built) then Build 2 — BOTH leave the row a DRAFT,
+  // so plannedStatus matches; only bundle_build_id/keys differ.
   const build1 = await runRoute({ month: "2026-01", finalize: false });
   const { exportId } = (await build1.json()) as { exportId: string };
   const row1 = ctx.d1.db.prepare(`SELECT * FROM receipt_exports WHERE id=?`).get(exportId) as never as Record<string, unknown>;
-  // A completed rebuild substitutes a different bundle before execution.
-  const build2 = await runRoute({ month: "2026-01", finalize: true, operatorMessage: null });
+  const build2 = await runRoute({ month: "2026-01", finalize: false });
   assert.equal(build2.status, 200);
+  const statusNow = (ctx.d1.db.prepare(`SELECT status FROM receipt_exports WHERE id=?`).get(exportId) as never as { status: string }).status;
+  assert.equal(statusNow, "draft", "row stayed a draft — the refusal below can only come from the build/key identity");
+  assert.notEqual(row1.bundle_build_id, (ctx.d1.db.prepare(`SELECT bundle_build_id FROM receipt_exports WHERE id=?`).get(exportId) as never as { bundle_build_id: string }).bundle_build_id, "the rebuild actually changed the build identity");
   await assert.rejects(
     executeExportDeletion(db, {
       exportId,
@@ -1350,7 +1360,7 @@ guardedTest("R3-F2 an intervening rebuild (different published build) refuses th
       },
     }),
     (err: unknown) => /constraint|NOT NULL|DZ_SEAL/i.test((err as Error).message),
-    "stale planned build identity refuses admission",
+    "stale planned build identity refuses admission at the SAME status",
   );
   assert.equal((ctx.d1.db.prepare(`SELECT COUNT(*) AS n FROM receipt_exports WHERE id=?`).get(exportId) as never as { n: number }).n, 1, "the rebuilt export survives");
 });
@@ -1366,6 +1376,7 @@ guardedTest("R3-F3 zero-row admission (draft, wrong planned month) rolls back EV
     items: (ctx.d1.db.prepare(`SELECT COUNT(*) AS n FROM receipt_export_items`).get() as never as { n: number }).n,
     audits: (ctx.d1.db.prepare(`SELECT COUNT(*) AS n FROM receipt_audit_log`).get() as never as { n: number }).n,
   };
+  const draftRow = ctx.d1.db.prepare(`SELECT * FROM receipt_exports WHERE id=?`).get(exportId) as never as Record<string, unknown>;
   await assert.rejects(
     executeExportDeletion(db, {
       exportId,
@@ -1376,6 +1387,12 @@ guardedTest("R3-F3 zero-row admission (draft, wrong planned month) rolls back EV
       auditId: "audit-f3",
       assertId: "assert-f3",
       auditValueJson: "{}",
+      plannedIdentity: {
+        bundleBuildId: (draftRow.bundle_build_id as string | null) ?? null,
+        archiveKey: (draftRow.archive_r2_key as string | null) ?? null,
+        manifestKey: (draftRow.manifest_r2_key as string | null) ?? null,
+        proofsKey: (draftRow.proofs_r2_key as string | null) ?? null,
+      },
     }),
     (err: unknown) => /constraint|NOT NULL/i.test((err as Error).message),
   );
@@ -1419,3 +1436,35 @@ guardedTest("R3-F3 an injected failure at the deliveries/parent tail rolls the m
   }
 });
 
+// ─── Round 4: R1 exported_month-only INSERT at the actual route ──────────────
+
+guardedTest("R4-R1 an exported_month-only INSERT mid-build is fenced; the finalize cannot seal a silently-widened gate", async () => {
+  freshContext();
+  const [reached, release] = ctx.archive.armPauseAt(3);
+  const inFlight = runRoute({ month: "2026-01", finalize: true, operatorMessage: null });
+  await reached; // build holds the claim, gate already validated
+
+  // The reviewer's probe: a CASH receipt dated FEBRUARY whose only relationship
+  // to January is exported_month — no statement month, incomplete fields.
+  assert.throws(
+    () =>
+      ctx.d1.db
+        .prepare(
+          `INSERT INTO receipt_records
+             (id,captured_at,captured_by,payment_path,transaction_date,status,original_r2_key,
+              original_sha256,original_content_type,original_size_bytes,created_at,updated_at,exported_month)
+           VALUES ('rx','2026-02-01T00:00:00Z','op','CASH','2026-02-01','captured','kx','sh','image/jpeg',1,'t','t','2026-01')`,
+        )
+        .run(),
+    /DZ_SEAL_CLAIM_ACTIVE/,
+    "exported_month alone is gate scope during a claim",
+  );
+
+  release();
+  const res = await inFlight;
+  assert.equal(res.status, 200);
+  // The sealed month's compliance population is exactly the fixture's — the
+  // would-be blocker receipt never entered it.
+  const pop = ctx.d1.db.prepare(`SELECT COUNT(*) AS n FROM receipt_records WHERE exported_month='2026-01' AND id='rx'`).get() as never as { n: number };
+  assert.equal(pop.n, 0);
+});

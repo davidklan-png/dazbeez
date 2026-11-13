@@ -195,12 +195,28 @@ try { rmSync(tmpFile, { force: true }); } catch { /* best effort */ }
 
 type ConfirmState =
   | { kind: "committed" }
-  | { kind: "not-committed" }
+  | { kind: "absent" }
+  | { kind: "present" }
   | { kind: "unreadable"; detail: string };
 
+// R3: the import's acknowledgement and this confirmation read are SEPARATE
+// requests. A lost import acknowledgement does not prove rollback — the
+// transaction may commit between the marker read and the parent read (or after
+// both). One query observing marker+parent TOGETHER closes the split-read
+// window inside this check, but cannot prove a pending import will never
+// commit later. So the ONLY evidence-supported outcomes are:
+//   committed  — marker present AND export absent (deletion happened)
+//   absent     — marker absent AND export still present
+//   present    — export present but marker present too, or anything else
+//                inconsistent: the deletion may still be in flight
+//   unreadable — the confirmation query itself failed
+// "absent" proves rollback ONLY when the import DEFINITELY completed with a
+// rejection; for an unclassified import error, absence now is not proof the
+// import cannot later commit — treat as UNCONFIRMED.
 function confirmByRead(): ConfirmState {
   try {
-    const markerRaw = execFileSync(
+    // Single query, single result set: marker and parent observed together.
+    const raw = execFileSync(
       "npx",
       [
         "wrangler",
@@ -210,30 +226,23 @@ function confirmByRead(): ConfirmState {
         "--remote",
         "--json",
         "--command",
-        `SELECT id FROM receipt_audit_log WHERE id = ${esc(auditId)}`,
+        `SELECT
+           (SELECT COUNT(*) FROM receipt_audit_log WHERE id = ${esc(auditId)}) AS marker_n,
+           (SELECT COUNT(*) FROM receipt_exports WHERE id = ${esc(exportId)}) AS export_n`,
       ],
       { encoding: "utf8", maxBuffer: 256 * 1024 * 1024 },
     );
-    const rowRaw = execFileSync(
-      "npx",
-      [
-        "wrangler",
-        "d1",
-        "execute",
-        DB,
-        "--remote",
-        "--json",
-        "--command",
-        `SELECT id FROM receipt_exports WHERE id = ${esc(exportId)}`,
-      ],
-      { encoding: "utf8", maxBuffer: 256 * 1024 * 1024 },
-    );
-    const markerRows = ((JSON.parse(markerRaw)[0] ?? JSON.parse(markerRaw))?.results ?? []) as unknown[];
-    const rowRows = ((JSON.parse(rowRaw)[0] ?? JSON.parse(rowRaw))?.results ?? []) as unknown[];
-    const markerPresent = markerRows.length === 1;
-    const exportAbsent = rowRows.length === 0;
-    if (markerPresent && exportAbsent) return { kind: "committed" };
-    return { kind: "not-committed" };
+    const rows = ((JSON.parse(raw)[0] ?? JSON.parse(raw))?.results ?? []) as Array<{
+      marker_n: number;
+      export_n: number;
+    }>;
+    const row = rows[0];
+    if (!row) return { kind: "unreadable", detail: "confirmation query returned no row" };
+    const markerPresent = Number(row.marker_n) === 1;
+    const exportPresent = Number(row.export_n) > 0;
+    if (markerPresent && !exportPresent) return { kind: "committed" };
+    if (!markerPresent && exportPresent) return { kind: "absent" };
+    return { kind: "present" };
   } catch (err) {
     return {
       kind: "unreadable",
@@ -247,17 +256,23 @@ if (confirm.kind === "committed") {
   if (importError) {
     console.log("  [d1] import reported an error but the committed deletion is confirmed by re-read (commit-before-error acknowledged).");
   }
-} else if (confirm.kind === "unreadable") {
-  console.error(`  [d1] UNCONFIRMED: the deletion result could not be verified (${confirm.detail}). NO R2 object was touched — re-run the confirmation read before any retry; do NOT assume either outcome.`);
+} else if (confirm.kind === "absent" && importError && /REFUSED|constraint|DZ_SEAL|NOT NULL/i.test(importError.message)) {
+  // A DEFINITE statement/admission rejection observed from the import itself,
+  // plus marker-absent/export-present now: known rollback.
+  console.error(`  [d1] REFUSED/ROLLED BACK: the deletion transaction was rejected (${importError.message.split("\n")[0]}). NOTHING was deleted and NO R2 object was touched.`);
   process.exit(2);
-} else if (importError) {
-  console.error(`  [d1] REFUSED/ROLLED BACK: the deletion transaction did not commit (guard refusal or admission assertion). NOTHING was deleted and NO R2 object was touched.`);
-  console.error(`  detail: ${importError.message.split("\n")[0]}`);
+} else if (confirm.kind === "unreadable" || confirm.kind === "present" || importError) {
+  // Unresolved: unclassified import error (a pending import may still commit —
+  // never claim definite rollback from a read that cannot prove it), an
+  // inconsistent state, or an unreadable confirmation.
+  console.error(
+    `  [d1] UNCONFIRMED: the deletion outcome could not be established (state=${confirm.kind}${importError ? `; import error: ${importError.message.split("\n")[0]}` : ""}). NO R2 object was touched — re-run the confirmation read before any retry; do NOT assume either outcome.`,
+  );
   process.exit(2);
 } else {
-  // Import reported success but the re-read does not show a committed
-  // deletion — treat as unconfirmed, never as "unchanged" without evidence.
-  console.error(`  [d1] UNCONFIRMED: the import returned but the committed state could not be verified by re-read (marker/export state unexpected). NO R2 object was touched — investigate before retrying.`);
+  // Import reported success, no import error, and the state is definitely
+  // marker-absent + export-present: the transaction did not commit.
+  console.error(`  [d1] REFUSED/ROLLED BACK: the deletion transaction did not commit (marker absent, export unchanged). NOTHING was deleted and NO R2 object was touched.`);
   process.exit(2);
 }
 console.log("  [d1] deletion transaction CONFIRMED by re-read (unique audit marker present, export row absent; items cascaded, deliveries removed, admission audited)");
