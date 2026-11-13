@@ -38,6 +38,10 @@ export interface ExportDeletionRequest {
 export interface ExportDeletionContext {
   /** The receipt_exports row for exportId (null ⇒ not found). */
   exportRow: ReceiptExport | null;
+  /** Wall-clock seconds, injected by the script (Date.now()/1000). Used ONLY
+   *  for the active-build-claim refusal — the D1-side CAS remains the real
+   *  authority; this precheck just gives the operator a readable refusal. */
+  nowEpochSeconds?: number;
   /** The export_deliveries rows for the export (the `state` column is all that's
    *  read here). */
   deliveries: { state: string }[];
@@ -125,6 +129,20 @@ export function planExportDeletion(
       `month mismatch: requested ${req.month}, row export_month is ${row.export_month}`,
     );
   }
+  // Seal boundary (0042): refuse while a build claim is ACTIVE on this row —
+  // a draft under construction may be staging objects right now; deleting the
+  // row (and cascading its items) under a live builder breaks the boundary the
+  // claim exists to draw. Expiry (or the builder's release) re-enables.
+  const claimActive =
+    !!row.sealing_token &&
+    typeof row.sealing_expires_at === "number" &&
+    row.sealing_expires_at > (ctx.nowEpochSeconds ?? 0);
+  if (claimActive) {
+    return refuse(
+      `export ${exportId} holds an active build claim (sealing_token present, lease unexpired) — a build is in progress. Retry after it publishes, releases, or its lease expires.`,
+    );
+  }
+
   // Refuse if any delivery may have reached the accountant. Reuse the named
   // constant from delivery-state.ts (the doctrine #171 settled) rather than
   // re-spelling the set. Only a definitively 'failed' delivery permits deletion.
@@ -148,14 +166,18 @@ export function planExportDeletion(
   const stored = [row.archive_r2_key, row.manifest_r2_key, row.proofs_r2_key].filter(
     (k): k is string => typeof k === "string" && k.length > 0,
   );
+  // Derived keys resolve under the row's PUBLISHED build namespace when it has
+  // one (0042); NULL keeps the legacy export-ID paths for rows sealed before it.
+  // Sealed objects never move, so this stays stable for the row's lifetime.
+  const buildId = row.bundle_build_id ?? null;
   const derived = [
-    buildSummaryKey(row.export_month, row.id),
-    buildAttendeesKey(row.export_month, row.id),
-    buildReadmeKey(row.export_month, row.id),
-    buildAmexReconciliationKey(row.export_month, row.id),
-    buildCashReconciliationKey(row.export_month, row.id),
-    buildDigitalReconciliationKey(row.export_month, row.id),
-    buildProofsNoReceiptsKey(row.export_month, row.id),
+    buildSummaryKey(row.export_month, row.id, buildId),
+    buildAttendeesKey(row.export_month, row.id, buildId),
+    buildReadmeKey(row.export_month, row.id, buildId),
+    buildAmexReconciliationKey(row.export_month, row.id, buildId),
+    buildCashReconciliationKey(row.export_month, row.id, buildId),
+    buildDigitalReconciliationKey(row.export_month, row.id, buildId),
+    buildProofsNoReceiptsKey(row.export_month, row.id, buildId),
   ];
   const r2Objects = [...stored, ...derived];
 

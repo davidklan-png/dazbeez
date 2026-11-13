@@ -60,85 +60,97 @@ export async function getReceiptFile(
   };
 }
 
-// ─── Proof-copy derivatives (PR 1) ─────────────────────────────────────────
-// Compact proof image generated on the Mac consumer at ingest (resize 1600,
-// JPEG q75; PDFs pass through). Stored in the LIVE receipts bucket under a
-// STABLE per-receipt key so the proofs ZIP (sealed-bundle artifact) can prefer
-// it over the original to keep the bundle small.
+// ─── Derivatives (proof copies + renders) — versioned, immutable (0042) ─────
+// Every NEW derivative write goes to a UNIQUE per-upload key and the bytes are
+// uploaded immutably BEFORE the manifest switch. Old derivative objects are
+// never overwritten or deleted: a manifest published by a sealed bundle lists
+// the key it sealed with, and that object must stay byte-identical forever
+// (the 0042 proof/render publication keeps old objects referenced by prior
+// manifests intact; abandoned unreferenced objects are an accepted, bounded
+// storage cost — cleanup is deliberately out of scope).
+//
+// Legacy rows may still point at the old STABLE keys (receipts/<id>/proof.<ext>
+// / rendered.<ext>) — those are read like any other key and never rewritten.
 
-export function proofCopyR2Key(receiptId: string, ext: "jpg" | "pdf"): string {
-  return `receipts/${receiptId}/proof.${ext}`;
+/** Versioned key for a proof-copy upload: `receipts/<id>/proof-<uuid>.<ext>`. */
+export function proofCopyVersionedKey(
+  receiptId: string,
+  ext: "jpg" | "pdf",
+  version: string,
+): string {
+  return `receipts/${receiptId}/proof-${version}.${ext}`;
+}
+
+/** Versioned key for a render upload: `receipts/<id>/rendered-<uuid>.<ext>`. */
+export function renderedVersionedKey(
+  receiptId: string,
+  ext: "pdf" | "png",
+  version: string,
+): string {
+  return `receipts/${receiptId}/rendered-${version}.${ext}`;
 }
 
 /**
- * Overwrite-capable put for a proof-copy derivative. Unlike uploadOriginal
- * (which guards against collisions to protect originals), proof copies are
- * regenerable — re-ingest and `backfill_proof_copies.py --force` refresh them
- * in place. The caller deletes any prior proof_copy receipt_files row first so
- * the r2_key UNIQUE constraint still holds after the fresh insert.
+ * Immutable no-overwrite put for derivative objects (the same conditional
+ * uploadOriginal uses): the precondition is evaluated atomically by R2 and a
+ * collision (impossible for a fresh uuid key — an anomaly) fails loudly.
  */
-export async function putProofCopy(
+export async function putDerivativeImmutable(
   key: string,
   data: ArrayBuffer,
   contentType: string,
 ): Promise<void> {
   const bucket = getReceiptsBucket();
-  await bucket.put(key, data, {
+  const result = await bucket.put(key, data, {
     httpMetadata: { contentType },
     customMetadata: retentionMetadata(),
+    onlyIf: { etagDoesNotMatch: "*" },
   });
-}
-
-// ─── Rendered derivatives (ADR 0011 Phase B) ────────────────────────────────
-// The Mac-rendered PDF/PNG of an email_body receipt's raw HTML/text body — the
-// MLX-consumable form of a receipt whose original is text, not an image. Stored
-// in the LIVE receipts bucket at a STABLE per-receipt key; /file serves it in
-// preference to the raw-body original once it exists.
-
-export function renderedR2Key(receiptId: string, ext: "pdf" | "png"): string {
-  return `receipts/${receiptId}/rendered.${ext}`;
+  if (result === null) {
+    throw new Error(
+      `R2 key collision: refusing to overwrite existing derivative at key "${key}".`,
+    );
+  }
 }
 
 /**
- * Overwrite-capable put for the Mac-rendered derivative. Like putProofCopy:
- * regenerable, so re-render overwrites in place. The caller deletes any prior
- * `processed` receipt_files row first so the r2_key UNIQUE constraint holds
- * after the fresh insert. NOTE: the rendered derivative is NOT the compliance
- * original — the raw body (text/*, is_original=true) is. This object is filed
- * as a separate is_original=false `processed` row.
+ * Immutable no-overwrite put for a bundle artifact in the archive bucket.
+ * Every 0042 build stages into its own `exports/<month>/<id>/<buildId>/`
+ * namespace, so a collision means an attempt is reusing a build id — refuse
+ * rather than silently overwrite another build's object (uploadOriginal's
+ * conditional pattern, applied to outputs).
  */
-export async function putRenderedDerivative(
+export async function putArchiveImmutable(
   key: string,
-  data: ArrayBuffer,
+  data: ArrayBuffer | Uint8Array,
   contentType: string,
 ): Promise<void> {
-  const bucket = getReceiptsBucket();
-  await bucket.put(key, data, {
+  const bucket = getReceiptsArchiveBucket();
+  const result = await bucket.put(key, data, {
     httpMetadata: { contentType },
     customMetadata: retentionMetadata(),
+    onlyIf: { etagDoesNotMatch: "*" },
   });
+  if (result === null) {
+    throw new Error(
+      `R2 key collision: refusing to overwrite existing archive object at key "${key}".`,
+    );
+  }
 }
 
+/** CSV-typed convenience wrapper for putArchiveImmutable. */
 export async function archiveBundle(
   key: string,
   data: ArrayBuffer,
 ): Promise<void> {
-  const bucket = getReceiptsArchiveBucket();
-  await bucket.put(key, data, {
-    httpMetadata: { contentType: "text/csv; charset=utf-8" },
-    customMetadata: retentionMetadata(),
-  });
+  await putArchiveImmutable(key, data, "text/csv; charset=utf-8");
 }
 
 export async function archiveManifest(
   key: string,
   data: ArrayBuffer,
 ): Promise<void> {
-  const bucket = getReceiptsArchiveBucket();
-  await bucket.put(key, data, {
-    httpMetadata: { contentType: "text/csv; charset=utf-8" },
-    customMetadata: retentionMetadata(),
-  });
+  await putArchiveImmutable(key, data, "text/csv; charset=utf-8");
 }
 
 export function generateArchiveKey(
@@ -166,25 +178,27 @@ export function generateAmexArtifactKey(
   return `amex-statements/${statementMonth}/${artifactId}-${safe}`;
 }
 
+/**
+ * No-overwrite conditional put for an AMEX statement original. Artifact keys
+ * are uuid-based (generateAmexArtifactKey) so a collision is an anomaly —
+ * refuse it rather than overwrite a source object a prior seal may retain
+ * (seal boundary §D: AMEX originals are immutable source evidence).
+ */
 export async function uploadAmexArtifact(
   key: string,
   data: ArrayBuffer,
 ): Promise<void> {
   const bucket = getReceiptsBucket();
-  await bucket.put(key, data, {
+  const result = await bucket.put(key, data, {
     httpMetadata: { contentType: "text/csv" },
     customMetadata: retentionMetadata(),
+    onlyIf: { etagDoesNotMatch: "*" },
   });
-}
-
-// Best-effort R2 delete for a stale artifact object. Used by
-// purgeFailedAmexArtifactsByHash when clearing out failed/replaced rows
-// before re-inserting. Errors are caught by the caller — this helper is
-// intentionally not try/catch'd so the caller can decide the failure
-// policy (in practice: log and continue).
-export async function deleteAmexArtifact(key: string): Promise<void> {
-  const bucket = getReceiptsBucket();
-  await bucket.delete(key);
+  if (result === null) {
+    throw new Error(
+      `R2 key collision: refusing to overwrite existing AMEX artifact at key "${key}".`,
+    );
+  }
 }
 
 export async function computeSha256Hex(data: ArrayBuffer | Uint8Array): Promise<string> {

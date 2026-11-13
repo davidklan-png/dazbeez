@@ -565,6 +565,16 @@ export interface ReceiptExport {
   //     because it forged decisions; see db.ts recordExportBundle + the
   //     operator-message-contract test).
   operator_message_updated_at?: string | null;
+  // ── Seal boundary (0042) ──────────────────────────────────────────────────
+  // Active build claim: a fresh unpredictable token (also the attempt's R2
+  // build namespace) plus its D1-clock-derived expiry (unix epoch seconds).
+  // NULL/absent = no claim; an EXPIRED claim is inert — every SQL predicate
+  // ignores it and the publication CAS refuses it.
+  sealing_token?: string | null;
+  sealing_expires_at?: number | null;
+  /** The build id whose artifacts this row published (NULL = legacy export-ID
+   *  paths, pre-0042). Derived download keys resolve under this namespace. */
+  bundle_build_id?: string | null;
 }
 
 /**
