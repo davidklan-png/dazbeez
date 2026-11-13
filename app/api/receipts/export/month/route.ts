@@ -25,12 +25,13 @@ import {
   buildCashReconciliationKey,
   buildDigitalReconciliationKey,
 } from "@/lib/receipts/export";
-import { publishExportBundle } from "@/lib/receipts/export-publication";
+import { publishExportBundle, PublicationConflictError } from "@/lib/receipts/export-publication";
 import { resolveOperatorMessageForRebuild, oneShotFinalizeDecision, findGeneratedHeadingInOperatorMessage } from "@/lib/receipts/operator-message";
 import {
   acquireSealClaim,
   releaseSealClaim,
   isSealBoundaryConflict,
+  ExportFinalizedError,
   SealClaimConflictError,
 } from "@/lib/receipts/month-lock";
 import {
@@ -61,7 +62,8 @@ import {
 import { getReceiptsDb } from "@/lib/cloudflare-runtime";
 import { getAmexArtifactByMonth } from "@/lib/receipts/db";
 import { getComplianceSettings } from "@/lib/receipts/settings";
-import type { AmexReconciliation, ReceiptFile } from "@/lib/receipts/types";
+import { loadCompliancePopulation } from "@/lib/receipts/compliance";
+import type { AmexReconciliation, ReceiptExport, ReceiptFile } from "@/lib/receipts/types";
 
 export async function POST(request: Request) {
   // ── Admission (seal boundary §A) ─────────────────────────────────────────
@@ -74,6 +76,10 @@ export async function POST(request: Request) {
   // prechecks ran before the claim existed.
   let claim: { exportId: string; buildId: string } | null = null;
   let published = false;
+  /** True once the publication batch has been attempted (B11 classification). */
+  let publicationBatchAttempted = false;
+  /** True when the outcome could not be confirmed — suppresses claim release. */
+  let uncertain = false;
   try {
     const actor = await requireReceiptsActor(request.headers);
 
@@ -124,42 +130,51 @@ export async function POST(request: Request) {
 
     // Resolve/create the canonical draft (first-create uniqueness contention
     // is handled inside createExport: the race loser re-reads the winner's
-    // draft). Every subsequent write targets this EXACT id.
+    // draft, or gets the friendly already-finalized conflict). Every
+    // subsequent write targets this EXACT id.
     const db = getReceiptsDb();
     const exportId = await createExport(month, actor);
-    const exportRecord = await getExportById(exportId);
-    if (!exportRecord || exportRecord.status !== "draft") {
-      return NextResponse.json(
-        { error: `Export for ${month} is not an open draft.` },
-        { status: 409 },
-      );
-    }
-    const exportRevision = exportRecord.export_revision ?? 1;
-    const supersedesExportId = exportRecord.supersedes_export_id ?? null;
-    const correctionReason = exportRecord.correction_reason ?? null;
-
-    // E1/A2: a rebuild that OMITS operatorMessage keeps the stored value; an
-    // explicit empty string CLEARS it. Resolved in memory — published only
-    // with successful outputs, never at acquisition, and never forging a
-    // decision timestamp.
-    const operatorMessage = body.finalize
-      ? finalizeDecision
-      : resolveOperatorMessageForRebuild(
-          body.operatorMessage,
-          exportRecord.operator_message ?? null,
-        );
 
     // Acquire the build claim (token = this attempt's build id / R2
-    // namespace). One conditional UPDATE: draft + absent/expired prior claim.
-    // The finalize decision (value + timestamp) rides this statement.
+    // namespace) FIRST. One conditional UPDATE: draft + absent/expired prior
+    // claim. The finalize decision (value + timestamp) rides this statement —
+    // an explicit decision, never re-derived from the row.
     const decisionAt = new Date().toISOString();
     const buildId = await acquireSealClaim(db, {
       exportId,
       finalize: Boolean(body.finalize),
-      operatorMessage: body.finalize ? operatorMessage : undefined,
+      operatorMessage: body.finalize ? finalizeDecision : undefined,
       decisionAt,
     });
     claim = { exportId, buildId };
+
+    // B1: RELOAD the exact claimed row AFTER acquisition and derive every
+    // row-sourced input from this snapshot — a message PATCH committed between
+    // the create and the acquisition (the claim trigger correctly allows it)
+    // must survive into the build instead of being overwritten by the stale
+    // pre-acquisition value. Revision/correction identity likewise.
+    const claimed = await getExportById(exportId, db);
+    if (!claimed || claimed.status !== "draft" || claimed.sealing_token !== buildId) {
+      return NextResponse.json(
+        { error: `Export for ${month} is not an open draft under this build claim.` },
+        { status: 409 },
+      );
+    }
+    const exportRevision = claimed.export_revision ?? 1;
+    const supersedesExportId = claimed.supersedes_export_id ?? null;
+    const correctionReason = claimed.correction_reason ?? null;
+    const priorBundleBuiltAt = claimed.bundle_built_at ?? null;
+
+    // E1/A2: a rebuild that OMITS operatorMessage keeps the stored value —
+    // the POST-ACQUISITION stored value (the reload above); an explicit empty
+    // string CLEARS it. Resolved in memory — published only with successful
+    // outputs, never at acquisition, and never forging a decision timestamp.
+    const operatorMessage = body.finalize
+      ? finalizeDecision
+      : resolveOperatorMessageForRebuild(
+          body.operatorMessage,
+          claimed.operator_message ?? null,
+        );
 
     // ── Build (§C: one protected input snapshot) ────────────────────────────
     // Build the bundle ONCE — single shared row-assembly authority
@@ -182,6 +197,41 @@ export async function POST(request: Request) {
     // One settings snapshot for the whole attempt (gate + compliance engine).
     const settings = await getComplianceSettings();
 
+    // ── File manifests: read ONCE into an ID map (§C) ───────────────────────
+    // The map covers the UNION of the bundle's receipts and the finalize
+    // gate's compliance population (month-anchored non-AMEX ∪ bundle ids), so
+    // the SAME selection feeds the gate's compliance summary + proof counts,
+    // proof-choice, and the manifest's per-file hash table. Claim-frozen.
+    const compliancePopulation = await loadCompliancePopulation(
+      db,
+      month,
+      bundle.receipts.map((r) => r.id),
+    );
+    const filesByReceiptId = new Map<string, ReceiptFile[]>();
+    {
+      const mapIds = [...compliancePopulation.keys()];
+      const CHUNK_SIZE = 90;
+      for (let i = 0; i < mapIds.length; i += CHUNK_SIZE) {
+        const chunk = mapIds.slice(i, i + CHUNK_SIZE);
+        const placeholders = chunk.map(() => "?").join(",");
+        const result = await db
+          .prepare(
+            `SELECT * FROM receipt_files
+             WHERE object_type = 'receipt' AND object_id IN (${placeholders})`,
+          )
+          .bind(...chunk)
+          .all<ReceiptFile>();
+        for (const f of result.results ?? []) {
+          let arr = filesByReceiptId.get(f.object_id);
+          if (!arr) {
+            arr = [];
+            filesByReceiptId.set(f.object_id, arr);
+          }
+          arr.push(f);
+        }
+      }
+    }
+
     if (body.finalize) {
       reconciliation = await getFinalizedReconciliationForMonth(month);
       // The full gate: same single authority (validateMonthReadyForExport),
@@ -198,12 +248,13 @@ export async function POST(request: Request) {
         {
           bundleRebuiltInRequest: true,
           preloadedExportBuild: {
-            bundleBuiltAt: exportRecord.bundle_built_at ?? null,
+            bundleBuiltAt: priorBundleBuiltAt,
             operatorMessageUpdatedAt: body.finalize
               ? decisionAt
-              : exportRecord.operator_message_updated_at ?? null,
+              : claimed.operator_message_updated_at ?? null,
           },
           preloadedSettings: settings,
+          preloadedFilesByReceipt: filesByReceiptId,
         },
       );
       if (blockers.length > 0) {
@@ -257,34 +308,8 @@ export async function POST(request: Request) {
     const attendeesShipped = bomPrefixedCrlf(attendeesPure);
     const attendeesSha256 = await hashCsvContent(attendeesShipped);
 
-    // ── File manifests: read ONCE into an ID map (§C) ───────────────────────
-    // The same selection feeds proof-choice, the finalize gate's compliance
-    // summary (via the source-computed engine), and the manifest's per-file
-    // hash table. Claim-frozen after acquisition.
+    // Manifest file rows come from the SAME shared map (bundle slice).
     const includedReceiptIds = bundle.receipts.map((r) => r.id);
-    const filesByReceiptId = new Map<string, ReceiptFile[]>();
-    {
-      const CHUNK_SIZE = 90;
-      for (let i = 0; i < includedReceiptIds.length; i += CHUNK_SIZE) {
-        const chunk = includedReceiptIds.slice(i, i + CHUNK_SIZE);
-        const placeholders = chunk.map(() => "?").join(",");
-        const result = await db
-          .prepare(
-            `SELECT * FROM receipt_files
-             WHERE object_type = 'receipt' AND object_id IN (${placeholders})`,
-          )
-          .bind(...chunk)
-          .all<ReceiptFile>();
-        for (const f of result.results ?? []) {
-          let arr = filesByReceiptId.get(f.object_id);
-          if (!arr) {
-            arr = [];
-            filesByReceiptId.set(f.object_id, arr);
-          }
-          arr.push(f);
-        }
-      }
-    }
 
     // All artifact keys live in THIS attempt's private build namespace
     // (§D): exports/<month>/<exportId>/<buildId>/… — conditional no-overwrite
@@ -673,6 +698,7 @@ export async function POST(request: Request) {
     // audits and (finalize) promotions. The candidate values above were
     // assembled entirely in memory while objects uploaded; nothing but the
     // claim touched the export row until now.
+    publicationBatchAttempted = true;
     await publishExportBundle(db, {
       exportId,
       month,
@@ -750,38 +776,76 @@ export async function POST(request: Request) {
     if (error instanceof Error && error.message.startsWith("Unauthorized")) {
       return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
     }
-    // Lost-acknowledgement check (§E): a failure AFTER publication (e.g. an
-    // interrupted success response) or a thrown batch that may still have
-    // committed. Re-read the exact export/build identity — a matching
-    // published build id confirms success; otherwise the failure is real and
-    // an owned, unpublished claim is released (never a successor's, never a
-    // finalized row).
+    // ── Outcome classification (§E, B11) ────────────────────────────────────
+    // KNOWN failures (definite rollback or never-ran): gate 422s, staging/R2
+    // errors, typed claim/CAS conflicts, DZ_SEAL_* trigger rejections — for
+    // these the state is provably unchanged, so the owned claim is released
+    // and the real error is surfaced. UNCERTAIN failures: an error out of the
+    // publication batch that is not a recognized statement rejection may be a
+    // lost acknowledgement AFTER commit — for those, confirm the exact
+    // published build when possible; otherwise report the outcome UNCONFIRMED
+    // with reload guidance and never release on this path (the lease expires
+    // on its own and heals admission; a release here could also race a state
+    // we could not read).
+    const knownFailure =
+      error instanceof SealClaimConflictError ||
+      error instanceof PublicationConflictError ||
+      error instanceof ExportFinalizedError ||
+      isSealBoundaryConflict(error) ||
+      !publicationBatchAttempted;
+
     if (claim) {
+      let rereadRow: ReceiptExport | null = null;
+      let rereadOk = true;
       try {
-        const db = getReceiptsDb();
-        const row = await getExportById(claim.exportId);
-        if (row?.bundle_build_id === claim.buildId) {
-          return NextResponse.json(
-            {
-              exportId: claim.exportId,
-              buildId: claim.buildId,
-              finalized: row.status === "finalized",
-              outcome: "published",
-              note: "The bundle committed but the response was interrupted — reload the export page to see the published state.",
-            },
-            { status: 200 },
-          );
-        }
-        if (!published) {
-          await releaseSealClaim(db, claim.exportId, claim.buildId);
-        }
+        rereadRow = await getExportById(claim.exportId);
       } catch (recheckErr) {
-        console.error("[api/receipts/export/month] post-failure recheck failed", recheckErr);
-        // Outcome unconfirmed: do NOT delete candidate objects, do NOT assume
-        // rollback — the lease will expire on its own and heal admission.
+        rereadOk = false;
+        console.error("[api/receipts/export/month] post-failure identity reread failed", recheckErr);
+      }
+      if (rereadOk && rereadRow?.bundle_build_id === claim.buildId) {
+        // Confirmed publication (committed batch / interrupted response).
+        return NextResponse.json(
+          {
+            exportId: claim.exportId,
+            buildId: claim.buildId,
+            finalized: rereadRow.status === "finalized",
+            outcome: "published",
+            note: "The bundle committed but the response was interrupted — reload the export page to see the published state.",
+          },
+          { status: 200 },
+        );
+      }
+      if (!knownFailure) {
+        // Uncertain acknowledgement, unconfirmed: nothing is deleted, no
+        // claim release, and the response says exactly what is (un)known.
+        uncertain = true;
+        return NextResponse.json(
+          {
+            outcome: "unconfirmed",
+            exportId: claim.exportId,
+            buildId: claim.buildId,
+            error:
+              "The publication result could not be confirmed (the transaction acknowledgement was lost or unreadable). Nothing was cleaned up — reload the export page to see the committed state before retrying.",
+          },
+          { status: 503 },
+        );
+      }
+      if (!published) {
+        try {
+          await releaseSealClaim(getReceiptsDb(), claim.exportId, claim.buildId);
+        } catch (releaseErr) {
+          console.error("[api/receipts/export/month] claim release failed", releaseErr);
+        }
       }
     }
     if (error instanceof SealClaimConflictError) {
+      return NextResponse.json({ error: error.message }, { status: 409 });
+    }
+    if (error instanceof PublicationConflictError) {
+      return NextResponse.json({ error: error.message }, { status: 409 });
+    }
+    if (error instanceof ExportFinalizedError) {
       return NextResponse.json({ error: error.message }, { status: 409 });
     }
     if (isSealBoundaryConflict(error)) {
@@ -797,11 +861,12 @@ export async function POST(request: Request) {
     );
   } finally {
     // Conditional release of an OWNED, unpublished claim (early returns like
-    // the 422 gate, staging errors, interruptions). After a publication the
-    // token is already NULL, so this is a no-op; a loser can never clear a
-    // successor's lease (ID + token), and a finalized row is never touched.
-    // A failure HERE must not mask the original outcome.
-    if (claim && !published) {
+    // the 422 gate, staging errors, known failures). Never on the UNCERTAIN
+    // path (B11) — there the lease must expire on its own. After a
+    // publication the token is already NULL, so this is a no-op; a loser can
+    // never clear a successor's lease (ID + token), and a finalized row is
+    // never touched. A failure HERE must not mask the original outcome.
+    if (claim && !published && !uncertain) {
       try {
         await releaseSealClaim(getReceiptsDb(), claim.exportId, claim.buildId);
       } catch (releaseErr) {

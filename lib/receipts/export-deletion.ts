@@ -197,3 +197,108 @@ export function planExportDeletion(
 
   return { ok: true, plan: { r2Objects, audit } };
 }
+
+// ─── Transactional execution (seal boundary B8) ──────────────────────────────
+//
+// The ONLY admitted way to delete an export row: ONE D1 transaction that
+// writes the typed `export.deleted` audit marker FIRST (gated on the planned
+// identity AND the absence of a live build claim), then removes deliveries,
+// item rows, and the export row. The 0042 guards make the marker the CAS:
+// without it, the finalized-items delete and the sealed-parent delete are
+// refused, so a claim acquired after planning (or any identity drift) aborts
+// the WHOLE transaction — deliveries and items roll back with the marker.
+// R2 objects may be removed only AFTER this transaction is confirmed; on any
+// uncertain outcome they are retained.
+
+export interface ExportDeletionExecutionInput {
+  exportId: string;
+  month: string;
+  /** The row's status as observed at plan time — re-checked transactionally. */
+  plannedStatus: string;
+  actor: string;
+  nowIso: string;
+  /** Fresh audit-row id (caller-generated). */
+  auditId: string;
+  /** The planner's audit payload (legal-hold exception recorded verbatim). */
+  auditValueJson: string;
+}
+
+export interface ExportDeletionExecutionResult {
+  /** 1 when the export row was deleted under the planned identity; else 0. */
+  exportRowsDeleted: number;
+  /** Whether the authorization marker was written (identity + claim held). */
+  markerWritten: boolean;
+}
+
+/**
+ * The deletion transaction's statements, in execution order. PURE — the
+ * committed script renders them as literals for `wrangler d1 execute --file`,
+ * and tests execute them against real SQLite with the 0042 triggers live.
+ */
+export function buildExportDeletionStatements(
+  input: ExportDeletionExecutionInput,
+): Array<{ sql: string; args: unknown[] }> {
+  return [
+    {
+      // Authorization marker + transactional CAS: inserts only when the row
+      // still matches the planned identity and holds no unexpired claim.
+      sql: `INSERT INTO receipt_audit_log
+              (id, actor, action, object_type, object_id, old_value_json, new_value_json, created_at)
+            SELECT ?, ?, 'export.deleted', 'export', e.id, NULL, ?, ?
+              FROM receipt_exports e
+             WHERE e.id = ? AND e.export_month = ? AND e.status = ?
+               AND (e.sealing_token IS NULL OR e.sealing_expires_at IS NULL
+                    OR e.sealing_expires_at <= CAST(strftime('%s','now') AS INTEGER))`,
+      args: [
+        input.auditId,
+        input.actor,
+        input.auditValueJson,
+        input.nowIso,
+        input.exportId,
+        input.month,
+        input.plannedStatus,
+      ],
+    },
+    {
+      sql: `DELETE FROM export_deliveries WHERE export_id = ?`,
+      args: [input.exportId],
+    },
+    {
+      // Admitted only by the marker (0042 seal_items_delete); for a draft
+      // parent the guard is inactive by design.
+      sql: `DELETE FROM receipt_export_items WHERE export_id = ?`,
+      args: [input.exportId],
+    },
+    {
+      // Claim-active and sealed-without-marker guards both apply here.
+      sql: `DELETE FROM receipt_exports WHERE id = ?`,
+      args: [input.exportId],
+    },
+  ];
+}
+
+/**
+ * Execute the deletion transaction against D1 (one batch). Throws on any
+ * statement failure — including the 0042 guard aborts when the marker did not
+ * authorize the deletion — leaving every row (and the marker) rolled back.
+ * The caller treats `exportRowsDeleted !== 1` as a refusal and RETAINS all
+ * R2 objects.
+ */
+export async function executeExportDeletion(
+  db: D1Database,
+  input: ExportDeletionExecutionInput,
+): Promise<ExportDeletionExecutionResult> {
+  const stmts = buildExportDeletionStatements(input);
+  const results = await db.batch(
+    stmts.map((st) => db.prepare(st.sql).bind(...st.args)),
+  );
+  const markerWritten = (results[0]?.meta.changes ?? 0) === 1;
+  const exportRowsDeleted = results[3]?.meta.changes ?? 0;
+  if (!markerWritten && exportRowsDeleted === 1) {
+    // Marker skipped (identity/claim drift) yet the row deleted anyway — only
+    // reachable for a draft whose row vanished mid-transaction elsewhere.
+    // Treat as NOT confirmed; the caller retains objects.
+    return { exportRowsDeleted: 0, markerWritten };
+  }
+  return { exportRowsDeleted, markerWritten };
+}

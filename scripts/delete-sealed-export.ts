@@ -23,7 +23,11 @@
 // read first. The planner is unit-tested; this wrapper is not.
 
 import { execFileSync } from "node:child_process";
-import { planExportDeletion } from "@/lib/receipts/export-deletion";
+import { rmSync, writeFileSync } from "node:fs";
+import {
+  buildExportDeletionStatements,
+  planExportDeletion,
+} from "@/lib/receipts/export-deletion";
 
 const DB = "RECEIPTS_DB";
 const BUCKET = "dazbeez-receipts-archive";
@@ -48,7 +52,7 @@ if (!exportId || !month || !reason) {
   process.exit(1);
 }
 
-const esc = (v: string | null | undefined) =>
+const esc = (v: string | number | null | undefined) =>
   v == null || v === "" ? "NULL" : `'${String(v).replace(/'/g, "''")}'`;
 
 function d1(sql: string): Record<string, unknown>[] {
@@ -59,17 +63,6 @@ function d1(sql: string): Record<string, unknown>[] {
   );
   const parsed = JSON.parse(raw);
   return (Array.isArray(parsed) ? parsed[0] : parsed)?.results ?? [];
-}
-
-function d1run(sql: string): number {
-  const raw = execFileSync(
-    "npx",
-    ["wrangler", "d1", "execute", DB, "--remote", "--json", "--command", sql],
-    { encoding: "utf8", maxBuffer: 256 * 1024 * 1024 },
-  );
-  const parsed = JSON.parse(raw);
-  const top = Array.isArray(parsed) ? parsed[0] : parsed;
-  return top?.meta?.changes ?? 0;
 }
 
 function r2Delete(key: string): boolean {
@@ -129,8 +122,66 @@ if (confirmDelete !== exportId) {
   process.exit(1);
 }
 
-// ─── Execute ─────────────────────────────────────────────────────────────────
-console.log("\n[WRITE] executing deletion...");
+// ─── Execute (B8): D1 transaction FIRST, R2 only after confirmed deletion ───
+// The deletion statements come from the shared, tested builder
+// (lib/receipts/export-deletion.ts buildExportDeletionStatements): the typed
+// export.deleted marker is written INSIDE the transaction, gated on the
+// planned identity and the absence of a live build claim — so a claim
+// acquired after planning aborts the whole transaction (the 0042 guards
+// refuse the sealed rows without the marker) and nothing is deleted. R2
+// objects are removed only after the transaction reports the export row
+// deleted; any uncertain outcome retains them.
+console.log("\n[WRITE] executing deletion transaction...");
+const plannedStatus = String((exportRow as Record<string, unknown>).status ?? "");
+const stmts = buildExportDeletionStatements({
+  exportId,
+  month,
+  plannedStatus,
+  actor: ACTOR,
+  nowIso: new Date().toISOString(),
+  auditId: globalThis.crypto.randomUUID(),
+  auditValueJson: plan.audit.newValueJson,
+});
+const sqlText = stmts
+  .map((st) =>
+    st.args.reduce<string>(
+      (sql, arg) => sql.replace("?", esc(arg as string | number | null)),
+      st.sql,
+    ),
+  )
+  .join(";\n");
+const tmpFile = `/tmp/delete-sealed-export-${exportId}.sql`;
+writeFileSync(tmpFile, sqlText + ";\n");
+let markerWritten = false;
+let exportRowsDeleted = 0;
+try {
+  const raw = execFileSync(
+    "npx",
+    ["wrangler", "d1", "execute", DB, "--remote", "--json", "--file", tmpFile],
+    { encoding: "utf8", maxBuffer: 256 * 1024 * 1024 },
+  );
+  const parsed = JSON.parse(raw);
+  const results = (Array.isArray(parsed) ? parsed[0] : parsed)?.results ?? [];
+  // wrangler --json reports one entry per statement; the marker is first and
+  // the export DELETE last. A guard abort surfaces as a nonzero exit (caught
+  // below) — nothing is deleted.
+  markerWritten = (results[0]?.meta?.changes ?? 0) === 1;
+  exportRowsDeleted = results[results.length - 1]?.meta?.changes ?? 0;
+} catch (err) {
+  console.error(`  [d1] REFUSED/FAILED: the deletion transaction did not commit (guard refusal or execution error). NOTHING was deleted and NO R2 object was touched.`);
+  console.error(`  detail: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+  process.exit(2);
+} finally {
+  try { rmSync(tmpFile, { force: true }); } catch { /* best effort */ }
+}
+if (!markerWritten || exportRowsDeleted !== 1) {
+  console.error(
+    `  [d1] REFUSED: transactional identity/claim check did not confirm the planned deletion (marker=${markerWritten}, exportRowsDeleted=${exportRowsDeleted}). Rows are unchanged and all R2 objects are RETAINED — re-run the dry-run to re-plan.`,
+  );
+  process.exit(2);
+}
+console.log("  [d1] deleted the export row, its deliveries, and its item set in one transaction (export.deleted audited)");
+
 let removed = 0;
 for (const key of plan.r2Objects) {
   if (r2Delete(key)) {
@@ -140,27 +191,5 @@ for (const key of plan.r2Objects) {
     console.log(`  [r2] absent (tolerated) ${BUCKET}/${key}`);
   }
 }
-
-const deliveriesDeleted = d1run(
-  `DELETE FROM export_deliveries WHERE export_id = ${esc(exportId)}`,
-);
-console.log(`  [d1] deleted ${deliveriesDeleted} export_deliveries row(s)`);
-
-// Delete the parent LAST; assert exactly one row changed before auditing.
-const exportDeleted = d1run(`DELETE FROM receipt_exports WHERE id = ${esc(exportId)}`);
-if (exportDeleted !== 1) {
-  console.error(
-    `  [d1] ABORT: expected to delete exactly 1 receipt_exports row, got ${exportDeleted}. Audit NOT written — investigate.`,
-  );
-  process.exit(2);
-}
-console.log("  [d1] deleted 1 receipt_exports row (items cascaded)");
-
-// Audit the deletion (export.deleted, typed action). The exception is recorded
-// verbatim in newValueJson (already built by the planner).
-d1run(
-  `INSERT INTO receipt_audit_log (id, actor, action, object_type, object_id, old_value_json, new_value_json, created_at)
-   VALUES (${esc(globalThis.crypto.randomUUID())}, ${esc(ACTOR)}, 'export.deleted', 'export', ${esc(exportId)}, NULL, ${esc(plan.audit.newValueJson)}, ${esc(new Date().toISOString())})`,
-);
-console.log(`  [audit] wrote export.deleted for ${exportId} (removed ${removed} R2 object(s))`);
+console.log(`  [audit] export.deleted recorded transactionally (removed ${removed} R2 object(s))`);
 console.log(`\n[WRITE] done. R2 removed: ${removed}.`);

@@ -469,6 +469,47 @@ export async function collectOpenComplianceCheckReceiptIds(
 }
 
 /**
+ * The finalize gate's compliance population (§C): (a) non-AMEX receipts
+ * anchored in `month` by transaction_date or exported_month, UNION (b)
+ * `extraReceiptIds` (bundle receipts incl. matched AMEX dated elsewhere),
+ * deduped, not deleted. Shared by {@link summarizeOpenChecksFromSource} and
+ * by the export route, which loads the UNION's file manifests ONCE and feeds
+ * the same map to the gate, proof selection, and the manifest.
+ */
+export async function loadCompliancePopulation(
+  db: D1Database,
+  month: string,
+  extraReceiptIds: string[],
+): Promise<Map<string, ReceiptRecord>> {
+  const byId = new Map<string, ReceiptRecord>();
+  const monthResult = await db
+    .prepare(
+      `SELECT * FROM receipt_records
+       WHERE deleted_at IS NULL
+         AND payment_path <> 'AMEX'
+         AND (transaction_date LIKE ? OR exported_month = ?)`,
+    )
+    .bind(`${month}%`, month)
+    .all<ReceiptRecord>();
+  for (const r of monthResult.results ?? []) byId.set(r.id, r);
+
+  const extraIds = [...new Set(extraReceiptIds)].filter((id) => !byId.has(id));
+  for (let i = 0; i < extraIds.length; i += 50) {
+    const chunk = extraIds.slice(i, i + 50);
+    const placeholders = chunk.map(() => "?").join(",");
+    const idResult = await db
+      .prepare(
+        `SELECT * FROM receipt_records
+         WHERE deleted_at IS NULL AND id IN (${placeholders})`,
+      )
+      .bind(...chunk)
+      .all<ReceiptRecord>();
+    for (const r of idResult.results ?? []) byId.set(r.id, r);
+  }
+  return byId;
+}
+
+/**
  * Source-computed open-check summary for the export finalize gate (seal
  * boundary §C). Same population contract as {@link summarizeOpenChecksForExport}
  * — (a) non-AMEX receipts anchored in `month` by transaction_date or
@@ -495,35 +536,7 @@ export async function summarizeOpenChecksFromSource(
   settings: ComplianceSettings,
   filesByReceiptId?: Map<string, ReceiptFile[]>,
 ): Promise<ComplianceSummary> {
-  // Population (a): month-anchored non-AMEX receipts, not deleted.
-  const monthResult = await db
-    .prepare(
-      `SELECT * FROM receipt_records
-       WHERE deleted_at IS NULL
-         AND payment_path <> 'AMEX'
-         AND (transaction_date LIKE ? OR exported_month = ?)`,
-    )
-    .bind(`${month}%`, month)
-    .all<ReceiptRecord>();
-
-  const byId = new Map<string, ReceiptRecord>();
-  for (const r of monthResult.results ?? []) byId.set(r.id, r);
-
-  // Population (b): bundle receipt ids, chunked (D1 bind cap).
-  const extraIds = [...new Set(extraReceiptIds)];
-  for (let i = 0; i < extraIds.length; i += 50) {
-    const chunk = extraIds.slice(i, i + 50);
-    const placeholders = chunk.map(() => "?").join(",");
-    const idResult = await db
-      .prepare(
-        `SELECT * FROM receipt_records
-         WHERE deleted_at IS NULL AND id IN (${placeholders})`,
-      )
-      .bind(...chunk)
-      .all<ReceiptRecord>();
-    for (const r of idResult.results ?? []) byId.set(r.id, r);
-  }
-
+  const byId = await loadCompliancePopulation(db, month, extraReceiptIds);
   const receiptIds = [...byId.keys()];
   const attendeeCountByReceipt = await countAttendeesByReceiptIds(db, receiptIds);
   // Files: use the caller's protected snapshot when provided (the export build

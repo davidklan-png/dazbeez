@@ -449,6 +449,12 @@ export async function DELETE(request: Request, { params }: RouteContext) {
     if (error instanceof Error && error.message.includes("requires a non-empty reason")) {
       return NextResponse.json({ error: error.message }, { status: 400 });
     }
+    if (isSealBoundaryConflict(error)) {
+      return NextResponse.json(
+        { error: error instanceof Error ? error.message : "Delete conflict." },
+        { status: 409 },
+      );
+    }
     console.error("[api/receipts/[id]] DELETE failed", error);
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Delete failed." },
