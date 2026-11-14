@@ -44,9 +44,12 @@ const ACCEPTED_RENDER_TYPES = new Map<string, "pdf" | "png">([
  * receipt for MLX extraction — so /file then transparently serves the rendered
  * image to both the consumer and the review UI.
  *
- * Idempotent upsert (mirrors /proof): a prior `processed` row is deleted and the
- * R2 object overwritten at the stable per-receipt key, so a re-render refreshes
- * the derivative without violating the r2_key UNIQUE constraint.
+ * Immutable publication (seal boundary 0042, mirrors /proof): a fresh
+ * versioned no-overwrite key, then the manifest/pointer/audit switch in ONE
+ * D1 batch; re-renders leave the prior object in place, unreferenced but
+ * byte-identical for any sealed manifest that names it. The extraction
+ * enqueue runs strictly AFTER the batch is admitted — queue work must not
+ * exist for a rejected publication.
  *
  * Auth mirrors /proof and /file: a valid `x-receipts-processor-key` header
  * authenticates the Mac consumer; otherwise a Clerk-authenticated human may post.

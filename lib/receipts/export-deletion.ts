@@ -197,3 +197,158 @@ export function planExportDeletion(
 
   return { ok: true, plan: { r2Objects, audit } };
 }
+
+// ─── Transactional execution (seal boundary B8/F2/F3) ────────────────────────
+//
+// The ONLY admitted way to delete an export row: ONE D1 transaction whose
+// ADMISSION is the marker INSERT..SELECT — it writes only when the row still
+// matches the planned identity (id/month/status), the planned published
+// build/key identity (F2: an intervening completed rebuild cannot substitute
+// a different bundle), holds no unexpired build claim, and has NO delivery
+// row in a may-have-reached-recipient state (F2: the planner's delivery
+// refusal revalidated at the write boundary). Admission is then ASSERTED
+// inside the transaction (F3): the immediately-following statement inserts
+// an admission audit row whose actor is NULL unless changes()=1 — the NOT
+// NULL constraint turns a zero-row admission into a batch error that rolls
+// back everything (no delivery deletion, no export deletion, no stray
+// marker). With admission committed, deliveries are removed and the export
+// row is deleted; its item rows go via the 0017 FK CASCADE, which the
+// parent-absence items guard admits (F6 — no independent item DELETE is
+// issued at all). R2 objects may be removed only AFTER the transaction is
+// confirmed; on any uncertain outcome they are retained.
+
+export interface ExportDeletionPlannedIdentity {
+  /** Published build namespace at plan time (null for never-built rows). */
+  bundleBuildId: string | null;
+  archiveKey: string | null;
+  manifestKey: string | null;
+  proofsKey: string | null;
+}
+
+export interface ExportDeletionExecutionInput {
+  exportId: string;
+  month: string;
+  /** The row's status as observed at plan time — re-checked transactionally. */
+  plannedStatus: string;
+  actor: string;
+  nowIso: string;
+  /** Fresh audit-row id for the export.deleted marker (caller-generated). */
+  auditId: string;
+  /** Fresh audit-row id for the admission assertion row (caller-generated). */
+  assertId: string;
+  /** The planner's audit payload (legal-hold exception recorded verbatim). */
+  auditValueJson: string;
+  /**
+   * F2 (REQUIRED): the planned published build/key identity. Admission also
+   * requires the row's bundle_build_id and the three stored artifact keys to
+   * be unchanged (null-safe) — a completed rebuild between plan and execution
+   * refuses the deletion instead of silently deleting a different bundle's
+   * row. Required so no caller can silently omit part of deletion admission.
+   */
+  plannedIdentity: ExportDeletionPlannedIdentity;
+}
+
+export interface ExportDeletionExecutionResult {
+  /** 1 when the export row was deleted under the planned identity; else 0. */
+  exportRowsDeleted: number;
+  /** Whether the authorization marker was written (identity + claim held). */
+  markerWritten: boolean;
+}
+
+/**
+ * The deletion transaction's statements, in execution order. PURE — the
+ * committed script renders them as literals for `wrangler d1 execute --file`,
+ * and tests execute them against real SQLite with the 0042/0043 triggers
+ * live. Statement order is load-bearing: marker → assertion → deliveries →
+ * parent (whose FK cascade removes the items).
+ */
+export function buildExportDeletionStatements(
+  input: ExportDeletionExecutionInput,
+): Array<{ sql: string; args: unknown[] }> {
+  const identity = input.plannedIdentity;
+  const identitySql = ` AND e.bundle_build_id IS ?
+               AND e.archive_r2_key IS ?
+               AND e.manifest_r2_key IS ?
+               AND e.proofs_r2_key IS ?`;
+  const identityArgs = [identity.bundleBuildId, identity.archiveKey, identity.manifestKey, identity.proofsKey];
+  return [
+    {
+      // Admission (marker + CAS): inserts only when the row still matches the
+      // planned identity/status, the planned published build/key identity,
+      // holds no unexpired claim, and has no may-have-reached delivery.
+      sql: `INSERT INTO receipt_audit_log
+              (id, actor, action, object_type, object_id, old_value_json, new_value_json, created_at)
+            SELECT ?, ?, 'export.deleted', 'export', e.id, NULL, ?, ?
+              FROM receipt_exports e
+             WHERE e.id = ? AND e.export_month = ? AND e.status = ?
+               AND (e.sealing_token IS NULL OR e.sealing_expires_at IS NULL
+                    OR e.sealing_expires_at <= CAST(strftime('%s','now') AS INTEGER))
+               AND NOT EXISTS (
+                 SELECT 1 FROM export_deliveries d
+                  WHERE d.export_id = e.id
+                    AND d.state IN ('sent','pending','ambiguous')
+               )${identitySql}`,
+      args: [
+        input.auditId,
+        input.actor,
+        input.auditValueJson,
+        input.nowIso,
+        input.exportId,
+        input.month,
+        input.plannedStatus,
+        ...identityArgs,
+      ],
+    },
+    {
+      // Admission ASSERTION (F3): receipt_audit_log.actor is NOT NULL, so a
+      // zero-row marker turns this row's actor NULL and the whole batch rolls
+      // back — a failed admission can never leave deliveries or the export
+      // deleted. On success this durable row records the revalidated
+      // admission (committed only with the entire transaction).
+      sql: `INSERT INTO receipt_audit_log
+              (id, actor, action, object_type, object_id, old_value_json, new_value_json, created_at)
+            VALUES (?, CASE WHEN changes() = 1 THEN ? ELSE NULL END,
+                    'export.deleted.admitted', 'export', ?, NULL, ?, ?)`,
+      args: [
+        input.assertId,
+        input.actor,
+        input.exportId,
+        JSON.stringify({
+          admission: "identity+claim+delivery+build revalidated in transaction",
+        }),
+        input.nowIso,
+      ],
+    },
+    {
+      sql: `DELETE FROM export_deliveries WHERE export_id = ?`,
+      args: [input.exportId],
+    },
+    {
+      // The parent delete; its 0017 FK CASCADE removes the item rows (the
+      // items guard admits the cascade via actual parent absence — F6). The
+      // claim-delete and sealed-marker triggers still apply here.
+      sql: `DELETE FROM receipt_exports WHERE id = ?`,
+      args: [input.exportId],
+    },
+  ];
+}
+
+/**
+ * Execute the deletion transaction against D1 (one batch). Throws on any
+ * statement failure — a zero-row admission (F3 assertion), a live claim, a
+ * may-have-reached delivery, or identity/build drift — leaving every row
+ * (and any partial marker) rolled back. The caller treats
+ * `exportRowsDeleted !== 1` as a refusal and RETAINS all R2 objects.
+ */
+export async function executeExportDeletion(
+  db: D1Database,
+  input: ExportDeletionExecutionInput,
+): Promise<ExportDeletionExecutionResult> {
+  const stmts = buildExportDeletionStatements(input);
+  const results = await db.batch(
+    stmts.map((st) => db.prepare(st.sql).bind(...st.args)),
+  );
+  const markerWritten = (results[0]?.meta.changes ?? 0) === 1;
+  const exportRowsDeleted = results[3]?.meta.changes ?? 0;
+  return { exportRowsDeleted, markerWritten };
+}

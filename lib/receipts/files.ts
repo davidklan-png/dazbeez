@@ -51,6 +51,41 @@ export async function createReceiptFile(
   return id;
 }
 
+/**
+ * The export build's ONE file-manifest map (seal boundary §C/F7): receipt
+ * files for the given ids, preserving the canonical selection order
+ * (is_original DESC, created_at ASC) WITHIN each id — the same order
+ * listFilesForObject has always used, so proof selection from the shared map
+ * picks the same original/derivative the ordered helper would.
+ */
+export async function loadReceiptFilesMap(
+  db: D1Database,
+  objectIds: string[],
+): Promise<Map<string, ReceiptFile[]>> {
+  const out = new Map<string, ReceiptFile[]>();
+  for (let i = 0; i < objectIds.length; i += D1_ID_CHUNK_SIZE) {
+    const chunk = objectIds.slice(i, i + D1_ID_CHUNK_SIZE);
+    const placeholders = chunk.map(() => "?").join(",");
+    const result = await db
+      .prepare(
+        `SELECT * FROM receipt_files
+         WHERE object_type = 'receipt' AND object_id IN (${placeholders})
+         ORDER BY object_id, is_original DESC, created_at ASC`,
+      )
+      .bind(...chunk)
+      .all<ReceiptFile>();
+    for (const f of result.results ?? []) {
+      let arr = out.get(f.object_id);
+      if (!arr) {
+        arr = [];
+        out.set(f.object_id, arr);
+      }
+      arr.push(f);
+    }
+  }
+  return out;
+}
+
 export async function listFilesForObject(
   objectType: string,
   objectId: string,
@@ -77,46 +112,11 @@ export async function findFileBySha256(
     .first<ReceiptFile>();
 }
 
-/**
- * Delete any existing proof_copy row for a receipt (upsert preamble).
- *
- * Proof copies live at a STABLE r2_key (`receipts/<id>/proof.<ext>`) and
- * `receipt_files.r2_key` is UNIQUE, so regenerating a derivative (re-ingest,
- * backfill --force) must clear the prior row before the fresh INSERT —
- * otherwise the insert trips the unique constraint. The R2 object itself is
- * overwritten separately by putProofCopy.
- */
-export async function deleteProofCopyForReceipt(
-  db: D1Database,
-  receiptId: string,
-): Promise<void> {
-  await db
-    .prepare(
-      `DELETE FROM receipt_files
-       WHERE object_type = 'receipt' AND object_id = ? AND role = 'proof_copy'`,
-    )
-    .bind(receiptId)
-    .run();
-}
-
-/**
- * Delete any existing `processed` row for a receipt (ADR 0011 Phase B render-
- * derivative upsert preamble). The rendered derivative lives at a STABLE r2_key
- * (`receipts/<id>/rendered.<ext>`) and r2_key is UNIQUE, so a re-render must
- * clear the prior row before the fresh INSERT. Mirrors deleteProofCopyForReceipt.
- */
-export async function deleteProcessedForReceipt(
-  db: D1Database,
-  receiptId: string,
-): Promise<void> {
-  await db
-    .prepare(
-      `DELETE FROM receipt_files
-       WHERE object_type = 'receipt' AND object_id = ? AND role = 'processed'`,
-    )
-    .bind(receiptId)
-    .run();
-}
+// (Seal boundary 0042) The former stable-key derivative upsert helpers
+// (deleteProofCopyForReceipt / deleteProcessedForReceipt) were removed with
+// their callers: proof/render publication now writes a UNIQUE versioned key
+// and switches the current manifest row inside ONE D1 batch (see the /proof
+// and /render routes). Old objects are retained, never overwritten.
 
 /**
  * Count receipt_files rows per receipt id (any role). Used by the proofs gate

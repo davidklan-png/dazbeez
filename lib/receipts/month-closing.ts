@@ -314,7 +314,9 @@ export interface ValidateMonthOptions {
    * Without these the wrapper loads each input itself (other callers/tests).
    */
   preloadedExportBuild?: { bundleBuiltAt: string | null; operatorMessageUpdatedAt: string | null } | null;
-  preloadedSettings?: { export_block_on_warnings: boolean };
+  /** Full settings snapshot (the check engine reads several keys, not only
+   *  export_block_on_warnings — typed complete, no unsafe cast). */
+  preloadedSettings?: ComplianceSettings;
   preloadedFilesByReceipt?: Map<string, ReceiptFile[]>;
 }
 
@@ -696,7 +698,7 @@ export async function validateMonthReadyForExportDetailed(
     db,
     month,
     bundle.receipts.map((r) => r.id),
-    settings as ComplianceSettings,
+    settings,
     opts.preloadedFilesByReceipt,
   );
 
@@ -715,11 +717,17 @@ export async function validateMonthReadyForExportDetailed(
     .all<{ statement_month: string; matched_receipt_id: string }>();
 
   // (7) Proofs — count receipt_files rows per shipped receipt (D1; no R2 in the
-  // gate — the rebuild's layer-2 check handles R2 existence).
-  const receiptFileCounts = await countReceiptFilesByObjectIds(
-    db,
-    bundle.receipts.map((r) => r.id),
-  );
+  // gate — the rebuild's layer-2 check handles R2 existence). When the caller
+  // supplied the shared file-manifest map (§C: one read for gate + proofs +
+  // manifest), derive the counts from it instead of re-querying.
+  const receiptFileCounts = opts.preloadedFilesByReceipt
+    ? new Map(
+        bundle.receipts.map((r) => [
+          r.id,
+          opts.preloadedFilesByReceipt!.get(r.id)?.length ?? 0,
+        ]),
+      )
+    : await countReceiptFilesByObjectIds(db, bundle.receipts.map((r) => r.id));
 
   // (1.5) Message staleness (E3): the open draft's build vs operator-message
   // timestamps. The claiming caller passes its exact acquired row; others read

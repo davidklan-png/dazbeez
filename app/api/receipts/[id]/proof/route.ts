@@ -40,12 +40,14 @@ const ACCEPTED_PROOF_TYPES = new Map<string, "jpg" | "pdf">([
  *
  * Stores a compact proof derivative (role `proof_copy`) generated on the Mac
  * consumer at ingest (ADR 0001 processor-key path). Lives in the live
- * RECEIPTS_BUCKET at a stable per-receipt key; the sealed proofs ZIP prefers it
+ * RECEIPTS_BUCKET at a UNIQUE versioned key; the sealed proofs ZIP prefers it
  * over the original to keep the bundle small.
  *
- * Idempotent upsert: a prior proof_copy row for the receipt is deleted and the
- * R2 object overwritten, so re-ingest / backfill --force refreshes the
- * derivative without violating the r2_key UNIQUE constraint.
+ * Immutable publication (seal boundary 0042): the bytes upload first under a
+ * fresh no-overwrite key, then the old current manifest row, the new row and
+ * the audit switch in ONE D1 batch — a fence rejection (active build claim)
+ * leaves the old manifest intact and the new object merely unreferenced. Old
+ * derivative objects are never overwritten or deleted.
  *
  * Auth mirrors the extract endpoint: a valid `x-receipts-processor-key` header
  * authenticates the Mac consumer; otherwise a Clerk-authenticated human may post.

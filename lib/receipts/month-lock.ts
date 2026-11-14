@@ -412,3 +412,17 @@ export function sealBoundaryErrorCode(error: unknown): string | null {
 export function isSealBoundaryConflict(error: unknown): boolean {
   return sealBoundaryErrorCode(error) !== null;
 }
+
+/** The active-build-claim rejection's stable identifier (see DZ_SEAL_* codes). */
+export const SEAL_CLAIM_ACTIVE_CODE = "DZ_SEAL_CLAIM_ACTIVE" as const;
+
+/**
+ * True when this error is specifically the ACTIVE-BUILD-CLAIM rejection — a
+ * TEMPORARY condition (lease ≤ SEAL_LEASE_SECONDS). Processor-facing
+ * boundaries (e.g. /extract) must classify it RETRYABLE (5xx + Retry-After),
+ * not 409: the Mac consumer treats every 4xx as terminal and would ack+drop
+ * work that only needed to wait out a monthly build.
+ */
+export function isTemporaryClaimConflict(error: unknown): boolean {
+  return sealBoundaryErrorCode(error) === SEAL_CLAIM_ACTIVE_CODE;
+}

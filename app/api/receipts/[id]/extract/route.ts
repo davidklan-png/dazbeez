@@ -7,7 +7,7 @@ import {
   type ModelExtractionFields,
 } from "@/lib/receipts/extraction";
 import { createAuditEntry } from "@/lib/receipts/audit";
-import { ExportFinalizedError } from "@/lib/receipts/month-lock";
+import { ExportFinalizedError, isSealBoundaryConflict, isTemporaryClaimConflict } from "@/lib/receipts/month-lock";
 import { nowIso, stringifyJson } from "@/lib/receipts/db-utils";
 import { getReceiptsDb, getReceiptsProcessorKey } from "@/lib/cloudflare-runtime";
 import type { ExtractionResult } from "@/lib/receipts/types";
@@ -311,6 +311,27 @@ export async function POST(request: Request, { params }: RouteContext) {
     }
     if (error instanceof ExportFinalizedError) {
       return NextResponse.json({ error: error.message }, { status: 409 });
+    }
+    if (isTemporaryClaimConflict(error)) {
+      // RETRYABLE by design (B9): an active monthly-build claim is temporary
+      // (lease ≤10 min), but the Mac consumer treats every 4xx as terminal
+      // and would ack+drop this extraction. Answer 503 + Retry-After so the
+      // consumer's 5xx path leaves the message for redelivery.
+      console.error("[api/receipts/[id]/extract] temporary claim conflict", error);
+      return NextResponse.json(
+        {
+          error:
+            "A monthly export build is in progress for this receipt's month. The claim is temporary (≤10 minutes) — retry after it completes.",
+          retryable: true,
+        },
+        { status: 503, headers: { "Retry-After": "60" } },
+      );
+    }
+    if (isSealBoundaryConflict(error)) {
+      return NextResponse.json(
+        { error: error instanceof Error ? error.message : "Extraction conflict." },
+        { status: 409 },
+      );
     }
     if (error instanceof Error && error.message.includes("finalized reconciliation")) {
       return NextResponse.json({ error: error.message }, { status: 409 });

@@ -31,6 +31,27 @@
 
 import { newUuid, stringifyJson } from "@/lib/receipts/db-utils";
 
+/**
+ * The publication CAS lost: the draft row was sealed, claimed by a successor,
+ * or its lease expired between staging and commit — the batch rolled back and
+ * NOTHING was published. Typed here (not at the route) so every caller maps
+ * it to a conflict instead of surfacing the driver's raw NOT NULL text.
+ */
+export class PublicationConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PublicationConflictError";
+  }
+}
+
+/**
+ * The assertion's specific driver signature. Matched ONLY against this one
+ * constraint — our changes()=1 gate on the export audit — so unrelated SQL
+ * failures (their own NOT NULLs, syntax, constraints) stay real errors.
+ */
+const CAS_ASSERTION_PATTERN =
+  /NOT NULL constraint failed:?\s*receipt_audit_log\.actor/i;
+
 export interface PublishExportCandidateInput {
   exportId: string;
   /** The statement month being built. */
@@ -215,6 +236,19 @@ export async function publishExportBundle(
     }
   }
 
-  await db.batch(stmts);
+  try {
+    await db.batch(stmts);
+  } catch (err) {
+    // A zero-row CAS turns the audit INSERT's CASE expression into a NULL
+    // actor — the NOT NULL violation we rely on to roll the batch back. Map
+    // exactly that signature to the typed conflict; anything else is a real
+    // error and must keep propagating untouched.
+    if (err instanceof Error && CAS_ASSERTION_PATTERN.test(err.message)) {
+      throw new PublicationConflictError(
+        "The bundle could not be published — this export was sealed, re-claimed, or its build lease expired while staging. Nothing was published; reload the export page and retry.",
+      );
+    }
+    throw err;
+  }
   return { published: true, finalized: c.finalize };
 }

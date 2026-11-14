@@ -615,6 +615,14 @@ export async function POST(request: Request) {
     if (error instanceof Error && error.message.startsWith("Unauthorized")) {
       return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
     }
+    if (isSealBoundaryConflict(error)) {
+      // SQL-authority rejection (active build claim on the statement month /
+      // sealed-month line writes) — nothing imported; retry after the build.
+      return NextResponse.json(
+        { error: error instanceof Error ? error.message : "Import conflicts with an active build or a sealed month." },
+        { status: 409 },
+      );
+    }
     console.error("[api/receipts/amex/import] failed", error);
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Import failed." },
