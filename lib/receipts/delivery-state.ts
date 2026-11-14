@@ -216,7 +216,8 @@ export const RESEND_IDEMPOTENCY_WINDOW_MS = 23 * 60 * 60 * 1000;
 export function isWithinResumeWindow(pendingCreatedAt: string, now: string): boolean {
   const origin = Date.parse(pendingCreatedAt);
   const age = Date.parse(now) - origin;
-  return Number.isFinite(origin) && Number.isFinite(age) && age >= 0 && age < RESEND_IDEMPOTENCY_WINDOW_MS;
+  return Number.isFinite(origin) && new Date(origin).toISOString() === pendingCreatedAt &&
+    Number.isFinite(age) && age >= 0 && age < RESEND_IDEMPOTENCY_WINDOW_MS;
 }
 
 /** A delivery-row view for {@link decideSendAction}. */

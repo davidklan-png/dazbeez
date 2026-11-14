@@ -4063,7 +4063,7 @@ export async function listDeliveriesForMonth(
  * A late old attempt stays historical; sent dominates all uncertainty of its key. */
 async function completeDelivery(
   id: string, state: "sent" | "failed" | "ambiguous", value: string,
-  db: D1Database, actor: string, provider?: { code?: string; status?: number },
+  db: D1Database, actor: string, provider?: { code?: string; name?: string; status?: number },
 ): Promise<void> {
   const now = nowIso();
   await db.batch([
@@ -4098,11 +4098,11 @@ export async function markDeliverySent(id: string, messageId: string,
   await completeDelivery(id, "sent", messageId, db, actor);
 }
 export async function markDeliveryFailed(id: string, error: string,
-  db: D1Database = getReceiptsDb(), actor = "system", provider?: { code?: string; status?: number }): Promise<void> {
+  db: D1Database = getReceiptsDb(), actor = "system", provider?: { code?: string; name?: string; status?: number }): Promise<void> {
   await completeDelivery(id, "failed", error, db, actor, provider);
 }
 export async function markDeliveryAmbiguous(id: string, error: string,
-  db: D1Database = getReceiptsDb(), actor = "system", provider?: { code?: string; status?: number }): Promise<void> {
+  db: D1Database = getReceiptsDb(), actor = "system", provider?: { code?: string; name?: string; status?: number }): Promise<void> {
   await completeDelivery(id, "ambiguous", error, db, actor, provider);
 }
 

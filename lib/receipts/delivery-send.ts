@@ -104,7 +104,7 @@ export async function performDelivery(opts: {
   idempotencyKey: string;
 }): Promise<
   | { ok: true; messageId?: string }
-  | { ok: false; error: string; classification: DeliveryFailureClass; code?: string; status?: number }
+  | { ok: false; error: string; classification: DeliveryFailureClass; code?: string; name?: string; status?: number }
 > {
   assertDeliveryZipNameAscii(opts.zipFilename);
   assertDeliverySize(opts.zipBytes.byteLength);
@@ -130,8 +130,9 @@ export async function performDelivery(opts: {
   return {
     ok: false,
     error: result.error,
-    classification: classifyDeliveryFailure(result.status, result.code),
+    classification: classifyDeliveryFailure(result.status, `${result.name ?? ""} ${result.code ?? ""}`),
     code: result.code,
+    name: result.name,
     status: result.status,
   };
 }

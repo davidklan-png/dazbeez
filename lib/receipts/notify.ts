@@ -99,7 +99,7 @@ export async function sendDeliveryViaResend(
   idempotencyKey: string,
 ): Promise<
   | { ok: true; messageId?: string }
-  | { ok: false; error: string; status?: number; code?: string }
+  | { ok: false; error: string; status?: number; code?: string; name?: string }
 > {
   try {
     const res = await fetchImpl("https://api.resend.com/emails", {
@@ -127,7 +127,8 @@ export async function sendDeliveryViaResend(
       const message = typeof errBody.message === "string" ? errBody.message : `Resend API returned ${res.status}`;
       // Preserve provider identity: idempotency/concurrent-key conflicts are uncertain.
       return { ok: false, error: message, status: res.status,
-        code: typeof errBody.name === "string" ? errBody.name : typeof errBody.code === "string" ? errBody.code : undefined };
+        name: typeof errBody.name === "string" ? errBody.name : undefined,
+        code: typeof errBody.code === "string" ? errBody.code : undefined };
     }
     const body = (await res.json().catch(() => ({}))) as { id?: string };
     return { ok: true, messageId: typeof body.id === "string" ? body.id : undefined };

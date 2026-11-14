@@ -227,7 +227,7 @@ test("preparation crossing cutoff refuses transport after durable resume admissi
   assert.equal(calls.length, 1);
 });
 
-for (const badTime of ["", "garbled", "2099-01-01T00:00:00Z"]) {
+for (const badTime of ["", "garbled", "2026-11-14", "2026-11-13T24:00:00.000Z", "2099-01-01T00:00:00Z"]) {
   test(`invalid first admission time ${JSON.stringify(badTime)} fails closed`, async () => {
     fresh(); provider = async () => { throw new Error("timeout"); }; await send();
     d1.db.prepare("UPDATE export_deliveries SET created_at=?").run(badTime);
@@ -329,7 +329,7 @@ for (const code of ["concurrent_idempotent_requests", "invalid_idempotent_reques
     await send();
     assert.equal(rows()[0].state, "ambiguous"); assert.deepEqual(calls[1], calls[0]);
     const audits = d1.db.prepare("SELECT new_value_json FROM receipt_audit_log WHERE action='export.delivery_failed'").all();
-    assert.equal(JSON.parse(String(audits[0].new_value_json)).code, code);
+    assert.equal(JSON.parse(String(audits[0].new_value_json)).name, code);
   });
 }
 
@@ -520,4 +520,13 @@ test("retry rows cannot hide a malformed first durable admission or move its ori
   mock.timers.tick(1 * 3600000); await send();
   d1.db.prepare("UPDATE export_deliveries SET created_at='malformed' WHERE admission_generation=1").run();
   assert.equal((await send()).status, 409); assert.equal(calls.length, 2);
+});
+
+test("provider name and code both survive; idempotency code makes even other 4xx uncertain", async () => {
+  fresh(); provider = async () => Response.json({ name: "validation_error", code: "invalid_idempotent_request", message: "conflict" }, { status: 422 });
+  await send(); await send();
+  assert.equal(rows()[0].state, "ambiguous"); assert.equal(calls[0].key, calls[1].key);
+  const audit = d1.db.prepare("SELECT new_value_json FROM receipt_audit_log WHERE action='export.delivery_failed' ORDER BY rowid LIMIT 1").get()!;
+  const value = JSON.parse(String(audit.new_value_json));
+  assert.equal(value.name, "validation_error"); assert.equal(value.code, "invalid_idempotent_request");
 });
