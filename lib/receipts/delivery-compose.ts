@@ -17,6 +17,7 @@
 // zipBytes and composeDelivery performs the B-2 R2 HEAD size check ahead of the
 // GET itself.
 
+import type { ReceiptExport } from "./types";
 import {
   getLatestFinalizedExport,
   listDeliveriesForMonth,
@@ -36,6 +37,7 @@ import { computeSha256Hex } from "@/lib/receipts/storage";
 import { nowIso } from "@/lib/receipts/db-utils";
 import {
   decideSendAction,
+  deriveMonthDeliveryState,
   type AttemptState,
   type DeliveryState,
 } from "@/lib/receipts/delivery-state";
@@ -66,18 +68,18 @@ export interface ComposedPreflightResult {
 export interface ComposedDelivery {
   month: string;
   exportId: string;
-  /** Plain SHA-256 fingerprint of this composition ({exportId, zipSha256, to,
-   *  cc, subject, text}; Item 2). The composer posts it back on Send; the send
+  deliveryState: DeliveryState | null;
+  observedGeneration: number;
+  observedAttemptId: string | null;
+  /** SHA-256 fingerprint of the complete versioned envelope and attachment.
+   *  The composer posts it back on Send; the send
    *  route recomposes, recomputes, and returns 409 on mismatch so a stale render
    *  (Settings edited, or a new revision finalized after the page loaded) can
    *  never silently send a different body / recipient / pack than the operator
    *  reviewed. NOT the ZIP bytes (zipSha256 already pins the pack); NOT content
    *  the client controls — it is a fingerprint the server recomputes. */
   compositionHash: string;
-  /** When the latest finalized revision was sealed (receipt_exports.finalized_at).
-   *  The composer header renders "sealed on {date}, NOT yet delivered" — sealing
-   *  is the midpoint, not completion (decision 5). Added beyond the spec'd
-   *  interface to avoid a second getLatestFinalizedExport fetch in the page. */
+  /** Sealed timestamp; deliveryState separately determines reporting closure. */
   sealedAt: string | null;
   to: string | null;
   cc: string | null;
@@ -118,7 +120,7 @@ export interface ComposedDelivery {
   action: "new" | "resume" | "redelivery" | "blocked";
   /** Present only when action === "blocked". The real enum from
    *  decideSendAction is "sent" | "stale" (the spec wrote "stale_pending";
-   *  the code's authority is "stale" — same case, the 24h-window-expired
+   *  the code's authority is "stale" — same case, the 23h-cutoff-expired
    *  pending). */
   blockedReason?: "sent" | "stale";
   /** For `resume` the resumeable attempt id; for `redelivery` the earlier
@@ -131,45 +133,34 @@ export interface ComposedDelivery {
   priorAttemptState?: AttemptState;
 }
 
-/**
- * Plain SHA-256 fingerprint of a delivery composition — the identity of exactly
- * what the operator reviewed on the composer page. Over {exportId, zipSha256,
- * to, cc, subject, text} (the signature is part of the body, so it is included
- * via `text`). NOT the ZIP bytes (the pack's sha already pins it).
- *
- * This is a CONCURRENCY / staleness check, NOT an auth boundary: plain SHA-256,
- * no HMAC, no signing. The threat is a second tab or a new revision finalized
- * after the page rendered — not a hostile client (the send route recomposes
- * server-side and trusts nothing from the body but this fingerprint, which it
- * recomputes). The composer posts { compositionHash } and nothing else; the
- * route recomposes, hashes its own result, and on mismatch returns 409 with the
- * fresh composition so the UI re-renders and asks for re-confirmation. Reject,
- * never warn — a click-through warning is the failure mode being fixed.
- *
- * Determinism is the whole point: the page render and the send route both call
- * {@link composeDelivery}, so both arrive at this hash via the same field set ⇒
- * a matching hash proves the reviewed composition equals the one about to ship.
- * The canonical form is a fixed-key-order JSON object (with a `v` tag so a
- * future field-set change forces re-confirmation instead of silently colliding).
- */
-export async function computeCompositionHash(input: {
+/** Versioned noncredential identity: every transmitted field and sealed attachment. */
+export interface DeliveryPayload {
+  v: 2;
   exportId: string;
+  bundleBuildId: string | null;
+  proofsKey: string;
   zipSha256: string;
+  zipBytes: number;
+  zipFilename: string;
+  from: string | null;
+  replyTo: string | null;
   to: string | null;
   cc: string | null;
   subject: string;
   text: string;
-}): Promise<string> {
-  const canonical = JSON.stringify({
-    v: 1,
-    exportId: input.exportId,
-    zipSha256: input.zipSha256,
-    to: input.to,
-    cc: input.cc,
-    subject: input.subject,
-    text: input.text,
-  });
-  return computeSha256Hex(new TextEncoder().encode(canonical));
+  html: string;
+}
+
+/** Fixed field order is also the durable noncredential provider snapshot. */
+export function deliveryPayload(input: Omit<DeliveryPayload, "v">): DeliveryPayload {
+  return { v: 2, exportId: input.exportId, bundleBuildId: input.bundleBuildId,
+    proofsKey: input.proofsKey, zipSha256: input.zipSha256, zipBytes: input.zipBytes,
+    zipFilename: input.zipFilename, from: input.from, replyTo: input.replyTo,
+    to: input.to, cc: input.cc, subject: input.subject, text: input.text, html: input.html };
+}
+
+export async function computeCompositionHash(input: Omit<DeliveryPayload, "v">): Promise<string> {
+  return computeSha256Hex(new TextEncoder().encode(JSON.stringify(deliveryPayload(input))));
 }
 
 /**
@@ -184,14 +175,27 @@ export async function computeCompositionHash(input: {
  */
 export async function composeDelivery(
   month: string,
-  opts: { zipBytes?: Uint8Array } = {},
+  opts: { zipBytes?: Uint8Array; exportRecord?: ReceiptExport } = {},
 ): Promise<ComposedDelivery> {
   // ── Load the sealed export (D1: send is post-seal) ───────────────────────
-  const exportRecord = await getLatestFinalizedExport(month);
+  const exportRecord = opts.exportRecord ?? await getLatestFinalizedExport(month);
   if (!exportRecord || !exportRecord.proofs_r2_key) {
     throw new NoSealedExportError(month);
   }
   const proofsKey = exportRecord.proofs_r2_key;
+  // Ownership must be observed before decision inputs, including settings/history.
+  const observedGeneration = exportRecord.delivery_generation ?? 0;
+  const observedAttemptId = exportRecord.current_delivery_attempt_id ?? null;
+  const history = await listDeliveriesForMonth(month);
+  const deliveries = history.map((d) => ({
+    id: d.id,
+    exportId: d.export_id,
+    attemptId: d.attempt_id,
+    state: d.state,
+    createdAt: d.created_at,
+    admissionGeneration: d.admission_generation,
+  }));
+  const deliveryState = deriveMonthDeliveryState(deliveries, observedAttemptId);
 
   // ── Recipients + transport config (Settings/config — not pack state) ─────
   // To: accountant (settings.notification_recipient → ACCOUNTANT_EMAIL
@@ -230,7 +234,7 @@ export async function composeDelivery(
       // composer disables Send. Use a placeholder sha so the shape is satisfied
       // (the composer won't render the attachment block when configErrors block
       // the ZIP — but the field is non-optional on the interface).
-      return noBytesResult(month, exportRecord.id, to, cc, from, replyTo, signature, configErrors);
+      return noBytesResult(month, exportRecord, to, cc, from, replyTo, signature, configErrors, deliveryState);
     }
     try {
       assertDeliverySize(head.size); // B-2 — guards the isolate before the GET
@@ -238,12 +242,12 @@ export async function composeDelivery(
       configErrors.push(
         err instanceof Error ? err.message : "Pack exceeds the delivery ceiling.",
       );
-      return noBytesResult(month, exportRecord.id, to, cc, from, replyTo, signature, configErrors);
+      return noBytesResult(month, exportRecord, to, cc, from, replyTo, signature, configErrors, deliveryState);
     }
     const object = await bucket.get(proofsKey);
     if (!object) {
       configErrors.push("Sealed proofs ZIP vanished between HEAD and GET.");
-      return noBytesResult(month, exportRecord.id, to, cc, from, replyTo, signature, configErrors);
+      return noBytesResult(month, exportRecord, to, cc, from, replyTo, signature, configErrors, deliveryState);
     }
     zipBytes = new Uint8Array(await new Response(object.body).arrayBuffer());
   }
@@ -272,18 +276,12 @@ export async function composeDelivery(
 
   // ── Decide new vs resume vs blocked for DISPLAY (forceNew:false). The send
   //    route re-decides with the real forceNew from the query.
-  const deliveries = (await listDeliveriesForMonth(month)).map((d) => ({
-    id: d.id,
-    exportId: d.export_id,
-    attemptId: d.attempt_id,
-    state: d.state,
-    createdAt: d.created_at,
-  }));
   const decision = decideSendAction({
     latestExportId: exportRecord.id,
     deliveries,
     now: nowIso(),
     forceNew: false,
+    currentAttemptId: observedAttemptId,
   });
 
   let action: ComposedDelivery["action"];
@@ -305,19 +303,34 @@ export async function composeDelivery(
     priorAttemptId = decision.priorAttemptId;
   }
 
-  const compositionHash = await computeCompositionHash({
+  const payload = deliveryPayload({
     exportId: exportRecord.id,
+    bundleBuildId: exportRecord.bundle_build_id ?? null,
+    proofsKey,
     zipSha256,
+    zipBytes: zipBytes.byteLength,
+    zipFilename,
+    from,
+    replyTo,
     to,
     cc,
     subject: email.subject,
     text: email.text,
+    html: email.html,
   });
+  const compositionHash = await computeCompositionHash(payload);
+  if (action === "resume" && history.find((d) => d.attempt_id === priorAttemptId)?.payload_json !== JSON.stringify(payload)) {
+    action = "blocked";
+    blockedReason = "stale";
+  }
 
   return {
     month,
     exportId: exportRecord.id,
     compositionHash,
+    deliveryState,
+    observedGeneration,
+    observedAttemptId,
     sealedAt: exportRecord.finalized_at ?? null,
     to,
     cc,
@@ -351,22 +364,26 @@ export async function composeDelivery(
  *  configError(s). The composer renders the error state and disables Send. */
 function noBytesResult(
   month: string,
-  exportId: string,
+  exportRecord: ReceiptExport,
   to: string | null,
   cc: string | null,
   from: string | null,
   replyTo: string | null,
   signature: string | null,
   configErrors: string[],
+  deliveryState: DeliveryState | null,
 ): ComposedDelivery {
   return {
     month,
-    exportId,
+    exportId: exportRecord.id,
     // No sealed bytes ⇒ no real composition was reviewed (Send is disabled in
     // this state via configBlocked). An empty fingerprint can never match a real
     // recomposed hash, so a stray POST would 409 rather than silently send.
     compositionHash: "",
-    sealedAt: null,
+    deliveryState,
+    observedGeneration: exportRecord.delivery_generation ?? 0,
+    observedAttemptId: exportRecord.current_delivery_attempt_id ?? null,
+    sealedAt: exportRecord.finalized_at ?? null,
     to,
     cc,
     from,

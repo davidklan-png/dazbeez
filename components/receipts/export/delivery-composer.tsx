@@ -7,8 +7,8 @@ import type { ComposedDelivery } from "@/lib/receipts/delivery-compose";
 /**
  * Delivery composer UI (delivery-composer §4). Renders the server-composed
  * delivery (From/To/Cc, subject, body, attachment, preflight) READ-ONLY and
- * provides the two-step Confirm → Send flow. The Send button posts ONLY the
- * `{ compositionHash }` fingerprint to POST /api/receipts/export/{month}/send
+ * provides Confirm → Send with a composition fingerprint and observed ownership
+ * posted to /api/receipts/export/{month}/send
  * — the route recomposes server-side from the sealed pack + Settings, compares
  * its own hash, and 409s on mismatch, so a client cannot change what is sent
  * (decision 2) and a stale render cannot silently send a different pack (Item
@@ -52,16 +52,20 @@ export function DeliveryComposer({
 
   async function doSend(forceNew: boolean) {
     setPhase("sending");
+    // Until refreshed, a lost resend response must not retain a delivered header.
+    setComposed((previous) => ({ ...previous, deliveryState: "pending" }));
     setError(null);
+    setConfirmed(false);
+    setForceConfirmed(false);
+    let confirmedSent = false;
     try {
       const url = `/api/receipts/export/${month}/send${forceNew ? "?force_new=true" : ""}`;
-      // Body carries ONLY the compositionHash fingerprint — never
-      // subject/body/To/Cc (decision 2). The route recomposes server-side and
-      // compares this hash to detect a stale render (Item 2).
+      // Server recomposes the content; ownership binds force_new to this review.
       const res = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ compositionHash: composed.compositionHash }),
+        body: JSON.stringify({ compositionHash: composed.compositionHash,
+          observedGeneration: composed.observedGeneration, observedAttemptId: composed.observedAttemptId }),
       });
       const data = (await res.json().catch(() => ({}))) as {
         state?: string;
@@ -75,6 +79,7 @@ export function DeliveryComposer({
         composition?: ComposedDelivery;
       };
       if (res.ok && data.state === "delivered") {
+        confirmedSent = true;
         setSentInfo({
           to: composed.to,
           messageId: data.messageId ?? null,
@@ -84,6 +89,8 @@ export function DeliveryComposer({
         return;
       }
       if (res.status === 409) {
+        setConfirmed(false);
+        setForceConfirmed(false);
         // Composition-stale (Item 2): the composition changed between render and
         // send (Settings edited, or a new revision finalized). Replace the
         // displayed composition with the FRESH one from the route and require
@@ -130,6 +137,18 @@ export function DeliveryComposer({
     } catch (e) {
       setError(e instanceof Error ? e.message : "Network error.");
       setPhase("failed");
+    } finally {
+      if (!confirmedSent) {
+        // Lost responses and failed overrides may have advanced server ownership.
+        try {
+          const preview = await fetch(`/api/receipts/export/${month}/delivery-preview`, { cache: "no-store" });
+          if (preview.ok) {
+            setComposed(await preview.json() as ComposedDelivery);
+            setConfirmed(false);
+            setForceConfirmed(false);
+          }
+        } catch { /* The visible error still requires a manual refresh. */ }
+      }
     }
   }
 
@@ -183,8 +202,13 @@ export function DeliveryComposer({
           ) : (
             "確定（seal）済み"
           )}{" "}
-          · <strong className="text-amber-700">まだ送信されていません</strong>
-          。この月は送信完了までレポート用にクローズされません。
+          · <strong className={phase !== "sending" && composed.deliveryState === "delivered" ? "text-green-700" : "text-amber-700"}>
+            {phase === "sending" ? "送信結果を確認中です。完了するまでクローズされません。"
+              : composed.deliveryState === "delivered" ? "送信済み · レポート用のクローズ処理は完了しています。"
+              : composed.deliveryState === "pending" ? "送信結果を確認中です。完了するまでクローズされません。"
+              : composed.deliveryState === "sealed_undelivered" ? "前回の送信は未完了です。結果不明の場合があります。"
+              : "まだ送信されていません。この月は送信完了までレポート用にクローズされません。"}
+          </strong>
         </p>
       </div>
 
@@ -300,6 +324,7 @@ export function DeliveryComposer({
         (composed.action === "blocked" ? (
           <BlockedAction
             blockedReason={composed.blockedReason ?? "stale"}
+            deliveryState={composed.deliveryState}
             forceConfirmed={forceConfirmed}
             setForceConfirmed={setForceConfirmed}
             sending={phase === "sending"}
@@ -511,12 +536,14 @@ function PrimaryAction({
 
 function BlockedAction({
   blockedReason,
+  deliveryState,
   forceConfirmed,
   setForceConfirmed,
   sending,
   onSend,
 }: {
   blockedReason: "sent" | "stale";
+  deliveryState: ComposedDelivery["deliveryState"];
   forceConfirmed: boolean;
   setForceConfirmed: (v: boolean) => void;
   sending: boolean;
@@ -534,11 +561,13 @@ function BlockedAction({
       >
         {delivered ? (
           <span>
-            <strong>この月は既に送信済みです。</strong> レポート用のクローズ処理も完了しています。
+            <strong>この改訂版には送信済みの履歴があります。</strong>{" "}
+            {deliveryState === "delivered" ? "レポート用のクローズ処理も完了しています。"
+              : "現在の送信試行は未完了です。再送信は重複メールになる可能性があります。"}
           </span>
         ) : (
           <span>
-            前回の送信試行から Resend の 24 時間 idempotency window を超過したため、安全な再開ができません。
+            前回の送信結果は不明の可能性があります。23 時間の安全期限、または送信内容の変更・記録不足により再開できません。画面を更新し、宛先・本文・添付を確認してください。
           </span>
         )}
       </div>
