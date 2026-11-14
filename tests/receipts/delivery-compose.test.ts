@@ -172,6 +172,8 @@ test("shape: ComposedDelivery's preflight result names map from the pack-preflig
 
 test("computeCompositionHash: deterministic — identical inputs ⇒ identical hash", async () => {
   const input = {
+    bundleBuildId: null, proofsKey: "proofs.zip", zipFilename: "pack.zip", zipBytes: 10,
+    from: "from@example.com", replyTo: null, html: "<p>body</p>",
     exportId: "exp-1",
     zipSha256: "abc123def",
     to: "cpa@example.com",
@@ -186,8 +188,10 @@ test("computeCompositionHash: deterministic — identical inputs ⇒ identical h
   );
 });
 
-test("computeCompositionHash: changing ANY of the six fields changes the hash", async () => {
+test("computeCompositionHash: changing ANY transmitted envelope or attachment field changes the hash", async () => {
   const base = {
+    bundleBuildId: null, proofsKey: "proofs.zip", zipFilename: "pack.zip", zipBytes: 10,
+    from: "from@example.com", replyTo: null, html: "<p>body</p>",
     exportId: "exp-1",
     zipSha256: "abc123def",
     to: "cpa@example.com",
@@ -198,6 +202,13 @@ test("computeCompositionHash: changing ANY of the six fields changes the hash", 
   const h = await computeCompositionHash(base);
   for (const [field, value] of [
     ["exportId", "exp-2"],
+    ["bundleBuildId", "build-2"],
+    ["proofsKey", "other/proofs.zip"],
+    ["zipFilename", "other.zip"],
+    ["zipBytes", 11],
+    ["from", "other-from@example.com"],
+    ["replyTo", "reply@example.com"],
+    ["html", "<p>new HTML</p>"],
     ["zipSha256", "def456789"],
     ["to", "someone-else@example.com"],
     ["cc", "other-cc@example.com"],
@@ -216,7 +227,7 @@ test("computeCompositionHash: null vs empty-string To/Cc are distinct fingerprin
   // The silent-overwrite shape Item 6(c) sweeps. The hash must distinguish
   // null (omitted) from "" (present-but-empty) so a recipient change can't hide
   // behind a coercion. (Plain equality of the canonical JSON pins this.)
-  const core = { exportId: "e", zipSha256: "z", subject: "s", text: "t" };
+  const core = { bundleBuildId: null, proofsKey: "proofs.zip", zipFilename: "pack.zip", zipBytes: 10, from: "from@example.com", replyTo: null, html: "html", exportId: "e", zipSha256: "z", subject: "s", text: "t" };
   assert.notEqual(
     await computeCompositionHash({ ...core, to: null, cc: null }),
     await computeCompositionHash({ ...core, to: "", cc: "" }),

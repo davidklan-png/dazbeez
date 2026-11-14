@@ -6,6 +6,7 @@ import {
   getLatestFinalizedExport,
   listDeliveriesForMonth,
   createDelivery,
+  DeliveryAdmissionConflictError,
   markDeliverySent,
   markDeliveryFailed,
   markDeliveryAmbiguous,
@@ -17,53 +18,19 @@ import {
 } from "@/lib/cloudflare-runtime";
 import {
   decideSendAction,
-  findRevisionSendBlocker,
+  isWithinResumeWindow,
+  logicalAttempts,
   idempotencyKeyForAttempt,
 } from "@/lib/receipts/delivery-state";
 import { performDelivery, assertDeliverySize } from "@/lib/receipts/delivery-send";
-import { composeDelivery } from "@/lib/receipts/delivery-compose";
+import { composeDelivery, deliveryPayload } from "@/lib/receipts/delivery-compose";
 
 type RouteContext = { params: Promise<{ month: string }> };
 
-/**
- * POST /api/receipts/export/{month}/send[?force_new=true]
- *
- * Delivers the latest SEALED export for the month to the accountant (Cc: business
- * manager — Change 5) as an attached ZIP. Fires strictly AFTER the seal commit
- * (D1); the seal is immutable and this only moves the month's delivery_state.
- *
- * Composition (recipients, subject/body, preflight, attachment sha/filename) is
- * single-sourced in {@link composeDelivery} — the SAME function the preview
- * endpoint and the composer page use — so preview and send cannot disagree by
- * construction. This handler owns only the send-specific concerns: the
- * `force_new`-aware new/resume/blocked decision, the B-2 R2 HEAD-before-GET
- * fetch, the delivery-row lifecycle, and the Resend call.
- *
- * Boundary order:
- *  - B-2 (isolate memory): R2 HEAD size check BEFORE the body is streamed in.
- *  - B-1 (Resend ceiling): defence-in-depth size check inside performDelivery,
- *    before base64. [Two call sites — both reported in the commit.]
- *  - Change 3: preflight runs on the fetched bytes BEFORE performDelivery (read
- *    from the composed result — no re-run); a preflight failure is audited and
- *    blocks before any delivery row is created.
- *
- * The POST body carries ONLY `{ compositionHash }` (Item 2) — the fingerprint of
- * the composition the operator reviewed. Subject/body/To/Cc are NEVER accepted
- * from the client (they are re-composed server-side from the sealed pack +
- * Settings via composeDelivery — delivery-composer decision 2); the hash is a
- * staleness check, not content. The route recomposes, recomputes its own hash,
- * and on mismatch 409s with the fresh composition so a stale render (Settings
- * edited, or a new revision finalized) can never silently send a different
- * body/recipient/pack. A client that posts an edited body still has no way to
- * change what is sent.
- *
- * `force_new` is the DISTINCT override for the double-send guard (D6). Without
- * it: a resumeable pending is RESUMED (same attempt_id ⇒ same key ⇒ Resend
- * replays — no duplicate); a sent or stale-pending blocks with 409.
- *
- * Auth: Clerk-protected via /api/receipts/:path*; asserted in the middleware-
- * routing test that it is NOT in PUBLIC_ROUTES.
- */
+/** Clerk-only Send: pin the sealed revision/bytes, prepare and validate, then
+ * CAS ownership + history + audits before any provider call. Unknown admission
+ * acknowledgements never authorize transport. Retries use a frozen envelope/key
+ * inside 23 hours of the FIRST durable admission; overrides require fresh review. */
 export async function POST(request: Request, { params }: RouteContext) {
   try {
     const actor = await requireReceiptsActor(request.headers);
@@ -78,8 +45,12 @@ export async function POST(request: Request, { params }: RouteContext) {
     // The hash is a staleness check, not content; an absent/invalid hash (direct
     // POST, pre-hash client) simply skips the check.
     let postedCompositionHash: string | undefined;
+    let observedGeneration: unknown;
+    let observedAttemptId: unknown;
     try {
-      const body = (await request.json()) as { compositionHash?: unknown };
+      const body = (await request.json()) as { compositionHash?: unknown; observedGeneration?: unknown; observedAttemptId?: unknown };
+      observedGeneration = body?.observedGeneration;
+      observedAttemptId = body?.observedAttemptId;
       if (typeof body?.compositionHash === "string") {
         postedCompositionHash = body.compositionHash;
       }
@@ -100,27 +71,35 @@ export async function POST(request: Request, { params }: RouteContext) {
     //    guard). This is the send-specific, force_new-aware decision;
     //    composeDelivery runs a forceNew:false decision for DISPLAY only. Kept
     //    BEFORE the R2 fetch so a duplicate 409 rejects cheaply.
-    const deliveries = (await listDeliveriesForMonth(month)).map((d) => ({
+    const history = await listDeliveriesForMonth(month);
+    const deliveries = history.map((d) => ({
       id: d.id,
       exportId: d.export_id,
       attemptId: d.attempt_id,
       state: d.state,
       createdAt: d.created_at,
+      admissionGeneration: d.admission_generation,
     }));
+    if (forceNew && (!Number.isInteger(observedGeneration) ||
+      observedGeneration !== (exportRecord.delivery_generation ?? 0) ||
+      observedAttemptId !== (exportRecord.current_delivery_attempt_id ?? null) || !postedCompositionHash)) {
+      return NextResponse.json({ error: "Override confirmation is missing or stale. Refresh the preview and confirm again." }, { status: 409 });
+    }
     const now = nowIso();
     const action = decideSendAction({
       latestExportId: exportRecord.id,
       deliveries,
       now,
       forceNew,
+      currentAttemptId: exportRecord.current_delivery_attempt_id,
     });
     if (action.action === "blocked") {
       return NextResponse.json(
         {
           error:
             action.reason === "sent"
-              ? "This month's current revision has already been delivered. Pass force_new=true to re-send (audited)."
-              : "This month has a pending delivery that can no longer be safely resumed (past Resend's 24h idempotency window). Pass force_new=true to send anew (audited).",
+              ? "This revision has already been delivered. Refresh and deliberately confirm a resend (audited)."
+              : "The earlier outcome is unknown and cannot be safely resumed (23-hour cutoff or invalid admission time). Refresh and review before explicitly resending.",
           reason: action.reason,
           priorAttemptId: action.priorAttemptId,
         },
@@ -162,7 +141,7 @@ export async function POST(request: Request, { params }: RouteContext) {
     //    EXACT bytes that ship and does not fetch a second time. This is the
     //    single composition path — the preview endpoint and composer page call
     //    the same function, so preview/send cannot drift.
-    const composed = await composeDelivery(month, { zipBytes });
+    const composed = await composeDelivery(month, { zipBytes, exportRecord });
 
     // Config problems (missing To, invalid address, no Resend key / From, missing
     // ZIP) make sending impossible. The composer surfaces these BEFORE the
@@ -224,144 +203,100 @@ export async function POST(request: Request, { params }: RouteContext) {
       );
     }
 
-    // ── attempt_id: resume reuses the pending one; a new/redelivery send mints one.
-    const attemptId = action.action === "resume" ? action.attemptId : newUuid();
-    // Audit the send's nature. A `redelivery` is the first send of a corrected
-    // revision AFTER an earlier revision was already delivered — legitimate, and
-    // it records as a re-delivery (the accountant gets a second email), NOT as
-    // the force_new override. force_new overriding a genuine duplicate guard for
-    // THIS revision still records as an override; the revision-scoped blocker
-    // (findRevisionSendBlocker) is what force_new actually overrode, replacing
-    // the old month-wide SENT/PENDING capture that mislabelled a redelivery as
-    // an override. `redelivery` and `override` are mutually exclusive: a
-    // sent-for-this-revision that force_new collapses returns `new` (override),
-    // never `redelivery`.
-    if (action.action === "redelivery") {
-      await createAuditEntry(getReceiptsDb(), {
-        actor,
-        action: "export.delivery_redelivery",
-        objectType: "export",
-        objectId: exportRecord.id,
-        newValueJson: stringifyJson({
-          month,
-          priorAttemptId: action.priorAttemptId,
-        }),
-      });
-    } else if (forceNew) {
-      const overrode = findRevisionSendBlocker(deliveries, exportRecord.id, now);
-      if (overrode) {
-        await createAuditEntry(getReceiptsDb(), {
-          actor,
-          action: "export.delivery_override",
-          objectType: "export",
-          objectId: exportRecord.id,
-          newValueJson: stringifyJson({
-            month,
-            reason: overrode.reason,
-            priorAttemptId: overrode.priorAttemptId,
-          }),
-        });
-      }
-    }
-
-    // ── Record the delivery attempt (pending) with the now-known bytes + sha ─
-    const operatorMessage = exportRecord.operator_message ?? null; // 0037: same stored value the pack notice carries (O7)
-    const deliveryId = await createDelivery({
-      exportId: exportRecord.id,
-      attemptId,
-      idempotencyKey: idempotencyKeyForAttempt(attemptId),
-      toAddress: composed.to,
-      ccAddress: composed.cc,
-      subject: composed.subject,
-      body: composed.text,
-      operatorMessage,
-      zipFilename: composed.zipFilename,
-      zipSha256: composed.zipSha256,
-      zipBytes: zipBytes.byteLength,
+    const payload = deliveryPayload({
+      exportId: exportRecord.id, bundleBuildId: exportRecord.bundle_build_id ?? null,
+      proofsKey, zipFilename: composed.zipFilename, zipSha256: composed.zipSha256,
+      zipBytes: zipBytes.byteLength, from: composed.from, to: composed.to,
+      cc: composed.cc, replyTo: composed.replyTo, subject: composed.subject,
+      text: composed.text, html: composed.html,
     });
+    let payloadJson = JSON.stringify(payload);
+    const attemptId = action.action === "resume" ? action.attemptId : newUuid();
+    let idempotencyKey = idempotencyKeyForAttempt(attemptId);
+    let origin = nowIso();
+    if (action.action === "resume") {
+      const rows = history.filter((d) => d.attempt_id === attemptId);
+      const first = rows.find((d) => d.id === action.deliveryId)!;
+      origin = first.created_at;
+      // Compare the ENTIRE envelope, not just client review. Legacy/malformed
+      // snapshots fail closed; never reconstruct an uncertain old payload.
+      if (!first.payload_json || first.payload_json !== payloadJson ||
+        rows.some((d) => d.payload_json !== first.payload_json || d.idempotency_key !== first.idempotency_key)) {
+        return NextResponse.json({ error: "The earlier delivery has a missing or different frozen envelope. Its outcome may be unknown. Refresh, review the current recipient/pack, and explicitly confirm a new send if intended." }, { status: 409 });
+      }
+      payloadJson = first.payload_json;
+      idempotencyKey = first.idempotency_key;
+    }
+    const frozen = JSON.parse(payloadJson) as typeof payload;
+    const deliveryId = await createDelivery({
+      exportId: exportRecord.id, month,
+      expectedGeneration: exportRecord.delivery_generation ?? 0,
+      expectedAttemptId: exportRecord.current_delivery_attempt_id ?? null,
+      bundleBuildId: exportRecord.bundle_build_id ?? null, proofsKey, payloadJson, actor,
+      admissionAction: action.action === "redelivery" ? "redelivery" : forceNew ? "override" : action.action,
+      priorAttemptId: action.action === "redelivery" ? action.priorAttemptId : exportRecord.current_delivery_attempt_id ?? undefined,
+      attemptId, idempotencyKey,
+      toAddress: frozen.to!, ccAddress: frozen.cc, subject: frozen.subject, body: frozen.text,
+      operatorMessage: exportRecord.operator_message ?? null,
+      zipFilename: frozen.zipFilename, zipSha256: frozen.zipSha256, zipBytes: frozen.zipBytes,
+    });
+    // Async R2/composition/admission may cross the cutoff. No sliding window.
+    if (!isWithinResumeWindow(origin, nowIso())) {
+      return NextResponse.json({ error: "Safe resume cutoff reached during preparation. Outcome remains unknown; refresh and review before explicitly resending." }, { status: 409 });
+    }
 
     // ── Send. performDelivery re-checks size on the in-memory bytes (CALL SITE
     //    2 — defence-in-depth, B-1) then base64-encodes and calls Resend with
     //    the Idempotency-Key. Never throws across the boundary.
     const result = await performDelivery({
       apiKey,
-      from: composed.from,
-      to: composed.to,
-      cc: composed.cc,
-      replyTo: composed.replyTo,
-      subject: composed.subject,
-      text: composed.text,
-      html: composed.html,
-      zipFilename: composed.zipFilename,
+      from: frozen.from!,
+      to: frozen.to!,
+      cc: frozen.cc,
+      replyTo: frozen.replyTo,
+      subject: frozen.subject,
+      text: frozen.text,
+      html: frozen.html,
+      zipFilename: frozen.zipFilename,
       zipBytes,
-      idempotencyKey: idempotencyKeyForAttempt(attemptId),
+      idempotencyKey,
     });
 
     const db = getReceiptsDb();
     if (result.ok) {
-      await markDeliverySent(deliveryId, result.messageId ?? "");
-      await createAuditEntry(db, {
-        actor,
-        action: "export.delivery_sent",
-        objectType: "export",
-        objectId: exportRecord.id,
-        newValueJson: stringifyJson({
-          month,
-          attemptId,
-          to: composed.to,
-          messageId: result.messageId ?? null,
-        }),
-      });
-      return NextResponse.json({
-        state: "delivered",
-        deliveryId,
-        messageId: result.messageId ?? null,
-      });
-    }
-    // Resend failure is retryable: the seal stands and the month is
-    // sealed_undelivered (not 5xx — D2; a 5xx risks infra auto-retry starting a
-    // new attempt with a new idempotency key). Classify so an ambiguous failure
-    // (timeout/5xx/network — mail may have been accepted) stays resumable: the
-    // operator's retry reuses this attempt_id and Resend deduplicates, rather
-    // than minting a new key and sending twice. A definitive 4xx rejection is
-    // terminal-failed — a retry is a clean new send.
-    const classification = result.classification;
-    if (classification === "definitive") {
-      await markDeliveryFailed(deliveryId, result.error);
+      await markDeliverySent(deliveryId, result.messageId ?? "", db, actor);
+    } else if (result.classification === "definitive") {
+      await markDeliveryFailed(deliveryId, result.error, db, actor, result);
     } else {
-      await markDeliveryAmbiguous(deliveryId, result.error);
+      await markDeliveryAmbiguous(deliveryId, result.error, db, actor, result);
     }
-    await createAuditEntry(db, {
-      actor,
-      action: "export.delivery_failed",
-      objectType: "export",
-      objectId: exportRecord.id,
-      newValueJson: stringifyJson({
-        month,
-        attemptId,
-        error: result.error,
-        classification,
-      }),
-    });
-    return NextResponse.json(
-      {
-        state: "sealed_undelivered",
-        deliveryId,
-        error: result.error,
-        classification,
-        // The composer renders "resume" (reuse the attempt) vs "retry" (new
-        // attempt) from this — ambiguous within 24h is resumable.
-        resumable: classification === "ambiguous",
-      },
-      { status: 200 },
-    );
+    const current = await getLatestFinalizedExport(month);
+    if (current?.id !== exportRecord.id || current.current_delivery_attempt_id !== attemptId) {
+      return NextResponse.json({ state: "superseded", deliveryId,
+        error: "This result was recorded in history. A newer revision or send owns the current state; refresh before taking further action." });
+    }
+    const settled = current.delivery_state === "delivered";
+    if (settled) return NextResponse.json({ state: "delivered", deliveryId,
+      messageId: result.ok ? result.messageId ?? null : null });
+    if (result.ok) return NextResponse.json({ state: "pending", deliveryId,
+      error: "Delivery result recorded. Refresh to confirm current delivery state." });
+    const classification = result.classification;
+    return NextResponse.json({ state: settled ? "delivered" : "sealed_undelivered", deliveryId,
+      error: result.error, classification,
+      resumable: !settled && logicalAttempts([...deliveries, {
+        id: deliveryId, exportId: exportRecord.id, attemptId, state: classification === "definitive" ? "failed" as const : "ambiguous" as const,
+        createdAt: origin,
+      }]).some((d) => d.attemptId === attemptId && (d.state === "pending" || d.state === "ambiguous")) });
   } catch (error) {
+    if (error instanceof DeliveryAdmissionConflictError) {
+      return NextResponse.json({ error: error.message }, { status: 409 });
+    }
     if (error instanceof Error && error.message.startsWith("Unauthorized")) {
       return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
     }
     console.error("[api/receipts/export/[month]/send] POST failed", error);
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Failed to send delivery." },
+      { error: "Delivery was not confirmed. Its outcome may be unknown. Refresh before retrying; do not assume it was unsent." },
       { status: 500 },
     );
   }
