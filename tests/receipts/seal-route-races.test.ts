@@ -1189,103 +1189,78 @@ guardedTest("R3-B9 /extract answers a temporary claim conflict 503 + Retry-After
 
 // ─── Round 3: expired-A / resumed-after-B publication race ────────────────────
 
-guardedTest("R4-A7 ACTUAL route A suspended at every before/after-put boundary, inputs changed, route B finalizes, A resumes: winner/legacy bytes unchanged, no losing audits", async () => {
-  const lockMod = await loadLock();
-  const dbMod = await import("@/lib/receipts/db");
-  // Suspend route A deterministically inside put k+1 (after exactly k of the
-  // route's 8 artifact puts completed), take its claim away, edit the receipt
-  // inputs, run actual route B to completion, then resume A. The
-  // after-ALL-puts boundary (suspended between staging and publication) is
-  // covered by the pure expired-lease CAS arm at the end of this test.
-  const boundaries = [0, 1, 2, 3, 4, 5, 6, 7] as const;
-  let exportId = "";
-  for (const boundary of boundaries) {
-    freshContext();
-    const db = ctx.d1.asD1();
+guardedTest("R5-A7 natural D1-time lease expiry: route A parked before AND after each of the 8 cash puts, receipt inputs changed, actual route B finalizes, A resumes 409 — winner/legacy bytes and audits unchanged", async () => {
+  // Round-4 review non-blocking 1: the prior version of this test released A's
+  // claim explicitly (a substitution for expiry). This orchestration is the
+  // reviewer's: ONLY route A's first acquisition gets a short lease (+1s,
+  // patched into the acquisition SQL); every predicate and the publication CAS
+  // remain the real SQL. A parks before OR after put #ordinal, the lease lapses
+  // by real clock time (1.1s), the receipt inputs change, actual route B
+  // acquires over the expired claim and finalizes, then A resumes and must lose.
+  for (const after of [false, true]) {
+    for (let ordinal = 1; ordinal <= 8; ordinal += 1) {
+      freshContext();
+      const label = `${after ? "after" : "before"} put ${ordinal}`;
+      const prepare = ctx.d1.prepare.bind(ctx.d1);
+      let firstAcquire = true;
+      ctx.d1.prepare = ((sql: string) => {
+        if (firstAcquire && sql.includes("SET sealing_token = ?")) {
+          firstAcquire = false;
+          sql = sql.replace(/\+ 600/, "+ 1");
+        }
+        return prepare(sql);
+      }) as typeof ctx.d1.prepare;
 
-    // A seeded LEGACY sealed object for the same month (pre-namespace bytes).
-    // (Seeded BEFORE arming the pause so its own put does not consume an
-    // ordinal — the boundaries below index the ROUTE's puts.)
-    const legacyKey = "exports/2026-01/legacy-old/legacy-summary.csv";
-    await ctx.archive.put(legacyKey, new TextEncoder().encode("legacy-bytes-2026-01"), {});
-    const legacyBytes = ctx.archive.objects.get(legacyKey)!;
-    const basePuts = ctx.archive.putCallCount;
+      const legacyKey = "exports/2025-12/legacy-summary.csv";
+      const legacyBytes = new TextEncoder().encode("legacy sealed bytes");
+      ctx.archive.objects.set(legacyKey, legacyBytes);
 
-    // Route A starts and is parked deterministically inside put boundary+1
-    // (its bytes not yet stored), i.e. after exactly `boundary` puts completed.
-    const [reachedPut, releasePut] = ctx.archive.armPauseAt(basePuts + boundary + 1);
-    const reachedP: Promise<void> = reachedPut.then(() => undefined);
-    const routeA = runRoute({ month: "2026-01", finalize: true, operatorMessage: "from-A" });
-    await reachedP;
+      const put = ctx.archive.put.bind(ctx.archive);
+      let aPuts = 0;
+      let reach!: () => void;
+      let resume!: () => void;
+      const reached = new Promise<void>((r) => (reach = r));
+      const parked = new Promise<void>((r) => (resume = r));
+      let pausing = true;
+      ctx.archive.put = (async (key: string, data: ArrayBuffer | Uint8Array, opts?: { onlyIf?: { etagDoesNotMatch?: string } }) => {
+        aPuts += 1;
+        const hold = pausing && aPuts === ordinal;
+        if (hold && !after) {
+          reach();
+          await parked;
+        }
+        const result = await put(key, data, opts);
+        if (hold && after) {
+          reach();
+          await parked;
+        }
+        return result;
+      }) as typeof ctx.archive.put;
 
-    // Suspend-then-lose: A's claim is taken away (owned release by A's own
-    // token — the SQL authority refuses a raw lease rewrite, and for A's
-    // resumed publication the outcome is identical to expiry: its CAS no
-    // longer matches). The pure expired-lease CAS arm is asserted at the end
-    // of this test. Then edit the receipt inputs B will build — A's snapshot
-    // is stale in every way that matters.
-    const claimRow = ctx.d1.db.prepare(`SELECT id, sealing_token FROM receipt_exports WHERE export_month='2026-01' AND sealing_token IS NOT NULL`).get() as never as { id: string; sealing_token: string } | undefined;
-    assert.ok(claimRow, `boundary=${boundary}: route A holds a claim`);
-    exportId = claimRow!.id;
-    await lockMod.releaseSealClaim(db, exportId, claimRow!.sealing_token);
-    ctx.d1.db
-      .prepare(`UPDATE receipt_records SET business_purpose = 'changed-after-A' WHERE id='r1'`)
-      .run();
-
-    // Actual route B (fresh request) finalizes once A's claim is gone.
-    const routeB = await runRoute({ month: "2026-01", finalize: true, operatorMessage: "from-B" });
-    assert.equal(routeB.status, 200, `boundary=${boundary}: route B finalizes`);
-    const afterB = new Map(ctx.archive.objects);
-    const bBuild = ctx.d1.db.prepare(`SELECT bundle_build_id, operator_message FROM receipt_exports WHERE export_month='2026-01'`).get() as never as Record<string, string | null>;
-
-    // Resume A: its build runs to its publication, which must lose.
-    releasePut();
-    const aResult = await routeA;
-    assert.equal(aResult.status, 409, `boundary=${boundary}: suspended route A is refused, never a silent overwrite`);
-
-    // Winner bytes and the seeded legacy bytes unchanged by A's loss.
-    const afterA = new Map(ctx.archive.objects);
-    for (const [k, v] of afterB) {
-      assert.deepEqual(afterA.get(k), v, `boundary=${boundary}: B object byte-identical: ${k}`);
+      const a = runRoute({ month: "2026-01", finalize: true, operatorMessage: "A older decision" });
+      await reached;
+      pausing = false;
+      // Natural D1-time expiry: the +1s lease lapses by real clock time. No
+      // explicit release anywhere in this test.
+      await new Promise((r) => setTimeout(r, 1100));
+      ctx.d1.db.prepare(`UPDATE receipt_records SET amount_minor=650, business_purpose='after expiry' WHERE id='r1'`).run();
+      const b = await runRoute({ month: "2026-01", finalize: true, operatorMessage: "B winner" });
+      assert.equal(b.status, 200, label);
+      const winnerRows = ctx.d1.db.prepare("SELECT * FROM receipt_exports").all();
+      const items = ctx.d1.db.prepare("SELECT * FROM receipt_export_items").all();
+      const audits = ctx.d1.db.prepare("SELECT * FROM receipt_audit_log").all();
+      const winnerObjects = new Map(ctx.archive.objects);
+      resume();
+      const aRes = await a;
+      assert.equal(aRes.status, 409, label);
+      assert.deepEqual(ctx.d1.db.prepare("SELECT * FROM receipt_exports").all(), winnerRows, label);
+      assert.deepEqual(ctx.d1.db.prepare("SELECT * FROM receipt_export_items").all(), items, label);
+      assert.deepEqual(ctx.d1.db.prepare("SELECT * FROM receipt_audit_log").all(), audits, label);
+      for (const [key, bytes] of winnerObjects) {
+        assert.deepEqual(ctx.archive.objects.get(key), bytes, `${label}: ${key}`);
+      }
+      assert.deepEqual(ctx.archive.objects.get(legacyKey), legacyBytes, label);
     }
-    assert.deepEqual(afterA.get(legacyKey), legacyBytes, `boundary=${boundary}: legacy object untouched`);
-    // B's published identity/message hold.
-    const row = ctx.d1.db.prepare(`SELECT bundle_build_id, operator_message FROM receipt_exports WHERE export_month='2026-01'`).get() as never as Record<string, string | null>;
-    assert.equal(row.operator_message, "from-B", `boundary=${boundary}: B's message holds`);
-    assert.equal(row.bundle_build_id, bBuild.bundle_build_id, `boundary=${boundary}: B's build id holds`);
-    // Exactly one promotion + exactly B's audits — no losing audit rows.
-    const promoted = (ctx.d1.db.prepare(`SELECT object_id FROM receipt_audit_log WHERE action='receipt.exported'`).all() as never as { object_id: string }[]).map((a) => a.object_id);
-    assert.deepEqual(promoted, ["r1"], `boundary=${boundary}: exactly one promotion`);
-    const exportAudits = (ctx.d1.db.prepare(`SELECT action FROM receipt_audit_log WHERE object_type='export' AND action LIKE 'export.%' ORDER BY rowid`).all() as never as { action: string }[]).map((a) => a.action);
-    assert.equal(exportAudits.filter((a) => a === "export.finalized").length, 1, `boundary=${boundary}: exactly one finalize audit (B's)`);
-  }
-
-  // The PURE expired-lease CAS arm: an attempt whose lease genuinely lapsed
-  // (test seam) loses its publication with the typed conflict, publishing
-  // nothing — the same CAS the suspended routes above ran into.
-  {
-    freshContext();
-    const db = ctx.d1.asD1();
-    const id = await dbMod.createExport("2026-01", "op", db);
-    const staleToken = await lockMod.acquireSealClaim(db, { exportId: id, finalize: false, leaseSeconds: -5 });
-    await ctx.archive.put(`exports/2026-01/${id}/${staleToken}/staged.csv`, new TextEncoder().encode("A"), { onlyIf: { etagDoesNotMatch: "*" } });
-    const rebuilt = await runRoute({ month: "2026-01", finalize: false });
-    assert.equal(rebuilt.status, 200);
-    const dbModPub = await import("@/lib/receipts/export-publication");
-    await assert.rejects(
-      dbModPub.publishExportBundle(db, {
-        exportId: id, month: "2026-01", buildId: staleToken, actor: "builder-a", finalize: false,
-        rowCount: 1, archiveKey: `exports/2026-01/${id}/${staleToken}/a.csv`,
-        manifestKey: `exports/2026-01/${id}/${staleToken}/m.csv`, archiveSha256: "AA",
-        manifestSha256: "MM", proofsKey: `exports/2026-01/${id}/${staleToken}/p.zip`,
-        proofsSha256: "PP", paymentDueDate: null, operatorMessage: null,
-        items: [{ itemType: "receipt", itemId: "r1" }], promotableReceiptIds: [],
-      }),
-      (err: unknown) => err instanceof dbModPub.PublicationConflictError,
-      "true expired lease → typed CAS conflict",
-    );
-    const row = ctx.d1.db.prepare(`SELECT archive_r2_key FROM receipt_exports WHERE id=?`).get(id) as never as { archive_r2_key: string };
-    assert.ok(!row.archive_r2_key.includes(staleToken), "metadata untouched by the expired attempt");
   }
 });
 

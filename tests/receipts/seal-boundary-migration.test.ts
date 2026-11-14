@@ -677,20 +677,31 @@ test("R4-R1 exported_month-only INSERT is fenced under a claim and permanently",
   }
 });
 
-test("R4-R1 UPDATE INTO a sealed exported_month is fenced (NEW side); the exact promotion still passes", () => {
+test("R4-R1 UPDATE INTO a sealed exported_month is fenced (NEW side) with NO item-derived lock to mask it; the exact promotion still passes", () => {
+  // Round-4 review non-blocking 2: the prior version seeded the receipt into
+  // the target month's finalized item set, so the item-derived lock alone
+  // would have rejected the UPDATE — removing the NEW-membership predicate
+  // would NOT have failed the test. Unmasked here: the receipt is ITEMLESS,
+  // lives in an UNRELATED OPEN month (2026-03), and the target month's
+  // finalized export is a legacy row with NO items at all. Only the NEW-side
+  // exported-month predicate can reject.
   const db = mk();
-  seedReceipt(db, "ry", "2026-03"); // open month
+  seedReceipt(db, "ry", "2026-03"); // open month; no items anywhere for ry
   seedExport(db, "e1", "2026-01", "draft");
-  db.prepare(`INSERT INTO receipt_export_items (id,export_id,item_type,item_id,created_at) VALUES ('i1','e1','receipt','ry','t')`).run();
   db.prepare(`UPDATE receipt_exports SET status='finalized' WHERE id='e1'`).run();
   assert.equal(
     R(db, `UPDATE receipt_records SET exported_month='2026-01' WHERE id='ry'`),
     "DZ_SEAL_MONTH_LOCKED",
-    "moving INTO a sealed exported_month without a published item",
+    "moving INTO a sealed exported_month with no item-derived lock present — only the NEW-membership predicate fires",
   );
-  // The exact exporter promotion (item-justified, identity-pinned) still passes.
+  // The exact exporter promotion (item-justified, identity-pinned) still
+  // passes for a receipt that IS in a finalized item set.
+  seedReceipt(db, "rp", "2026-03");
+  seedExport(db, "e2", "2026-02", "draft");
+  db.prepare(`INSERT INTO receipt_export_items (id,export_id,item_type,item_id,created_at) VALUES ('i2','e2','receipt','rp','t')`).run();
+  db.prepare(`UPDATE receipt_exports SET status='finalized' WHERE id='e2'`).run();
   assert.equal(
-    R(db, `UPDATE receipt_records SET status='exported', exported_month='2026-01', updated_at='t2' WHERE id='ry' AND status IN ('captured','needs_review','reviewed','reconciled')`),
+    R(db, `UPDATE receipt_records SET status='exported', exported_month='2026-02', updated_at='t2' WHERE id='rp' AND status IN ('captured','needs_review','reviewed','reconciled')`),
     true,
   );
 });

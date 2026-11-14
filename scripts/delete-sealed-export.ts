@@ -199,6 +199,16 @@ type ConfirmState =
   | { kind: "present" }
   | { kind: "unreadable"; detail: string };
 
+/**
+ * The ONLY import-error signatures that positively identify a statement /
+ * admission rejection (R5-1): a 0042/0043 seal trigger identifier, or the
+ * deletion admission's exact NOT NULL assertion. Anything else — connection
+ * refusals, timeouts, generic constraint/driver text — is NOT evidence the
+ * transaction rolled back (a pending import may still commit) and must be
+ * reported UNCONFIRMED.
+ */
+const DEFINITE_REJECTION = /DZ_SEAL_[A-Z_]+|NOT NULL constraint failed:?\s*receipt_audit_log\.actor/i;
+
 // R3: the import's acknowledgement and this confirmation read are SEPARATE
 // requests. A lost import acknowledgement does not prove rollback — the
 // transaction may commit between the marker read and the parent read (or after
@@ -256,9 +266,12 @@ if (confirm.kind === "committed") {
   if (importError) {
     console.log("  [d1] import reported an error but the committed deletion is confirmed by re-read (commit-before-error acknowledged).");
   }
-} else if (confirm.kind === "absent" && importError && /REFUSED|constraint|DZ_SEAL|NOT NULL/i.test(importError.message)) {
+} else if (confirm.kind === "absent" && importError && DEFINITE_REJECTION.test(importError.message)) {
   // A DEFINITE statement/admission rejection observed from the import itself,
-  // plus marker-absent/export-present now: known rollback.
+  // plus marker-absent/export-present now: known rollback. ONLY these two
+  // signatures count as positive rejection evidence — a network error
+  // (ECONNREFUSED, timeouts, lost polling) says nothing about whether the
+  // import committed, so it must fall through to UNCONFIRMED below.
   console.error(`  [d1] REFUSED/ROLLED BACK: the deletion transaction was rejected (${importError.message.split("\n")[0]}). NOTHING was deleted and NO R2 object was touched.`);
   process.exit(2);
 } else if (confirm.kind === "unreadable" || confirm.kind === "present" || importError) {

@@ -37,7 +37,7 @@ const SCRIPT = join(process.cwd(), "scripts", "delete-sealed-export.ts");
  *  - `r2 object delete` → appends the key to r2.log.
  */
 function writeShim(dir: string, scenario: {
-  fileImport: "aggregate-success" | "exit1-committed" | "exit1-rolledback" | "exit1-late-commit";
+  fileImport: "aggregate-success" | "exit1-committed" | "exit1-rolledback" | "exit1-late-commit" | "exit1-econnrefused";
   confirm: "committed" | "rolledback" | "unreadable" | "inconsistent" | "late-commit";
   /** The combined confirmation query's single row (marker_n, export_n). */
   confirmState?: { marker_n: number; export_n: number };
@@ -59,6 +59,15 @@ if (args.includes("object") && args.includes("delete")) {
 if (fileIdx >= 0) {
   const f = args[fileIdx + 1];
   fs.copyFileSync(f, join0(capture, "import-" + fs.readdirSync(capture).length + ".sql"));
+  if (${JSON.stringify(scenario.fileImport)} === "exit1-econnrefused") {
+    // R5-1: an ordinary CONNECTION failure while polling the running D1
+    // import — the transaction may still commit (arm the late-commit sentinel
+    // so the first combined read observes PRE-commit state). Contains no
+    // rejection signature ("ECONNREFUSED" is not one).
+    fs.writeFileSync(join0(capture, "late-commit"), "pending");
+    process.stderr.write("wrangler: exit 1 - fetch failed: connect ECONNREFUSED 127.0.0.1:443 while polling running D1 import" + String.fromCharCode(10));
+    process.exit(1);
+  }
   if (${JSON.stringify(scenario.fileImport)} === "exit1-late-commit") {
     // Lost acknowledgement: the import STARTED, exited 1, and the deletion
     // transaction commits AFTER the operator's first confirmation read runs.
@@ -114,7 +123,7 @@ function join0(a, b) { return a + "/" + b; }
 }
 
 function runCli(scenario: {
-  fileImport: "aggregate-success" | "exit1-committed" | "exit1-rolledback" | "exit1-late-commit";
+  fileImport: "aggregate-success" | "exit1-committed" | "exit1-rolledback" | "exit1-late-commit" | "exit1-econnrefused";
   confirm: "committed" | "rolledback" | "unreadable" | "inconsistent" | "late-commit";
   confirmState?: { marker_n: number; export_n: number };
   reason?: string;
@@ -229,6 +238,36 @@ test("CLI R3 late commit between reads: unclassified import error + absent-now s
     assert.match(r.stdout + r.stderr, /UNCONFIRMED/);
     assert.ok(!/ROLLED BACK/.test(r.stdout + r.stderr), "must NOT claim a definite rollback on unresolved evidence");
     assert.equal(r.r2Log, "", "R2 retained");
+  } finally { cleanup(r.dir); }
+});
+
+test("CLI R5-1 ECONNREFUSED during import polling is UNCONFIRMED, never a claimed rollback", () => {
+  // Reviewer probe (round-4 review, finding 1): the import subprocess dies
+  // with a connection refusal mid-poll; the combined confirmation read
+  // observes marker-absent/export-present (pre-commit). A network error is
+  // NOT rejection evidence — the deletion may commit after the read — so the
+  // only honest outcome is UNCONFIRMED with R2 retained. (Before R5-1 the
+  // classifier's /REFUSED/ alternative matched "ECONNREFUSED" and the CLI
+  // falsely printed REFUSED/ROLLED BACK.)
+  const r = runCli({ fileImport: "exit1-econnrefused", confirm: "late-commit" });
+  try {
+    assert.equal(r.code, 2);
+    assert.match(r.stdout + r.stderr, /UNCONFIRMED/);
+    assert.ok(!/ROLLED BACK/.test(r.stdout + r.stderr), "must NOT claim definite rollback on a connection error");
+    assert.ok(!/REFUSED\//.test(r.stdout + r.stderr));
+    assert.equal(r.r2Log, "", "R2 retained");
+  } finally { cleanup(r.dir); }
+});
+
+test("CLI R5-1 ECONNREFUSED with a plain absent-now read is also UNCONFIRMED", () => {
+  // Same class, static read: absence now still cannot prove a pending import
+  // will never commit.
+  const r = runCli({ fileImport: "exit1-econnrefused", confirm: "rolledback", confirmState: { marker_n: 0, export_n: 1 } });
+  try {
+    assert.equal(r.code, 2);
+    assert.match(r.stdout + r.stderr, /UNCONFIRMED/);
+    assert.ok(!/ROLLED BACK/.test(r.stdout + r.stderr));
+    assert.equal(r.r2Log, "");
   } finally { cleanup(r.dir); }
 });
 
