@@ -3929,9 +3929,25 @@ export async function updateExportOperatorMessage(
 // (transaction), so list queries never disagree with the attempt history.
 // A failed send never touches the seal — only the month's delivery_state.
 
+export class DeliveryAdmissionConflictError extends Error {
+  constructor() {
+    super("Delivery state or sealed revision changed. Refresh and review again before sending.");
+    this.name = "DeliveryAdmissionConflictError";
+  }
+}
+
 /** Input for a new delivery attempt row (state starts 'pending'). */
 export interface CreateDeliveryInput {
   exportId: string;
+  month: string;
+  expectedGeneration: number;
+  expectedAttemptId: string | null;
+  bundleBuildId: string | null;
+  proofsKey: string;
+  payloadJson: string;
+  actor: string;
+  admissionAction: "new" | "resume" | "redelivery" | "override";
+  priorAttemptId?: string;
   attemptId: string;
   idempotencyKey: string;
   toAddress: string;
@@ -3954,34 +3970,47 @@ export async function createDelivery(
 ): Promise<string> {
   const id = newUuid();
   const now = nowIso();
-  await db.batch([
-    db
-      .prepare(
-        `INSERT INTO export_deliveries
-          (id, export_id, attempt_id, idempotency_key, state,
-           to_address, cc_address, subject, body, operator_message,
-           zip_filename, zip_sha256, zip_bytes, created_at)
-         VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .bind(
-        id,
-        input.exportId,
-        input.attemptId,
-        input.idempotencyKey,
-        input.toAddress,
-        input.ccAddress,
-        input.subject,
-        input.body,
-        input.operatorMessage,
-        input.zipFilename,
-        input.zipSha256,
-        input.zipBytes,
-        now,
-      ),
-    db
-      .prepare(`UPDATE receipt_exports SET delivery_state = 'pending' WHERE id = ?`)
-      .bind(input.exportId),
-  ]);
+  const statements = [
+    db.prepare(`UPDATE receipt_exports
+      SET delivery_generation = delivery_generation + 1,
+          current_delivery_attempt_id = ?, delivery_state = 'pending'
+      WHERE id = ? AND export_month = ? AND status = 'finalized'
+        AND delivery_generation = ? AND current_delivery_attempt_id IS ?
+        AND bundle_build_id IS ? AND proofs_r2_key = ?
+        AND id = (SELECT id FROM receipt_exports WHERE export_month = ? AND status = 'finalized'
+          ORDER BY COALESCE(export_revision, 1) DESC, created_at DESC LIMIT 1)`)
+      .bind(input.attemptId, input.exportId, input.month, input.expectedGeneration,
+        input.expectedAttemptId, input.bundleBuildId, input.proofsKey, input.month),
+    // This assertion must immediately follow CAS: a loser rolls back the batch.
+    db.prepare(`INSERT INTO receipt_audit_log
+      (id, actor, action, object_type, object_id, new_value_json, created_at)
+      VALUES (?, CASE WHEN changes() = 1 THEN ? ELSE NULL END, 'export.delivery_admitted', 'export', ?, ?, ?)`)
+      .bind(newUuid(), input.actor, input.exportId, stringifyJson({ attemptId: input.attemptId,
+        generation: input.expectedGeneration + 1, action: input.admissionAction }), now),
+    db.prepare(`INSERT INTO export_deliveries
+      (id, export_id, attempt_id, idempotency_key, state, to_address, cc_address, subject,
+       body, operator_message, zip_filename, zip_sha256, zip_bytes, created_at,
+       payload_json, admission_generation)
+      VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .bind(id, input.exportId, input.attemptId, input.idempotencyKey, input.toAddress,
+        input.ccAddress, input.subject, input.body, input.operatorMessage, input.zipFilename,
+        input.zipSha256, input.zipBytes, now, input.payloadJson, input.expectedGeneration + 1),
+  ];
+  if (input.admissionAction === "override" || input.admissionAction === "redelivery") {
+    statements.push(db.prepare(`INSERT INTO receipt_audit_log
+      (id, actor, action, object_type, object_id, new_value_json, created_at)
+      VALUES (?, ?, ?, 'export', ?, ?, ?)`)
+      .bind(newUuid(), input.actor, `export.delivery_${input.admissionAction}`, input.exportId,
+        stringifyJson({ month: input.month, priorAttemptId: input.priorAttemptId, attemptId: input.attemptId }), now));
+  }
+  try {
+    await db.batch(statements);
+  } catch (err) {
+    if (err instanceof Error && /NOT NULL constraint failed:?\s*receipt_audit_log\.actor/i.test(err.message)) {
+      throw new DeliveryAdmissionConflictError();
+    }
+    throw err;
+  }
   return id;
 }
 
@@ -4001,7 +4030,7 @@ export async function listDeliveriesForExport(
   const db = getReceiptsDb();
   const result = await db
     .prepare(
-      `SELECT * FROM export_deliveries WHERE export_id = ? ORDER BY created_at ASC`,
+      `SELECT * FROM export_deliveries WHERE export_id = ? ORDER BY created_at ASC, rowid ASC`,
     )
     .bind(exportId)
     .all<ExportDelivery>();
@@ -4023,100 +4052,58 @@ export async function listDeliveriesForMonth(
        FROM export_deliveries d
        JOIN receipt_exports e ON e.id = d.export_id
        WHERE e.export_month = ?
-       ORDER BY d.created_at ASC`,
+       ORDER BY d.created_at ASC, d.rowid ASC`,
     )
     .bind(month)
     .all<ExportDelivery>();
   return result.results ?? [];
 }
 
-/**
- * Mark an attempt sent: record the provider message id + completion time, and
- * set the export's delivery_state='delivered' in one transaction. A sent
- * attempt closes the month for reporting.
- */
-export async function markDeliverySent(
-  id: string,
-  providerMessageId: string,
-  db: D1Database = getReceiptsDb(),
+/** Each HTTP outcome, current summary, generation fence and audit commit together.
+ * A late old attempt stays historical; sent dominates all uncertainty of its key. */
+async function completeDelivery(
+  id: string, state: "sent" | "failed" | "ambiguous", value: string,
+  db: D1Database, actor: string, provider?: { code?: string; status?: number },
 ): Promise<void> {
   const now = nowIso();
   await db.batch([
-    db
-      .prepare(
-        `UPDATE export_deliveries
-         SET state = 'sent', provider_message_id = ?, completed_at = ?
-         WHERE id = ? AND state = 'pending'`,
-      )
-      .bind(providerMessageId, now, id),
-    db
-      .prepare(
-        `UPDATE receipt_exports
-         SET delivery_state = 'delivered'
-         WHERE id = (SELECT export_id FROM export_deliveries WHERE id = ?)`,
-      )
-      .bind(id),
+    db.prepare(`INSERT INTO receipt_audit_log
+      (id, actor, action, object_type, object_id, new_value_json, created_at)
+      SELECT ?, ?, ?, 'export', export_id,
+        json_patch(?, json_object('attemptId', attempt_id, 'to', to_address,
+          'month', (SELECT export_month FROM receipt_exports WHERE id = export_id))), ?
+        FROM export_deliveries WHERE id = ? AND state = 'pending'`)
+      .bind(newUuid(), actor, state === "sent" ? "export.delivery_sent" : "export.delivery_failed",
+        stringifyJson({ deliveryId: id, state,
+          ...(state === "sent" ? { messageId: value } : { error: value, classification: state === "ambiguous" ? "ambiguous" : "definitive" }),
+          ...provider }), now, id),
+    db.prepare(`UPDATE export_deliveries SET state = ?, provider_message_id = ?, error = ?, completed_at = ?
+      WHERE id = ? AND state = 'pending'`)
+      .bind(state, state === "sent" ? value : null, state === "sent" ? null : value, now, id),
+    db.prepare(`UPDATE receipt_exports SET delivery_generation = delivery_generation + 1,
+      delivery_state = CASE WHEN current_delivery_attempt_id =
+        (SELECT attempt_id FROM export_deliveries WHERE id = ?) THEN
+        CASE WHEN EXISTS (SELECT 1 FROM export_deliveries d WHERE d.export_id = receipt_exports.id
+          AND d.attempt_id = current_delivery_attempt_id AND d.state = 'sent') THEN 'delivered'
+        WHEN EXISTS (SELECT 1 FROM export_deliveries d WHERE d.export_id = receipt_exports.id
+          AND d.attempt_id = current_delivery_attempt_id AND d.state = 'pending') THEN 'pending'
+        ELSE 'sealed_undelivered' END ELSE delivery_state END
+      WHERE id = (SELECT export_id FROM export_deliveries WHERE id = ?)`)
+      .bind(id, id),
   ]);
 }
 
-/**
- * Mark an attempt failed: record the error + completion time, and set the
- * export's delivery_state='sealed_undelivered' (retryable; month NOT closed)
- * in one transaction. The seal is untouched — only the reporting state moves.
- */
-export async function markDeliveryFailed(
-  id: string,
-  error: string,
-  db: D1Database = getReceiptsDb(),
-): Promise<void> {
-  const now = nowIso();
-  await db.batch([
-    db
-      .prepare(
-        `UPDATE export_deliveries
-         SET state = 'failed', error = ?, completed_at = ?
-         WHERE id = ? AND state = 'pending'`,
-      )
-      .bind(error, now, id),
-    db
-      .prepare(
-        `UPDATE receipt_exports
-         SET delivery_state = 'sealed_undelivered'
-         WHERE id = (SELECT export_id FROM export_deliveries WHERE id = ?)`,
-      )
-      .bind(id),
-  ]);
+export async function markDeliverySent(id: string, messageId: string,
+  db: D1Database = getReceiptsDb(), actor = "system"): Promise<void> {
+  await completeDelivery(id, "sent", messageId, db, actor);
 }
-
-/**
- * Mark an attempt ambiguously failed: a definitive result was NOT obtained
- * (timeout / network / Resend 5xx — the mail may have been accepted). The
- * attempt stays RESUMABLE (a retry reuses its attempt_id ⇒ same key ⇒ Resend
- * deduplicates), and the month's delivery_state is sealed_undelivered (not
- * closed). The seal is untouched. Counterpart to {@link markDeliveryFailed}
- * (which is for definitive 4xx rejections, terminal). */
-export async function markDeliveryAmbiguous(
-  id: string,
-  error: string,
-  db: D1Database = getReceiptsDb(),
-): Promise<void> {
-  const now = nowIso();
-  await db.batch([
-    db
-      .prepare(
-        `UPDATE export_deliveries
-         SET state = 'ambiguous', error = ?, completed_at = ?
-         WHERE id = ? AND state = 'pending'`,
-      )
-      .bind(error, now, id),
-    db
-      .prepare(
-        `UPDATE receipt_exports
-         SET delivery_state = 'sealed_undelivered'
-         WHERE id = (SELECT export_id FROM export_deliveries WHERE id = ?)`,
-      )
-      .bind(id),
-  ]);
+export async function markDeliveryFailed(id: string, error: string,
+  db: D1Database = getReceiptsDb(), actor = "system", provider?: { code?: string; status?: number }): Promise<void> {
+  await completeDelivery(id, "failed", error, db, actor, provider);
+}
+export async function markDeliveryAmbiguous(id: string, error: string,
+  db: D1Database = getReceiptsDb(), actor = "system", provider?: { code?: string; status?: number }): Promise<void> {
+  await completeDelivery(id, "ambiguous", error, db, actor, provider);
 }
 
 /**

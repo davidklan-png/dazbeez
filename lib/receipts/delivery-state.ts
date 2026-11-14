@@ -41,7 +41,7 @@ export type DeliveryFailureClass = "definitive" | "ambiguous";
 
 /**
  * Classify a delivery failure. Explicit allowlist of DEFINITIVE conditions —
- * Resend returned a 4xx (the request was definitively rejected; the mail was
+ * Resend returned a non-idempotency 4xx (the request was definitively rejected; the mail was
  * never accepted) — defaulting to AMBIGUOUS (5xx, network error, timeout, no
  * response: the mail may have been accepted). Never infer "definitely not sent"
  * from the absence of a response. Same doctrine as the consumer's permanent-
@@ -50,8 +50,8 @@ export type DeliveryFailureClass = "definitive" | "ambiguous";
  * `status` is the Resend HTTP status when it responded; `undefined` for a
  * transport error / timeout / no response.
  */
-export function classifyDeliveryFailure(status: number | undefined): DeliveryFailureClass {
-  if (status !== undefined && status >= 400 && status < 500) {
+export function classifyDeliveryFailure(status: number | undefined, code?: string): DeliveryFailureClass {
+  if (status !== undefined && status >= 400 && status < 500 && status !== 409 && !/idempot|concurrent/i.test(code ?? "")) {
     return "definitive";
   }
   return "ambiguous";
@@ -150,36 +150,47 @@ export interface AttemptRow {
   attemptId: string;
   state: AttemptState;
   createdAt: string;
+  admissionGeneration?: number | null;
 }
 
-/**
- * Derive the month's delivery state from its attempt rows (a consistency check
- * for the denormalised column; the send path writes the column directly in the
- * same transaction).
- *
- * The latest operator-initiated send (the attempt_id owning the newest row)
- * decides: if any of its rows is `sent` → delivered; else if its newest row is
- * `failed` → sealed_undelivered; else `pending` (in flight).
- */
+/** Fold HTTP retries into logical attempts; success always settles its attempt.
+ * Input order breaks legacy timestamp ties deterministically, never by UUID. */
+export function logicalAttempts<T extends AttemptRow>(rows: T[]): T[] {
+  const groups = new Map<string, T[]>();
+  for (const row of rows) groups.set(row.attemptId, [...(groups.get(row.attemptId) ?? []), row]);
+  return [...groups.values()].map((group) => {
+    const origin = group.reduce((a, b) => {
+      if (a.admissionGeneration != null && b.admissionGeneration != null) {
+        return b.admissionGeneration < a.admissionGeneration ? b : a;
+      }
+      return b.createdAt < a.createdAt ? b : a;
+    });
+    const state = group.some((r) => r.state === "sent") ? "sent"
+      : group.some((r) => r.state === "pending") ? "pending"
+      : group.some((r) => r.state === "ambiguous") ? "ambiguous" : "failed";
+    return { ...origin, state };
+  });
+}
+
+function currentLogicalAttempt<T extends AttemptRow>(logical: T[], owner?: string | null): T | undefined {
+  if (owner) return logical.find((r) => r.attemptId === owner);
+  return logical.reduce<T | undefined>((current, row) => {
+    if (!current) return row;
+    const generation = row.admissionGeneration ?? 0;
+    const previousGeneration = current.admissionGeneration ?? 0;
+    return generation > previousGeneration ||
+      (generation === previousGeneration && row.createdAt >= current.createdAt) ? row : current;
+  }, undefined);
+}
+
 export function deriveMonthDeliveryState(
   attempts: AttemptRow[],
+  currentAttemptId?: string | null,
 ): DeliveryState | null {
-  if (attempts.length === 0) return null;
-  const newest = attempts.reduce((a, b) => (b.createdAt > a.createdAt ? b : a));
-  const latestAttemptRows = attempts.filter((a) => a.attemptId === newest.attemptId);
-  if (latestAttemptRows.some((a) => a.state === ATTEMPT_STATE.SENT)) {
-    return DELIVERY_STATE.DELIVERED;
-  }
-  const latestRow = latestAttemptRows.reduce((a, b) =>
-    b.createdAt > a.createdAt ? b : a,
-  );
-  if (
-    latestRow.state === ATTEMPT_STATE.FAILED ||
-    latestRow.state === ATTEMPT_STATE.AMBIGUOUS
-  ) {
-    return DELIVERY_STATE.SEALED_UNDELIVERED;
-  }
-  return DELIVERY_STATE.PENDING;
+  const current = currentLogicalAttempt(logicalAttempts(attempts), currentAttemptId);
+  if (!current) return null;
+  return current.state === "sent" ? DELIVERY_STATE.DELIVERED
+    : current.state === "pending" ? DELIVERY_STATE.PENDING : DELIVERY_STATE.SEALED_UNDELIVERED;
 }
 
 // ─── Resume vs new send (the stuck-pending duplicate-send guard) ─────────────
@@ -196,14 +207,16 @@ export function deriveMonthDeliveryState(
 // Resend will not recognise the key, so a "resume" is a genuine second send —
 // the pending is then stale and a new send requires the override.
 
-/** Resend's idempotency window. A resume is only safe within it. */
-export const RESEND_IDEMPOTENCY_WINDOW_MS = 24 * 60 * 60 * 1000;
+/** Conservative resume cutoff: one hour of headroom before provider 24h retention. */
+export const RESEND_IDEMPOTENCY_WINDOW_MS = 23 * 60 * 60 * 1000;
 
 /** Is a pending attempt still within Resend's idempotency window (resumeable)?
  *  Both args are ISO strings; `now` is passed in so the check is deterministic
  *  and unit-testable. */
 export function isWithinResumeWindow(pendingCreatedAt: string, now: string): boolean {
-  return Date.parse(now) - Date.parse(pendingCreatedAt) <= RESEND_IDEMPOTENCY_WINDOW_MS;
+  const origin = Date.parse(pendingCreatedAt);
+  const age = Date.parse(now) - origin;
+  return Number.isFinite(origin) && Number.isFinite(age) && age >= 0 && age < RESEND_IDEMPOTENCY_WINDOW_MS;
 }
 
 /** A delivery-row view for {@link decideSendAction}. */
@@ -213,6 +226,7 @@ export interface DeliveryAttemptSummary {
   attemptId: string;
   state: AttemptState;
   createdAt: string;
+  admissionGeneration?: number | null;
 }
 
 /** What the send endpoint should do for a month, given its delivery history.
@@ -231,7 +245,7 @@ export interface DeliveryAttemptSummary {
  *    only pending/ambiguous.
  *  - `blocked`: the CURRENT revision (latestExportId) was already delivered
  *    (`sent`), OR has a pending/ambiguous attempt that is NOT resumeable (stale
- *    beyond the 24h window) — a new send risks a duplicate of THIS revision's
+ *    at the 23h cutoff) — a new send risks a duplicate of THIS revision's
  *    pack, so it needs the explicit override (forceNew).
  *
  *  State and action are scoped to the latest finalized revision; month-wide
@@ -296,7 +310,7 @@ function isResumeableDelivery(
  *  null. Two shapes, both scoped to this revision on purpose:
  *   - `sent`: this revision's pack already landed — a genuine duplicate.
  *   - `stale`: a pending/ambiguous for this revision that is no longer
- *     resumeable (beyond 24h) — Resend won't dedupe a fresh key, so a new send
+ *     resumeable (at the 23h cutoff) — Resend won't dedupe a fresh key, so a new send
  *     risks duplicating THIS revision's pack.
  *  A `sent` or stale pending for an EARLIER revision is intentionally NOT a
  *  blocker here: it is a different pack, so it is a {@link SendAction.redelivery}
@@ -310,6 +324,7 @@ export function findRevisionSendBlocker(
   latestExportId: string,
   now: string,
 ): { reason: "sent" | "stale"; priorAttemptId: string } | null {
+  deliveries = logicalAttempts(deliveries);
   const sent = deliveries.find(
     (d) => d.exportId === latestExportId && d.state === ATTEMPT_STATE.SENT,
   );
@@ -339,7 +354,8 @@ export function findRevisionSendBlocker(
  * revision read as delivered (display) and forced the operator through force_new
  * for its FIRST send (send path, audited as an override).
  *
- * Resume (pending/ambiguous, this revision, within 24h) wins first — a
+ * Confirmed current logical-attempt success blocks ordinary repeats; otherwise resume
+ * (pending/ambiguous, this revision, within the fixed 23h cutoff) wins — a
  * corrected re-delivery in flight supersedes a prior delivered pack. forceNew
  * skips resume and overrides a block (the caller audits the override via
  * {@link findRevisionSendBlocker}); a redundant forceNew on a redelivery still
@@ -351,28 +367,27 @@ export function decideSendAction(opts: {
   deliveries: DeliveryAttemptSummary[];
   now: string;
   forceNew: boolean;
+  currentAttemptId?: string | null;
 }): SendAction {
-  const { latestExportId, deliveries, now, forceNew } = opts;
+  const { latestExportId, now, forceNew } = opts;
+  const deliveries = logicalAttempts(opts.deliveries);
 
-  const resumeable = deliveries.find((d) =>
-    isResumeableDelivery(d, latestExportId, now),
-  );
-  if (resumeable && !forceNew) {
-    return { action: "resume", attemptId: resumeable.attemptId, deliveryId: resumeable.id };
-  }
-
-  const blocker = findRevisionSendBlocker(deliveries, latestExportId, now);
-  if (blocker) {
-    // forceNew overrides the duplicate guard for THIS revision — proceed as a
-    // fresh send; the caller audits it as an override via findRevisionSendBlocker.
-    // (Return before the redelivery check: a sent-for-this-revision override is
-    // NOT a redelivery, even if an earlier revision was also delivered.)
+  const current = currentLogicalAttempt(deliveries.filter((d) => d.exportId === latestExportId), opts.currentAttemptId);
+  // Only current ownership can resume. An override must never resurrect an
+  // older uncertain key, nor may an older success settle the new attempt.
+  if (current && (current.state === "pending" || current.state === "ambiguous")) {
     if (forceNew) return { action: "new" };
-    return {
-      action: "blocked",
-      reason: blocker.reason,
-      priorAttemptId: blocker.priorAttemptId,
-    };
+    if (isResumeableDelivery(current, latestExportId, now)) {
+      return { action: "resume", attemptId: current.attemptId, deliveryId: current.id };
+    }
+    return { action: "blocked", reason: "stale", priorAttemptId: current.attemptId };
+  }
+  // Sent history still blocks an ordinary repeat, including legacy deliveries.
+  const blocker = findRevisionSendBlocker(deliveries.filter((d) =>
+    d.state === "sent" || d.attemptId === current?.attemptId), latestExportId, now);
+  if (blocker) {
+    if (forceNew) return { action: "new" };
+    return { action: "blocked", reason: blocker.reason, priorAttemptId: blocker.priorAttemptId };
   }
 
   // No blocker for the current revision. An EARLIER-revision attempt whose mail

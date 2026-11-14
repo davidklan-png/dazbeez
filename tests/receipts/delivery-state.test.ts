@@ -125,12 +125,12 @@ const NOW = "2026-08-08T12:00:00.000Z";
 const withinWindow = new Date(Date.parse(NOW) - 60 * 60 * 1000).toISOString(); // 1h ago
 const beyondWindow = new Date(Date.parse(NOW) - RESEND_IDEMPOTENCY_WINDOW_MS - 1).toISOString();
 
-test("isWithinResumeWindow: within 24h ⇒ true; beyond ⇒ false; boundary inclusive", () => {
+test("isWithinResumeWindow: within 23h ⇒ true; boundary and beyond ⇒ false", () => {
   assert.equal(isWithinResumeWindow(withinWindow, NOW), true);
   assert.equal(isWithinResumeWindow(beyondWindow, NOW), false);
-  // exactly at the window edge ⇒ still resumeable (≤)
+  // exactly at the conservative cutoff ⇒ blocked
   const edge = new Date(Date.parse(NOW) - RESEND_IDEMPOTENCY_WINDOW_MS).toISOString();
-  assert.equal(isWithinResumeWindow(edge, NOW), true);
+  assert.equal(isWithinResumeWindow(edge, NOW), false);
 });
 
 function sum(over: Partial<DeliveryAttemptSummary>): DeliveryAttemptSummary {

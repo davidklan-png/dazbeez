@@ -99,7 +99,7 @@ export async function sendDeliveryViaResend(
   idempotencyKey: string,
 ): Promise<
   | { ok: true; messageId?: string }
-  | { ok: false; error: string; status?: number }
+  | { ok: false; error: string; status?: number; code?: string }
 > {
   try {
     const res = await fetchImpl("https://api.resend.com/emails", {
@@ -123,11 +123,11 @@ export async function sendDeliveryViaResend(
       }),
     });
     if (!res.ok) {
-      const errBody = (await res.json().catch(() => ({}))) as { message?: unknown };
+      const errBody = (await res.json().catch(() => ({}))) as { message?: unknown; name?: unknown; code?: unknown };
       const message = typeof errBody.message === "string" ? errBody.message : `Resend API returned ${res.status}`;
-      // status lets the caller classify: 4xx = definitive (rejected); the caller
-      // defaults everything else (5xx, and the catch below) to ambiguous.
-      return { ok: false, error: message, status: res.status };
+      // Preserve provider identity: idempotency/concurrent-key conflicts are uncertain.
+      return { ok: false, error: message, status: res.status,
+        code: typeof errBody.name === "string" ? errBody.name : typeof errBody.code === "string" ? errBody.code : undefined };
     }
     const body = (await res.json().catch(() => ({}))) as { id?: string };
     return { ok: true, messageId: typeof body.id === "string" ? body.id : undefined };

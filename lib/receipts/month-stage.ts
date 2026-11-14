@@ -324,8 +324,9 @@ export async function deriveMonthStage(month: string): Promise<MonthStage[]> {
         // The DB column allows 'ambiguous' at runtime; cast through the authority.
         state: (d.state as AttemptState) ?? "pending",
         createdAt: d.created_at,
+        admissionGeneration: d.admission_generation,
       }));
-    delivered = deriveMonthDeliveryState(deliveries) === DELIVERY_STATE.DELIVERED;
+    delivered = deriveMonthDeliveryState(deliveries, exportRecord.current_delivery_attempt_id) === DELIVERY_STATE.DELIVERED;
   }
 
   return deriveMonthStageCore({

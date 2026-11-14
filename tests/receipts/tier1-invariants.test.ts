@@ -58,7 +58,7 @@ function recordingDb() {
 // sealed receipt_exports row fails.
 
 /** The ONLY receipt_exports column any of the four wrappers ever SETs. */
-const ALLOWED_EXPORTS_SET_COLUMNS = new Set(["delivery_state"]);
+const ALLOWED_EXPORTS_SET_COLUMNS = new Set(["delivery_state", "delivery_generation", "current_delivery_attempt_id"]);
 
 /** export_deliveries SET columns across markDeliverySent/Failed/Ambiguous. */
 const ALLOWED_DELIVERY_SET_COLUMNS = new Set([
@@ -83,11 +83,12 @@ const ALLOWED_DELIVERY_INSERT_COLUMNS = new Set([
   "zip_filename",
   "zip_sha256",
   "zip_bytes",
-  "created_at",
+  "created_at", "payload_json", "admission_generation",
 ]);
 
 /** Assert one recorded SQL statement only writes delivery-reporting fields. */
 function assertStatementAllowed(wrapper: string, sql: string) {
+  if (/^INSERT\s+INTO\s+receipt_audit_log/i.test(sql)) return;
   const update =
     /^UPDATE\s+(receipt_exports|export_deliveries)\s+SET\s+([\s\S]*?)(?:\s+WHERE\b|$)/i.exec(
       sql,
@@ -149,7 +150,8 @@ function assertSealSafe(
 
 function deliveryInput(): CreateDeliveryInput {
   return {
-    exportId: "exp-1",
+    exportId: "exp-1", month: "2026-10", expectedGeneration: 0, expectedAttemptId: null,
+    bundleBuildId: null, proofsKey: "proofs", payloadJson: "{}", actor: "op", admissionAction: "new",
     attemptId: "att-1",
     idempotencyKey: "key-1",
     toAddress: "accountant@example.com",
@@ -176,7 +178,7 @@ for (const [name, call] of [
     await call(db);
     const sql = assertSealSafe(name, batches, runs);
     // Positive anchor: it DOES move the reporting state.
-    assert.ok(/delivery_state\s*=\s*'/.test(sql), `${name} sets delivery_state`);
+    assert.ok(/delivery_state\s*=/.test(sql), `${name} sets delivery_state`);
   });
 }
 
@@ -193,7 +195,7 @@ for (const [name, call, attemptStmt] of [
     await call(db);
     assert.equal(batches.length, 1, "the two writes are a single db.batch (transaction)");
     const [stmts] = batches;
-    assert.equal(stmts.length, 2, "exactly two statements — the attempt statement + the delivery_state UPDATE");
+    assert.equal(stmts.length, 3, "attempt, reporting/generation fence, and audit share one transaction");
     assert.ok(
       stmts.some((s) => attemptStmt.test(s)),
       "the attempt statement (INSERT/UPDATE export_deliveries) is in the batch",

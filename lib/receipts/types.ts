@@ -151,6 +151,7 @@ export type AuditAction =
   | "export.notification_sent"
   | "export.notification_failed"
   | "export.notification_test"
+  | "export.delivery_admitted"
   | "export.delivery_sent"
   | "export.delivery_failed"
   | "export.delivery_override"
@@ -544,6 +545,8 @@ export interface ReceiptExport {
   // Denormalised delivery state for list queries (0036). NULL on rows
   // predating 0036 and on sealed-but-never-sent exports. The send path writes
   // it in the same D1 transaction as the export_deliveries row.
+  delivery_generation?: number;
+  current_delivery_attempt_id?: string | null;
   delivery_state?: "delivered" | "sealed_undelivered" | "pending" | null;
   // Operator free-text message for the month's pack (0037). One stored value,
   // two surfaces (O7): injected into 【今月のご連絡】 inside the sealed ZIP at
@@ -590,7 +593,9 @@ export interface ExportDelivery {
   export_id: string;
   attempt_id: string;
   idempotency_key: string;
-  state: "pending" | "sent" | "failed";
+  state: "pending" | "sent" | "failed" | "ambiguous";
+  payload_json?: string | null;
+  admission_generation?: number | null;
   to_address: string;
   cc_address: string | null;
   subject: string;
