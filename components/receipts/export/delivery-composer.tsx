@@ -52,6 +52,8 @@ export function DeliveryComposer({
 
   async function doSend(forceNew: boolean) {
     setPhase("sending");
+    // Until refreshed, a lost resend response must not retain a delivered header.
+    setComposed((previous) => ({ ...previous, deliveryState: "pending" }));
     setError(null);
     setConfirmed(false);
     setForceConfirmed(false);
