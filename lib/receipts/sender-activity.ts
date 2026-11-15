@@ -3,6 +3,7 @@
 // results. Selects only counts/timestamps — never bodies, headers, subjects,
 // or attachment contents.
 
+import { INTAKE_ACTIVITY_SQL } from "@/lib/receipts/intake-time";
 import type { TrustedIntakeSender } from "@/lib/receipts/trusted-senders";
 import type { BlockedIntakeSender } from "@/lib/receipts/blocked-senders";
 import { listTrustedSenders } from "@/lib/receipts/trusted-senders";
@@ -10,8 +11,10 @@ import { listBlockedSenders } from "@/lib/receipts/blocked-senders";
 
 export interface SenderActivityGroup {
   from_address: string;
-  first_received: string;
-  latest_received: string;
+  first_received: string | null;
+  latest_received: string | null;
+  legacy_count: number;
+  unavailable_count: number;
   total: number;
   pending: number;
   promoted: number;
@@ -25,6 +28,8 @@ export interface SenderActivityGroup {
 export interface BlockedSenderWithActivity extends BlockedIntakeSender {
   blocked_delivery_count: number;
   latest_blocked_delivery: string | null;
+  legacy_count: number;
+  unavailable_count: number;
 }
 
 /**
@@ -39,10 +44,15 @@ export async function listUnrecognizedSenders(
 ): Promise<SenderActivityGroup[]> {
   const result = await db
     .prepare(
-      `SELECT
+      `WITH activity AS (
+         SELECT *, CASE WHEN ${INTAKE_ACTIVITY_SQL} <= julianday('now') THEN ${INTAKE_ACTIVITY_SQL} END AS activity_at
+         FROM email_receipt_intake
+       ) SELECT
          LOWER(TRIM(from_address)) AS addr,
-         MIN(received_at)    AS first_received,
-         MAX(received_at)    AS latest_received,
+         strftime('%Y-%m-%dT%H:%M:%fZ', MIN(activity_at)) AS first_received,
+         strftime('%Y-%m-%dT%H:%M:%fZ', MAX(activity_at)) AS latest_received,
+         SUM(arrived_at IS NULL) AS legacy_count,
+         SUM(activity_at IS NULL) AS unavailable_count,
          COUNT(*)            AS total,
          SUM(CASE WHEN status = 'pending_triage' THEN 1 ELSE 0 END) AS pending,
          SUM(CASE WHEN status = 'promoted' THEN 1 ELSE 0 END)       AS promoted,
@@ -51,7 +61,7 @@ export async function listUnrecognizedSenders(
          SUM(CASE WHEN spf_pass = 0 THEN 1 ELSE 0 END)  AS spf_fail_any,
          SUM(CASE WHEN dkim_pass = 1 THEN 1 ELSE 0 END) AS dkim_pass_any,
          SUM(CASE WHEN dkim_pass = 0 THEN 1 ELSE 0 END) AS dkim_fail_any
-       FROM email_receipt_intake e
+       FROM activity e
        WHERE NOT EXISTS (SELECT 1 FROM trusted_intake_senders t WHERE t.email = LOWER(TRIM(e.from_address)))
          AND NOT EXISTS (SELECT 1 FROM blocked_intake_senders b WHERE b.email = LOWER(TRIM(e.from_address)))
        GROUP BY LOWER(TRIM(from_address))
@@ -65,6 +75,8 @@ export async function listUnrecognizedSenders(
     from_address: r.addr,
     first_received: r.first_received,
     latest_received: r.latest_received,
+    legacy_count: r.legacy_count,
+    unavailable_count: r.unavailable_count,
     total: r.total,
     pending: r.pending,
     promoted: r.promoted,
@@ -90,18 +102,23 @@ async function enrichBlockedWithActivity(
   const placeholders = emails.map(() => "?").join(",");
   const activityRows = await db
     .prepare(
-      `SELECT blocked_sender_email AS email,
-              COUNT(*) AS cnt,
-              MAX(received_at) AS latest
+      `WITH activity AS (
+         SELECT *, CASE WHEN ${INTAKE_ACTIVITY_SQL} <= julianday('now') THEN ${INTAKE_ACTIVITY_SQL} END AS activity_at
          FROM email_receipt_intake
+       ) SELECT blocked_sender_email AS email,
+              COUNT(*) AS cnt,
+              strftime('%Y-%m-%dT%H:%M:%fZ', MAX(activity_at)) AS latest,
+              SUM(arrived_at IS NULL) AS legacy_count,
+              SUM(activity_at IS NULL) AS unavailable_count
+         FROM activity
         WHERE blocked_sender_email IN (${placeholders})
         GROUP BY blocked_sender_email`,
     )
     .bind(...emails)
-    .all<{ email: string; cnt: number; latest: string | null }>();
+    .all<{ email: string; cnt: number; latest: string | null; legacy_count: number; unavailable_count: number }>();
 
   const activityMap = new Map(
-    (activityRows.results ?? []).map((r) => [r.email, { cnt: r.cnt, latest: r.latest }]),
+    (activityRows.results ?? []).map((r) => [r.email, r]),
   );
 
   return blocked.map((b) => {
@@ -110,6 +127,8 @@ async function enrichBlockedWithActivity(
       ...b,
       blocked_delivery_count: act?.cnt ?? 0,
       latest_blocked_delivery: act?.latest ?? null,
+      legacy_count: act?.legacy_count ?? 0,
+      unavailable_count: act?.unavailable_count ?? 0,
     };
   });
 }

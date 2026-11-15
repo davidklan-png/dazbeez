@@ -44,7 +44,7 @@ test("cleanup alone deletes stale objects and preserves rejection reasons and au
   assert.equal(c.tasks.length, 1); await Promise.all(c.tasks);
   assert.deepEqual(f.deleted, ["pending-key", "rejected-key"]);
   assert.deepEqual(f.updates, [["attachment expired — R2 object deleted after 30 days pending", "pending"], ["blocked_sender", "rejected"]]);
-  assert.match(f.queries[0], /status = 'rejected'[\s\S]*status = 'pending_triage' AND received_at < \?/);
+  assert.match(f.queries[0], /status = 'rejected'[\s\S]*status = 'pending_triage' AND[\s\S]*julianday\(\?\)/);
   assert.equal(f.queries.length, 3); assert.ok(f.queries.slice(1).every((sql) => /UPDATE email_receipt_intake/.test(sql)));
 });
 

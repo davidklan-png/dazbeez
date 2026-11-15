@@ -63,7 +63,7 @@ export async function POST(
         hadOriginalAttachment: !!intake.attachment_filename,
         trustedSenders: trusted.map((t) => t.email),
         blockedSenders: blocked.map((b) => b.email),
-        receivedAt: intake.received_at,
+        arrivedAt: intake.arrived_at,
         trustedCreatedAt: trustedEntry?.created_at ?? null,
       });
       if (!eligible) {

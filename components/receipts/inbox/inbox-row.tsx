@@ -2,6 +2,7 @@
 
 import { useState, useTransition, useMemo } from "react";
 import { useRouter } from "next/navigation";
+import { intakeActivityLabel } from "@/lib/receipts/intake-time";
 import type { EmailReceiptIntake } from "@/lib/receipts/types";
 import { extractLinks } from "@/lib/receipts/email-parse";
 
@@ -142,7 +143,10 @@ export function InboxRow({
             {intake.subject || <span className="text-gray-400">(no subject)</span>}
           </p>
           <p className="mt-0.5 text-xs text-gray-400">
-            {formatReceived(intake.received_at)}
+            {intakeActivityLabel(intake)}
+          </p>
+          <p className="mt-0.5 break-words text-xs text-gray-400">
+            {senderDateLabel(intake)}
           </p>
           {intake.to_address && (
             <p className="truncate text-xs text-gray-400">→ {intake.to_address}</p>
@@ -401,5 +405,17 @@ function formatReceived(iso: string): string {
     });
   } catch {
     return iso;
+  }
+}
+
+function senderDateLabel(intake: EmailReceiptIntake): string {
+  if (!intake.raw_headers_json) return "Sender Date unavailable (raw header not retained)";
+  try {
+    const raw = JSON.parse(intake.raw_headers_json).date;
+    if (!raw || typeof raw !== "string") return "Sender Date unavailable (missing or empty)";
+    if (!Number.isFinite(Date.parse(raw))) return `Sender Date invalid: ${raw}`;
+    return `Sender Date: ${formatReceived(intake.received_at)}`;
+  } catch {
+    return "Sender Date unavailable (invalid metadata)";
   }
 }

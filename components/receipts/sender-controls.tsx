@@ -173,7 +173,7 @@ export function SenderControls({ initialTrusted, initialBlocked, initialUnrecogn
       {/* Trusted */}
       <section>
         <h2 className="text-sm font-bold text-gray-900">Trusted senders</h2>
-        <p className="mt-0.5 text-xs text-gray-500">Trust applies only to mail received <strong>after</strong> the sender was trusted. Existing messages still require a manual Promote.</p>
+        <p className="mt-0.5 text-xs text-gray-500">Trust applies only to mail arriving at the email Worker <strong>at or after</strong> the sender was trusted. Legacy messages with unknown arrival still require a manual Promote.</p>
         <form onSubmit={addTrusted} className="mt-3 flex flex-wrap items-end gap-2">
           <label className="block flex-1"><span className="text-xs font-medium text-gray-600">Add an email address</span>
             <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" required className="mt-1 block w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:border-amber-500 focus:outline-none" /></label>
@@ -207,10 +207,11 @@ export function SenderControls({ initialTrusted, initialBlocked, initialUnrecogn
                   <p className="text-sm font-semibold text-gray-900">{b.email}</p>
                   <p className="text-xs text-gray-500">Blocked by {b.blocked_by} · {b.created_at.slice(0, 10)}</p>
                   {b.blocked_delivery_count > 0 ? (
-                    <p className="text-[11px] text-amber-700">{b.blocked_delivery_count} blocked deliver{b.blocked_delivery_count === 1 ? "y" : "ies"} · latest {b.latest_blocked_delivery?.slice(0, 16).replace("T", " ") ?? "—"}</p>
+                    <p className="text-[11px] text-amber-700">{b.blocked_delivery_count} blocked deliver{b.blocked_delivery_count === 1 ? "y" : "ies"} · latest activity {b.latest_blocked_delivery?.slice(0, 16).replace("T", " ") ?? "unavailable"}</p>
                   ) : (
                     <p className="text-[11px] text-gray-400">No deliveries recorded since blocking.</p>
                   )}
+                  <ActivityMetadata legacy={b.legacy_count} unavailable={b.unavailable_count} />
                 </div>
                 <button onClick={() => unblock(b.email)} disabled={busyAddr === b.email} className="rounded-lg border border-gray-300 px-3 py-1 text-xs font-medium text-gray-600 hover:bg-gray-100 disabled:opacity-50">Unblock</button>
               </li>
@@ -222,7 +223,7 @@ export function SenderControls({ initialTrusted, initialBlocked, initialUnrecogn
       {/* Recent unrecognized */}
       <section>
         <h2 className="text-sm font-bold text-gray-900">Recent unrecognized senders</h2>
-        <p className="mt-0.5 text-xs text-gray-500">Senders not yet trusted or blocked, derived from recent inbox activity.</p>
+        <p className="mt-0.5 text-xs text-gray-500">Senders not yet trusted or blocked, ordered by Worker arrival (legacy processing time where arrival is unknown).</p>
         {snap.unrecognized.length === 0 ? (
           <p className="mt-3 rounded-xl border border-dashed border-gray-300 bg-white p-4 text-sm text-gray-500">No unrecognized sender activity.</p>
         ) : (
@@ -231,7 +232,8 @@ export function SenderControls({ initialTrusted, initialBlocked, initialUnrecogn
               <li key={u.from_address} className="flex items-center justify-between gap-3 p-3">
                 <div className="min-w-0">
                   <p className="truncate text-sm font-semibold text-gray-900">{u.from_address}</p>
-                  <p className="text-xs text-gray-500">{u.total} msg · {u.pending} pending · {u.promoted} promo · {u.rejected} rej · first {u.first_received.slice(0, 10)} · latest {u.latest_received.slice(0, 10)}</p>
+                  <p className="text-xs text-gray-500">{u.total} msg · {u.pending} pending · {u.promoted} promo · {u.rejected} rej · first activity {u.first_received?.slice(0, 10) ?? "unavailable"} · latest activity {u.latest_received?.slice(0, 10) ?? "unavailable"}</p>
+                  <ActivityMetadata legacy={u.legacy_count} unavailable={u.unavailable_count} />
                   <p className="text-[10px] text-gray-400">SPF {u.spf_pass_any}✓/{u.spf_fail_any}✗ · DKIM {u.dkim_pass_any}✓/{u.dkim_fail_any}✗</p>
                 </div>
                 <div className="flex flex-none gap-1.5">
@@ -245,4 +247,8 @@ export function SenderControls({ initialTrusted, initialBlocked, initialUnrecogn
       </section>
     </div>
   );
+}
+
+function ActivityMetadata({ legacy, unavailable }: { legacy: number; unavailable: number }) {
+  return <p className="text-[11px] text-gray-500">Worker arrival{legacy > 0 ? ` · ${legacy} legacy processing time` : ""}{unavailable > 0 ? ` · ${unavailable} time unavailable` : ""}</p>;
 }

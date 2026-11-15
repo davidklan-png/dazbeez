@@ -81,7 +81,7 @@ function createFakeDb(initial: EmailReceiptIntake[] = []): FakeDb {
               if (/status = 'pending_triage'/.test(sql)) {
                 const rows = db.rows
                   .filter((r) => r.status === "pending_triage")
-                  .sort((a, b) => b.received_at.localeCompare(a.received_at));
+                  .sort((a, b) => Date.parse(b.arrived_at ?? b.created_at) - Date.parse(a.arrived_at ?? a.created_at));
                 return { results: rows as unknown as T[] };
               }
               return { results: [] };
@@ -109,6 +109,7 @@ function rowFromInsertBinds(args: unknown[]): EmailReceiptIntake {
   return {
     id: String(args[0]),
     received_at: String(args[1]),
+    arrived_at: String(args[20]),
     from_address: String(args[2]),
     subject: (args[3] as string | null) ?? null,
     spf_pass: Number(args[4]),
@@ -186,6 +187,7 @@ function createFakeBucket(): FakeBucket {
 function intakeRow(over: Partial<EmailReceiptIntake> = {}): EmailReceiptIntake {
   return {
     id: "intake-1",
+    arrived_at: null,
     received_at: "2026-07-19T00:00:00.000Z",
     from_address: "vendor@example.com",
     to_address: "receipts@dazbeez.com",
@@ -210,6 +212,7 @@ function intakeRow(over: Partial<EmailReceiptIntake> = {}): EmailReceiptIntake {
 }
 
 const baseInput = {
+  arrivedAt: "2026-07-19T00:00:00.000Z",
   receivedAt: "2026-07-19T00:00:00.000Z",
   fromAddress: "vendor@example.com",
   toAddress: "receipts@dazbeez.com",
@@ -455,8 +458,8 @@ test("INTAKE_MAX_MESSAGE_BYTES is 10 MiB and tighter than the 5 MiB receipt limi
 
 test("listPendingIntake: returns only pending_triage, newest first", async () => {
   const db = createFakeDb([
-    intakeRow({ id: "old", received_at: "2026-07-01T00:00:00Z", status: "pending_triage" }),
-    intakeRow({ id: "new", received_at: "2026-07-18T00:00:00Z", status: "pending_triage" }),
+    intakeRow({ id: "old", arrived_at: "2026-07-01T00:00:00Z", status: "pending_triage" }),
+    intakeRow({ id: "new", arrived_at: "2026-07-18T00:00:00Z", status: "pending_triage" }),
     intakeRow({ id: "prom", status: "promoted" }),
     intakeRow({ id: "rej", status: "rejected" }),
   ]);

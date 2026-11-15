@@ -37,7 +37,7 @@ class IsAutoPromoteEligibleTests(unittest.TestCase):
         self.assertTrue(
             is_auto_promote_eligible(
                 "david@gmail.com", True, True, False, False, TRUSTED, set(),
-                received_at="2026-08-01T00:00:00Z",
+                arrived_at="2026-08-01T00:00:00Z",
             )
         )
 
@@ -54,7 +54,7 @@ class IsAutoPromoteEligibleTests(unittest.TestCase):
         self.assertFalse(
             is_auto_promote_eligible(
                 "david@gmail.com", True, True, False, True, TRUSTED, set(),
-                received_at="2026-08-01T00:00:00Z",
+                arrived_at="2026-08-01T00:00:00Z",
             )
         )
 
@@ -62,7 +62,7 @@ class IsAutoPromoteEligibleTests(unittest.TestCase):
         self.assertTrue(
             is_auto_promote_eligible(
                 "david@gmail.com", True, True, False, False, TRUSTED, set(),
-                received_at="2026-08-01T00:00:00Z",
+                arrived_at="2026-08-01T00:00:00Z",
             )
         )
 
@@ -83,7 +83,7 @@ class IsAutoPromoteEligibleTests(unittest.TestCase):
         self.assertTrue(
             is_auto_promote_eligible(
                 "DAVID@Gmail.com", True, True, False, False, TRUSTED, set(),
-                received_at="2026-08-01T00:00:00Z",
+                arrived_at="2026-08-01T00:00:00Z",
             )
         )
 
@@ -100,7 +100,7 @@ class IsAutoPromoteEligibleTests(unittest.TestCase):
         self.assertFalse(
             is_auto_promote_eligible(
                 "david@gmail.com", True, True, False, False, trusted_new, set(),
-                received_at="2026-06-01T00:00:00Z",
+                arrived_at="2026-06-01T00:00:00Z",
             )
         )
 
@@ -109,7 +109,7 @@ class IsAutoPromoteEligibleTests(unittest.TestCase):
         self.assertTrue(
             is_auto_promote_eligible(
                 "david@gmail.com", True, True, False, False, trusted, set(),
-                received_at="2026-07-01T00:00:00Z",
+                arrived_at="2026-07-01T00:00:00Z",
             )
         )
 
@@ -118,16 +118,16 @@ class IsAutoPromoteEligibleTests(unittest.TestCase):
         self.assertTrue(
             is_auto_promote_eligible(
                 "david@gmail.com", True, True, False, False, trusted, set(),
-                received_at="2026-08-01T00:00:00Z",
+                arrived_at="2026-08-01T00:00:00Z",
             )
         )
 
-    def test_prospective_malformed_received_at_ineligible(self):
+    def test_prospective_malformed_arrived_at_ineligible(self):
         trusted = {"david@gmail.com": "2026-07-01T00:00:00Z"}
         self.assertFalse(
             is_auto_promote_eligible(
                 "david@gmail.com", True, True, False, False, trusted, set(),
-                received_at="not-a-date",
+                arrived_at="not-a-date",
             )
         )
 
@@ -136,16 +136,16 @@ class IsAutoPromoteEligibleTests(unittest.TestCase):
         self.assertFalse(
             is_auto_promote_eligible(
                 "david@gmail.com", True, True, False, False, trusted, set(),
-                received_at="2026-08-01T00:00:00Z",
+                arrived_at="2026-08-01T00:00:00Z",
             )
         )
 
-    def test_missing_received_at_ineligible(self):
-        """Missing received_at is ineligible (mandatory for prospective trust)."""
+    def test_missing_arrived_at_ineligible(self):
+        """Missing arrived_at is ineligible (mandatory for prospective trust)."""
         self.assertFalse(
             is_auto_promote_eligible(
                 "david@gmail.com", True, True, False, False, TRUSTED, set(),
-                received_at=None,
+                arrived_at=None,
             )
         )
 
@@ -155,7 +155,7 @@ class IsAutoPromoteEligibleTests(unittest.TestCase):
         self.assertFalse(
             is_auto_promote_eligible(
                 "david@gmail.com", True, True, False, False, trusted_no_date, set(),
-                received_at="2026-08-01T00:00:00Z",
+                arrived_at="2026-08-01T00:00:00Z",
             )
         )
 

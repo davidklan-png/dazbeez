@@ -34,11 +34,12 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import requests
@@ -792,7 +793,7 @@ def process_backfill(dry_run: bool, only_id: str | None = None) -> None:
 def fetch_trusted_senders() -> dict[str, str]:
     """Read the auto-promote allowlist from D1 as {email: created_at}. The
     Settings page (trusted_intake_senders table) is authoritative. The
-    created_at is used for the prospective-trust gate (intake.received_at >=
+    created_at is used for the prospective-trust gate (intake.arrived_at >=
     trusted.created_at). Emails are stored lowercase-normalized."""
     rows = _d1_query("SELECT email, created_at FROM trusted_intake_senders;")
     return {str(r["email"]): str(r["created_at"]) for r in rows if r.get("email")}
@@ -805,6 +806,21 @@ def fetch_blocked_senders() -> set[str]:
     return {str(r["email"]) for r in rows if r.get("email")}
 
 
+def parse_intake_time(value: str | None) -> datetime | None:
+    """Same strict timezone-aware ISO grammar as intake-time.ts / SQLite."""
+    if not isinstance(value, str) or not re.fullmatch(
+        r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{3})?(?:Z|[+-][0-9]{2}:[0-9]{2})", value
+    ):
+        return None
+    if value[-1] != "Z" and (int(value[-5:-3]) > 14 or int(value[-2:]) > 59
+                                or (int(value[-5:-3]) == 14 and int(value[-2:]) != 0)):
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except (ValueError, OverflowError):
+        return None
+
+
 def is_auto_promote_eligible(
     from_address: str,
     spf_pass: int | bool | None,
@@ -813,14 +829,14 @@ def is_auto_promote_eligible(
     has_original_attachment: bool,
     trusted_senders: dict[str, str],
     blocked_senders: set[str],
-    received_at: str | None = None,
+    arrived_at: str | None = None,
 ) -> bool:
     """Mirror of lib/receipts/email-parse.ts isAutoPromoteEligible. Blocked
     wins defensively. Attachments use the manual triage path regardless of
     sender — including emails that merely ARRIVED with one (the 30-day intake
     cleanup nulls attachment_r2_key but attachment_filename survives; never
     auto-promote those as body). Body-only + a trusted sender + SPF and DKIM
-    pass → eligible. ADR 0011 follow-up: prospective trust — received_at must
+    pass → eligible. ADR 0011 follow-up: prospective trust — arrived_at must
     be >= the trusted sender's created_at. Malformed timestamps → ineligible
     (safe default)."""
     normalized = (from_address or "").strip().lower()
@@ -832,19 +848,15 @@ def is_auto_promote_eligible(
         return False
     if normalized not in trusted_senders:
         return False
-    # Prospective trust: received_at AND trusted_created_at are MANDATORY.
+    # Prospective trust: arrived_at AND trusted_created_at are MANDATORY.
     # Missing, null, malformed, or timezone-incompatible → ineligible.
     trusted_created = trusted_senders.get(normalized)
-    if not received_at or not trusted_created:
+    if not arrived_at or not trusted_created:
         return False
-    try:
-        recv_dt = datetime.fromisoformat(received_at.replace("Z", "+00:00"))
-        trust_dt = datetime.fromisoformat(trusted_created.replace("Z", "+00:00"))
-        if recv_dt < trust_dt:
-            return False
-    except (ValueError, TypeError):
-        return False
-    return True
+    recv_dt = parse_intake_time(arrived_at)
+    trust_dt = parse_intake_time(trusted_created)
+    return (recv_dt is not None and trust_dt is not None
+            and trust_dt <= recv_dt <= datetime.now(timezone.utc))
 
 
 def post_promote(intake_id: str) -> None:
@@ -891,7 +903,7 @@ def pull_auto_promote_candidates(
     where_id = f" AND id = {_sql_escape(only_id)}" if only_id else ""
     rows = _d1_query(
         "SELECT id, from_address, spf_pass, dkim_pass, "
-        "attachment_r2_key, attachment_filename, body_text, body_html, received_at "
+        "attachment_r2_key, attachment_filename, body_text, body_html, arrived_at "
         "FROM email_receipt_intake "
         "WHERE status = 'pending_triage'"
         + where_id + ";"
@@ -910,7 +922,7 @@ def pull_auto_promote_candidates(
             bool(r.get("attachment_filename")),
             trusted_senders,
             blocked_senders,
-            r.get("received_at"),
+            r.get("arrived_at"),
         )
     ]
 

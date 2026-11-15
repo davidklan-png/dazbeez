@@ -17,6 +17,7 @@
 // a receipt_records row (legal_hold + 10-year retention), via the single
 // existing insert path. Do not add a second insert path into receipt_records.
 
+import { parseIntakeTime, INTAKE_ACTIVITY_SQL } from "@/lib/receipts/intake-time";
 import { getReceiptsDb, getReceiptsBucket } from "@/lib/cloudflare-runtime";
 import { createAuditEntry } from "@/lib/receipts/audit";
 import { captureReceipt } from "@/lib/receipts/capture";
@@ -139,7 +140,8 @@ export interface ParsedEmailAttachment {
 }
 
 export interface RecordIntakeInput {
-  receivedAt: string; // ISO; the message's Date (or now)
+  arrivedAt: string; // Worker entry clock, required before any asynchronous work
+  receivedAt: string; // sender Date evidence, or arrival if unavailable
   fromAddress: string;
   toAddress: string | null; // destination alias the message arrived on (ADR 0011 follow-up)
   subject: string | null;
@@ -173,6 +175,7 @@ export async function recordIntake(
   input: RecordIntakeInput,
 ): Promise<string[]> {
   const now = nowIso();
+  const arrivedAt = requireArrival(input.arrivedAt, now);
   const createdIds: string[] = [];
 
   const rowsToInsert: Array<Omit<EmailReceiptIntake, "created_at">> = [];
@@ -182,6 +185,7 @@ export async function recordIntake(
     rowsToInsert.push({
       id: newUuid(),
       received_at: input.receivedAt,
+      arrived_at: arrivedAt,
       from_address: input.fromAddress,
       to_address: input.toAddress,
       subject: input.subject,
@@ -208,13 +212,14 @@ export async function recordIntake(
       if (verdict.valid) {
         // Valid → R2 put (intake key, NO retention metadata — this is not a
         // tax record) + full metadata row.
-        const key = generateIntakeR2Key(id, att.filename, input.receivedAt);
+        const key = generateIntakeR2Key(id, att.filename, arrivedAt);
         await bucket.put(key, att.data, {
           httpMetadata: { contentType: att.contentType },
         });
         rowsToInsert.push({
           id,
           received_at: input.receivedAt,
+          arrived_at: arrivedAt,
           from_address: input.fromAddress,
           to_address: input.toAddress,
           subject: input.subject,
@@ -239,6 +244,7 @@ export async function recordIntake(
         rowsToInsert.push({
           id,
           received_at: input.receivedAt,
+          arrived_at: arrivedAt,
           from_address: input.fromAddress,
           to_address: input.toAddress,
           subject: input.subject,
@@ -269,8 +275,8 @@ export async function recordIntake(
            attachment_r2_key, attachment_sha256, attachment_content_type,
            attachment_size_bytes, attachment_filename, status, reject_reason,
            promoted_receipt_id, raw_headers_json, created_at, to_address,
-           body_text, body_html, body_truncated)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           body_text, body_html, body_truncated, arrived_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         row.id,
@@ -293,6 +299,7 @@ export async function recordIntake(
         row.body_text,
         row.body_html,
         row.body_truncated,
+        row.arrived_at,
       )
       .run();
     createdIds.push(row.id);
@@ -320,6 +327,7 @@ export const BLOCKED_SUBJECT_MAX_CHARS = 200;
 export async function recordBlockedIntake(
   db: D1Database,
   input: {
+    arrivedAt: string;
     receivedAt: string;
     fromAddress: string;
     toAddress: string | null;
@@ -330,6 +338,8 @@ export async function recordBlockedIntake(
     blockedSenderEmail: string;
   },
 ): Promise<string> {
+  const now = nowIso();
+  const arrivedAt = requireArrival(input.arrivedAt, now);
   // Normalize the policy identity — reject malformed/empty.
   const normalizedBlocked = input.blockedSenderEmail?.trim().toLowerCase();
   if (!normalizedBlocked || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedBlocked)) {
@@ -337,7 +347,6 @@ export async function recordBlockedIntake(
   }
 
   const id = newUuid();
-  const now = nowIso();
   const auditId = newUuid();
   const boundedSubject = input.subject
     ? input.subject.slice(0, BLOCKED_SUBJECT_MAX_CHARS)
@@ -362,8 +371,8 @@ export async function recordBlockedIntake(
            attachment_r2_key, attachment_sha256, attachment_content_type,
            attachment_size_bytes, attachment_filename, status, reject_reason,
            promoted_receipt_id, raw_headers_json, created_at, to_address,
-           body_text, body_html, body_truncated, blocked_sender_email)
-         VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, 'rejected', 'blocked_sender', NULL, NULL, ?, ?, NULL, NULL, 0, ?)`,
+           body_text, body_html, body_truncated, arrived_at, blocked_sender_email)
+         VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, 'rejected', 'blocked_sender', NULL, NULL, ?, ?, NULL, NULL, 0, ?, ?)`,
       )
       .bind(
         id,
@@ -374,6 +383,7 @@ export async function recordBlockedIntake(
         input.dkimPass ? 1 : 0,
         now,
         input.toAddress,
+        arrivedAt,
         normalizedBlocked,
       ),
     db
@@ -386,6 +396,12 @@ export async function recordBlockedIntake(
   ]);
 
   return id;
+}
+
+function requireArrival(value: unknown, now: string): string {
+  const ms = parseIntakeTime(value);
+  if (ms === null || ms > Date.parse(now)) throw new Error("A valid non-future Worker arrivedAt is required.");
+  return new Date(ms).toISOString();
 }
 
 async function sha256Hex(data: ArrayBuffer): Promise<string> {
@@ -415,7 +431,7 @@ export async function listPendingIntake(
     .prepare(
       `SELECT * FROM email_receipt_intake
        WHERE status = 'pending_triage'
-       ORDER BY received_at DESC
+       ORDER BY CASE WHEN ${INTAKE_ACTIVITY_SQL} <= julianday('now') THEN ${INTAKE_ACTIVITY_SQL} END DESC, id DESC
        LIMIT ?`,
     )
     .bind(Math.min(limit, 500))

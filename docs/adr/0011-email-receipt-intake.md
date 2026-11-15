@@ -246,7 +246,7 @@ Rationale for a separate table rather than inserting at `status='captured'` with
 A new lightweight screen, not the existing `/receipts/review` queue (that queue's semantics — locks, month-scoping, reconciliation status — don't apply to unreviewed mail). Lists `email_receipt_intake` rows at `status='pending_triage'`, shows sender, SPF/DKIM verdicts, subject, and an attachment preview. Two actions per row:
 
 - **Promote** → calls `createReceiptRecord` as above, sets `promoted_receipt_id`, `status='promoted'`. The resulting receipt then flows through the normal review queue exactly like a mobile capture.
-- **Reject** → `status='rejected'` with a required `reject_reason`. The R2 object is retained for a short audit window (30 days, not 10 years) then deleted by a scheduled cleanup — this is not a tax record.
+- **Reject** → `status='rejected'` with a required `reject_reason`. The next cleanup deletes the rejected attachment immediately; pending attachments expire strictly after 30 days — this is not a tax record.
 
 Every promote/reject is audit-logged (`lib/receipts/audit.ts`) with the SPF/DKIM verdicts preserved, so "who let this in" is always answerable even though the sender itself is unauthenticated.
 
@@ -308,7 +308,7 @@ The Phase B auto-promote allowlist (`trusted_intake_senders`, managed from Setti
 
 1. **Operator-managed blocklist.** A new `blocked_intake_senders` table (migration `0034`) mirrors `trusted_intake_senders`. Trusted and blocked are mutually exclusive (trusting removes a blocked row; blocking removes a trusted row). Blocked wins defensively if inconsistent data exists.
 
-2. **Prospective trust.** Auto-promotion now requires `intake.received_at >= trusted_sender.created_at`. Mail received before the sender was trusted stays `pending_triage` (an explicit human Promote still works). This also scopes the consumer's previously unbounded replay of ALL pending rows.
+2. **Prospective trust.** Auto-promotion now requires `intake.arrived_at >= trusted_sender.created_at` (trusted Worker entry clock; see the 2026-11-15 repair below). Mail received before the sender was trusted stays `pending_triage` (an explicit human Promote still works). This also scopes the consumer's previously unbounded replay of ALL pending rows.
 
 3. **Metadata-only blocked delivery.** Future mail from blocked senders is recorded as ONE minimal `rejected` row (`reject_reason='blocked_sender'`) with only sender, recipient, received time, SPF/DKIM, a bounded subject, and `blocked_sender_email` (the exact normalized policy identity that matched) — no raw headers, body, attachment, or R2 object. The block check runs in the Email Worker BEFORE reading `message.raw`, checking BOTH the RFC 5322 From header mailbox (parsed via postal-mime `addressParser`) and the SMTP envelope MAIL FROM. A match on either blocks the delivery. If the blocklist lookup fails, the Worker logs visibly and continues into ordinary pending triage (the promotion gate is the final safety net). The `blocked_sender_email` column (migration 0034 `ALTER TABLE`) enables accurate blocked-delivery activity counts without fragile joins against display `from_address`.
 
@@ -319,3 +319,73 @@ The Phase B auto-promote allowlist (`trusted_intake_senders`, managed from Setti
 6. **Inbox block action rejects only the selected row.** Blocking from an Inbox row blocks the sender AND rejects that ONE intake row. Other pending rows from the same sender are NOT mass-rejected (decision 11).
 
 7. **Atomic audit.** Every sender-policy transition (Trust/Block/Untrust/Unblock) executes its conditional audit INSERTs and mutation statements in ONE D1 `batch()` — so mutation and audit are atomic. If any statement fails, the entire batch rolls back. No post-batch `meta.changes`-derived audit writes.
+
+## Trusted arrival repair (2026-11-15)
+
+Sender `Date` is evidence, never an operational clock. Migration 0045 adds
+nullable `arrived_at`, without backfilling or rewriting existing dates, keys,
+receipt originals or sealed artifacts. New email handlers capture the Worker
+clock once at synchronous entry, before blocklist lookup, raw reads, MIME
+parsing or background work. Both shared writers require a valid, non-future
+arrival and normalize it to UTC; all fan-out rows share that clock.
+`created_at` still means writer start. This is Worker arrival, not a claim
+about provider/SMTP acceptance or an arbitrary Received header.
+
+Valid old/future sender Dates remain in `received_at`; the ordinary path
+retains raw Date (including invalid/empty values) in its existing header subset.
+Missing, empty or malformed Date falls back to entry arrival for the NOT NULL
+legacy display field, with explicit unavailable/invalid wording in the inbox.
+Blocked deliveries remain metadata-only with no raw/body/attachment reads or
+header retention. Neither clock sets promoted receipt transaction dates;
+extraction/review, receipt retention and seal authority are unchanged.
+
+Both the processor route and Mac consumer require a known, valid
+`trusted.created_at <= arrived_at <= now`, including equality. Trust membership,
+SPF/DKIM, blocking, body/status and current/original-attachment vetoes still apply.
+There is no additional maximum age. A message entering before trust remains
+ineligible even if parsing/persistence crosses the trust instant. A NULL arrival
+is unknown, so legacy/mixed-version mail requires manual Clerk Promote.
+Corrupt non-NULL arrival also fails closed, never falling back to processing or
+sender time.
+
+Operational timestamp grammar, shared by TS, SQLite and Python: four-digit
+calendar year 0001–9999; `YYYY-MM-DDTHH:mm:ss`, optionally exactly `.SSS`, then
+uppercase `Z` or signed `HH:MM` (offset magnitude at most 14:00). Calendar rollover,
+24:00, leap seconds, local/timezone-free times and UTC instants outside years
+0001–9999 are invalid. Accepted offsets compare as instants, never text.
+
+Pending attachment cleanup uses valid arrival, or valid `created_at` **only
+when arrival is NULL**, strictly older than 30 days. Missing/malformed/future
+operational values cannot earn deletion. Rejected objects retain the existing
+immediate policy. Cap 200, trusted-time ordering, key nulling, reason/status,
+promoted/body-only scope and best-effort error handling are preserved. Rows,
+bodies and date evidence survive cleanup. Already-purged objects cannot be
+recovered by this migration.
+
+Inbox order and sender first/latest activity use arrival with an explicitly
+labeled legacy processing fallback; corrupt/future values display unavailable.
+The existing status-leading index still narrows pending reads. No new index:
+validation/normalization and the current-time guard require computed ordering,
+so a raw arrived_at index would not serve that order or aggregate.
+
+### Coordinated rollout (plan only; separately authorized execution)
+
+1. Agree on an execution window and how to keep the **old scheduled cleanup**
+   from running against new arrivals until the separate intake Worker is
+   replaced. It remains unsafe until updated; a separately approved schedule
+   pause/window may be needed. This PR changes no schedules or activation.
+2. Apply nullable migration 0045 **before any new readers/writers**. Existing
+   producers remain schema-compatible and write NULL; do not backfill arrival.
+3. Coordinate the main app rollout with deployment of the separate
+   `workers/receipts-email-intake` Worker (including its cleanup). Main CI does
+   **not** deploy that Worker. Do not leave old cleanup running after only the
+   main app is upgraded.
+4. Explicitly arrange Mac consumer code pickup under the same plan. Main CI
+   does **not** update/restart the Mac consumer. Until updated it may select
+   old candidates, but the new authoritative processor route refuses unknown
+   arrivals; mixed old producers' NULL arrivals always require manual review.
+5. After the separately authorized rollout, inspect signed-in Inbox and
+   Settings at mobile/desktop widths: arrival/legacy/unavailable wording,
+   sender Date evidence, actual order and sender first/latest values. Use
+   local fixtures for destructive expiry; no live-email/expiry experiment is
+   authorized by this repair. Preserve disabled digest and queue configuration.
