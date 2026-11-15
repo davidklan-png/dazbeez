@@ -272,7 +272,7 @@ test("legacy unknown arrival is refused automatically but manual body and attach
     assert.deepEqual(dates(rows().find(r => r.id === id)!), before);
   }
   const id = insert({arrived_at: null}); const before = dates(rows().find(r => r.id === id)!);
-  await rejectIntake(db, id, "fixture-operator", "not needed"); assert.deepEqual(dates(rows().find(r => r.id === id)!), before);
+  await rejectIntake(db, id, "not needed", "fixture-operator"); assert.deepEqual(dates(rows().find(r => r.id === id)!), before);
 });
 
 test("inbox and sender activity order by normalized arrival/legacy processing time; corrupt dates stay visible", async () => {
@@ -280,9 +280,13 @@ test("inbox and sender activity order by normalized arrival/legacy processing ti
   insert({id: "legacy", from_address: "legacy@example.invalid", arrived_at: null, created_at: "2020-03-01T00:00:00Z", received_at: "1900-01-01T00:00:00Z"});
   insert({id: "new", from_address: "new@example.invalid", arrived_at: "2020-04-01T09:00:00+09:00"});
   insert({id: "bad", from_address: "bad@example.invalid", arrived_at: "invalid", created_at: "2099"});
-  assert.deepEqual((await listPendingIntake(db)).map(r => r.id), ["new", "legacy", "old", "bad"]);
+  insert({id: "old-later", from_address: "old@example.invalid", arrived_at: "2020-02-01T09:00:00+09:00", received_at: "1900-01-01T00:00:00Z"});
+  assert.deepEqual((await listPendingIntake(db)).map(r => r.id), ["new", "legacy", "old-later", "old", "bad"]);
   const activity = await listUnrecognizedSenders(db); assert.deepEqual(activity.map(r => r.from_address), ["new@example.invalid", "legacy@example.invalid", "old@example.invalid", "bad@example.invalid"]);
   assert.equal(activity[0].latest_received, "2020-04-01T00:00:00.000Z"); assert.equal(activity[1].legacy_count, 1);
+  assert.equal(activity[2].first_received, "2020-01-01T00:00:00.000Z");
+  assert.equal(activity[2].latest_received, "2020-02-01T00:00:00.000Z");
+  assert.equal(activity[2].total, 2);
   assert.equal(activity[3].latest_received, null); assert.equal(activity[3].unavailable_count, 1);
   assert.match(intakeActivityLabel(rows()[1]), /Legacy processing time:/); assert.equal(intakeActivityLabel(rows()[3]), "Worker arrival unavailable");
   raw.prepare("INSERT INTO blocked_intake_senders VALUES ('new@example.invalid','operator',?)").run(ENTRY);
