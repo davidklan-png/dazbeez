@@ -812,6 +812,8 @@ def parse_intake_time(value: str | None) -> datetime | None:
         r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{3})?(?:Z|[+-][0-9]{2}:[0-9]{2})", value
     ):
         return None
+    if value[11:13] > "23":
+        return None
     if value[-1] != "Z" and (int(value[-5:-3]) > 14 or int(value[-2:]) > 59
                                 or (int(value[-5:-3]) == 14 and int(value[-2:]) != 0)):
         return None

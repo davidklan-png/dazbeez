@@ -11,6 +11,7 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = json.loads((ROOT / "tests/fixtures/intake-arrival-times.json").read_text())
@@ -45,6 +46,15 @@ class IntakeArrivalTests(unittest.TestCase):
                    from_address="fixture@example.invalid", spf_pass=1, dkim_pass=1, body_text="Receipt")
         row.update(overrides)
         self.db.execute(f"INSERT INTO email_receipt_intake ({','.join(row)}) VALUES ({','.join('?' for _ in row)})", list(row.values()))
+
+    def test_hour24_rejected_before_datetime_parser(self):
+        parser = Mock(wraps=Clock)
+        parser.fromisoformat.return_value = Clock.now(timezone.utc)
+        hour24 = next(case["arrival"] for case in FIXTURES if case["name"] == "hour24")
+        with patch.dict(self.ns, {"datetime": parser}):
+            for value in [hour24, hour24.replace("Z", ".000Z")]:
+                self.assertIsNone(self.ns["parse_intake_time"](value))
+        parser.fromisoformat.assert_not_called()
 
     def test_candidate_controls_and_only_id(self):
         trusted = {"fixture@example.invalid": "2026-11-15T12:00:01Z"}

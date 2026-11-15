@@ -362,6 +362,10 @@ promoted/body-only scope and best-effort error handling are preserved. Rows,
 bodies and date evidence survive cleanup. Already-purged objects cannot be
 recovered by this migration.
 
+Within the shared 200-row cleanup cap, rejected rows with unavailable operational
+time sort first (SQLite NULL-first ordering). Remaining candidates, whether
+rejected or stale pending, sort by operational instant, then id.
+
 Inbox order and sender first/latest activity use arrival with an explicitly
 labeled legacy processing fallback; corrupt/future values display unavailable.
 The existing status-leading index still narrows pending reads. No new index:
