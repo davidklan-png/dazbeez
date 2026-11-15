@@ -11,6 +11,7 @@
 // All intake/cleanup LOGIC lives in lib/receipts/{email-intake,email-parse}.ts;
 // pipeline-digest.ts owns the operator digest; this file is thin binding/IO glue.
 
+import { INTAKE_ACTIVITY_SQL } from "../../../lib/receipts/intake-time";
 import PostalMime from "postal-mime";
 import {
   recordIntake,
@@ -44,6 +45,7 @@ const worker = {
     env: Env,
     ctx: ExecutionContext,
   ): Promise<void> {
+    const arrivedAt = new Date().toISOString();
     // ADR 0011 follow-up (2026-07-22): check the blocklist BEFORE the size
     // ceiling and BEFORE reading/parsing message.raw. Check BOTH identities:
     //   1. The SMTP envelope MAIL FROM (message.from)
@@ -80,7 +82,8 @@ const worker = {
         const { spf, dkim } = extractAuthVerdicts(message.headers.get("authentication-results"));
         const subject = message.headers.get("subject");
         await recordBlockedIntake(env.RECEIPTS_DB, {
-          receivedAt: new Date().toISOString(),
+          arrivedAt,
+          receivedAt: senderDateOrArrival(message.headers.get("date"), arrivedAt),
           fromAddress: headerFrom ?? matchedBlockedIdentity,
           toAddress: message.to ?? null,
           subject,
@@ -150,7 +153,7 @@ const worker = {
     // ADR 0011. If intake reliability later matters more than sender UX, revisit
     // by awaiting synchronously AND adding a dead-letter signal (not by throwing
     // inside this backgrounded task, which buys nothing).
-    ctx.waitUntil(processMessage(env, message, rawBytes));
+    ctx.waitUntil(processMessage(env, message, rawBytes, arrivedAt));
   },
 
   // ─── Cleanup (03:00 UTC) and digest (23:30 UTC / 08:30 JST) ───────────────────────────────────────
@@ -181,6 +184,7 @@ async function processMessage(
   env: Env,
   message: ForwardableEmailMessage,
   rawBytes: Uint8Array,
+  arrivedAt: string,
 ): Promise<void> {
   try {
     // arraybuffer encoding → attachment.content is an ArrayBuffer (no base64).
@@ -190,9 +194,7 @@ async function processMessage(
 
     const fromAddress = parsed.from?.address ?? message.from ?? "";
     const subject = parsed.subject ?? null;
-    const receivedAt = parsed.date
-      ? new Date(parsed.date).toISOString()
-      : new Date().toISOString();
+    const receivedAt = senderDateOrArrival(parsed.date, arrivedAt);
 
     const getHeader = (name: string): string | null =>
       message.headers.get(name) ?? null;
@@ -220,6 +222,7 @@ async function processMessage(
     const bodyTruncated = textCap.truncated || htmlCap.truncated;
 
     const ids = await recordIntake(env.RECEIPTS_DB, env.RECEIPTS_BUCKET, {
+      arrivedAt,
       receivedAt,
       fromAddress,
       toAddress: message.to ?? null,
@@ -245,6 +248,11 @@ async function processMessage(
       error: err instanceof Error ? err.message : String(err),
     });
   }
+}
+
+function senderDateOrArrival(date: string | undefined | null, arrivedAt: string): string {
+  const ms = date ? Date.parse(date) : NaN;
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : arrivedAt;
 }
 
 // Read a ReadableStream<Uint8Array> into a single Uint8Array. Same pattern as
@@ -299,9 +307,9 @@ async function cleanupStaleIntake(env: Env): Promise<void> {
         WHERE attachment_r2_key IS NOT NULL
           AND (
             status = 'rejected'
-            OR (status = 'pending_triage' AND received_at < ?)
+            OR (status = 'pending_triage' AND ${INTAKE_ACTIVITY_SQL} < julianday(?))
           )
-        ORDER BY received_at ASC
+        ORDER BY ${INTAKE_ACTIVITY_SQL} ASC, id ASC
         LIMIT ?`,
     )
     .bind(cutoff, CLEANUP_BATCH_LIMIT)

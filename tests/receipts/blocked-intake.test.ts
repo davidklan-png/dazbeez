@@ -46,7 +46,7 @@ function getAuditBinds(db: { _batchCalls: { sql: string; binds: unknown[] }[] })
 test("recordBlockedIntake: status is rejected", async () => {
   const db = makeCaptureDb();
   await recordBlockedIntake(db, {
-    receivedAt: "2026-07-22T00:00:00Z", fromAddress: "spam@evil.com", toAddress: null,
+    arrivedAt: "2026-07-22T00:00:00Z", receivedAt: "2026-07-22T00:00:00Z", fromAddress: "spam@evil.com", toAddress: null,
     subject: "Test", spfPass: false, dkimPass: false, blockedSenderEmail: "spam@evil.com",
   });
   const rowSql = db._batchCalls[0].sql;
@@ -56,7 +56,7 @@ test("recordBlockedIntake: status is rejected", async () => {
 test("recordBlockedIntake: reason is blocked_sender", async () => {
   const db = makeCaptureDb();
   await recordBlockedIntake(db, {
-    receivedAt: "2026-07-22T00:00:00Z", fromAddress: "spam@evil.com", toAddress: null,
+    arrivedAt: "2026-07-22T00:00:00Z", receivedAt: "2026-07-22T00:00:00Z", fromAddress: "spam@evil.com", toAddress: null,
     subject: "Test", spfPass: false, dkimPass: false, blockedSenderEmail: "spam@evil.com",
   });
   const rowSql = db._batchCalls[0].sql;
@@ -66,7 +66,7 @@ test("recordBlockedIntake: reason is blocked_sender", async () => {
 test("recordBlockedIntake: normalized blocked_sender_email stored", async () => {
   const db = makeCaptureDb();
   await recordBlockedIntake(db, {
-    receivedAt: "2026-07-22T00:00:00Z", fromAddress: "visible@harmless.com", toAddress: null,
+    arrivedAt: "2026-07-22T00:00:00Z", receivedAt: "2026-07-22T00:00:00Z", fromAddress: "visible@harmless.com", toAddress: null,
     subject: "Test", spfPass: true, dkimPass: true, blockedSenderEmail: "  Spam@Evil.COM  ",
   });
   const binds = getRowBinds(db);
@@ -78,7 +78,7 @@ test("recordBlockedIntake: subject bounded to BLOCKED_SUBJECT_MAX_CHARS", async 
   const db = makeCaptureDb();
   const longSubject = "A".repeat(BLOCKED_SUBJECT_MAX_CHARS + 100);
   await recordBlockedIntake(db, {
-    receivedAt: "2026-07-22T00:00:00Z", fromAddress: "spam@evil.com", toAddress: null,
+    arrivedAt: "2026-07-22T00:00:00Z", receivedAt: "2026-07-22T00:00:00Z", fromAddress: "spam@evil.com", toAddress: null,
     subject: longSubject, spfPass: false, dkimPass: false, blockedSenderEmail: "spam@evil.com",
   });
   const binds = getRowBinds(db);
@@ -89,7 +89,7 @@ test("recordBlockedIntake: subject bounded to BLOCKED_SUBJECT_MAX_CHARS", async 
 test("recordBlockedIntake: raw headers NULL (SQL has NULL literal)", async () => {
   const db = makeCaptureDb();
   await recordBlockedIntake(db, {
-    receivedAt: "2026-07-22T00:00:00Z", fromAddress: "spam@evil.com", toAddress: null,
+    arrivedAt: "2026-07-22T00:00:00Z", receivedAt: "2026-07-22T00:00:00Z", fromAddress: "spam@evil.com", toAddress: null,
     subject: null, spfPass: false, dkimPass: false, blockedSenderEmail: "spam@evil.com",
   });
   const rowSql = db._batchCalls[0].sql;
@@ -100,7 +100,7 @@ test("recordBlockedIntake: raw headers NULL (SQL has NULL literal)", async () =>
 test("recordBlockedIntake: body + attachment fields NULL (SQL literals)", async () => {
   const db = makeCaptureDb();
   await recordBlockedIntake(db, {
-    receivedAt: "2026-07-22T00:00:00Z", fromAddress: "spam@evil.com", toAddress: null,
+    arrivedAt: "2026-07-22T00:00:00Z", receivedAt: "2026-07-22T00:00:00Z", fromAddress: "spam@evil.com", toAddress: null,
     subject: null, spfPass: false, dkimPass: false, blockedSenderEmail: "spam@evil.com",
   });
   const rowSql = db._batchCalls[0].sql.toUpperCase();
@@ -112,7 +112,7 @@ test("recordBlockedIntake: body + attachment fields NULL (SQL literals)", async 
 test("recordBlockedIntake: audit contains blocked_sender_email", async () => {
   const db = makeCaptureDb();
   await recordBlockedIntake(db, {
-    receivedAt: "2026-07-22T00:00:00Z", fromAddress: "visible@harmless.com", toAddress: null,
+    arrivedAt: "2026-07-22T00:00:00Z", receivedAt: "2026-07-22T00:00:00Z", fromAddress: "visible@harmless.com", toAddress: null,
     subject: "Test", spfPass: false, dkimPass: false, blockedSenderEmail: "env@evil.com",
   });
   const auditBinds = getAuditBinds(db);
@@ -127,14 +127,14 @@ test("recordBlockedIntake: malformed blockedSenderEmail rejected", async () => {
   const db = makeCaptureDb();
   await assert.rejects(
     () => recordBlockedIntake(db, {
-      receivedAt: "2026-07-22T00:00:00Z", fromAddress: "spam@evil.com", toAddress: null,
+      arrivedAt: "2026-07-22T00:00:00Z", receivedAt: "2026-07-22T00:00:00Z", fromAddress: "spam@evil.com", toAddress: null,
       subject: "Test", spfPass: false, dkimPass: false, blockedSenderEmail: "",
     }),
     /valid normalized blockedSenderEmail/,
   );
   await assert.rejects(
     () => recordBlockedIntake(db, {
-      receivedAt: "2026-07-22T00:00:00Z", fromAddress: "spam@evil.com", toAddress: null,
+      arrivedAt: "2026-07-22T00:00:00Z", receivedAt: "2026-07-22T00:00:00Z", fromAddress: "spam@evil.com", toAddress: null,
       subject: "Test", spfPass: false, dkimPass: false, blockedSenderEmail: "not-email",
     }),
     /valid normalized blockedSenderEmail/,
@@ -144,7 +144,7 @@ test("recordBlockedIntake: malformed blockedSenderEmail rejected", async () => {
 test("recordBlockedIntake: row + audit in ONE batch (atomic)", async () => {
   const db = makeCaptureDb();
   await recordBlockedIntake(db, {
-    receivedAt: "2026-07-22T00:00:00Z", fromAddress: "spam@evil.com", toAddress: null,
+    arrivedAt: "2026-07-22T00:00:00Z", receivedAt: "2026-07-22T00:00:00Z", fromAddress: "spam@evil.com", toAddress: null,
     subject: "Test", spfPass: false, dkimPass: false, blockedSenderEmail: "spam@evil.com",
   });
   // Exactly 2 statements in the batch: the row INSERT + the audit INSERT

@@ -1,7 +1,7 @@
 // Pure helpers for the receipts-email-intake Worker (ADR 0011 §2/§3).
 //
-// Deliberately dependency-free: no `@/` aliases, no Worker bindings, no
-// postal-mime import. That keeps this file trivially portable into the
+// No Worker bindings or server dependencies, so this also runs in the
+// standalone email Worker, without importing postal-mime. It is portable into the
 // standalone worker's bundle AND unit-testable from the main repo's test
 // suite (tests/receipts/email-parse.test.ts). The Worker's src/index.ts owns
 // the binding/IO glue (readRaw, PostalMime.parse, R2/D1) and calls these.
@@ -15,6 +15,8 @@
 // provided by the transport."
 
 // ─── Message size ceiling ───────────────────────────────────────────────────
+
+import { parseIntakeTime } from "./intake-time";
 
 /** True when the raw MIME message is within the pre-parse byte ceiling. */
 export function withinMessageSizeCeiling(rawSize: number, ceiling: number): boolean {
@@ -120,7 +122,7 @@ export function pickRawHeadersSubset(
   const out: Record<string, string> = {};
   for (const name of names) {
     const v = getHeader(name);
-    if (v !== null && v.trim().length > 0) out[name] = v.trim();
+    if (v !== null && (name === "date" || v.trim().length > 0)) out[name] = v.trim();
   }
   return out;
 }
@@ -128,7 +130,7 @@ export function pickRawHeadersSubset(
 // ─── Scheduled cleanup ──────────────────────────────────────────────────────
 
 /**
- * ISO timestamp of the stale cutoff: rows with received_at older than this are
+ * ISO timestamp of the stale cutoff: rows with arrived_at older than this are
  * eligible for R2 cleanup. Pure given `nowMs` (Worker passes Date.now()) so the
  * boundary is unit-testable without a clock.
  */
@@ -239,12 +241,12 @@ export function parseTrustedIntakeSenders(
  * parsed allowlist.
  *
  * ADR 0011 follow-up (2026-07-22):
- * - Prospective trust: auto-promotion requires intake.received_at >= the
+ * - Prospective trust: auto-promotion requires intake.arrived_at >= the
  *   sender's trust row created_at. Mail received BEFORE the sender was trusted
  *   stays pending (explicit human Promote still works).
  * - Blocked sender defense: blocked senders are never auto-promoted, even if
  *   they are somehow also in the trusted set.
- * - Malformed timestamps (either received_at or trusted_created_at) →
+ * - Malformed timestamps (either arrived_at or trusted_created_at) →
  *   ineligible (safe default).
  */
 export function isAutoPromoteEligible(args: {
@@ -262,8 +264,8 @@ export function isAutoPromoteEligible(args: {
   trustedSenders: readonly string[];
   /** Blocked sender set (normalized lowercase). */
   blockedSenders?: readonly string[];
-  /** ISO timestamp of the intake's received_at. */
-  receivedAt?: string;
+  /** ISO timestamp of the intake's arrived_at. */
+  arrivedAt?: string | null;
   /** ISO timestamp of the matched trusted sender's created_at (prospective gate). */
   trustedCreatedAt?: string | null;
 }): boolean {
@@ -280,25 +282,14 @@ export function isAutoPromoteEligible(args: {
   if (!args.spfPass || !args.dkimPass) return false;
   if (!args.trustedSenders.includes(normalized)) return false;
 
-  // Prospective trust: received_at AND trusted_created_at are MANDATORY for
+  // Prospective trust: arrived_at AND trusted_created_at are MANDATORY for
   // automatic promotion. Missing, null, malformed, or timezone-incompatible
   // timestamps are ineligible (safe default).
-  if (!args.receivedAt || !args.trustedCreatedAt) return false;
-  const receivedMs = parseIsoMs(args.receivedAt);
-  const trustedMs = parseIsoMs(args.trustedCreatedAt);
-  if (receivedMs === null || trustedMs === null) return false;
-  if (receivedMs < trustedMs) return false; // older than trust → ineligible
+  if (!args.arrivedAt || !args.trustedCreatedAt) return false;
+  const arrivedMs = parseIntakeTime(args.arrivedAt);
+  const trustedMs = parseIntakeTime(args.trustedCreatedAt);
+  if (arrivedMs === null || trustedMs === null) return false;
+  if (arrivedMs > Date.now() || arrivedMs < trustedMs) return false;
 
   return true;
-}
-
-/**
- * Parse an ISO-8601 timestamp to epoch-ms, returning null if malformed.
- * Uses Date.parse (UTC-aware for ISO strings with 'Z'). Avoids locale
- * formatting issues.
- */
-function parseIsoMs(iso: string): number | null {
-  if (!iso || typeof iso !== "string") return null;
-  const ms = Date.parse(iso);
-  return Number.isNaN(ms) ? null : ms;
 }

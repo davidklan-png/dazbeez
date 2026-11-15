@@ -293,7 +293,7 @@ test("isAutoPromoteEligible: allowlisted + SPF+DKIM + body-only + timestamps →
       hasValidAttachment: false,
       hadOriginalAttachment: false,
       trustedSenders: ["david@gmail.com", "other@x.com"],
-      receivedAt: "2026-08-01T00:00:00.000Z",
+      arrivedAt: "2026-08-01T00:00:00.000Z",
       trustedCreatedAt: "2026-07-01T00:00:00.000Z",
     }),
     true,
@@ -355,7 +355,7 @@ test("isAutoPromoteEligible: original attachment (filename survives cleanup) →
       hasValidAttachment: false, // R2 object already deleted by cleanup
       hadOriginalAttachment: true, // but the email arrived WITH one
       trustedSenders: ["david@gmail.com"],
-      receivedAt: "2026-08-01T00:00:00.000Z",
+      arrivedAt: "2026-08-01T00:00:00.000Z",
       trustedCreatedAt: "2026-07-01T00:00:00.000Z",
     }),
     false,
@@ -371,7 +371,7 @@ test("isAutoPromoteEligible: truly body-only (no original attachment) → true (
       hasValidAttachment: false,
       hadOriginalAttachment: false,
       trustedSenders: ["david@gmail.com"],
-      receivedAt: "2026-08-01T00:00:00.000Z",
+      arrivedAt: "2026-08-01T00:00:00.000Z",
       trustedCreatedAt: "2026-07-01T00:00:00.000Z",
     }),
     true,
@@ -387,7 +387,7 @@ test("isAutoPromoteEligible: from_address matched case-insensitively", () => {
       hasValidAttachment: false,
       hadOriginalAttachment: false,
       trustedSenders: ["david@gmail.com"],
-      receivedAt: "2026-08-01T00:00:00.000Z",
+      arrivedAt: "2026-08-01T00:00:00.000Z",
       trustedCreatedAt: "2026-07-01T00:00:00.000Z",
     }),
     true,
@@ -420,7 +420,7 @@ test("isAutoPromoteEligible: prospective — older intake → false", () => {
       hasValidAttachment: false,
       hadOriginalAttachment: false,
       trustedSenders: ["david@gmail.com"],
-      receivedAt: "2026-06-01T00:00:00.000Z",
+      arrivedAt: "2026-06-01T00:00:00.000Z",
       trustedCreatedAt: "2026-07-01T00:00:00.000Z",
     }),
     false,
@@ -436,7 +436,7 @@ test("isAutoPromoteEligible: prospective — equal timestamp → true", () => {
       hasValidAttachment: false,
       hadOriginalAttachment: false,
       trustedSenders: ["david@gmail.com"],
-      receivedAt: "2026-07-01T00:00:00.000Z",
+      arrivedAt: "2026-07-01T00:00:00.000Z",
       trustedCreatedAt: "2026-07-01T00:00:00.000Z",
     }),
     true,
@@ -452,14 +452,14 @@ test("isAutoPromoteEligible: prospective — newer intake → true", () => {
       hasValidAttachment: false,
       hadOriginalAttachment: false,
       trustedSenders: ["david@gmail.com"],
-      receivedAt: "2026-08-01T00:00:00.000Z",
+      arrivedAt: "2026-08-01T00:00:00.000Z",
       trustedCreatedAt: "2026-07-01T00:00:00.000Z",
     }),
     true,
   );
 });
 
-test("isAutoPromoteEligible: malformed received_at → false", () => {
+test("isAutoPromoteEligible: malformed arrived_at → false", () => {
   assert.equal(
     isAutoPromoteEligible({
       fromAddress: "david@gmail.com",
@@ -468,7 +468,7 @@ test("isAutoPromoteEligible: malformed received_at → false", () => {
       hasValidAttachment: false,
       hadOriginalAttachment: false,
       trustedSenders: ["david@gmail.com"],
-      receivedAt: "not-a-date",
+      arrivedAt: "not-a-date",
       trustedCreatedAt: "2026-07-01T00:00:00.000Z",
     }),
     false,
@@ -484,7 +484,7 @@ test("isAutoPromoteEligible: malformed trusted_created_at → false", () => {
       hasValidAttachment: false,
       hadOriginalAttachment: false,
       trustedSenders: ["david@gmail.com"],
-      receivedAt: "2026-08-01T00:00:00.000Z",
+      arrivedAt: "2026-08-01T00:00:00.000Z",
       trustedCreatedAt: "garbage",
     }),
     false,
@@ -500,13 +500,13 @@ test("isAutoPromoteEligible: missing trustedCreatedAt → false (mandatory)", ()
       hasValidAttachment: false,
       hadOriginalAttachment: false,
       trustedSenders: ["david@gmail.com"],
-      receivedAt: "2026-08-01T00:00:00.000Z",
+      arrivedAt: "2026-08-01T00:00:00.000Z",
     }),
     false,
   );
 });
 
-test("isAutoPromoteEligible: missing receivedAt → false (mandatory)", () => {
+test("isAutoPromoteEligible: missing arrivedAt → false (mandatory)", () => {
   assert.equal(
     isAutoPromoteEligible({
       fromAddress: "david@gmail.com",
@@ -530,7 +530,7 @@ test("isAutoPromoteEligible: null trustedCreatedAt → false (mandatory)", () =>
       hasValidAttachment: false,
       hadOriginalAttachment: false,
       trustedSenders: ["david@gmail.com"],
-      receivedAt: "2026-08-01T00:00:00.000Z",
+      arrivedAt: "2026-08-01T00:00:00.000Z",
       trustedCreatedAt: null,
     }),
     false,

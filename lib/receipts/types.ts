@@ -358,6 +358,7 @@ export interface ReceiptRecord {
 export type EmailIntakeStatus = "pending_triage" | "promoted" | "rejected";
 
 export interface EmailReceiptIntake {
+  arrived_at: string | null;
   id: string;
   received_at: string;
   from_address: string;

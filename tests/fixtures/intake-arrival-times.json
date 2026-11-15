@@ -1,0 +1,212 @@
+[
+  {
+    "name": "pre",
+    "arrival": "2026-11-15T12:00:00Z",
+    "trust": "2026-11-15T12:00:01Z",
+    "eligible": false,
+    "valid": true
+  },
+  {
+    "name": "equal",
+    "arrival": "2026-11-15T12:00:01Z",
+    "trust": "2026-11-15T12:00:01Z",
+    "eligible": true,
+    "valid": true
+  },
+  {
+    "name": "post",
+    "arrival": "2026-11-15T12:00:01.001Z",
+    "trust": "2026-11-15T12:00:01Z",
+    "eligible": true,
+    "valid": true
+  },
+  {
+    "name": "offset-equal",
+    "arrival": "2026-11-15T21:00:01+09:00",
+    "trust": "2026-11-15T12:00:01Z",
+    "eligible": true,
+    "valid": true
+  },
+  {
+    "name": "offset-pre",
+    "arrival": "2026-11-15T21:00:00.999+09:00",
+    "trust": "2026-11-15T12:00:01Z",
+    "eligible": false,
+    "valid": true
+  },
+  {
+    "name": "future",
+    "arrival": "2099-01-01T00:00:00Z",
+    "trust": "2026-11-15T12:00:01Z",
+    "eligible": false,
+    "valid": true
+  },
+  {
+    "name": "legacy",
+    "arrival": null,
+    "trust": "2026-11-15T12:00:01Z",
+    "eligible": false,
+    "valid": false
+  },
+  {
+    "name": "empty",
+    "arrival": "",
+    "trust": "2026-11-15T12:00:01Z",
+    "eligible": false,
+    "valid": false
+  },
+  {
+    "name": "garbage",
+    "arrival": "bad",
+    "trust": "2026-11-15T12:00:01Z",
+    "eligible": false,
+    "valid": false
+  },
+  {
+    "name": "local",
+    "arrival": "2026-11-15T12:00:01",
+    "trust": "2026-11-15T12:00:01Z",
+    "eligible": false,
+    "valid": false
+  },
+  {
+    "name": "rollover",
+    "arrival": "2026-02-30T12:00:01Z",
+    "trust": "2026-11-15T12:00:01Z",
+    "eligible": false,
+    "valid": false
+  },
+  {
+    "name": "leap-day",
+    "arrival": "2024-02-29T12:00:00Z",
+    "trust": "2026-11-15T12:00:01Z",
+    "eligible": false,
+    "valid": true
+  },
+  {
+    "name": "hour24",
+    "arrival": "2026-11-15T24:00:00Z",
+    "trust": "2026-11-15T12:00:01Z",
+    "eligible": false,
+    "valid": false
+  },
+  {
+    "name": "leap-second",
+    "arrival": "2026-11-15T12:00:60Z",
+    "trust": "2026-11-15T12:00:01Z",
+    "eligible": false,
+    "valid": false
+  },
+  {
+    "name": "zone24",
+    "arrival": "2026-11-15T12:00:01+24:00",
+    "trust": "2026-11-15T12:00:01Z",
+    "eligible": false,
+    "valid": false
+  },
+  {
+    "name": "zone-minute60",
+    "arrival": "2026-11-15T12:00:01+09:60",
+    "trust": "2026-11-15T12:00:01Z",
+    "eligible": false,
+    "valid": false
+  },
+  {
+    "name": "short-fraction",
+    "arrival": "2026-11-15T12:00:01.1Z",
+    "trust": "2026-11-15T12:00:01Z",
+    "eligible": false,
+    "valid": false
+  },
+  {
+    "name": "long-fraction",
+    "arrival": "2026-11-15T12:00:01.0001Z",
+    "trust": "2026-11-15T12:00:01Z",
+    "eligible": false,
+    "valid": false
+  },
+  {
+    "name": "suffix",
+    "arrival": "2026-11-15T12:00:01Zx",
+    "trust": "2026-11-15T12:00:01Z",
+    "eligible": false,
+    "valid": false
+  },
+  {
+    "name": "bad-trust",
+    "arrival": "2026-11-15T12:00:01Z",
+    "trust": "invalid",
+    "eligible": false,
+    "valid": true
+  },
+  {
+    "name": "local-trust",
+    "arrival": "2026-11-15T12:00:01Z",
+    "trust": "2026-11-15T12:00:00",
+    "eligible": false,
+    "valid": true
+  },
+  {
+    "name": "future-trust",
+    "arrival": "2026-11-15T12:00:01Z",
+    "trust": "2099-01-01T00:00:00Z",
+    "eligible": false,
+    "valid": true
+  },
+  {
+    "name": "year-zero",
+    "arrival": "0000-01-01T00:00:00Z",
+    "trust": "2026-11-15T12:00:01Z",
+    "eligible": false,
+    "valid": false
+  },
+  {
+    "name": "year-underflow",
+    "arrival": "0001-01-01T00:00:00+01:00",
+    "trust": "2026-11-15T12:00:01Z",
+    "eligible": false,
+    "valid": false
+  },
+  {
+    "name": "year-overflow",
+    "arrival": "9999-12-31T23:59:59-01:00",
+    "trust": "2026-11-15T12:00:01Z",
+    "eligible": false,
+    "valid": false
+  },
+  {
+    "name": "zone14-equal",
+    "arrival": "2026-11-16T02:00:01+14:00",
+    "trust": "2026-11-15T12:00:01Z",
+    "eligible": true,
+    "valid": true
+  },
+  {
+    "name": "zone-negative14-equal",
+    "arrival": "2026-11-14T22:00:01-14:00",
+    "trust": "2026-11-15T12:00:01Z",
+    "eligible": true,
+    "valid": true
+  },
+  {
+    "name": "zone14-minutes",
+    "arrival": "2026-11-16T02:00:01+14:01",
+    "trust": "2026-11-15T12:00:01Z",
+    "eligible": false,
+    "valid": false
+  },
+  {
+    "name": "zone15",
+    "arrival": "2026-11-16T03:00:01+15:00",
+    "trust": "2026-11-15T12:00:01Z",
+    "eligible": false,
+    "valid": false
+  },
+  {
+    "name": "zone23",
+    "arrival": "2026-11-16T11:00:01+23:00",
+    "trust": "2026-11-15T12:00:01Z",
+    "eligible": false,
+    "valid": false
+  }
+]
