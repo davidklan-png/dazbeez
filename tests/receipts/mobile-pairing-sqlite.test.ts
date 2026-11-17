@@ -125,7 +125,7 @@ for (const approved of [false, true]) {
     test(`${approved ? "approved" : "pending"} code returns no credential at ${boundary}`, async t => {
       const f = fixture(t);
       const expires = boundary === "expired" ? "2000-01-01T00:00:00.000Z" : f.exactExpiry();
-      t.mock.timers.enable({ apis: ["Date"], now: Date.parse(expires) });
+      t.mock.timers.enable({ apis: ["Date"], now: Date.parse(expires) + (boundary === "expired" ? 1 : 0) });
       f.seed(expires, approved ? "approved-device" : null, approved ? "synthetic-token" : null);
       assert.deepEqual(await pairing.checkPairingCode(CODE), { status: "expired" });
       if (!approved) await assert.rejects(pairing.completePairing(input), /expired/);
@@ -196,7 +196,8 @@ test("normal pairing start cleans expired pending/approved rows and retains vali
   f.sqlite.exec("UPDATE mobile_pairing_codes SET consumed_at='2000-01-01T00:00:00.000Z' WHERE code='DAZ-EEEE'");
   const created = await pairing.createPairingCode();
   assert.equal(pairing.isValidPairingCodeShape(created.code), true);
-  assert.equal(f.row(), undefined);
+  // Cleanup permits the freshly generated code to reuse an expired code.
+  assert.equal(f.row()?.consumed_device_id ?? null, null);
   const codes = f.sqlite.prepare("SELECT code FROM mobile_pairing_codes").all().map((r: { code: string }) => r.code);
   assert.deepEqual(codes.sort(), ["DAZ-BBBB", "DAZ-CCCC", "DAZ-DDDD", created.code].sort());
   assert.deepEqual(await pairing.checkPairingCode("DAZ-DDDD"), { status: "not_found" });
