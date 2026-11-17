@@ -153,6 +153,7 @@ export function PrefaceEditor({
             id="preface"
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
+            disabled={saving}
             rows={5}
             placeholder="例：今月は出張費用が多めです（6/10–6/12 大阪）。詳細は領収書をご確認ください。"
             className="mt-2.5 w-full resize-y rounded-lg border border-gray-300 bg-white px-3 py-2 text-[13px] leading-relaxed text-gray-900 outline-none focus:border-amber-500"
