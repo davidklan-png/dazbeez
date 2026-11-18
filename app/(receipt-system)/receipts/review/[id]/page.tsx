@@ -245,6 +245,7 @@ async function renderReceiptPage(
     <ReviewLayout
       queueItems={queueItems}
       activeId={id}
+      readOnly={activeLock.locked}
       queryParams={queryParams}
       needsAttention={needsAttention}
       workingSetCount={workingReceipts.length}

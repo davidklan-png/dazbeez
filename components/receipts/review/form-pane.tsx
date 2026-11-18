@@ -94,6 +94,8 @@ export function FormPane(props: FormPaneProps) {
   // form is read-only (banner + every mutating control disabled, autosave and
   // the `s` shortcut suppressed). The server 409 path stays the backstop.
   const isLocked = props.lock?.locked ?? false;
+  const lockedRef = useRef(isLocked);
+  lockedRef.current = isLocked;
   const lockKind = props.lock?.kind ?? null;
   const lockMonth = props.lock?.month ?? null;
 
@@ -316,13 +318,14 @@ export function FormPane(props: FormPaneProps) {
   const saveQueue = saveQueueRef.current;
 
   const triggerSave = useCallback(() => {
+    if (lockedRef.current) return;
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     saveTimerRef.current = setTimeout(() => {
       saveTimerRef.current = null;
       // A composition may have started after this timer was scheduled. Do
       // not enqueue (or update SaveBadge / any other React state) until
       // WebKit commits; composition end re-arms the save.
-      if (businessPurposeComposingRef.current) return;
+      if (lockedRef.current || businessPurposeComposingRef.current) return;
       setSave({ kind: "saving" });
       void saveQueue.save().then(
         (result) => {
@@ -376,6 +379,7 @@ export function FormPane(props: FormPaneProps) {
   // autosaved) — a confirm states the consequence, then a dedicated PATCH. The
   // server guards the target month is export-open (two-lock model).
   async function handleOverride(target: string) {
+    if (lockedRef.current) return;
     const current = receipt.export_statement_month ?? null;
     if (!target || target === current) return;
     const ok = window.confirm(
@@ -434,6 +438,7 @@ export function FormPane(props: FormPaneProps) {
   // surfaces the badge error and the operator stays with their edits.
   const reviewedRiderRef = useRef(false);
   const onMarkReviewed = useCallback(() => {
+    if (lockedRef.current) return;
     // Cancel the debounce: the flush sends the latest fields immediately.
     if (saveTimerRef.current) {
       clearTimeout(saveTimerRef.current);
@@ -478,11 +483,13 @@ export function FormPane(props: FormPaneProps) {
 
   const flushingRef = useRef<Promise<void> | null>(null);
   const flushPendingEdits = useCallback((): Promise<void> => {
+    if (lockedRef.current) return Promise.resolve();
     const existing = flushingRef.current;
     if (existing) return existing;
     const flush = (async () => {
       try {
         for (;;) {
+          if (lockedRef.current) return;
           if (businessPurposeComposingRef.current) {
             await waitForCompositionEnd();
             continue; // re-read the now-committed value on the next pass
@@ -560,7 +567,7 @@ export function FormPane(props: FormPaneProps) {
       if (saveTimerRef.current) {
         clearTimeout(saveTimerRef.current);
         saveTimerRef.current = null;
-        void saveQueue.save().catch(() => {});
+        if (!lockedRef.current) void saveQueue.save().catch(() => {});
       }
     };
   }, [saveQueue]);
@@ -575,12 +582,12 @@ export function FormPane(props: FormPaneProps) {
       onMarkReviewed();
     },
     c: (e) => {
-      if (isLocked) return;
+      if (lockedRef.current) return;
       e.preventDefault();
       categoryRef.current?.focus();
     },
     a: (e) => {
-      if (isLocked) return;
+      if (lockedRef.current) return;
       e.preventDefault();
       const input = attendeeAddRef.current?.querySelector("input");
       if (input instanceof HTMLInputElement) input.focus();
@@ -598,6 +605,7 @@ export function FormPane(props: FormPaneProps) {
   }
 
   async function handleDelete() {
+    if (lockedRef.current) return;
     if (!window.confirm(`Soft-delete receipt ${receipt.id.slice(0, 8)}…?`))
       return;
     try {
@@ -712,14 +720,18 @@ export function FormPane(props: FormPaneProps) {
 
       {isLocked && (
         <div className="mx-6 mt-3 flex items-start gap-2 rounded-lg border border-gray-300 bg-gray-100 px-3 py-2 text-xs text-gray-700">
-          <span className="mt-px font-semibold text-gray-700">Sealed.</span>
+          <span className="mt-px font-semibold text-gray-700">Read-only.</span>
           <span>
-            {lockKind === "reconciliation" ? (
+            {lockKind === "archived" ? (
+              "This receipt is archived and cannot be edited."
+            ) : lockKind === "exported" ? (
+              "This exported receipt has no recorded export month and cannot be edited."
+            ) : lockKind === "reconciliation" ? (
               <>
                 The {lockMonth} AMEX reconciliation is finalized. Reopen it — or
                 open a correction export draft for {lockMonth} — to edit.{" "}
                 <Link
-                  href={withWorkMonth("/receipts/reconcile", workMonth)}
+                  href={withWorkMonth("/receipts/reconcile", lockMonth ?? workMonth)}
                   className="font-semibold text-gray-900 underline"
                 >
                   Go to reconcile →
@@ -729,7 +741,7 @@ export function FormPane(props: FormPaneProps) {
               <>
                 The {lockMonth} export is finalized. Open a revision to edit.{" "}
                 <Link
-                  href={withWorkMonth("/receipts/export", workMonth)}
+                  href={withWorkMonth("/receipts/export", lockMonth ?? workMonth)}
                   className="font-semibold text-gray-900 underline"
                 >
                   Go to export →

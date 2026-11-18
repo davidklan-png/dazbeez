@@ -59,6 +59,7 @@ export function ReviewLayout({
   scope,
   savedAtLabel,
   search,
+  readOnly = false,
 }: {
   queueItems: QueueItem[];
   activeId: string | null;
@@ -84,6 +85,7 @@ export function ReviewLayout({
   /** Current closing scope — drives the toggle's pressed state. */
   scope?: ReviewScope;
   savedAtLabel?: string;
+  readOnly?: boolean;
   /** Cross-month search state (TASK-041). The list page passes the server
    *  match count; the [id] page passes only `q` (its working set is the month
    *  view, so no honest match count exists there — the label is omitted). */
@@ -122,9 +124,11 @@ export function ReviewLayout({
           </div>
         </div>
         <KeyboardHintBar
-          hints={REVIEW_HINTS}
+          hints={readOnly ? REVIEW_HINTS.filter(([key]) => !["s", "c", "a"].includes(key)) : REVIEW_HINTS}
           trailing={
-            savedAtLabel
+            readOnly
+              ? "Read-only receipt · changes are disabled"
+              : savedAtLabel
               ? `Auto-saving every change · ${savedAtLabel}`
               : "Auto-saving every change"
           }

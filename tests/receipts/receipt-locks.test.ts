@@ -1,303 +1,210 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {
-  computeReceiptLocks,
-  loadReconciliationLockedReceiptIds,
-  type ReceiptLockD1,
-} from "@/lib/receipts/receipt-locks";
-import type { PaymentPath, ReceiptRecord } from "@/lib/receipts/types";
+import { readFileSync, readdirSync } from "node:fs";
+// @ts-expect-error node:sqlite is present in the project test runtime.
+import { DatabaseSync } from "node:sqlite";
+import { computeReceiptLocks, getReceiptLocks, loadReceiptClaimLocks, type ReceiptLockD1 } from "@/lib/receipts/receipt-locks";
+import { rejectIfReceiptInFinalizedReconciliation } from "@/lib/receipts/db";
+import { isMonthLockedForEdits } from "@/lib/receipts/month-lock";
+import { buildQueueItems } from "@/lib/receipts/queue-items";
+import { filterReviewQueue } from "@/lib/receipts/review-queue-filter";
 import { D1_ID_CHUNK_SIZE } from "@/lib/receipts/db-utils";
+import type { PaymentPath, ReceiptRecord } from "@/lib/receipts/types";
 
-// computeReceiptLocks is pure: feed the two query results (sealed export months
-// + the receipt→statement-month map for finalized reconciliations) and assert
-// the lock matrix. The I/O wrappers (loadSealedExportMonths, the recon query)
-// are integration-tested against live D1 on the Mac worker.
-
-function receipt(partial: Partial<ReceiptRecord>): ReceiptRecord {
-  return {
-    id: "r1",
-    payment_path: "CASH",
-    transaction_date: "2026-03-10",
-    ...partial,
-  } as ReceiptRecord;
+const paths: PaymentPath[] = ["AMEX", "CASH", "DIGITAL", "UNKNOWN"];
+function fixture(path: PaymentPath = "CASH", overrides: Partial<ReceiptRecord> = {}) {
+  const raw = new DatabaseSync(":memory:");
+  raw.exec("PRAGMA foreign_keys=ON");
+  for (const file of readdirSync("db/receipts").filter((f) => f.endsWith(".sql")).sort()) {
+    raw.exec(readFileSync(`db/receipts/${file}`, "utf8"));
+  }
+  raw.prepare(`INSERT INTO receipt_records
+    (id,captured_at,captured_by,payment_path,transaction_date,merchant,amount_minor,currency,status,
+     original_r2_key,original_sha256,original_content_type,original_size_bytes,created_at,updated_at)
+    VALUES ('r','t','fixture',?,'2026-05-10','Fixture',100,'JPY','reviewed','k','s','image/jpeg',1,'t','t')`).run(path);
+  for (const [key, value] of Object.entries(overrides).sort(([a], [b]) => Number(a === "status") - Number(b === "status"))) {
+    raw.prepare(`UPDATE receipt_records SET ${key}=? WHERE id='r'`).run(value);
+  }
+  // Real emitted D1 queries and actual server prechecks, executed by SQLite.
+  const db = { prepare(sql: string) {
+    let args: unknown[] = [];
+    const query = {
+      bind(...values: unknown[]) { args = values; return query; },
+      async all() { return { results: raw.prepare(sql).all(...args) }; },
+      async first() { return raw.prepare(sql).get(...args) ?? null; },
+    };
+    return query;
+  } } as unknown as D1Database;
+  function exp(month: string, draft = false) {
+    const id = `${month}-${draft}`;
+    raw.prepare(`INSERT INTO receipt_exports
+      (id,export_month,status,created_by,created_at,retention_until,legal_hold,export_revision)
+      VALUES (?,?,'draft','fixture','t','t',1,?)`).run(id, month, draft ? 2 : 1);
+    if (!draft) raw.prepare("UPDATE receipt_exports SET status='finalized' WHERE id=?").run(id);
+    return id;
+  }
+  function published(month: string) {
+    raw.prepare(`INSERT INTO receipt_exports (id,export_month,status,created_by,created_at,retention_until,legal_hold)
+      VALUES (?,?,'draft','fixture','t','t',1)`).run(month, month);
+    raw.prepare(`INSERT INTO receipt_export_items (id,export_id,item_type,item_id,created_at)
+      VALUES (?,?,'receipt','r','t')`).run(month, month);
+    raw.prepare("UPDATE receipt_exports SET status='finalized' WHERE id=?").run(month);
+  }
+  function recon(month: string) {
+    raw.prepare(`INSERT INTO amex_statement_lines
+      (id,statement_month,transaction_date,merchant,amount_minor,currency,match_status,raw_json,created_at,matched_receipt_id)
+      VALUES (?,?,'2026-05-10','Fixture',100,'JPY','matched','{}','t','r')`).run(month, month);
+    raw.prepare(`INSERT INTO amex_reconciliations (id,statement_month,status,line_count,matched_count,no_receipt_count,created_by,created_at)
+      VALUES (?,?,'finalized',1,1,0,'fixture','t')`).run(month, month);
+  }
+  async function lock() {
+    const row = raw.prepare("SELECT * FROM receipt_records WHERE id='r'").get() as ReceiptRecord;
+    const locks = await getReceiptLocks([row], db);
+    // Verify downstream queue data/filter consumes the real authority result.
+    assert.equal(buildQueueItems([row], new Map(), Date.now(), locks)[0].locked, locks.get("r")!.locked);
+    assert.equal(filterReviewQueue([row], "", { locks }).length, locks.get("r")!.locked ? 0 : 1);
+    return locks.get("r")!;
+  }
+  function sqlRefused(locked: boolean) {
+    const edit = () => raw.prepare("UPDATE receipt_records SET amount_minor=amount_minor+1 WHERE id='r'").run();
+    if (locked) assert.throws(edit, /DZ_SEAL_MONTH_LOCKED/);
+    else assert.doesNotThrow(edit);
+  }
+  return { raw, db, exp, published, recon, lock, sqlRefused };
 }
 
-// ─── EXPORT lock (non-AMEX receipt whose transaction month is sealed) ────────
+for (const path of paths) {
+  test(`${path}: May receipt / July finalized reconciliation; actual server + SQL + queue parity`, async () => {
+    const f = fixture(path);
+    try {
+      f.recon("2026-07");
+      // A finalized reconciliation alone is not an export edit lock.
+      assert.equal((await f.lock()).locked, false);
+      await rejectIfReceiptInFinalizedReconciliation(f.db, "r");
+      f.sqlRefused(false);
+      f.exp("2026-07");
+      assert.equal(await isMonthLockedForEdits(f.db, "2026-07"), true);
+      assert.deepEqual(await f.lock(), { locked: true, kind: "reconciliation", month: "2026-07" });
+      await assert.rejects(rejectIfReceiptInFinalizedReconciliation(f.db, "r"), /finalized reconciliation/);
+      f.sqlRefused(true);
+      f.exp("2026-05", true); // unrelated correction cannot release July
+      assert.equal((await f.lock()).month, "2026-07");
+      f.sqlRefused(true);
+      f.exp("2026-07", true);
+      assert.equal((await f.lock()).locked, false);
+      await rejectIfReceiptInFinalizedReconciliation(f.db, "r");
+      f.sqlRefused(false);
+      assert.throws(() => f.raw.prepare("UPDATE amex_statement_lines SET amount_minor=9 WHERE id='2026-07'").run(), /DZ_SEAL_RECON_LOCKED/);
+    } finally { f.raw.close(); }
+  });
 
-test("computeReceiptLocks: CASH receipt in a sealed export month → export-locked", () => {
-  const locks = computeReceiptLocks(
-    [receipt({ id: "cash", payment_path: "CASH", transaction_date: "2026-03-10" })],
-    new Set(["2026-03"]),
-    new Map(),
-  );
-  const info = locks.get("cash");
-  assert.equal(info?.locked, true);
-  assert.equal(info?.kind, "export");
-  assert.equal(info?.month, "2026-03");
-});
-
-test("computeReceiptLocks: DIGITAL receipt in a sealed export month → export-locked", () => {
-  const locks = computeReceiptLocks(
-    [receipt({ id: "dig", payment_path: "DIGITAL", transaction_date: "2026-03-10" })],
-    new Set(["2026-03"]),
-    new Map(),
-  );
-  assert.equal(locks.get("dig")?.locked, true);
-  assert.equal(locks.get("dig")?.kind, "export");
-});
-
-test("computeReceiptLocks: a draft revision releases the export lock (month not in sealed set)", () => {
-  // loadSealedExportMonths excludes months that have an open draft revision, so
-  // the month simply isn't in the sealed set passed in.
-  const locks = computeReceiptLocks(
-    [receipt({ id: "cash", payment_path: "CASH", transaction_date: "2026-03-10" })],
-    new Set(), // 2026-03 has a draft → not sealed
-    new Map(),
-  );
-  assert.equal(locks.get("cash")?.locked, false);
-});
-
-test("computeReceiptLocks: export lock is month-scoped (other sealed months don't lock)", () => {
-  const locks = computeReceiptLocks(
-    [receipt({ id: "cash", payment_path: "CASH", transaction_date: "2026-03-10" })],
-    new Set(["2026-04"]),
-    new Map(),
-  );
-  assert.equal(locks.get("cash")?.locked, false);
-});
-
-test("computeReceiptLocks: undated CASH receipt is never export-locked", () => {
-  const locks = computeReceiptLocks(
-    [receipt({ id: "undated", payment_path: "CASH", transaction_date: null })],
-    new Set(["2026-07"]),
-    new Map(),
-  );
-  assert.equal(locks.get("undated")?.locked, false);
-});
-
-// ─── RECONCILIATION lock (AMEX/UNKNOWN matched to a finalized statement line) ─
-
-test("computeReceiptLocks: AMEX receipt matched to a finalized reconciliation → recon-locked", () => {
-  const locks = computeReceiptLocks(
-    [receipt({ id: "amex", payment_path: "AMEX", transaction_date: "2026-06-15" })],
-    new Set(),
-    new Map([["amex", "2026-06"]]),
-  );
-  const info = locks.get("amex");
-  assert.equal(info?.locked, true);
-  assert.equal(info?.kind, "reconciliation");
-  assert.equal(info?.month, "2026-06");
-});
-
-test("computeReceiptLocks: AMEX receipt with no matched line → unlocked (even in a sealed export month)", () => {
-  const locks = computeReceiptLocks(
-    [receipt({ id: "amex", payment_path: "AMEX", transaction_date: "2026-06-15" })],
-    new Set(["2026-06"]), // would export-lock a CASH receipt, but AMEX is not export-gated
-    new Map(),
-  );
-  assert.equal(locks.get("amex")?.locked, false);
-});
-
-// ─── Path-gating: each lock owns its own population (audit A5) ───────────────
-
-test("computeReceiptLocks: CASH receipt is NOT reconciliation-gated even if matched to a finalized line", () => {
-  // Path-agnostic server predicate aside, the UI lock model assigns the recon
-  // gate to AMEX/UNKNOWN only — CASH/DIGITAL have no statement line to match.
-  const locks = computeReceiptLocks(
-    [receipt({ id: "cash", payment_path: "CASH", transaction_date: "2026-03-10" })],
-    new Set(),
-    new Map([["cash", "2026-06"]]),
-  );
-  assert.equal(locks.get("cash")?.locked, false);
-});
-
-test("computeReceiptLocks: AMEX receipt is NOT export-gated even when its month is sealed (vice versa)", () => {
-  const locks = computeReceiptLocks(
-    [receipt({ id: "amex", payment_path: "AMEX", transaction_date: "2026-06-15" })],
-    new Set(["2026-06"]),
-    new Map(),
-  );
-  assert.equal(locks.get("amex")?.locked, false);
-});
-
-// ─── UNKNOWN: export-gated by month, recon-gated when matched (the safe path) ─
-
-test("computeReceiptLocks: UNKNOWN receipt in a sealed export month → export-locked", () => {
-  const locks = computeReceiptLocks(
-    [receipt({ id: "unk", payment_path: "UNKNOWN", transaction_date: "2026-06-15" })],
-    new Set(["2026-06"]),
-    new Map(),
-  );
-  assert.equal(locks.get("unk")?.locked, true);
-  assert.equal(locks.get("unk")?.kind, "export");
-});
-
-test("computeReceiptLocks: UNKNOWN receipt matched to a finalized reconciliation → recon-locked (server predicate is path-agnostic)", () => {
-  const locks = computeReceiptLocks(
-    [receipt({ id: "unk", payment_path: "UNKNOWN", transaction_date: "2026-06-15" })],
-    new Set(),
-    new Map([["unk", "2026-06"]]),
-  );
-  assert.equal(locks.get("unk")?.locked, true);
-  assert.equal(locks.get("unk")?.kind, "reconciliation");
-});
-
-// ─── Mixed set + coverage invariant ─────────────────────────────────────────
-
-test("computeReceiptLocks: every input receipt gets a Map entry (single .get lookup, no default needed)", () => {
-  const receipts = [
-    receipt({ id: "a", payment_path: "CASH", transaction_date: "2026-03-10" }),
-    receipt({ id: "b", payment_path: "AMEX", transaction_date: "2026-06-15" }),
-  ];
-  const locks = computeReceiptLocks(receipts, new Set(["2026-03"]), new Map([["b", "2026-06"]]));
-  assert.equal(locks.size, 2);
-  assert.equal(locks.get("a")?.kind, "export");
-  assert.equal(locks.get("b")?.kind, "reconciliation");
-});
-
-test("computeReceiptLocks: empty input → empty map", () => {
-  const locks = computeReceiptLocks([], new Set(["2026-03"]), new Map());
-  assert.equal(locks.size, 0);
-});
-
-// ─── loadReconciliationLockedReceiptIds (fake D1) ────────────────────────────
-
-function fakeReconDb(rows: Array<{ rid: string; m: string }>): ReceiptLockD1 {
-  return {
-    prepare(_sql: string) {
-      return {
-        bind(..._args: unknown[]) {
-          return {
-            async all<T = unknown>(): Promise<{ results?: T[] }> {
-              return { results: rows as unknown as T[] };
-            },
-          };
-        },
-      };
-    },
-  };
+  for (const claim of ["published", "exported_month"] as const) {
+    test(`${path}: ${claim} alone locks May/July even undated and status-independent`, async () => {
+      const f = fixture(path, { transaction_date: null, ...(claim === "exported_month" ? { exported_month: "2026-07" } : {}) });
+      try {
+        if (claim === "published") f.published("2026-07"); else f.exp("2026-07");
+        assert.deepEqual(await f.lock(), { locked: true, kind: "export", month: "2026-07" });
+        f.sqlRefused(true);
+        f.exp("2026-05", true);
+        assert.equal((await f.lock()).locked, true);
+        f.exp("2026-07", true);
+        assert.equal((await f.lock()).locked, false);
+        f.sqlRefused(false);
+      } finally { f.raw.close(); }
+    });
+  }
 }
 
-test("loadReconciliationLockedReceiptIds: builds id→statement-month map", async () => {
-  const db = fakeReconDb([
-    { rid: "a", m: "2026-06" },
-    { rid: "b", m: "2026-05" },
-  ]);
-  const out = await loadReconciliationLockedReceiptIds(db, ["a", "b"]);
-  assert.equal(out.get("a"), "2026-06");
-  assert.equal(out.get("b"), "2026-05");
-  assert.equal(out.size, 2);
+for (const path of ["CASH", "DIGITAL"] as const) {
+  test(`${path}: sticky July and calendar May independently retain closed claims`, async () => {
+    const f = fixture(path, { export_statement_month: "2026-07" });
+    try {
+      f.exp("2026-05"); f.exp("2026-07");
+      assert.equal((await f.lock()).month, "2026-07");
+      f.sqlRefused(true);
+      f.exp("2026-07", true);
+      assert.equal((await f.lock()).month, "2026-05");
+      f.sqlRefused(true);
+      f.exp("2026-05", true);
+      assert.equal((await f.lock()).locked, false);
+      f.sqlRefused(false);
+    } finally { f.raw.close(); }
+  });
+}
+
+for (const path of ["CASH", "DIGITAL"] as const) {
+  test(`${path}: an undated sticky claim stays locked until its own correction opens`, async () => {
+    const f = fixture(path, { transaction_date: null, export_statement_month: "2026-07" });
+    try {
+      f.exp("2026-07");
+      assert.deepEqual(await f.lock(), { locked: true, kind: "export", month: "2026-07" });
+      f.sqlRefused(true);
+      f.exp("2026-05", true);
+      assert.equal((await f.lock()).locked, true);
+      f.exp("2026-07", true);
+      assert.equal((await f.lock()).locked, false);
+      f.sqlRefused(false);
+    } finally { f.raw.close(); }
+  });
+}
+
+test("competing published/reconciliation months choose a stable concrete reason; one draft releases only itself", async () => {
+  const f = fixture("DIGITAL");
+  try {
+    f.published("2026-08"); f.published("2026-07");
+    assert.equal((await f.lock()).month, "2026-07");
+    f.exp("2026-07", true);
+    assert.equal((await f.lock()).month, "2026-08");
+    f.sqlRefused(true);
+    f.recon("2026-09"); f.recon("2026-06");
+    f.exp("2026-09"); f.exp("2026-06");
+    assert.deepEqual(await f.lock(), { locked: true, kind: "reconciliation", month: "2026-06" });
+    f.exp("2026-06", true);
+    assert.equal((await f.lock()).month, "2026-09");
+    f.sqlRefused(true);
+    f.exp("2026-09", true); f.exp("2026-08", true);
+    assert.equal((await f.lock()).locked, false);
+    f.sqlRefused(false);
+  } finally { f.raw.close(); }
 });
 
-test("loadReconciliationLockedReceiptIds: first writer wins when a receipt matches several lines in the same finalized month", async () => {
-  const db = fakeReconDb([
-    { rid: "a", m: "2026-06" },
-    { rid: "a", m: "2026-06" },
-  ]);
-  const out = await loadReconciliationLockedReceiptIds(db, ["a"]);
-  assert.equal(out.size, 1);
-  assert.equal(out.get("a"), "2026-06");
+test("archived stays terminal under correction; exported without a recorded month stays read-only", async () => {
+  for (const path of paths) {
+    const f = fixture(path, { status: "archived", exported_month: "2026-07" });
+    try {
+      f.exp("2026-07"); f.exp("2026-07", true);
+      assert.deepEqual(await f.lock(), { locked: true, kind: "archived", month: "2026-07" });
+      f.sqlRefused(true);
+    } finally { f.raw.close(); }
+    const row = { id: "r", payment_path: path, status: "exported", transaction_date: null } as ReceiptRecord;
+    assert.deepEqual(computeReceiptLocks([row], new Set(), new Map()).get("r"), { locked: true, kind: "exported", month: null });
+  }
 });
 
-test("loadReconciliationLockedReceiptIds: empty id list → empty map, no query", async () => {
-  let prepared = false;
-  const db: ReceiptLockD1 = {
-    prepare() {
-      prepared = true;
-      return { bind: () => ({ all: async () => ({ results: [] }) }) };
-    },
-  };
-  const out = await loadReconciliationLockedReceiptIds(db, []);
-  assert.equal(out.size, 0);
-  assert.equal(prepared, false, "must short-circuit and not run a query for empty input");
+test("exported status with a known unsealed/correction month follows the existing route predicate", async () => {
+  const f = fixture("AMEX", { status: "exported", exported_month: "2026-07" });
+  try {
+    assert.equal((await f.lock()).locked, false);
+    f.exp("2026-07"); assert.equal((await f.lock()).locked, true);
+    f.exp("2026-07", true); assert.equal((await f.lock()).locked, false);
+    f.sqlRefused(false);
+  } finally { f.raw.close(); }
 });
 
-// ─── ADR 0012: drafted months are excluded from the recon-locked set ─────────
-
-test("loadReconciliationLockedReceiptIds: query excludes months that have an open export draft", async () => {
-  // A drafted month must NOT appear in the locked set — otherwise the queue
-  // over-reports a 409 the server would no longer throw. The canned-fake style
-  // can't execute the NOT EXISTS, so assert the exclusion clause is in the
-  // emitted SQL (live behavior is covered by the server carve-out tests).
-  let capturedSql = "";
-  const recording: ReceiptLockD1 = {
-    prepare(sql: string) {
-      capturedSql = sql;
-      return {
-        bind(..._args: unknown[]) {
-          return {
-            async all<T = unknown>(): Promise<{ results?: T[] }> {
-              return { results: [] };
-            },
-          };
-        },
-      };
-    },
-  };
-  await loadReconciliationLockedReceiptIds(recording, ["a"]);
-  assert.match(capturedSql, /NOT EXISTS/i);
-  assert.match(capturedSql, /receipt_exports/i);
-  assert.match(capturedSql, /status = 'draft'/i);
+test("existing calendar policy: UNKNOWN locked, unmatched AMEX and undated CASH unlocked", () => {
+  const rows = paths.map((payment_path) => ({ id: payment_path, payment_path, transaction_date: "2026-05-10" }) as ReceiptRecord);
+  const locks = computeReceiptLocks(rows, new Set(["2026-05"]), new Map());
+  for (const path of paths) assert.equal(locks.get(path)?.locked, path !== "AMEX");
+  assert.equal(computeReceiptLocks([{ id: "r", payment_path: "CASH", transaction_date: null } as ReceiptRecord], new Set(["2026-05"]), new Map()).get("r")?.locked, false);
 });
 
-test("computeReceiptLocks: AMEX receipt whose finalized-recon month has a draft → UNLOCKED (carve-out)", () => {
-  // End-to-end effect: a drafted month is excluded from the recon-locked map by
-  // loadReconciliationLockedReceiptIds, so the receipt the operator wants to
-  // correct surfaces unlocked (empty map here models the exclusion).
-  const locks = computeReceiptLocks(
-    [receipt({ id: "amex", payment_path: "AMEX", transaction_date: "2026-06-15" })],
-    new Set(),
-    new Map(),
-  );
-  assert.equal(locks.get("amex")?.locked, false);
-});
-
-// Static guard: keep the PaymentPath literals honest against the lock model.
-test("computeReceiptLocks: covers all four payment paths", () => {
-  const paths: PaymentPath[] = ["AMEX", "CASH", "DIGITAL", "UNKNOWN"];
-  const receipts = paths.map((p, i) =>
-    receipt({ id: p, payment_path: p, transaction_date: "2026-06-15" }),
-  );
-  // Sealed export month + a finalized reconciliation matching every id: each
-  // path should take the lock its model assigns (export for CASH/DIGITAL/UNKNOWN,
-  // reconciliation for AMEX).
-  const locks = computeReceiptLocks(
-    receipts,
-    new Set(["2026-06"]),
-    new Map(paths.map((p) => [p, "2026-06"])),
-  );
-  assert.equal(locks.get("AMEX")?.kind, "reconciliation");
-  assert.equal(locks.get("CASH")?.kind, "export");
-  assert.equal(locks.get("DIGITAL")?.kind, "export");
-  assert.equal(locks.get("UNKNOWN")?.kind, "reconciliation"); // recon wins (checked first)
-});
-
-// ─── D1 bind-limit chunking (regression: all-months review crash) ───────────
-
-test("loadReconciliationLockedReceiptIds: chunks receipt ids to stay under D1's bind limit", async () => {
-  // The review queue passes 100+ ids for an all-months view; a single IN(?,…)
-  // exceeded D1's bound-param limit and crashed /receipts/review. The query must
-  // chunk over D1_ID_CHUNK_SIZE. Recording fake counts bind args per prepare.
+test("batched claims stay within D1 bind limits and empty inputs perform no queries", async () => {
   const bindCounts: number[] = [];
-  const recording: ReceiptLockD1 = {
-    prepare() {
-      return {
-        bind(...args: unknown[]) {
-          bindCounts.push(args.length);
-          return {
-            async all<T = unknown>(): Promise<{ results?: T[] }> {
-              return { results: [] };
-            },
-          };
-        },
-      };
-    },
-  };
-  const ids = Array.from({ length: D1_ID_CHUNK_SIZE + 5 }, (_, i) => `r${i}`);
-  await loadReconciliationLockedReceiptIds(recording, ids);
-  assert.ok(bindCounts.length >= 2, `expected ≥2 chunked queries, got ${bindCounts.length}`);
-  assert.ok(
-    Math.max(...bindCounts) <= D1_ID_CHUNK_SIZE,
-    `largest chunk ${Math.max(...bindCounts)} exceeds D1_ID_CHUNK_SIZE (${D1_ID_CHUNK_SIZE})`,
-  );
+  const db: ReceiptLockD1 = { prepare() { return { bind(...args) {
+    bindCounts.push(args.length); return { all: async () => ({ results: [] }) };
+  } }; } };
+  assert.equal((await loadReceiptClaimLocks(db, [])).size, 0);
+  assert.equal(bindCounts.length, 0);
+  await loadReceiptClaimLocks(db, Array.from({ length: D1_ID_CHUNK_SIZE + 5 }, (_, i) => `r${i}`));
+  assert.deepEqual(bindCounts, [D1_ID_CHUNK_SIZE, D1_ID_CHUNK_SIZE, 5, 5]);
 });
