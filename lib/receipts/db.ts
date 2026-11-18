@@ -131,8 +131,9 @@ export async function createReceiptRecord(
          legacy, retention_until, legal_hold,
          source_type, preservation_status, qualified_invoice_status,
          created_at, updated_at, extraction_r2_key, needs_render,
-         device_id, client_capture_id, captured_at_client, upload_origin)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 1, ?, ?, 'not_checked', ?, ?, ?, ?, ?, ?, ?, ?)`,
+         device_id, client_capture_id, captured_at_client, upload_origin,
+         capture_request_fingerprint)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 1, ?, ?, 'not_checked', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .bind(
       id,
@@ -171,14 +172,15 @@ export async function createReceiptRecord(
       // pending-extraction query until /render clears it and enqueues.
       sourceType === "email_body" ? 1 : 0,
       // Mobile provenance (backlog #18 merge — createMobileReceiptRecord folded
-      // in). NULL for non-mobile captures; the 0015 partial UNIQUE index on
+      // in). device_id is NULL for browser captures; the 0015 UNIQUE index on
       // (device_id, client_capture_id) only fires when both are NOT NULL, so
-      // non-mobile rows never collide. captureReceipt throws
+      // browser rows use actor-scoped uniqueness instead (0046). captureReceipt throws
       // CaptureIdempotencyConflict on a collision so the route returns duplicate.
       input.deviceId ?? null,
       input.clientCaptureId ?? null,
       input.capturedAtClient ?? null,
       input.uploadOrigin ?? null,
+      input.captureRequestFingerprint ?? null,
     )
     .run();
 
@@ -221,6 +223,29 @@ export async function createReceiptRecord(
   }
 
   return id;
+}
+
+export async function findBrowserCapture(actor: string, clientCaptureId: string) {
+  return getReceiptsDb().prepare(
+    `SELECT r.id, r.original_r2_key, r.capture_request_fingerprint,
+            r.extraction_enqueued_at, r.extraction_enqueue_failed_at, r.deleted_at,
+            (EXISTS (SELECT 1 FROM receipt_files f
+                     WHERE f.object_type = 'receipt' AND f.object_id = r.id
+                       AND f.is_original = 1 AND f.r2_key = r.original_r2_key
+                       AND f.sha256_hash = r.original_sha256)
+             AND (r.extraction_enqueued_at IS NOT NULL
+                  OR r.extraction_enqueue_failed_at IS NOT NULL OR r.needs_render = 1)) AS complete
+       FROM receipt_records r
+      WHERE r.captured_by = ? AND r.client_capture_id = ? AND r.device_id IS NULL`,
+  ).bind(actor, clientCaptureId).first<{
+    id: string;
+    original_r2_key: string;
+    capture_request_fingerprint: string | null;
+    extraction_enqueued_at: string | null;
+    extraction_enqueue_failed_at: string | null;
+    deleted_at: string | null;
+    complete: number;
+  }>();
 }
 
 export async function getReceiptRecord(

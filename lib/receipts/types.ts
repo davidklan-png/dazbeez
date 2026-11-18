@@ -774,12 +774,14 @@ export interface CreateReceiptInput {
   // divergent INSERT folded in). device_id/client_capture_id/captured_at_client/
   // upload_origin are written to receipt_records columns; the 0015 partial
   // UNIQUE index on (device_id, client_capture_id) enforces idempotency AT
-  // INSERT (so it fires for mobile, never for non-mobile where both are NULL).
+  // INSERT. Browser keys instead use actor scope when device_id is NULL (0046).
   // app_version/note are audit-JSON ONLY (never columns) — the receipt.uploaded
   // audit emits them when present, or mobile captures lose device provenance
   // (same class of loss the promote path guards against via SPF/DKIM).
   deviceId?: string;
   clientCaptureId?: string;
+  // Browser request identity at INSERT, independent of later operator edits.
+  captureRequestFingerprint?: string;
   capturedAtClient?: string | null;
   uploadOrigin?: string;
   appVersion?: string | null;
