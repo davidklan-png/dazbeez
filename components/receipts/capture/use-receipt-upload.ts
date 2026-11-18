@@ -5,6 +5,7 @@ import { maybeResizeImage } from "@/lib/receipts/client-image";
 import type { PaymentPath } from "@/lib/receipts/types";
 import type { Source } from "@/lib/receipts/upload-policy";
 import { AbortRegistry } from "@/lib/receipts/abort-registry";
+import { browserCaptureId } from "@/lib/receipts/browser-capture";
 
 // ADR 0001: extraction is store-and-forward. Capture no longer runs OCR inline
 // — the image is uploaded, enqueued, and processed later by the Mac MLX
@@ -32,6 +33,7 @@ export function useReceiptUpload() {
   // every new upload — which silently killed all but the last file when the
   // desktop drop handler called upload() N times back-to-back.
   const registryRef = useRef(new AbortRegistry());
+  const captureIdsRef = useRef(new WeakMap<File, string>());
 
   const upload = useCallback(
     async (
@@ -50,6 +52,7 @@ export function useReceiptUpload() {
       });
 
       try {
+        const captureId = browserCaptureId(file, captureIdsRef.current);
         const uploadFile = await maybeResizeImage(file);
         setPhase({
           kind: "uploading",
@@ -61,6 +64,7 @@ export function useReceiptUpload() {
         const fd = new FormData();
         fd.append("file", uploadFile);
         fd.append("source", source);
+        fd.append("client_capture_id", captureId);
         if (paymentPath) fd.append("paymentPath", paymentPath);
 
         const res = await fetch("/api/receipts/upload", {

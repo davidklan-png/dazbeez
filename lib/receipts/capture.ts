@@ -13,7 +13,7 @@
 //     outage is distinguishable from a forgotten enqueue (backlog #20).
 
 import { getReceiptsBucket, getReceiptsDb } from "@/lib/cloudflare-runtime";
-import { createReceiptRecord, hardDeleteReceipt } from "@/lib/receipts/db";
+import { createReceiptRecord, findBrowserCapture, hardDeleteReceipt } from "@/lib/receipts/db";
 import { createReceiptFile, type CreateReceiptFileInput } from "@/lib/receipts/files";
 import { buildExtractionJob, enqueueExtractionJob } from "@/lib/receipts/queue";
 import { generateR2Key, uploadOriginal } from "@/lib/receipts/storage";
@@ -53,7 +53,26 @@ export class CaptureManifestFailure extends Error {
  *  Exported so the race-vs-manifest classification (#18 ii-c(b)) is unit-testable. */
 export function isMobileIdempotencyCollision(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
-  return /UNIQUE constraint/i.test(msg) && /device_id|client_capture_id/i.test(msg);
+  return /UNIQUE constraint failed: receipt_records\.device_id, receipt_records\.client_capture_id/i.test(msg);
+}
+
+export function isBrowserIdempotencyCollision(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /UNIQUE constraint failed: receipt_records\.captured_by, receipt_records\.client_capture_id/i.test(msg);
+}
+
+export class BrowserCaptureConflict extends Error {
+  constructor() {
+    super("Capture key already belongs to a different request or a deleted receipt.");
+    this.name = "BrowserCaptureConflict";
+  }
+}
+
+export class CaptureIncomplete extends Error {
+  constructor(public readonly receiptId?: string) {
+    super("Capture is incomplete or still in progress. Retry later with the same capture key; if it persists, check pipeline health.");
+    this.name = "CaptureIncomplete";
+  }
 }
 
 /** Manifest metadata for the original file. The bytes themselves are either
@@ -89,6 +108,7 @@ export interface CaptureInput {
 
 export interface CaptureResult {
   receiptId: string;
+  duplicate?: boolean;
   /** true only when an enqueue was attempted and succeeded. False for the
    *  needs_render path (intentionally not enqueued). */
   enqueued: boolean;
@@ -171,14 +191,26 @@ async function compensate(receiptId: string, actor: string, reason: string): Pro
 export async function captureReceipt(input: CaptureInput): Promise<CaptureResult> {
   const db = getReceiptsDb();
 
-  // (a) the receipt record — the sacred single insert path. A collision on the
-  // 0015 mobile-idempotency index (device_id+client_capture_id) throws
-  // CaptureIdempotencyConflict so the route returns { duplicate: true }; any
-  // other DB error propagates.
+  // INSERT arbitrates ownership. Browser replays must also match the original
+  // request and have a manifest + recorded enqueue outcome (or render deferral).
   let receiptId: string;
   try {
     receiptId = await createReceiptRecord(input.record, input.actor);
   } catch (err) {
+    if (!input.record.deviceId && input.record.clientCaptureId && isBrowserIdempotencyCollision(err)) {
+      const existing = await findBrowserCapture(input.actor, input.record.clientCaptureId);
+      if (!existing) throw new CaptureIncomplete();
+      if (existing.capture_request_fingerprint !== input.record.captureRequestFingerprint || existing.deleted_at) {
+        throw new BrowserCaptureConflict();
+      }
+      if (!existing.complete) throw new CaptureIncomplete(existing.id);
+      return {
+        receiptId: existing.id,
+        r2Key: existing.original_r2_key,
+        enqueued: existing.extraction_enqueued_at !== null,
+        duplicate: true,
+      };
+    }
     if (isMobileIdempotencyCollision(err)) throw new CaptureIdempotencyConflict();
     throw err;
   }

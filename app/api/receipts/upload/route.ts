@@ -8,10 +8,18 @@ import {
   type Source,
 } from "@/lib/receipts/upload-policy";
 import { generateR2Key, uploadOriginal } from "@/lib/receipts/storage";
-import { captureReceipt } from "@/lib/receipts/capture";
+import {
+  captureReceipt,
+  BrowserCaptureConflict,
+  CaptureIncomplete,
+  CaptureManifestFailure,
+  type CaptureResult,
+} from "@/lib/receipts/capture";
+import { findBrowserCapture } from "@/lib/receipts/db";
+import { browserCaptureFingerprint, isValidBrowserCaptureId } from "@/lib/receipts/browser-capture";
 import { ExportFinalizedError } from "@/lib/receipts/month-lock";
 import { getReceiptsBucket } from "@/lib/cloudflare-runtime";
-import type { PaymentPath } from "@/lib/receipts/types";
+import type { ExpenseType, PaymentPath } from "@/lib/receipts/types";
 
 async function sha256Hex(data: ArrayBuffer): Promise<string> {
   const hash = await crypto.subtle.digest("SHA-256", data);
@@ -27,6 +35,11 @@ export async function POST(request: Request) {
     const actor = await requireReceiptsActor(request.headers);
 
     const formData = await request.formData();
+    const rawCaptureId = formData.get("client_capture_id");
+    if (rawCaptureId !== null && !isValidBrowserCaptureId(rawCaptureId)) {
+      return NextResponse.json({ error: "Invalid client_capture_id (1–128 letters, digits, _ or -)." }, { status: 400 });
+    }
+    const clientCaptureId = rawCaptureId ?? undefined;
     const file = formData.get("file");
 
     if (!(file instanceof File)) {
@@ -45,7 +58,7 @@ export async function POST(request: Request) {
         ? (rawPaymentPath as PaymentPath)
         : "UNKNOWN";
 
-    const expenseType = formData.get("expenseType")?.toString() || undefined;
+    const expenseType = (formData.get("expenseType")?.toString() || undefined) as ExpenseType | undefined;
     // source is required provenance — the capture client always sends one
     // (mobile_capture | desktop_upload). Reject rather than silently default,
     // since defaulting to "mobile_capture" previously mislabeled every desktop
@@ -72,6 +85,9 @@ export async function POST(request: Request) {
 
     const bytes = await file.arrayBuffer();
     const sha256 = await sha256Hex(bytes);
+    const captureRequestFingerprint = clientCaptureId
+      ? await browserCaptureFingerprint({ sha256, contentType, filename: file.name, source, sourceType, paymentPath, expenseType })
+      : undefined;
 
     const tempId = crypto.randomUUID();
     const r2Key = generateR2Key(tempId, file.name, new Date().toISOString());
@@ -82,7 +98,7 @@ export async function POST(request: Request) {
     // (a) + the is_original manifest row (b) + enqueue (c), with manifest LOUD
     // (compensating delete on failure) and enqueue best-effort. Nothing else
     // imports createReceiptRecord (enforced by tests/receipts/capture-contract.test.ts).
-    let capture: { receiptId: string; enqueued: boolean };
+    let capture: CaptureResult;
     try {
       capture = await captureReceipt({
         record: {
@@ -91,7 +107,9 @@ export async function POST(request: Request) {
           sourceType,
           originalFilename: file.name,
           paymentPath,
-          expenseType: expenseType as import("@/lib/receipts/types").ExpenseType | undefined,
+          expenseType,
+          clientCaptureId,
+          captureRequestFingerprint,
           originalR2Key: r2Key,
           originalSha256: sha256,
           originalContentType: contentType,
@@ -104,9 +122,21 @@ export async function POST(request: Request) {
         actor,
       });
     } catch (captureError) {
-      // captureReceipt handles manifest-failure rollback (hardDeleteReceipt +
-      // r2Key delete) internally. For a createReceiptRecord failure there is no
-      // receipt yet — clean up the object we uploaded.
+      // A failed acknowledgement/audit can follow a committed INSERT. Retain
+      // its original; only a losing attempt's unreferenced object is disposable.
+      if (clientCaptureId && !(captureError instanceof CaptureManifestFailure)) {
+        let existing;
+        try {
+          existing = await findBrowserCapture(actor, clientCaptureId);
+        } catch {
+          console.error("[receipts/upload] ownership unknown; retaining R2 object", { r2Key, captureError });
+          throw captureError;
+        }
+        if (existing?.original_r2_key === r2Key) {
+          console.error("[receipts/upload] capture interrupted; original retained", captureError);
+          throw new CaptureIncomplete(existing.id);
+        }
+      }
       try {
         await getReceiptsBucket().delete(r2Key);
       } catch {
@@ -115,9 +145,18 @@ export async function POST(request: Request) {
       throw captureError;
     }
 
+    if (capture.duplicate) {
+      try {
+        await getReceiptsBucket().delete(r2Key);
+      } catch (error) {
+        console.error("[receipts/upload] duplicate attempt R2 cleanup failed", { r2Key, error });
+      }
+    }
+
     return NextResponse.json(
       {
         ok: true,
+        duplicate: capture.duplicate ?? false,
         receiptId: capture.receiptId,
         status: "captured",
         extractionState: capture.enqueued ? "queued" : "captured",
@@ -125,9 +164,21 @@ export async function POST(request: Request) {
         sourceType,
         reviewUrl: `/receipts/review/${capture.receiptId}`,
       },
-      { status: 201 },
+      { status: capture.duplicate ? 200 : 201 },
     );
   } catch (error) {
+    if (error instanceof BrowserCaptureConflict) {
+      return NextResponse.json({ error: error.message, code: "capture_key_conflict" }, { status: 409 });
+    }
+    if (error instanceof CaptureIncomplete) {
+      return NextResponse.json(
+        { error: error.message, code: "capture_incomplete", receiptId: error.receiptId },
+        { status: 503, headers: { "Retry-After": "5" } },
+      );
+    }
+    if (error instanceof CaptureManifestFailure) {
+      return NextResponse.json({ error: error.message, code: "capture_manifest_failed" }, { status: 500 });
+    }
     if (error instanceof Error && error.message.startsWith("Unauthorized")) {
       return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
     }
@@ -136,7 +187,7 @@ export async function POST(request: Request) {
     }
     console.error("[api/receipts/upload] failed", error);
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Upload failed." },
+      { error: error instanceof Error ? error.message : "Upload failed.", code: "capture_failed" },
       { status: 500 },
     );
   }

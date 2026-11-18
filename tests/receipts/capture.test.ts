@@ -9,9 +9,11 @@ import {
   buildCaptureFileInput,
   decideCaptureMark,
   isMobileIdempotencyCollision,
+  isBrowserIdempotencyCollision,
   CaptureIdempotencyConflict,
   CaptureManifestFailure,
 } from "@/lib/receipts/capture";
+import { browserCaptureId, browserCaptureFingerprint, isValidBrowserCaptureId } from "@/lib/receipts/browser-capture";
 
 // ─── decideCaptureMark (the #20 marker logic) ───────────────────────────────
 
@@ -88,4 +90,38 @@ test("typed errors: CaptureIdempotencyConflict and CaptureManifestFailure are di
   assert.equal(manifest instanceof CaptureIdempotencyConflict, false);
   assert.equal(race.kind, "CaptureIdempotencyConflict");
   assert.equal(manifest.kind, "CaptureManifestFailure");
+});
+
+test("browser and native uniqueness errors cannot be mistaken for each other or other D1 failures", () => {
+  const browser = new Error("D1_ERROR: UNIQUE constraint failed: receipt_records.captured_by, receipt_records.client_capture_id: SQLITE_CONSTRAINT");
+  const native = new Error("D1_ERROR: UNIQUE constraint failed: receipt_records.device_id, receipt_records.client_capture_id: SQLITE_CONSTRAINT");
+  assert.equal(isBrowserIdempotencyCollision(browser), true);
+  assert.equal(isMobileIdempotencyCollision(browser), false);
+  assert.equal(isBrowserIdempotencyCollision(native), false);
+  assert.equal(isMobileIdempotencyCollision(native), true);
+  for (const error of [new Error("UNIQUE constraint failed: receipt_records.id"), new CaptureManifestFailure(), new Error("D1 unavailable"), null]) {
+    assert.equal(isBrowserIdempotencyCollision(error), false);
+    assert.equal(isMobileIdempotencyCollision(error), false);
+  }
+});
+
+test("browser selection keys survive repeated attempts and distinguish identical new selections", () => {
+  const ids = new WeakMap<File, string>();
+  const file = new File(["same"], "photo.jpg");
+  const id = browserCaptureId(file, ids);
+  assert.equal(browserCaptureId(file, ids), id);
+  assert.notEqual(browserCaptureId(new File(["same"], "photo.jpg"), ids), id);
+  assert.ok(isValidBrowserCaptureId(id));
+  for (const invalid of [null, undefined, "", "bad id", "あ", "x".repeat(129), new File([], "key")]) {
+    assert.equal(isValidBrowserCaptureId(invalid), false);
+  }
+});
+
+test("fingerprint uses normalized request metadata and unambiguous field encoding", async () => {
+  const input = { sha256: "hash", contentType: "image/jpeg", filename: "receipt.jpg", source: "mobile_capture", sourceType: "paper_scanned", paymentPath: "AMEX" } as const;
+  const fingerprint = await browserCaptureFingerprint(input);
+  assert.match(fingerprint, /^[0-9a-f]{64}$/);
+  assert.equal(await browserCaptureFingerprint({ ...input }), fingerprint);
+  assert.notEqual(await browserCaptureFingerprint({ ...input, sha256: "other" }), fingerprint);
+  assert.notEqual(await browserCaptureFingerprint({ ...input, filename: "a|b", contentType: "c" }), await browserCaptureFingerprint({ ...input, filename: "a", contentType: "b|c" }));
 });
