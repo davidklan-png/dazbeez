@@ -11,7 +11,7 @@ export function KeyboardHintBar({
   trailing?: React.ReactNode;
 }) {
   return (
-    <div className="flex items-center gap-[18px] border-t border-gray-200 bg-white px-8 py-2.5 text-[11.5px] text-gray-500">
+    <div className="flex flex-wrap items-center gap-x-[18px] gap-y-2 border-t border-gray-200 bg-white px-4 py-2.5 sm:px-8 text-[11.5px] text-gray-500">
       {hints.map(([keys, label]) => (
         <span key={keys + label} className="flex items-center gap-1.5">
           {keys.split(" / ").map((k, i, arr) => (
