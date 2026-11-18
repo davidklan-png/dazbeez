@@ -18,6 +18,7 @@ const MONTH = "2026-06";
 
 function makeReceipt(overrides: Partial<ReceiptRecord> = {}): ReceiptRecord {
   return {
+    revision: 0,
     id: "r-1",
     captured_at: "2026-06-15T10:00:00Z",
     captured_by: "test",

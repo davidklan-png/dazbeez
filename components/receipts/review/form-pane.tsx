@@ -173,6 +173,7 @@ export function FormPane(props: FormPaneProps) {
   // failed). Save succeeded, so this is a toast — not an error state.
   const [apiWarnings, setApiWarnings] = useState<string[]>([]);
   const [overrideBusy, setOverrideBusy] = useState(false);
+  const dedicatedActionRef = useRef(false);
 
   // Attendee directory (migration 0022): loaded client-side from D1 on mount
   // and passed to AttendeeEditor. The editor lets the operator register a new
@@ -306,6 +307,7 @@ export function FormPane(props: FormPaneProps) {
   // routing, so commits complete while the form is still mounted.
   const saveQueueConfig = {
     url: `/api/receipts/${receipt.id}`,
+    initialRevision: receipt.revision,
     buildBody: buildSaveBody,
     deferFire: () => businessPurposeComposingRef.current,
   };
@@ -380,6 +382,7 @@ export function FormPane(props: FormPaneProps) {
   // server guards the target month is export-open (two-lock model).
   async function handleOverride(target: string) {
     if (lockedRef.current) return;
+    if (dedicatedActionRef.current) return;
     const current = receipt.export_statement_month ?? null;
     if (!target || target === current) return;
     const ok = window.confirm(
@@ -387,22 +390,18 @@ export function FormPane(props: FormPaneProps) {
         `It will ship in ${target}'s export${current ? ` instead of ${current}` : ""}. This change is audited.`,
     );
     if (!ok) return;
+    dedicatedActionRef.current = true;
     setOverrideBusy(true);
     try {
-      const res = await fetch(`/api/receipts/${receipt.id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ exportStatementMonth: target }),
-      });
-      const json = (await res.json().catch(() => ({}))) as { error?: string };
-      if (!res.ok) {
-        setSave({ kind: "error", message: json.error ?? "Override failed" });
-        return;
-      }
+      await flushPendingEdits();
+      const result = await saveQueue.mutate("PATCH", { exportStatementMonth: target });
+      setApiWarnings(result.warnings);
+      setSave({ kind: "saved", at: Date.now() });
       router.refresh();
-    } catch {
-      setSave({ kind: "error", message: "Network error" });
+    } catch (error) {
+      setSave({ kind: "error", message: error instanceof Error ? error.message : "Override failed" });
     } finally {
+      dedicatedActionRef.current = false;
       setOverrideBusy(false);
     }
   }
@@ -439,6 +438,7 @@ export function FormPane(props: FormPaneProps) {
   const reviewedRiderRef = useRef(false);
   const onMarkReviewed = useCallback(() => {
     if (lockedRef.current) return;
+    if (dedicatedActionRef.current) return;
     // Cancel the debounce: the flush sends the latest fields immediately.
     if (saveTimerRef.current) {
       clearTimeout(saveTimerRef.current);
@@ -483,6 +483,8 @@ export function FormPane(props: FormPaneProps) {
 
   const flushingRef = useRef<Promise<void> | null>(null);
   const flushPendingEdits = useCallback((): Promise<void> => {
+    // A refresh may seal a conflicted form; keep its retained draft guarded.
+    if (saveQueue.halted) return saveQueue.save().then(() => {});
     if (lockedRef.current) return Promise.resolve();
     const existing = flushingRef.current;
     if (existing) return existing;
@@ -552,9 +554,24 @@ export function FormPane(props: FormPaneProps) {
     return flush;
   }, [saveQueue]);
 
+  useEffect(() => {
+    const guard = (event: BeforeUnloadEvent) => {
+      if (dedicatedActionRef.current || saveTimerRef.current || !saveQueue.idle || saveQueue.lastFailed || saveQueue.halted) {
+        event.preventDefault();
+        event.returnValue = "";
+      }
+    };
+    window.addEventListener("beforeunload", guard);
+    return () => window.removeEventListener("beforeunload", guard);
+  }, [saveQueue]);
+
   // The single mounted review form publishes its flush to the navigation
   // guard (queue-rail's j/k + item links call it via guardedNavigate).
-  useEffect(() => registerSaveFlusher(flushPendingEdits), [flushPendingEdits]);
+  useEffect(() => registerSaveFlusher(() => {
+    // Do not enqueue a field snapshot behind an in-flight Delete/override.
+    if (dedicatedActionRef.current) return Promise.reject(new Error("Receipt action in progress."));
+    return flushPendingEdits();
+  }), [flushPendingEdits]);
 
   // Residual net for exits that CANNOT be awaited (browser back/reload,
   // header scope/search controls outside this form): a pending debounce is
@@ -606,18 +623,24 @@ export function FormPane(props: FormPaneProps) {
 
   async function handleDelete() {
     if (lockedRef.current) return;
+    if (dedicatedActionRef.current) return;
     if (!window.confirm(`Soft-delete receipt ${receipt.id.slice(0, 8)}…?`))
       return;
+    const reason = receipt.status === "exported"
+      ? window.prompt("Reason for deleting this exported receipt (required):")?.trim()
+      : undefined;
+    if (receipt.status === "exported" && !reason) return;
+    dedicatedActionRef.current = true;
+    setOverrideBusy(true);
     try {
-      const res = await fetch(`/api/receipts/${receipt.id}`, {
-        method: "DELETE",
-      });
-      // Return to the SAME review view (month/scope/filter preserved), not the
-      // bare queue — deleting one receipt shouldn't drop the operator out of
-      // the work month they were in.
-      if (res.ok) router.push(`/receipts/review${queryParams}`);
-    } catch {
-      // ignore
+      await flushPendingEdits();
+      await saveQueue.mutate("DELETE", { reason });
+      router.push(`/receipts/review${queryParams}`);
+    } catch (error) {
+      setSave({ kind: "error", message: error instanceof Error ? error.message : "Delete failed" });
+    } finally {
+      dedicatedActionRef.current = false;
+      setOverrideBusy(false);
     }
   }
 
@@ -652,7 +675,7 @@ export function FormPane(props: FormPaneProps) {
             </Pill>
           )}
           <span className="flex-1" />
-          <SaveBadge state={save} />
+          <SaveBadge state={saveQueue.halted ? { kind: "error", message: "Saving stopped" } : save} />
         </div>
         <div className="mt-1.5 flex items-center gap-2 text-xs text-gray-500">
           <span className="tabular-nums">
@@ -718,6 +741,14 @@ export function FormPane(props: FormPaneProps) {
         </div>
       )}
 
+      {saveQueue.halted && (
+        <div role="alert" className="m-4 rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm text-gray-900">
+          {save.kind === "error" ? save.message : "Saving stopped. Your edits remain on this form."}
+          <button type="button" className="ml-2 underline" onClick={() => {
+            if (window.confirm("Discard local edits and reload the current receipt for review?")) window.location.reload();
+          }}>Reload and review</button>
+        </div>
+      )}
       {isLocked && (
         <div className="mx-6 mt-3 flex items-start gap-2 rounded-lg border border-gray-300 bg-gray-100 px-3 py-2 text-xs text-gray-700">
           <span className="mt-px font-semibold text-gray-700">Read-only.</span>
@@ -790,7 +821,7 @@ export function FormPane(props: FormPaneProps) {
               <TextInput
                 value={merchant}
                 onChange={(e) => setMerchant(e.target.value)}
-                disabled={isLocked}
+                disabled={isLocked || overrideBusy}
               />
             </Field>
             <Field label="Date">
@@ -799,7 +830,7 @@ export function FormPane(props: FormPaneProps) {
                 value={transactionDate}
                 max={new Date().toISOString().slice(0, 10)}
                 onChange={(e) => setTransactionDate(e.target.value)}
-                disabled={isLocked}
+                disabled={isLocked || overrideBusy}
                 mono
               />
             </Field>
@@ -810,7 +841,7 @@ export function FormPane(props: FormPaneProps) {
                 prefix={currency === "JPY" ? "¥" : currency}
                 suffix={currency}
                 onChange={(e) => setAmountDisplay(e.target.value)}
-                disabled={isLocked}
+                disabled={isLocked || overrideBusy}
                 mono
               />
             </Field>
@@ -820,7 +851,7 @@ export function FormPane(props: FormPaneProps) {
               kind="ghost"
               size="sm"
               onClick={handleExtract}
-              disabled={isLocked || extractionBusy || pendingProcessing}
+              disabled={isLocked || overrideBusy || extractionBusy || pendingProcessing}
             >
               {pendingProcessing
                 ? "Waiting for processor…"
@@ -858,7 +889,7 @@ export function FormPane(props: FormPaneProps) {
             <PaymentPathSeg
               value={paymentPath}
               onChange={setPaymentPath}
-              disabled={isLocked}
+              disabled={isLocked || overrideBusy}
             />
           </Field>
           <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
@@ -867,7 +898,7 @@ export function FormPane(props: FormPaneProps) {
                 ref={categoryRef}
                 value={expenseCategoryCode}
                 onChange={(e) => setExpenseCategoryCode(e.target.value)}
-                disabled={isLocked}
+                disabled={isLocked || overrideBusy}
                 className="h-[38px] w-full rounded-lg border border-gray-200 bg-white px-3 text-sm text-gray-900 focus:border-amber-500 focus:outline-none disabled:bg-gray-50 disabled:text-gray-500"
               >
                 <option value="">— Select category —</option>
@@ -937,7 +968,7 @@ export function FormPane(props: FormPaneProps) {
                 triggerSave();
                 wakeCompositionWaiters();
               }}
-              disabled={isLocked}
+              disabled={isLocked || overrideBusy}
               placeholder="e.g. Client dinner — Acme product review"
             />
           </Field>
@@ -951,7 +982,7 @@ export function FormPane(props: FormPaneProps) {
                 attendees={attendees}
                 onChange={setAttendees}
                 directory={directory}
-                disabled={isLocked}
+                disabled={isLocked || overrideBusy}
                 onRegister={(entry) =>
                   setDirectory((prev) =>
                     prev.some((e) => e.id === entry.id) ? prev : [...prev, entry],
@@ -1002,7 +1033,7 @@ export function FormPane(props: FormPaneProps) {
             kind="primary"
             size="md"
             onClick={onMarkReviewed}
-            disabled={!canMarkReviewed(receipt.status, isLocked) || !inView}
+            disabled={overrideBusy || !canMarkReviewed(receipt.status, isLocked) || !inView}
             rightIcon={<ArrowRightIcon size={14} className="text-white" />}
           >
             Mark reviewed → next
@@ -1016,7 +1047,7 @@ export function FormPane(props: FormPaneProps) {
             </Btn>
           )}
           <span className="flex-1" />
-          <Btn kind="danger" size="sm" onClick={handleDelete} disabled={isLocked}>
+          <Btn kind="danger" size="sm" onClick={handleDelete} disabled={isLocked || overrideBusy}>
             Delete
           </Btn>
         </div>

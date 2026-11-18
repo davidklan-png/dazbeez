@@ -37,7 +37,7 @@ function makeDeferredFetch() {
         ok: (json: Record<string, unknown> = {}) =>
           resolve(
             // Default body = the endpoint's ack shape ({ok:true,warnings:[]}).
-            new Response(JSON.stringify({ ok: true, warnings: [], ...json }), {
+            new Response(JSON.stringify({ ok: true, revision: Number(JSON.parse(init.body as string).expectedRevision) + 1, warnings: [], ...json }), {
               status: 200,
               headers: { "Content-Type": "application/json" },
             }),
@@ -72,7 +72,7 @@ function bodyOf(call: DeferredCall): Record<string, unknown> {
 
 test("SaveQueue: strictly serializes — nothing fires until the previous commit", async () => {
   const { calls, fetchImpl } = makeDeferredFetch();
-  const q = new SaveQueue({ url: "/r", buildBody: () => ({}), fetchImpl });
+  const q = new SaveQueue({ initialRevision: 0, url: "/r", buildBody: () => ({}), fetchImpl });
 
   const p1 = q.save();
   const p2 = q.save();
@@ -94,7 +94,7 @@ test("SaveQueue: strictly serializes — nothing fires until the previous commit
 
 test("SaveQueue: coalesces concurrent saves into one flush, never dropping a waiter", async () => {
   const { calls, fetchImpl } = makeDeferredFetch();
-  const q = new SaveQueue({ url: "/r", buildBody: () => ({}), fetchImpl });
+  const q = new SaveQueue({ initialRevision: 0, url: "/r", buildBody: () => ({}), fetchImpl });
 
   const p1 = q.save();
   await tick(); // request 1 in flight
@@ -117,7 +117,7 @@ test("SaveQueue: coalesced flush carries the LATEST snapshot at fire time", asyn
   const { calls, fetchImpl } = makeDeferredFetch();
   let merchant = "old-value";
   const q = new SaveQueue({
-    url: "/r",
+    initialRevision: 0, url: "/r",
     buildBody: () => ({ merchant }),
     fetchImpl,
   });
@@ -142,7 +142,7 @@ test("SaveQueue: markReviewed waits for the flush carrying its rider, then resol
   const { calls, fetchImpl } = makeDeferredFetch();
   const builtWithRider: boolean[] = [];
   const q = new SaveQueue({
-    url: "/r",
+    initialRevision: 0, url: "/r",
     buildBody: (markReviewed) => {
       builtWithRider.push(markReviewed);
       return markReviewed ? { status: "reviewed" } : {};
@@ -179,7 +179,7 @@ test("SaveQueue: markReviewed rider is sticky across later coalesced autosaves",
   const { calls, fetchImpl } = makeDeferredFetch();
   let riderSeen: boolean | undefined;
   const q = new SaveQueue({
-    url: "/r",
+    initialRevision: 0, url: "/r",
     buildBody: (markReviewed) => {
       riderSeen = markReviewed;
       return {};
@@ -204,7 +204,7 @@ test("SaveQueue: markReviewed rider is sticky across later coalesced autosaves",
 
 test("SaveQueue: failed flush rejects its waiters with the server error and the queue recovers", async () => {
   const { calls, fetchImpl } = makeDeferredFetch();
-  const q = new SaveQueue({ url: "/r", buildBody: () => ({}), fetchImpl });
+  const q = new SaveQueue({ initialRevision: 0, url: "/r", buildBody: () => ({}), fetchImpl });
 
   const p1 = q.save();
   await tick();
@@ -226,7 +226,7 @@ test("SaveQueue: failed flush rejects its waiters with the server error and the 
 
 test("SaveQueue: transport loss = UNKNOWN outcome — halts draining, rejects queued work with guidance, later saves refuse (B3)", async () => {
   const { calls, fetchImpl } = makeDeferredFetch();
-  const q = new SaveQueue({ url: "/r", buildBody: () => ({}), fetchImpl });
+  const q = new SaveQueue({ initialRevision: 0, url: "/r", buildBody: () => ({}), fetchImpl });
 
   // Request A in flight; work B queues behind it (newer fields + rider).
   const pA = q.save();
@@ -257,7 +257,7 @@ test("SaveQueue: transport loss = UNKNOWN outcome — halts draining, rejects qu
 
 test("SaveQueue: a 500 can FOLLOW a committed write — UNKNOWN outcome, halts, queued B never claims success (response boundary)", async () => {
   const { calls, fetchImpl } = makeDeferredFetch();
-  const q = new SaveQueue({ url: "/r", buildBody: () => ({}), fetchImpl });
+  const q = new SaveQueue({ initialRevision: 0, url: "/r", buildBody: () => ({}), fetchImpl });
 
   // A is applied (or mid-application) server-side; its handler then crashes
   // in a post-write step and answers 500. B (newer fields + rider) is
@@ -277,7 +277,7 @@ test("SaveQueue: a 500 can FOLLOW a committed write — UNKNOWN outcome, halts, 
 
 test("SaveQueue: a 200 whose body cannot be parsed is not a usable ack — UNKNOWN, halts (response boundary)", async () => {
   const { calls, fetchImpl } = makeDeferredFetch();
-  const q = new SaveQueue({ url: "/r", buildBody: () => ({}), fetchImpl });
+  const q = new SaveQueue({ initialRevision: 0, url: "/r", buildBody: () => ({}), fetchImpl });
 
   const pA = q.save();
   await tick();
@@ -307,7 +307,7 @@ test("R1: a parseable but UNUSABLE 200 body is not an ack — halts and queued w
     "null", // JSON null
   ]) {
     const { calls, fetchImpl } = makeDeferredFetch();
-    const q = new SaveQueue({ url: "/r", buildBody: () => ({}), fetchImpl });
+    const q = new SaveQueue({ initialRevision: 0, url: "/r", buildBody: () => ({}), fetchImpl });
     const pA = q.save();
     await tick();
     const pB = q.save(true); // newer fields + rider queued behind A
@@ -333,12 +333,12 @@ test("R1: the endpoint's actual success shapes acknowledge and drain", async () 
   // may be empty or carry the compliance-recompute warning; ok alone (a
   // defensive future variant) still proves the handler completed.
   for (const [body, expectedWarnings] of [
-    ['{"ok":true,"warnings":[]}', []],
-    ['{"ok":true,"warnings":["Saved, but compliance checks could not be recomputed."]}', ["Saved, but compliance checks could not be recomputed."]],
-    ['{"ok":true}', []],
+    ['{"ok":true,"revision":1,"warnings":[]}', []],
+    ['{"ok":true,"revision":1,"warnings":["Saved, but compliance checks could not be recomputed."]}', ["Saved, but compliance checks could not be recomputed."]],
+    ['{"ok":true,"revision":1}', []],
   ] as const) {
     const { calls, fetchImpl } = makeDeferredFetch();
-    const q = new SaveQueue({ url: "/r", buildBody: () => ({}), fetchImpl });
+    const q = new SaveQueue({ initialRevision: 0, url: "/r", buildBody: () => ({}), fetchImpl });
     const pA = q.save();
     await tick();
     const pB = q.save();
@@ -355,7 +355,7 @@ test("R1: the endpoint's actual success shapes acknowledge and drain", async () 
 
 test("SaveQueue: a conclusive PRE-WRITE refusal (422) is a known failure — corrected-input retry stays available", async () => {
   const { calls, fetchImpl } = makeDeferredFetch();
-  const q = new SaveQueue({ url: "/r", buildBody: () => ({}), fetchImpl });
+  const q = new SaveQueue({ initialRevision: 0, url: "/r", buildBody: () => ({}), fetchImpl });
 
   const pA = q.save();
   await tick();
@@ -374,7 +374,7 @@ test("SaveQueue: deferFire holds REAL pending work — nothing fires or resolves
   const { calls, fetchImpl } = makeDeferredFetch();
   let composing = false;
   const q = new SaveQueue({
-    url: "/r",
+    initialRevision: 0, url: "/r",
     buildBody: () => ({}),
     deferFire: () => composing,
     fetchImpl,
@@ -413,7 +413,7 @@ test("SaveQueue: deferFire holds REAL pending work — nothing fires or resolves
 
 test("SaveQueue: lastFailed tracks the newest flush outcome for retry decisions", async () => {
   const { calls, fetchImpl } = makeDeferredFetch();
-  const q = new SaveQueue({ url: "/r", buildBody: () => ({}), fetchImpl });
+  const q = new SaveQueue({ initialRevision: 0, url: "/r", buildBody: () => ({}), fetchImpl });
   assert.equal(q.lastFailed, false);
 
   const pFail = q.save();
@@ -432,7 +432,7 @@ test("SaveQueue: lastFailed tracks the newest flush outcome for retry decisions"
 test("SaveQueue: rebind swaps the builder so later flushes carry the new fields", async () => {
   const { calls, fetchImpl } = makeDeferredFetch();
   const q = new SaveQueue({
-    url: "/r",
+    initialRevision: 0, url: "/r",
     buildBody: () => ({ merchant: "first-render" }),
     fetchImpl,
   });
@@ -443,7 +443,7 @@ test("SaveQueue: rebind swaps the builder so later flushes carry the new fields"
 
   // The form re-renders (fields changed) and rebinds a fresh closure.
   q.rebind({
-    url: "/r",
+    initialRevision: 0, url: "/r",
     buildBody: () => ({ merchant: "next-render" }),
     fetchImpl,
   });
@@ -492,8 +492,8 @@ test("form-pane routes every save through the serialized queue (no parallel PATC
   );
   assert.equal(
     (formBody.match(/method: "PATCH"/g) ?? []).length,
-    1,
-    "exactly one non-queue PATCH: the exportStatementMonth override",
+    0,
+    "membership override and all fields share the revision queue",
   );
 });
 
@@ -520,7 +520,7 @@ test("form-pane: registers the navigation flusher; Skip and in-form links naviga
   // The single mounted form publishes its flush to the guard.
   assert.match(
     reviewForm,
-    /useEffect\(\(\) => registerSaveFlusher\(flushPendingEdits\), \[flushPendingEdits\]\)/,
+    /registerSaveFlusher\(\(\) => \{[\s\S]*?dedicatedActionRef\.current[\s\S]*?return flushPendingEdits\(\)/,
   );
   // Skip delegates to the awaited guard (flushPendingEdits does the saving);
   // the push runs only inside the guard's callback, i.e. after the flush.
@@ -624,6 +624,52 @@ test("form-pane: s-key gate and Mark-reviewed button gating unchanged", () => {
   );
   assert.match(
     reviewForm,
-    /disabled=\{!canMarkReviewed\(receipt\.status, isLocked\) \|\| !inView\}/,
+    /disabled=\{overrideBusy \|\| !canMarkReviewed\(receipt\.status, isLocked\) \|\| !inView\}/,
   );
+});
+
+test("revision acknowledgements feed queued saves and dedicated membership/Delete at execution time", async () => {
+  const { calls, fetchImpl } = makeDeferredFetch();
+  const q = new SaveQueue({ url: "/r", initialRevision: 10, buildBody: () => ({ merchant: "draft" }), fetchImpl });
+  const a = q.save();
+  const b = q.save();
+  assert.equal(bodyOf(calls[0]!).expectedRevision, 10);
+  calls[0]!.ok({ revision: 13 });
+  await a; await tick();
+  assert.equal(bodyOf(calls[1]!).expectedRevision, 13);
+  calls[1]!.ok({ revision: 16 });
+  await b;
+  const membership = q.mutate("PATCH", { exportStatementMonth: "2026-11" });
+  assert.equal(bodyOf(calls[2]!).expectedRevision, 16);
+  calls[2]!.ok({ revision: 17 }); await membership;
+  const deletion = q.mutate("DELETE", { reason: "correction" });
+  assert.equal(bodyOf(calls[3]!).expectedRevision, 17);
+  assert.equal(calls[3]!.init.method, "DELETE");
+  calls[3]!.ok({ revision: 18 }); await deletion;
+});
+
+test("revision conflict halts pending and future saves, preserving newest unsent fields", async () => {
+  let draft = "first";
+  let calls = 0;
+  let release!: (r: Response) => void;
+  const q = new SaveQueue({ url: "/r", initialRevision: 0, buildBody: () => ({ merchant: draft }), fetchImpl: async () => {
+    calls++;
+    return new Promise(resolve => { release = resolve; });
+  } });
+  const a = q.save(); draft = "unsaved typing"; const b = q.save(true);
+  const rejectedA = assert.rejects(a, /changed elsewhere/);
+  const rejectedB = assert.rejects(b, /changed elsewhere/);
+  release(Response.json({ code: "receipt_revision_conflict", error: "conflict" }, { status: 409 }));
+  await Promise.all([rejectedA, rejectedB]);
+  await assert.rejects(q.save(), /changed elsewhere/);
+  await assert.rejects(q.mutate("DELETE", {}), /changed elsewhere/);
+  assert.equal(draft, "unsaved typing"); assert.equal(calls, 1);
+});
+
+test("missing, unsafe and regressed acknowledgement revisions halt", async () => {
+  for (const revision of [undefined, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, 3]) {
+    const q = new SaveQueue({ url: "/r", initialRevision: 4, buildBody: () => ({}), fetchImpl: async () => Response.json({ ok: true, revision }) });
+    await assert.rejects(q.save(), /uncertain/);
+    assert.equal(q.halted, true);
+  }
 });

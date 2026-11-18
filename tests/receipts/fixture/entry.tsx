@@ -25,6 +25,7 @@ import { navLog } from "./nav-shim";
 function makeReceipt(id: string, merchant: string): ReceiptRecord {
   return {
     id,
+    revision: 0,
     created_at: "2026-11-11T09:00:00.000Z",
     updated_at: "2026-11-11T09:00:00.000Z",
     captured_at: "2026-11-11T09:00:00.000Z",
@@ -121,7 +122,7 @@ function installFetchMock() {
           // ({ok:true, warnings:[]} — route.ts:386).
           resolve(
             new Response(
-              JSON.stringify({ ok: true, warnings: [], ...json }),
+              JSON.stringify({ ok: true, revision: Number(JSON.parse(init!.body as string).expectedRevision) + 1, warnings: [], ...json }),
               { status: 200 },
             ),
           ),

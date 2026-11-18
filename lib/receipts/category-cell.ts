@@ -10,7 +10,7 @@ import type { ExportRow } from "@/lib/receipts/types";
 import { findCategorySuggestion, type CategoryRule } from "@/lib/receipts/category-rules";
 
 export type CategoryRoute =
-  | { kind: "receipt"; id: string }
+  | { kind: "receipt"; id: string; revision: number }
   | { kind: "line"; id: string };
 
 export interface InlineCategoryCellProps {
@@ -66,7 +66,7 @@ export function buildCategoryCellProps(
     ? "from receipt"
     : "on line";
   const route: CategoryRoute | null = hasReceipt
-    ? { kind: "receipt", id: row.receiptId! }
+    ? { kind: "receipt", id: row.receiptId!, revision: row.receiptRevision! }
     : row.lineId
       ? { kind: "line", id: row.lineId }
       : null;
@@ -82,6 +82,11 @@ export function buildCategoryCellProps(
     // untouched by the reconciliation seal and stay editable.
     editable = false;
     disabledReason = "Reconciliation is sealed for this month — unseal to edit.";
+  }
+
+  if (hasReceipt && !Number.isSafeInteger(row.receiptRevision)) {
+    editable = false;
+    disabledReason = "Reload this receipt before editing its category.";
   }
 
   // Category-rule suggestion: only for an UNMATCHED, UNCATEGORIZED line (a

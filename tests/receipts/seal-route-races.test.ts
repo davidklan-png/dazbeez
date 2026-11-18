@@ -96,13 +96,17 @@ class SqliteD1 {
   private async runBatch(stmts: { __spec: { sql: string; args: unknown[] } }[]) {
     this.db.exec("BEGIN");
     try {
-      const results: { success: true; meta: { changes: number } }[] = [];
+      const results: { success: true; results?: unknown[]; meta: { changes: number } }[] = [];
       for (const s of stmts) {
         await this.onBeforeStatement?.(s.__spec.sql);
         const injected = this.injectFailure?.(s.__spec.sql);
         if (injected) throw injected;
-        const info = this.db.prepare(s.__spec.sql).run(...s.__spec.args);
-        results.push({ success: true, meta: { changes: Number(info.changes) } });
+        if (/^SELECT revision/.test(s.__spec.sql)) {
+          results.push({ success: true, results: this.db.prepare(s.__spec.sql).all(...s.__spec.args), meta: { changes: 0 } });
+        } else {
+          const info = this.db.prepare(s.__spec.sql).run(...s.__spec.args);
+          results.push({ success: true, meta: { changes: Number(info.changes) } });
+        }
       }
       this.db.exec("COMMIT");
       return results;
@@ -667,14 +671,14 @@ guardedTest("R2-A1 writer matrix fenced at EVERY archive-put boundary; unmatched
 
 // ─── Acceptance 2: a writer paused AFTER its JS prechecks, resumed post-seal ──
 
-guardedTest("R3-A2 pre-admitted PATCH: parked AFTER its unlocked precheck read, mutation SQL attempted and rejected post-seal", async () => {
+guardedTest("R3-A2 pre-admitted PATCH: parked AFTER its unlocked precheck read, SQL admission rejected post-seal", async () => {
   freshContext();
   const patchRoute = await import("@/app/api/receipts/[id]/route");
   const patchReq = () =>
     new Request("http://localhost/api/receipts/r1", {
       method: "PATCH",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ amountMinor: 4242 }),
+      body: JSON.stringify({ amountMinor: 4242, expectedRevision: (ctx.d1.db.prepare("SELECT revision FROM receipt_records WHERE id='r1'").get() as { revision: number }).revision }),
     });
 
   // Deterministic gates:
@@ -710,8 +714,7 @@ guardedTest("R3-A2 pre-admitted PATCH: parked AFTER its unlocked precheck read, 
   ctx.d1.onBeforeStatement = async (sql) => {
     if (
       !updateAttempted &&
-      /UPDATE receipt_records SET /.test(sql) &&
-      sql.includes("amount_minor")
+      /INSERT INTO receipt_edit_admissions/.test(sql)
     ) {
       updateAttempted = true;
     }
@@ -728,7 +731,7 @@ guardedTest("R3-A2 pre-admitted PATCH: parked AFTER its unlocked precheck read, 
   const patchRes = await patchInFlight;
   ctx.d1.onBeforeStatement = null;
   assert.equal(patchRes.status, 409, "SQL authority rejects the resumed writer");
-  assert.ok(updateAttempted, "the mutation UPDATE was actually attempted (not stopped by the JS precheck)");
+  assert.ok(updateAttempted, "transactional SQL admission was attempted (not stopped by the JS precheck)");
   const amt = (ctx.d1.db.prepare(`SELECT amount_minor FROM receipt_records WHERE id='r1'`).get() as never as { amount_minor: number }).amount_minor;
   assert.equal(amt, 500, "the sealed amount is unchanged");
 });
@@ -977,7 +980,7 @@ guardedTest("R2-A13 correction matrix: sealed edit refused → correction draft 
     new Request("http://localhost/api/receipts/r1", {
       method: "PATCH",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ amountMinor: amount }),
+      body: JSON.stringify({ amountMinor: amount, expectedRevision: (ctx.d1.db.prepare("SELECT revision FROM receipt_records WHERE id='r1'").get() as { revision: number }).revision }),
     });
 
   const sealed = await runRoute({ month: "2026-01", finalize: true, operatorMessage: null });

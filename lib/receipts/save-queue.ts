@@ -1,3 +1,5 @@
+import { isReceiptRevision, RECEIPT_CONFLICT_MESSAGE } from "./receipt-revision";
+
 // Client-safe serialized save queue for the receipt review form. No React, no
 // server-only imports — pure logic (repo convention: upload-pool.ts) so the
 // ordering contract is unit-testable with an injected fetch.
@@ -5,7 +7,7 @@
 // Why this exists (same-session save ordering, 2026-11): the old debounce
 // aborted the in-flight PATCH and fired a new one, but fetch.abort() is
 // client-side only — an already-sent PATCH still applies server-side, and the
-// server (updateReceiptRecord) is last-write-wins with no CAS. Two overlapping
+// server then used last-write-wins. Two overlapping
 // PATCHes could therefore commit out of order and let an OLDER field snapshot
 // overwrite a newer one. "Mark reviewed" additionally fired its own PATCH
 // without waiting for an in-flight autosave, so a slow autosave could revert
@@ -31,8 +33,7 @@
 // complete before the form can unmount — there is deliberately no
 // fire-and-forget machinery here.
 //
-// ponytail: this is client-only ordering. Cross-tab / cross-session
-// last-write-wins remains (no server CAS by design v1).
+// Receipt aggregate CAS also protects across tabs and processor writes.
 
 export type SaveFetch = (url: string, init: RequestInit) => Promise<Response>;
 
@@ -44,6 +45,7 @@ export type SaveBodyBuilder = (markReviewed: boolean) => Record<string, unknown>
 
 export interface SaveQueueConfig {
   url: string;
+  initialRevision: number;
   buildBody: SaveBodyBuilder;
   fetchImpl?: SaveFetch;
   /** Return true to HOLD the pending flush (e.g. IME composition is active —
@@ -54,6 +56,7 @@ export interface SaveQueueConfig {
 
 export interface SaveSuccess {
   warnings: string[];
+  revision: number;
 }
 
 /**
@@ -62,9 +65,8 @@ export interface SaveSuccess {
  *   • fetch rejects (connection lost; the request may still land), or
  *   • a 5xx / off-contract status: the route's catch-all 500
  *     (app/api/receipts/[id]/route.ts:387-401) can FOLLOW a committed
- *     UPDATE — updateReceiptRecord writes the row before its audit and
- *     membership steps (lib/receipts/db.ts), so a later crash answers 500
- *     with the write already durable, or
+ *     batch — a later response/compliance failure can follow a durable
+ *     receipt mutation, or
  *   • a 2xx whose body cannot be parsed: not a usable acknowledgement.
  * Once any of those happens the queue HALTS: no further request is sent
  * automatically (a later flush could not be claimed safely ordered if the
@@ -101,23 +103,22 @@ export function isConclusivePreWriteRefusal(status: number): boolean {
 
 /**
  * Runtime shape check for the success body, derived verbatim from the ONLY
- * success the receipt PATCH route can emit: `{ ok: true, warnings: string[] }`
+ * success the receipt PATCH route can emit: `{ ok: true, revision: number, warnings: string[] }`
  * (route.ts:386; warnings built as a string array at :375). A 2xx whose body
  * is anything else — primitive (`true`), array (`[]`), an error envelope
  * (`{error:…}`), or a non-array `warnings` — did not come from a completed
  * save handler and is therefore NOT an acknowledgement: it is an UNKNOWN
- * outcome and halts. No new ack key is invented; `ok: true` is the
- * endpoint's own.
+ * outcome and halts. Revision must be a nonnegative safe integer.
  */
 function isUsableSuccessAck(
   parsed: unknown,
-): parsed is { ok: true; warnings?: string[] } {
+): parsed is { ok: true; revision: number; warnings?: string[] } {
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     return false;
   }
-  const body = parsed as { ok?: unknown; warnings?: unknown; error?: unknown };
+  const body = parsed as { ok?: unknown; warnings?: unknown; revision?: unknown; error?: unknown };
   if (body.error !== undefined) return false; // error envelope ≠ success ack
-  if (body.ok !== true) return false; // the endpoint's own acknowledgement
+  if (body.ok !== true || !isReceiptRevision(body.revision)) return false; // the endpoint's own acknowledgement
   if (body.warnings !== undefined && !isStringArray(body.warnings)) {
     return false; // wrong warnings type = not the endpoint's body
   }
@@ -142,6 +143,8 @@ interface Waiter {
 
 export class SaveQueue {
   private config: SaveQueueConfig;
+  private revision: number;
+  private haltMessage = SAVE_HALTED_MESSAGE;
   private inFlight = false;
   private hasPending = false;
   private pendingMarkReviewed = false;
@@ -151,6 +154,7 @@ export class SaveQueue {
 
   constructor(config: SaveQueueConfig) {
     this.config = config;
+    this.revision = config.initialRevision;
   }
 
   /** Replace the closures: the form re-renders with fresh field state, and
@@ -191,13 +195,23 @@ export class SaveQueue {
       // Unknown-outcome halt: refuse rather than enqueue — sending more
       // after an ambiguous request cannot be claimed safely ordered.
       if (this.haltedForUnknownOutcome) {
-        reject(new Error(SAVE_HALTED_MESSAGE));
+        reject(new Error(this.haltMessage));
         return;
       }
       this.waiters.push({ resolve, reject });
       this.hasPending = true;
       if (markReviewed) this.pendingMarkReviewed = true;
       this.drain();
+    });
+  }
+
+  /** Caller flushes edits first; dedicated actions share the acknowledged token. */
+  mutate(method: "PATCH" | "DELETE", body: Record<string, unknown>): Promise<SaveSuccess> {
+    if (this.halted) return Promise.reject(new Error(this.haltMessage));
+    if (!this.idle) return Promise.reject(new Error("Wait for pending receipt saves."));
+    this.inFlight = true;
+    return new Promise((resolve, reject) => {
+      void this.fire(this.config.url, body, [{ resolve, reject }], this.config.fetchImpl ?? defaultFetch, method);
     });
   }
 
@@ -223,14 +237,15 @@ export class SaveQueue {
     body: Record<string, unknown>,
     waiters: Waiter[],
     fetchImpl: SaveFetch,
+    method = "PATCH",
   ): Promise<void> {
     let result: SaveSuccess | Error;
     let haltError: Error | null = null;
     try {
       const res = await fetchImpl(url, {
-        method: "PATCH",
+        method,
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+        body: JSON.stringify({ ...body, expectedRevision: this.revision }),
       });
       // Ack boundary: a success ack must be a 2xx WITH a parseable body; a
       // conclusive failure must be one of the route's proven PRE-WRITE
@@ -241,12 +256,15 @@ export class SaveQueue {
       } catch {
         parsed = null; // malformed/missing body — not a usable ack
       }
-      if (res.ok && isUsableSuccessAck(parsed)) {
-        result = { warnings: parsed.warnings ?? [] };
+      if (res.ok && isUsableSuccessAck(parsed) && parsed.revision >= this.revision) {
+        this.revision = parsed.revision;
+        result = { warnings: parsed.warnings ?? [], revision: parsed.revision };
       } else if (!res.ok && isConclusivePreWriteRefusal(res.status)) {
-        result = new Error(
-          errorTextOf(parsed) ?? "Save failed",
-        );
+        result = new Error(errorTextOf(parsed) ?? "Save failed");
+        if (res.status === 409 && (parsed as { code?: string } | null)?.code === "receipt_revision_conflict") {
+          haltError = new Error(RECEIPT_CONFLICT_MESSAGE);
+          result = haltError;
+        }
       } else {
         haltError = new Error(SAVE_HALTED_MESSAGE);
         result = haltError;
@@ -261,6 +279,7 @@ export class SaveQueue {
     if (haltError) {
       // Halt BEFORE rejecting so even synchronous observers see it.
       this.haltedForUnknownOutcome = true;
+      this.haltMessage = haltError.message;
       // Work queued behind the ambiguous request cannot be safely ordered:
       // reject (never silently drop) its waiters too. Fields stay with the
       // caller; the guidance message is the honest recovery state.

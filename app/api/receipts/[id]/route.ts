@@ -1,3 +1,4 @@
+import { isReceiptRevision, isReceiptRevisionConflict, RECEIPT_CONFLICT_MESSAGE } from "@/lib/receipts/receipt-revision";
 import { NextResponse } from "next/server";
 import { requireReceiptsActor } from "@/lib/receipts/auth";
 import { getReceiptRecord, updateReceiptRecord, listAttendees, softDeleteReceipt } from "@/lib/receipts/db";
@@ -118,6 +119,7 @@ export async function PATCH(request: Request, { params }: RouteContext) {
     }
 
     const body = (await request.json()) as {
+      expectedRevision?: number;
       paymentPath?: string;
       expenseType?: string;
       transactionDate?: string | null;
@@ -136,6 +138,10 @@ export async function PATCH(request: Request, { params }: RouteContext) {
       counterpartyName?: string | null;
       taxRate?: string | null;
     };
+
+    if (!isReceiptRevision(body.expectedRevision)) {
+      return NextResponse.json({ error: "A last acknowledged receipt revision is required.", code: "receipt_revision_required" }, { status: 400 });
+    }
 
     if (
       body.paymentPath !== undefined &&
@@ -351,11 +357,12 @@ export async function PATCH(request: Request, { params }: RouteContext) {
           .map((name) => ({ attendeeName: name.trim().slice(0, 120) }))
       : undefined;
 
-    await updateReceiptRecord(
+    const revision = await updateReceiptRecord(
       id,
       receiptUpdate,
       actor,
       {
+        expectedRevision: body.expectedRevision,
         attendees: attendeeInputs,
         // ADR 0006 §D6: dedicated audit for the override (old → new month +
         // actor), separate from the generic receipt.updated entry.
@@ -390,10 +397,13 @@ export async function PATCH(request: Request, { params }: RouteContext) {
       );
     }
 
-    return NextResponse.json({ ok: true, warnings }, { status: 200 });
+    return NextResponse.json({ ok: true, warnings, revision }, { status: 200 });
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("Unauthorized")) {
       return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
+    }
+    if (isReceiptRevisionConflict(error)) {
+      return NextResponse.json({ error: RECEIPT_CONFLICT_MESSAGE, code: "receipt_revision_conflict" }, { status: 409 });
     }
     if (error instanceof ExportFinalizedError) {
       return NextResponse.json({ error: error.message }, { status: 409 });
@@ -426,17 +436,25 @@ export async function DELETE(request: Request, { params }: RouteContext) {
     // (audit A1 loud-failure theme — softDeleteReceipt enforces it). Parse
     // defensively: a missing/empty/non-JSON body is treated as no reason.
     let reason: string | undefined;
+    let expectedRevision: unknown;
     try {
-      const body = (await request.json()) as { reason?: string };
-      reason = body.reason?.trim() || undefined;
+      const body = (await request.json()) as { reason?: string; expectedRevision?: number };
+      reason = typeof body.reason === "string" ? body.reason.trim() || undefined : undefined;
+      expectedRevision = body.expectedRevision;
     } catch {
       reason = undefined;
     }
 
-    await softDeleteReceipt(id, actor, reason);
+    if (!isReceiptRevision(expectedRevision)) {
+      return NextResponse.json({ error: "A last acknowledged receipt revision is required.", code: "receipt_revision_required" }, { status: 400 });
+    }
+    const revision = await softDeleteReceipt(id, actor, reason, getReceiptsDb(), expectedRevision);
 
-    return NextResponse.json({ ok: true }, { status: 200 });
+    return NextResponse.json({ ok: true, revision }, { status: 200 });
   } catch (error) {
+    if (isReceiptRevisionConflict(error)) {
+      return NextResponse.json({ error: RECEIPT_CONFLICT_MESSAGE, code: "receipt_revision_conflict" }, { status: 409 });
+    }
     if (error instanceof Error && error.message.startsWith("Unauthorized")) {
       return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
     }

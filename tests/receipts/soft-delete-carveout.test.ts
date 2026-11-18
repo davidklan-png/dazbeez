@@ -18,13 +18,18 @@ function fakeDb(opts: {
 }) {
   const runs: Run[] = [];
   const db = {
+    async batch(stmts: { sql: string; args: unknown[] }[]) {
+      runs.push(...stmts);
+      return stmts.map(() => ({ results: [{ revision: 1 }], meta: { changes: 1 } }));
+    },
     prepare(sql: string) {
       return {
         bind(...args: unknown[]) {
           return {
+            sql, args,
             async first<T = unknown>(): Promise<T | null> {
-              if (/SELECT id, status, exported_month FROM receipt_records/i.test(sql)) {
-                return { id: "r1", status: opts.status, exported_month: opts.exportedMonth } as T;
+              if (/SELECT id, revision, status, exported_month FROM receipt_records/i.test(sql)) {
+                return { id: "r1", revision: 0, status: opts.status, exported_month: opts.exportedMonth } as T;
               }
               if (/CASE/i.test(sql) && /receipt_exports/i.test(sql)) {
                 return { locked: opts.locked } as T;
@@ -50,7 +55,7 @@ test("softDeleteReceipt: exported + open draft + reason → soft-deleted, audit 
   assert.ok(update, "expected a deleted_at UPDATE");
   const audit = runs.find((r) => /INSERT INTO receipt_audit_log/i.test(r.sql));
   assert.ok(audit, "expected an audit INSERT");
-  assert.equal(audit!.args[2], "receipt.deleted"); // action bind position
+  assert.match(audit!.sql, /'receipt.deleted'/);
 });
 
 test("softDeleteReceipt: exported + no draft (locked) → throws, writes nothing", async () => {
