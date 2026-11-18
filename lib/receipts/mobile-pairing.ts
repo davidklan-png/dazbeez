@@ -45,6 +45,7 @@ export function isValidPairingCodeShape(code: string): boolean {
 }
 
 export async function createPairingCode(): Promise<{ code: string; expiresAt: string }> {
+  await deleteExpiredPairingCodes();
   const db = getReceiptsDb();
   const now = Date.now();
   const expiresAt = new Date(now + CODE_TTL_MS).toISOString();
@@ -110,7 +111,7 @@ export async function completePairing(
 
   if (!row) throw new Error("Pairing code not found.");
   if (row.consumed_device_id) throw new Error("Pairing code already used.");
-  if (Date.parse(row.expires_at) < Date.now()) {
+  if (Date.parse(row.expires_at) <= Date.now()) {
     throw new Error("Pairing code has expired.");
   }
 
@@ -133,7 +134,8 @@ export async function completePairing(
          SET consumed_device_id = ?,
              consumed_at = ?,
              bearer_token = ?
-       WHERE code = ? AND consumed_device_id IS NULL`,
+       WHERE code = ? AND consumed_device_id IS NULL
+         AND expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`,
     )
     .bind(deviceId, nowIso(), bearerToken, normalized)
     .run();
@@ -146,14 +148,14 @@ export async function completePairing(
       .prepare(`UPDATE trusted_devices SET revoked_at = ? WHERE id = ?`)
       .bind(nowIso(), deviceId)
       .run();
-    throw new Error("Pairing code already used.");
+    throw new Error("Pairing code already used or expired.");
   }
 
   return { deviceId };
 }
 
 // Polling endpoint result. Bearer token is returned exactly once: the row is
-// cleared after a successful read so the token cannot be replayed.
+// cleared by a conditional write; only its winner can return the read token.
 export async function checkPairingCode(code: string): Promise<
   | { status: "pending" }
   | { status: "expired" }
@@ -178,22 +180,26 @@ export async function checkPairingCode(code: string): Promise<
 
   if (!row) return { status: "not_found" };
 
-  if (!row.consumed_device_id) {
-    if (Date.parse(row.expires_at) < Date.now()) return { status: "expired" };
-    return { status: "pending" };
-  }
-
-  if (!row.bearer_token) {
+  if (row.consumed_device_id && !row.bearer_token) {
     // Already delivered.
     return { status: "not_found" };
   }
 
-  await db
+  if (Date.parse(row.expires_at) <= Date.now()) return { status: "expired" };
+  if (!row.consumed_device_id || !row.bearer_token) return { status: "pending" };
+
+  // Check expiry at write admission, after any D1 queueing or concurrent cleanup.
+  const update = await db
     .prepare(
-      `UPDATE mobile_pairing_codes SET bearer_token = NULL WHERE code = ?`,
+      `UPDATE mobile_pairing_codes SET bearer_token = NULL
+       WHERE code = ? AND consumed_device_id = ? AND bearer_token = ?
+         AND expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`,
     )
-    .bind(normalized)
+    .bind(normalized, row.consumed_device_id, row.bearer_token)
     .run();
+  if (Number(update.meta?.changes ?? 0) === 0) {
+    return { status: Date.parse(row.expires_at) <= Date.now() ? "expired" : "not_found" };
+  }
 
   return {
     status: "ready",
@@ -207,9 +213,10 @@ export async function deleteExpiredPairingCodes(): Promise<void> {
   await db
     .prepare(
       `DELETE FROM mobile_pairing_codes
-       WHERE (consumed_device_id IS NULL AND expires_at < ?)
+       WHERE ((consumed_device_id IS NULL OR bearer_token IS NOT NULL)
+              AND expires_at <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
           OR (consumed_at IS NOT NULL AND bearer_token IS NULL AND consumed_at < ?)`,
     )
-    .bind(nowIso(), new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString())
+    .bind(new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString())
     .run();
 }
