@@ -1,4 +1,4 @@
-import { isReceiptRevision, isReceiptRevisionConflict, RECEIPT_CONFLICT_MESSAGE } from "@/lib/receipts/receipt-revision";
+import { isReceiptRevision, ReceiptNotFoundError, isReceiptRevisionConflict, RECEIPT_CONFLICT_MESSAGE } from "@/lib/receipts/receipt-revision";
 import { NextResponse } from "next/server";
 import { requireReceiptsActor } from "@/lib/receipts/auth";
 import { getReceiptRecord, updateReceiptRecord, listAttendees, softDeleteReceipt } from "@/lib/receipts/db";
@@ -402,6 +402,9 @@ export async function PATCH(request: Request, { params }: RouteContext) {
     if (error instanceof Error && error.message.startsWith("Unauthorized")) {
       return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
     }
+    if (error instanceof ReceiptNotFoundError) {
+      return NextResponse.json({ error: "Receipt not found.", code: "receipt_not_found" }, { status: 404 });
+    }
     if (isReceiptRevisionConflict(error)) {
       return NextResponse.json({ error: RECEIPT_CONFLICT_MESSAGE, code: "receipt_revision_conflict" }, { status: 409 });
     }
@@ -452,6 +455,9 @@ export async function DELETE(request: Request, { params }: RouteContext) {
 
     return NextResponse.json({ ok: true, revision }, { status: 200 });
   } catch (error) {
+    if (error instanceof ReceiptNotFoundError) {
+      return NextResponse.json({ error: "Receipt not found.", code: "receipt_not_found" }, { status: 404 });
+    }
     if (isReceiptRevisionConflict(error)) {
       return NextResponse.json({ error: RECEIPT_CONFLICT_MESSAGE, code: "receipt_revision_conflict" }, { status: 409 });
     }

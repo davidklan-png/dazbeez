@@ -261,7 +261,7 @@ export class SaveQueue {
         result = { warnings: parsed.warnings ?? [], revision: parsed.revision };
       } else if (!res.ok && isConclusivePreWriteRefusal(res.status)) {
         result = new Error(errorTextOf(parsed) ?? "Save failed");
-        if (res.status === 409 && (parsed as { code?: string } | null)?.code === "receipt_revision_conflict") {
+        if (res.status === 404 || (res.status === 409 && (parsed as { code?: string } | null)?.code === "receipt_revision_conflict")) {
           haltError = new Error(RECEIPT_CONFLICT_MESSAGE);
           result = haltError;
         }

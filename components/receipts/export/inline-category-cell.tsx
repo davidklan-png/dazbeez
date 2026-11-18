@@ -55,7 +55,7 @@ export function InlineCategoryCell(props: InlineCategoryCellProps) {
   // or another tab's edit) — but never clobber an in-flight optimistic value.
   // Adjusting state during render with a prop-change guard is the React-
   // recommended way to sync to a prop without a setState-in-effect.
-  if (props.code !== trackedCode) {
+  if ((props.code ?? "") !== trackedCode) {
     setTrackedCode(props.code ?? "");
     if (status === "idle") setValue(props.code ?? "");
   }

@@ -1,4 +1,4 @@
-import { isReceiptRevision } from "./receipt-revision";
+import { isReceiptRevision, ReceiptNotFoundError } from "./receipt-revision";
 import { expectedStatementMonths } from "./missing-statements";
 import { getReceiptsDb } from "@/lib/cloudflare-runtime";
 import { createAuditEntry } from "@/lib/receipts/audit";
@@ -428,7 +428,7 @@ export async function updateReceiptRecord(
     .bind(id)
     .first<ReceiptRecord>();
 
-  if (!before) throw new Error(`Receipt ${id} not found.`);
+  if (!before) throw new ReceiptNotFoundError(id);
   await rejectIfReceiptInFinalizedReconciliation(db, id);
   // Split lock (audit A5): for CASH/DIGITAL receipts, also check the
   // export-finalized gate against the EFFECTIVE transaction month (input
@@ -1035,7 +1035,7 @@ export async function softDeleteReceipt(
     .bind(id)
     .first<{ id: string; revision: number; status: string; exported_month: string | null }>();
 
-  if (!record) throw new Error(`Receipt ${id} not found.`);
+  if (!record) throw new ReceiptNotFoundError(id);
 
   // Unified draft carve-out (ADR 0012): an exported receipt becomes deletable
   // when its month has an open correction draft (isMonthLockedForEdits → false).

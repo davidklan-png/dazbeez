@@ -763,6 +763,7 @@ export function FormPane(props: FormPaneProps) {
                 open a correction export draft for {lockMonth} — to edit.{" "}
                 <Link
                   href={withWorkMonth("/receipts/reconcile", lockMonth ?? workMonth)}
+                  onClick={(e) => guardedLinkClick(e, withWorkMonth("/receipts/reconcile", lockMonth ?? workMonth), (h) => router.push(h))}
                   className="font-semibold text-gray-900 underline"
                 >
                   Go to reconcile →
@@ -773,6 +774,7 @@ export function FormPane(props: FormPaneProps) {
                 The {lockMonth} export is finalized. Open a revision to edit.{" "}
                 <Link
                   href={withWorkMonth("/receipts/export", lockMonth ?? workMonth)}
+                  onClick={(e) => guardedLinkClick(e, withWorkMonth("/receipts/export", lockMonth ?? workMonth), (h) => router.push(h))}
                   className="font-semibold text-gray-900 underline"
                 >
                   Go to export →

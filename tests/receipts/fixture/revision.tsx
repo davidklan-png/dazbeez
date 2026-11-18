@@ -1,6 +1,8 @@
 // Synthetic two-tab fixture: real FormPane/SaveQueue, local test transport only.
+import { navLog } from "./nav-shim";
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
+import { InlineCategoryCell } from "@/components/receipts/export/inline-category-cell";
 import { FormPane } from "@/components/receipts/review/form-pane";
 import { QueueControlsProvider } from "@/components/receipts/review/queue-controls";
 import type { ReceiptRecord, ReceiptStatus } from "@/lib/receipts/types";
@@ -42,17 +44,25 @@ function makeReceipt(id: string, merchant: string): ReceiptRecord {
   };
 }
 
+Object.assign(window, { fixtureNavigation: navLog });
+
 function Fixture() {
   const [receipt, setReceipt] = useState(makeReceipt("r1", "Original"));
+  const [sealed, setSealed] = useState(false);
   return <QueueControlsProvider items={[]} activeId="r1" queryParams="?month=2026-11">
     <button id="refresh-props" onClick={async () => {
       const state = await fetch("/state").then(r => r.json()) as { revision: number; merchant: string };
       setReceipt({ ...receipt, revision: state.revision, merchant: state.merchant });
     }}>Synthetic server refresh</button>
+    <button id="seal-props" onClick={() => setSealed(true)}>Synthetic seal refresh</button>
+    {window.location.hash === "#inline" ? <InlineCategoryCell
+      code={receipt.expense_category_code} categoryJa={null} categoryEn={null}
+      sourceLabel="from receipt" route={{ kind: "receipt", id: receipt.id, revision: receipt.revision }}
+      editable hasAttendees suggestedCategoryCode={null} disabledReason={null} /> :
     <div style={{ height: "95vh" }}><FormPane receipt={receipt} initialAttendees={[]}
       queueIndex={1} queueTotal={1} nextReceiptId={null} prevReceiptId={null}
       hasAmexMatch={false} reReviewNeeded={false} overrideTargetMonths={["2026-12"]}
-      naturalStatementMonth="2026-11" /></div>
+      naturalStatementMonth="2026-11" lock={sealed ? { locked: true, kind: "export", month: "2026-11" } : undefined} /></div>}
   </QueueControlsProvider>;
 }
 createRoot(document.getElementById("root")!).render(<Fixture />);

@@ -673,3 +673,15 @@ test("missing, unsafe and regressed acknowledgement revisions halt", async () =>
     assert.equal(q.halted, true);
   }
 });
+
+test("a missing/deleted receipt halts future autosaves and dedicated actions", async () => {
+  let calls = 0;
+  const q = new SaveQueue({ initialRevision: 4, url: "/r", buildBody: () => ({ merchant: "retained" }), fetchImpl: async () => {
+    calls++;
+    return Response.json({ error: "Receipt not found." }, { status: 404 });
+  } });
+  await assert.rejects(q.save(), /no longer available/);
+  await assert.rejects(q.save(), /no longer available/);
+  await assert.rejects(q.mutate("DELETE", {}), /no longer available/);
+  assert.equal(q.halted, true); assert.equal(calls, 1);
+});

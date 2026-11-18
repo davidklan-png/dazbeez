@@ -15,10 +15,15 @@ function fixture() {
   let beforeBatch: (() => void) | undefined;
   let loseAck = false;
   let afterCommit: (() => void) | undefined;
+  let afterRead: (() => void) | undefined;
   const prepare = (text: string) => {
     const make = (args: unknown[] = []) => ({
       text, args, bind: (...values: unknown[]) => make(values),
-      first: async () => sql.prepare(text).get(...args) ?? null,
+      first: async () => {
+        const row = sql.prepare(text).get(...args);
+        const hook = afterRead; afterRead = undefined; hook?.();
+        return row ?? null;
+      },
       all: async () => ({ results: sql.prepare(text).all(...args) }),
       run: async () => ({ success: true, meta: { changes: Number(sql.prepare(text).run(...args).changes) } }),
     });
@@ -38,7 +43,7 @@ function fixture() {
     if (loseAck) throw new Error("Lost response after COMMIT");
     return results;
   } } as unknown as D1Database;
-  return { sql, db, afterCommit: (fn: () => void) => { afterCommit = fn; }, beforeBatch: (fn: () => void) => { beforeBatch = fn; }, loseAck: () => { loseAck = true; },
+  return { sql, db, afterRead: (fn: () => void) => { afterRead = fn; }, afterCommit: (fn: () => void) => { afterCommit = fn; }, beforeBatch: (fn: () => void) => { beforeBatch = fn; }, loseAck: () => { loseAck = true; },
     revision: () => (sql.prepare("SELECT revision FROM receipt_records WHERE id='r1'").get() as { revision: number }).revision,
     audits: () => sql.prepare("SELECT * FROM receipt_audit_log").all(),
   };
@@ -95,6 +100,11 @@ test("admission races: deletion or processor write immediately before batch leav
     await assert.rejects(updateReceiptRecord("r1", { merchant: "browser" }, "op", { expectedRevision: 0 }, current.db), /REVISION_CONFLICT/);
     assert.equal(current.audits().length, 0);
   }
+  current = fixture();
+  current.afterRead(() => current.sql.exec("DELETE FROM receipt_records"));
+  const missing = await route.PATCH(request("PATCH", { expectedRevision: 0, merchant: "late" }), context);
+  assert.equal(missing.status, 404);
+  assert.equal(current.audits().length, 0);
 });
 
 test("audit-tail failure rolls back fields, automatic membership, roster and revisions", async () => {
@@ -222,4 +232,22 @@ test("D1 commit-before-error yields 500 and halts the queue; admitted Delete ret
   assert.equal(response.status, 200);
   assert.equal((await response.json() as { revision: number }).revision, current.revision());
   assert.equal(current.audits().length, 1);
+});
+
+test("file manifest and export-item direct writes invalidate the receipt aggregate", () => {
+  current = fixture();
+  const changes = [
+    `INSERT INTO receipt_files (id,object_type,object_id,role,r2_bucket,r2_key,original_filename,content_type,file_size_bytes,sha256_hash,uploaded_by,uploaded_at,created_at,updated_at)
+      VALUES ('f','receipt','r1','original','bucket','key','f.jpg','image/jpeg',1,'sha','a','t','t','t')`,
+    "UPDATE receipt_files SET role='proof' WHERE id='f'",
+    "DELETE FROM receipt_files WHERE id='f'",
+    "INSERT INTO receipt_exports (id,export_month,status,created_by,created_at) VALUES ('e','2026-11','draft','a','t')",
+    "INSERT INTO receipt_export_items (id,export_id,item_type,item_id,created_at) VALUES ('i','e','receipt','r1','t')",
+    "UPDATE receipt_export_items SET created_at='later' WHERE id='i'",
+    "DELETE FROM receipt_export_items WHERE id='i'",
+  ];
+  for (const sql of changes) {
+    const revision = current.revision(); current.sql.exec(sql);
+    if (!sql.startsWith("INSERT INTO receipt_exports ")) assert.ok(current.revision() > revision, sql);
+  }
 });

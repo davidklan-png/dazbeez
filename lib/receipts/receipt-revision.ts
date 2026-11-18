@@ -8,4 +8,10 @@ export function isReceiptRevisionConflict(error: unknown): boolean {
 }
 
 export const RECEIPT_CONFLICT_MESSAGE =
-  "This receipt changed elsewhere. Your edits are kept here. Reload and review the current receipt before editing again.";
+  "This receipt changed elsewhere or is no longer available. Your edits are kept here. Reload and review the current receipt before editing again.";
+
+export class ReceiptNotFoundError extends Error {
+  constructor(id: string) {
+    super(`Receipt ${id} not found.`);
+  }
+}
