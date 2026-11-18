@@ -74,7 +74,8 @@ async function run() {
       button.click();
     }
     assert(form, "form mounted");
-    for (const control of form.querySelectorAll<HTMLInputElement | HTMLSelectElement>("input, select")) {
+    for (const control of form.querySelectorAll("input, select")) {
+      assert(control instanceof HTMLInputElement || control instanceof HTMLSelectElement, "native form control");
       assert(control.disabled || (control instanceof HTMLInputElement && control.readOnly), `${path}: native disabled/read-only field`);
     }
     const attendeeAdd = Array.from(form.querySelectorAll("button")).find((el) => el.textContent?.includes("Add attendee"));
