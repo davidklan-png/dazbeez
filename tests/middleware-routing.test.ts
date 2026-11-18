@@ -144,3 +144,12 @@ test("PUBLIC_ROUTES: the /render-retry recovery endpoint is NOT exempted (Clerk-
     "/render-retry must NOT be exempted from auth.protect() (Clerk-only operator action)",
   );
 });
+
+
+test("PUBLIC_ROUTES: /extraction-failed permits the handler's processor-key authentication", () => {
+  const request = new NextRequest(
+    "https://dazbeez.com/api/receipts/00000000-0000-0000-0000-000000000000/extraction-failed",
+    { method: "POST" },
+  );
+  assert.ok(isPublicRoute(request));
+});

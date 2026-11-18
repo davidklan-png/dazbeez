@@ -302,26 +302,18 @@ def apply_to_worker(receipt_id: str, payload: dict[str, Any]) -> None:
     resp.raise_for_status()
 
 
-def post_extraction_failed(receipt_id: str, reason: str) -> None:
-    """Tell the Worker this receipt's extraction failed permanently.
+def post_extraction_failed(receipt_id: str, reason: str) -> bool:
+    """Confirm a terminal/handled outcome before allowing the queue ACK.
 
-    The Worker moves extraction_state to 'failed' (only from pending), persists
-    the reason into extraction_json, and the review UI surfaces a red
-    'extraction failed' pill. Caller then ACKs the queue message — retrying
-    the same bytes would produce the same failure, so the message must not
-    redeliver forever or land in the DLQ.
-
-    Failures of THIS call (network, 5xx) are swallowed because the caller
-    has already classified the original error as permanent and will ACK
-    regardless — losing the reason annotation is preferable to retrying
-    a poison pill.
+    A lost response can follow a commit. False means unconfirmed: leave the
+    lease unacked for retry/DLQ and check current state, never assume rollback.
     """
     headers = {
         "x-receipts-processor-key": PROCESSOR_KEY,
         "Content-Type": "application/json",
     }
     try:
-        requests.post(
+        resp = requests.post(
             f"{EXTRACT_BASE}/{receipt_id}/extraction-failed",
             headers=headers,
             json={
@@ -330,12 +322,28 @@ def post_extraction_failed(receipt_id: str, reason: str) -> None:
             },
             timeout=30,
         )
-    except requests.RequestException as exc:
+        body = resp.json()
+        if isinstance(body, dict):
+            if (200 <= resp.status_code < 300 and body.get("ok") is True
+                    and body.get("extractionState") in ("failed", "processed")):
+                return True
+            # Only the handler's explicit not-found response is definitive;
+            # a generic proxy/Clerk 404 or a refused 409 is not confirmation.
+            if (resp.status_code == 404 and body.get("outcome") == "not_found"
+                    and isinstance(body.get("error"), str)):
+                return True
         print(
-            f"[warn] {receipt_id}: failed to post extraction-failed ({exc}); "
-            "acking anyway — reason will not be visible in the UI.",
+            f"[warn] {receipt_id}: extraction-failed report unconfirmed "
+            f"(HTTP {resp.status_code}); check the dashboard's current state",
             file=sys.stderr,
         )
+    except (requests.RequestException, ValueError) as exc:
+        print(
+            f"[warn] {receipt_id}: extraction-failed report unconfirmed ({exc}); "
+            "check the dashboard's current state",
+            file=sys.stderr,
+        )
+    return False
 
 
 # ─── Proof-copy derivatives (PR 1) ────────────────────────────────────────────
@@ -754,12 +762,11 @@ def process_backfill(dry_run: bool, only_id: str | None = None) -> None:
                 # mark the receipt failed in the UI, count as extract_fail
                 # (no queue to ack here — backfill reads D1 directly).
                 reason = _format_failure_reason(exc)
-                post_extraction_failed(rid, reason)
+                confirmed = post_extraction_failed(rid, reason)
                 stats["extract_fail"] += 1
-                print(
-                    f"  [fail-perm]   {label}: {reason} — marked extraction-failed",
-                    file=sys.stderr,
-                )
+                outcome = ("terminal or already handled confirmed" if confirmed else
+                           "report unconfirmed — check the dashboard's current state")
+                print(f"  [fail-perm]   {label}: {reason} — {outcome}", file=sys.stderr)
             else:
                 print(f"  [fail]        {label}: {exc}", file=sys.stderr)
                 stats["extract_fail"] += 1
@@ -1147,17 +1154,24 @@ def process_once() -> int:
             if is_permanent_extraction_error(exc):
                 # Deterministic-permanent local failure (corrupt image / PDF,
                 # zero-byte file). Mark the receipt failed so the operator
-                # sees it in the review UI, then ack so the message doesn't
-                # retry into the DLQ. Transient errors (network, model load,
-                # generate) fall through to the unacked-retry path.
+                # sees it in the review UI. ACK only a confirmed report;
+                # unconfirmed delivery stays unacked for retry/DLQ. Transient
+                # local errors fall through to the unacked-retry path.
                 reason = _format_failure_reason(exc)
-                post_extraction_failed(receipt_id, reason)
-                acked.append(lease_id)
-                print(
-                    f"[fail-perm] {msg.get('id')} ({receipt_id}): {reason} "
-                    "— marked extraction-failed + acked",
-                    file=sys.stderr,
-                )
+                if post_extraction_failed(receipt_id, reason):
+                    acked.append(lease_id)
+                    print(
+                        f"[fail-perm] {msg.get('id')} ({receipt_id}): {reason} "
+                        "— terminal or already handled confirmed; eligible for ACK",
+                        file=sys.stderr,
+                    )
+                else:
+                    print(
+                        f"[retry] {msg.get('id')} ({receipt_id}): {reason} "
+                        "— failure report unconfirmed; leaving unacked for retry/DLQ; "
+                        "check the dashboard's current state",
+                        file=sys.stderr,
+                    )
             else:
                 print(f"[retry] {msg.get('id')} ({receipt_id}): {exc}", file=sys.stderr)
     ack(acked)
