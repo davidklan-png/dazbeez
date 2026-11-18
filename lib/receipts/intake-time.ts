@@ -14,10 +14,12 @@ export function parseIntakeTime(value: unknown): number | null {
 
 /** Same grammar/calendar validation in SQLite; compare instants, never strings. */
 export function intakeJulianSql(column: string): string {
-  const base = `substr(${column}, 1, 19)`;
   const zone = `(CASE WHEN substr(${column}, 20, 1) = '.' THEN substr(${column}, 24) ELSE substr(${column}, 20) END)`;
+  // Split the grammar so each GLOB stays within D1's 50-byte pattern limit.
   return `(CASE WHEN
-    ${base} GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]'
+    substr(${column}, 1, 10) GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
+    AND substr(${column}, 11, 1) = 'T'
+    AND substr(${column}, 12, 8) GLOB '[0-9][0-9]:[0-9][0-9]:[0-9][0-9]'
     AND substr(${column}, 1, 4) != '0000'
     AND date(substr(${column}, 1, 10), '+0 days') = substr(${column}, 1, 10)
     AND substr(${column}, 12, 2) <= '23' AND substr(${column}, 15, 2) <= '59' AND substr(${column}, 18, 2) <= '59'
