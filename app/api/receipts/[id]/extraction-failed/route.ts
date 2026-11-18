@@ -1,11 +1,6 @@
 import { NextResponse } from "next/server";
 import { requireReceiptsActor } from "@/lib/receipts/auth";
-import {
-  getReceiptRecord,
-  reconcileExtractionState,
-} from "@/lib/receipts/db";
-import { createAuditEntry } from "@/lib/receipts/audit";
-import { nowIso, stringifyJson } from "@/lib/receipts/db-utils";
+import { parseExtractionFailedBody, recordExtractionFailure } from "@/lib/receipts/extraction-failure";
 import { getReceiptsDb, getReceiptsProcessorKey } from "@/lib/cloudflare-runtime";
 
 type RouteContext = { params: Promise<{ id: string }> };
@@ -25,32 +20,7 @@ function timingSafeEqual(a: string, b: string): boolean {
   return mismatch === 0;
 }
 
-interface ExtractionFailedBody {
-  /** Why extraction failed (e.g. "UnidentifiedImageError", "pymupdf: empty file"). */
-  reason?: string;
-  /** Optional provider/model label for provenance, e.g. "mlx_local:qwen3-vl-32b". */
-  model?: string;
-}
-
-/**
- * Mark a receipt's extraction as permanently failed (ADR 0001).
- *
- * Called by the Mac MLX consumer (`scripts/receipts-consumer/consumer.py`) when
- * it classifies a local failure as deterministic-permanent — corrupt image,
- * zero-byte file, pymupdf open/render error. The consumer then ACKs the queue
- * message so it does not retry forever or land in the DLQ. Transient failures
- * (network, HTTP 5xx, model load) stay on the existing unacked-retry path.
- *
- * Auth mirrors `/extract`: processor key OR Clerk-authenticated human actor.
- * The Clerk middleware exemption (ce01989) is required so processor-key
- * requests reach the handler instead of being 404-rewritten by `auth.protect()`
- * — see middleware.ts isPublicRoute list.
- *
- * Effect: `extraction_state` moves to `'failed'` only from pending states
- * (captured/queued/processing). Locked statuses (reviewed/reconciled/exported/
- * archived) return 409 — a late failure report for a receipt a human already
- * handled must not roll the queue state back.
- */
+/** Processor-key OR Clerk auth; the middleware exemption must remain in place. */
 export async function POST(request: Request, { params }: RouteContext) {
   try {
     // Layered auth: processor key first, then Clerk human-actor fall-through.
@@ -65,110 +35,32 @@ export async function POST(request: Request, { params }: RouteContext) {
       : await requireReceiptsActor(request.headers);
 
     const { id } = await params;
-    const body = (await request.json().catch(() => null)) as
-      | ExtractionFailedBody
-      | null;
-    const reason = (body?.reason ?? "").trim();
-    if (!reason) {
-      return NextResponse.json(
-        { error: "Body must include a non-empty `reason`." },
-        { status: 400 },
-      );
+    const parsed = parseExtractionFailedBody(await request.json().catch(() => null));
+    if (!parsed.ok) {
+      return NextResponse.json({ error: parsed.error }, { status: parsed.status });
     }
-    if (reason.length > 1000) {
-      return NextResponse.json(
-        { error: "`reason` must be 1000 characters or fewer." },
-        { status: 413 },
-      );
-    }
-
-    const receipt = await getReceiptRecord(id);
-    const db = getReceiptsDb();
-
-    if (!receipt) {
-      await createAuditEntry(db, {
-        actor,
-        action: "receipt.extraction_failed",
-        objectType: "receipt",
-        objectId: id,
-        newValueJson: stringifyJson({ reason: "not_found", failureReason: reason }),
-      });
-      return NextResponse.json({ error: "Receipt not found." }, { status: 404 });
-    }
-
-    // Locked statuses: a human has already advanced this receipt. A late
-    // failure report from the consumer must not un-review it. Mirror the
-    // guard in /extract — including reconciling any stale pending state so
-    // the month-close gate isn't blocked by a queue message that arrived
-    // after human review.
-    if (receipt.status !== "captured" && receipt.status !== "needs_review") {
-      await reconcileExtractionState(id, "processed");
-      await createAuditEntry(db, {
-        actor,
-        action: "receipt.extraction_failed",
-        objectType: "receipt",
-        objectId: id,
-        newValueJson: stringifyJson({
-          reason: "locked",
-          status: receipt.status,
-          failureReason: reason,
-        }),
-      });
-      return NextResponse.json(
-        {
-          error: `Receipt is ${receipt.status} and cannot be marked as extraction-failed.`,
-        },
-        { status: 409 },
-      );
-    }
-
-    // Persist the failure into extraction_json. This column is the canonical
-    // "latest extraction outcome" surface; the review UI reads it to badge
-    // the receipt. No DB migration needed (architect preference). Shape:
-    //   { failed: true, reason, model?, failedAt }
-    // Any prior extraction_json on a pending receipt is incomplete/stale
-    // (the receipt never reached 'processed'); overwrite is the right move.
-    const failedPayload = {
-      failed: true as const,
-      reason,
-      model: body?.model?.trim() || null,
-      failedAt: nowIso(),
-    };
-
-    // reconcileExtractionState is idempotent — only touches rows still in a
-    // pending state. If a parallel request already advanced this receipt,
-    // the UPDATE is a no-op and we surface that to the caller as 409.
-    await reconcileExtractionState(id, "failed");
-
-    // Write extraction_json separately (reconcileExtractionState does not
-    // touch it). Bypasses the finalized-reconciliation guard like /extract
-    // does for the same reason — this is queue-state mirror, not business
-    // fields.
-    await db
-      .prepare(
-        `UPDATE receipt_records
-           SET extraction_json = ?, updated_at = ?
-         WHERE id = ?
-           AND extraction_state = 'failed'`,
-      )
-      .bind(stringifyJson(failedPayload), nowIso(), id)
-      .run();
-
-    await createAuditEntry(db, {
-      actor,
-      action: "receipt.extraction_failed",
-      objectType: "receipt",
-      objectId: id,
-      newValueJson: stringifyJson({
-        failureReason: reason,
-        model: body?.model?.trim() || null,
-      }),
+    const result = await recordExtractionFailure({
+      db: getReceiptsDb(), receiptId: id, actor,
+      reason: parsed.reason, model: parsed.model,
     });
-
-    return NextResponse.json(
-      { ok: true, extractionState: "failed", failedAt: failedPayload.failedAt },
-      { status: 200 },
-    );
+    switch (result.kind) {
+      case "recorded":
+        return NextResponse.json({ ok: true, extractionState: "failed", failedAt: result.failedAt });
+      case "already_terminal":
+        return NextResponse.json({
+          ok: true, extractionState: "failed", alreadyRecorded: true,
+          reason: result.reason, failedAt: result.failedAt,
+        });
+      case "processed":
+        return NextResponse.json({ ok: true, extractionState: "processed", alreadyHandled: true });
+      case "not_found":
+        return NextResponse.json({ outcome: "not_found", error: "Receipt not found." }, { status: 404 });
+      case "refused":
+        return NextResponse.json({
+          outcome: "refused",
+          error: "Receipt is not admitted for extraction failure. Refresh the dashboard to check its current state.",
+        }, { status: 409 });
+    }
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("Unauthorized")) {
       return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
@@ -176,8 +68,7 @@ export async function POST(request: Request, { params }: RouteContext) {
     console.error("[api/receipts/[id]/extraction-failed] failed", error);
     return NextResponse.json(
       {
-        error:
-          error instanceof Error ? error.message : "Failed to mark extraction-failed.",
+        error: "Extraction failure report unconfirmed — refresh the dashboard to check this receipt's current state.",
       },
       { status: 500 },
     );

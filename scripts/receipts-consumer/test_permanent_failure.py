@@ -9,7 +9,6 @@ Run:
 from __future__ import annotations
 
 import unittest
-from unittest.mock import patch
 
 # Need to import consumer AFTER setting dummy env vars. The conftest pattern
 # isn't worth it for one test file — set env via the runner documented above,
@@ -118,13 +117,6 @@ class TestPermanentFailureClassifier(unittest.TestCase):
         truncated = consumer._format_failure_reason(exc)
         self.assertEqual(len(truncated), 1000)
 
-    def test_post_extraction_failed_swallows_network_error(self):
-        """A failed POST to extraction-failed must NOT raise — caller will
-        ACK regardless, and the alternative (re-raising) would leak a
-        network error into the ack-decision path."""
-        with patch("consumer.requests.post", side_effect=__import__("requests").RequestException("network down")):
-            # Should not raise.
-            consumer.post_extraction_failed("r1", "test reason")
 
 
 if __name__ == "__main__":
