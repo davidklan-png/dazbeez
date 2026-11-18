@@ -1,134 +1,85 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
-import { maybeResizeImage } from "@/lib/receipts/client-image";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { PaymentPath } from "@/lib/receipts/types";
 import type { Source } from "@/lib/receipts/upload-policy";
 import { AbortRegistry } from "@/lib/receipts/abort-registry";
 import { browserCaptureId } from "@/lib/receipts/browser-capture";
+import {
+  UploadAttempt,
+  type CapturePhase,
+  type UploadResult,
+} from "@/lib/receipts/upload-attempt";
 
-// ADR 0001: extraction is store-and-forward. Capture no longer runs OCR inline
-// — the image is uploaded, enqueued, and processed later by the Mac MLX
-// consumer. So the capture client just confirms "captured (pending processing)"
-// and re-arms for the next shot; there is nothing to review here.
-
-export type CapturePhase =
-  | { kind: "idle" }
-  | { kind: "uploading"; pct: number; fileName: string; fileSizeBytes: number }
-  | { kind: "saved"; receiptId: string; reviewUrl: string; capturedAt: number }
-  | { kind: "error"; message: string };
-
-// Result of a single upload attempt. The desktop path (multi-file drop) reads
-// this to update its per-row state; the mobile path ignores the return value
-// and relies on `phase` (only one upload is ever in flight on mobile, so phase
-// stays coherent there).
-export type UploadResult =
-  | { ok: true; receiptId: string; reviewUrl: string }
-  | { ok: false; message: string };
+export type { CapturePhase, UploadResult } from "@/lib/receipts/upload-attempt";
 
 export function useReceiptUpload() {
   const [phase, setPhase] = useState<CapturePhase>({ kind: "idle" });
-  // Each upload() gets its OWN controller; cancel()/reset() aborts all of
-  // them. The previous design kept a single controller and aborted it on
-  // every new upload — which silently killed all but the last file when the
-  // desktop drop handler called upload() N times back-to-back.
   const registryRef = useRef(new AbortRegistry());
   const captureIdsRef = useRef(new WeakMap<File, string>());
+  const mobileRef = useRef<UploadAttempt | null>(null);
 
-  const upload = useCallback(
-    async (
-      file: File,
-      paymentPath: PaymentPath | null,
-      source: Source,
-    ): Promise<UploadResult> => {
-      const abort = new AbortController();
-      registryRef.current.register(abort);
-
-      setPhase({
-        kind: "uploading",
-        pct: 5,
-        fileName: file.name,
-        fileSizeBytes: file.size,
-      });
-
-      try {
-        const captureId = browserCaptureId(file, captureIdsRef.current);
-        const uploadFile = await maybeResizeImage(file);
-        setPhase({
-          kind: "uploading",
-          pct: 30,
-          fileName: uploadFile.name,
-          fileSizeBytes: uploadFile.size,
-        });
-
-        const fd = new FormData();
-        fd.append("file", uploadFile);
-        fd.append("source", source);
-        fd.append("client_capture_id", captureId);
-        if (paymentPath) fd.append("paymentPath", paymentPath);
-
-        const res = await fetch("/api/receipts/upload", {
-          method: "POST",
-          body: fd,
-          signal: abort.signal,
-        });
-
-        const json = (await res.json()) as {
-          ok?: boolean;
-          receiptId?: string;
-          reviewUrl?: string;
-          error?: string;
-        };
-
-        if (!res.ok || !json.receiptId) {
-          const message =
-            json.error ?? "Upload failed. Please try again.";
-          setPhase({ kind: "error", message });
-          return { ok: false, message };
-        }
-
-        // Captured and enqueued. Done — extraction happens later in the queue.
-        const reviewUrl =
-          json.reviewUrl ?? `/receipts/review/${json.receiptId}`;
-        setPhase({
-          kind: "saved",
-          receiptId: json.receiptId,
-          reviewUrl,
-          capturedAt: Date.now(),
-        });
-        return { ok: true, receiptId: json.receiptId, reviewUrl };
-      } catch (error) {
-        if ((error as DOMException | undefined)?.name === "AbortError") {
-          // Explicit cancel/reset already set phase to idle — don't clobber
-          // it with an error. Caller still sees a result it can act on.
-          return { ok: false, message: "Cancelled" };
-        }
-        const message =
-          error instanceof Error
-            ? error.message
-            : "Network error — please try again.";
-        setPhase({ kind: "error", message });
-        return { ok: false, message };
-      } finally {
-        registryRef.current.unregister(abort);
-      }
-    },
-    [],
-  );
-
-  const abortAll = useCallback(() => {
+  useEffect(() => () => {
+    mobileRef.current?.dispose();
+    mobileRef.current = null;
     registryRef.current.abortAll();
   }, []);
 
+  const upload = useCallback(async (
+    file: File,
+    paymentPath: PaymentPath | null,
+    source: Source,
+  ): Promise<UploadResult> => {
+    // An unresolved mobile selection can only be replaced by explicit discard.
+    if (source === "mobile_capture" && mobileRef.current) {
+      return { ok: false, message: "Retry or discard the retained photo first." };
+    }
+    const captureId = source === "mobile_capture"
+      ? crypto.randomUUID()
+      : browserCaptureId(file, captureIdsRef.current);
+    const attempt = new UploadAttempt(file, paymentPath, source, captureId);
+    if (source === "mobile_capture") mobileRef.current = attempt;
+    const abort = new AbortController();
+    abort.signal.addEventListener("abort", () => attempt.dispose(), { once: true });
+    registryRef.current.register(abort);
+    try {
+      // Desktop outcomes belong to their session rows, never the retained mobile photo.
+      const result = await attempt.run(source === "mobile_capture" ? setPhase : () => {});
+      if (result.ok && mobileRef.current === attempt) mobileRef.current = null;
+      return result;
+    } finally {
+      registryRef.current.unregister(abort);
+      if (source !== "mobile_capture") attempt.dispose();
+    }
+  }, []);
+
+  const retry = useCallback(async (): Promise<UploadResult> => {
+    const attempt = mobileRef.current;
+    if (!attempt) return { ok: false, message: "No retained photo." };
+    const result = await attempt.run(setPhase);
+    if (result.ok && mobileRef.current === attempt) mobileRef.current = null;
+    return result;
+  }, []);
+
   const reset = useCallback(() => {
-    abortAll();
+    mobileRef.current?.dispose();
+    mobileRef.current = null;
+    registryRef.current.abortAll();
     setPhase({ kind: "idle" });
-  }, [abortAll]);
+  }, []);
 
   const cancel = useCallback(() => {
-    abortAll();
-    setPhase({ kind: "idle" });
-  }, [abortAll]);
+    if (mobileRef.current) {
+      mobileRef.current.cancel();
+      setPhase({
+        kind: "error",
+        message: "Upload cancelled. The server may already have saved it. Retry this photo to confirm the outcome.",
+      });
+    } else {
+      registryRef.current.abortAll();
+      setPhase({ kind: "idle" });
+    }
+  }, []);
 
-  return { phase, upload, reset, cancel };
+  return { phase, upload, retry, reset, cancel };
 }
