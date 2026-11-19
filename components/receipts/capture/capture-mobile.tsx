@@ -29,6 +29,7 @@ export interface CaptureMobileProps {
   onRecentRetry?: () => void;
   phase: CapturePhase;
   onPickFile: (file: File) => void;
+  onRetry: () => void;
   onCancel: () => void;
   onReset: () => void;
 }
@@ -68,6 +69,48 @@ export function CaptureMobile(props: CaptureMobileProps) {
           onCaptureNext={pickFile}
           onDone={props.onReset}
         />
+      ) : props.phase.kind === "error" ? (
+        <>
+          <MobileHeader queueCount={props.todayCount} label="Photo retained" />
+          <div className="flex-1 overflow-y-auto px-5 pt-6 pb-28">
+            <h2 className="text-2xl font-bold text-gray-900">
+              Your photo is still here
+            </h2>
+            {props.phase.fileName && (
+              <p className="mt-2 break-words text-sm text-gray-500">
+                {props.phase.fileName}
+              </p>
+            )}
+            <p role="alert" className="mt-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+              {props.phase.message}
+            </p>
+            <p className="my-4 text-sm text-gray-500">
+              Retry sends the same photo and payment details. Leaving or reloading
+              this page loses the local photo. Cancelling does not undo a capture
+              already saved.
+            </p>
+            <div className="flex flex-col gap-3">
+              <Btn kind="primary" size="lg" full onClick={props.onRetry}>
+                Retry this photo
+              </Btn>
+              <Btn
+                kind="ghost"
+                size="lg"
+                full
+                onClick={() => { props.onReset(); pickFile(); }}
+              >
+                Discard / Retake
+              </Btn>
+            </div>
+            <RecentCaptures
+              items={props.recentCaptures}
+              workMonth={props.workMonth}
+              variant="inline"
+              refreshUnavailable={props.recentRefreshUnavailable}
+              onRetry={props.onRecentRetry}
+            />
+          </div>
+        </>
       ) : (
         <CaptureIdleMobile
           todayCount={props.todayCount}
@@ -78,7 +121,6 @@ export function CaptureMobile(props: CaptureMobileProps) {
           recentRefreshUnavailable={props.recentRefreshUnavailable}
           onRecentRetry={props.onRecentRetry}
           onTapCapture={pickFile}
-          error={props.phase.kind === "error" ? props.phase.message : null}
         />
       )}
 
@@ -98,7 +140,6 @@ function CaptureIdleMobile({
   recentRefreshUnavailable,
   onRecentRetry,
   onTapCapture,
-  error,
 }: {
   todayCount: number | null;
   paymentChip: PaymentPath | null;
@@ -108,7 +149,6 @@ function CaptureIdleMobile({
   recentRefreshUnavailable?: boolean;
   onRecentRetry?: () => void;
   onTapCapture: () => void;
-  error: string | null;
 }) {
   return (
     <>
@@ -126,7 +166,8 @@ function CaptureIdleMobile({
         </h2>
         <p className="mt-2 max-w-[280px] text-sm text-gray-500">
           Snap it and keep going. We&rsquo;ll read each one during processing —
-          review later.
+          review later. Local photos are kept only until you leave or reload
+          this page.
         </p>
 
         <div className="mt-5 flex flex-1 items-center justify-center">
@@ -174,12 +215,6 @@ function CaptureIdleMobile({
             );
           })}
         </div>
-
-        {error && (
-          <div className="mb-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-center text-sm text-red-700">
-            {error}
-          </div>
-        )}
 
         <div className="flex flex-col gap-2.5">
           <Link
@@ -292,7 +327,7 @@ function CaptureUploadingMobile({
         </div>
         <div className="mt-1 text-sm font-semibold">Uploading…</div>
         <div className="text-[11.5px] text-white/55">
-          resized from HEIC · queued for processing
+          Keep this page open until capture is confirmed
         </div>
       </div>
 

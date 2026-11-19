@@ -579,6 +579,7 @@ test("actual first-party upload hook sends stable keys and keeps new selections 
     useRef: (value: unknown) => ({ current: value }),
     useState: (value: unknown) => [value, () => {}],
     useCallback: (callback: unknown) => callback,
+    useEffect: () => {},
   } });
   const originalFetch = globalThis.fetch;
   const keys: string[] = [];
@@ -600,5 +601,34 @@ test("actual first-party upload hook sends stable keys and keeps new selections 
     assert.equal(keys[0], keys[1]);
     assert.notEqual(keys[0], keys[2]);
     assertCounts(2, 2, 2);
+
+    const mobileRequests: FormData[] = [];
+    let committedMobileId: string | undefined;
+    globalThis.fetch = (async (_url, init) => {
+      mobileRequests.push(init!.body as FormData);
+      const response = await upload(new Request("http://localhost/api/receipts/upload", { ...init, headers: { "x-test-actor": "actor-a" } }));
+      if (mobileRequests.length === 1) {
+        committedMobileId = ((await response.clone().json()) as { receiptId: string }).receiptId;
+        throw new TypeError("Lost after commit");
+      }
+      return response;
+    }) as typeof fetch;
+    const mobilePhoto = new File(["mobile photo"], "mobile.jpg", { type: "image/jpeg" });
+    assert.equal((await hook.upload(mobilePhoto, "CASH", "mobile_capture")).ok, false);
+    // Later chip/selection changes cannot mutate the unresolved request.
+    assert.equal((await hook.upload(mobilePhoto, "AMEX", "mobile_capture")).ok, false);
+    const recovered = await hook.retry();
+    assert.ok(recovered.ok);
+    assert.equal(recovered.receiptId, committedMobileId);
+    assert.equal(mobileRequests.length, 2);
+    assert.equal(mobileRequests[0], mobileRequests[1]);
+    assert.equal(mobileRequests[1].get("paymentPath"), "CASH");
+    assertCounts(3, 3, 3);
+
+    // Explicit discard starts a fresh identity even if the picker returns the same File.
+    hook.reset();
+    assert.equal((await hook.upload(mobilePhoto, "AMEX", "mobile_capture")).ok, true);
+    assert.notEqual(mobileRequests[1].get("client_capture_id"), mobileRequests[2].get("client_capture_id"));
+    assertCounts(4, 4, 4);
   } finally { globalThis.fetch = originalFetch; react.restore(); }
 });

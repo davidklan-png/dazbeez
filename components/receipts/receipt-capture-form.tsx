@@ -11,7 +11,6 @@ import {
   type Source,
 } from "@/lib/receipts/upload-policy";
 import { UploadPool } from "@/lib/receipts/upload-pool";
-import { SingleFlight } from "@/lib/receipts/single-flight";
 import {
   applyUploadFailure,
   applyUploadSuccess,
@@ -98,7 +97,7 @@ export function ReceiptCaptureForm({
   recentCaptures = [],
 }: ReceiptCaptureFormProps) {
   const isMobile = useIsMobile();
-  const { phase, upload, reset, cancel } = useReceiptUpload();
+  const { phase, upload, retry, reset, cancel } = useReceiptUpload();
   // DB-backed recent-captures rail: seeded from the server, refreshed after
   // each successful upload and polled while anything is still processing.
   const {
@@ -122,11 +121,9 @@ export function ReceiptCaptureForm({
   // Before this, paymentChip lived in CaptureMobile and only drove the chip's
   // own highlight — it never reached the upload call, so the chip was cosmetic.
   const [paymentChip, setPaymentChip] = useState<PaymentChip>(initialPayment);
-  // Desktop FIFO concurrency pool (limit DESKTOP_MAX_CONCURRENT_UPLOADS) and
-  // the mobile single-flight gate. Both held in refs so they survive re-renders
-  // without restarting in-flight work.
+  // Desktop FIFO concurrency pool (limit DESKTOP_MAX_CONCURRENT_UPLOADS),
+  // held in a ref so re-renders do not restart in-flight work.
   const desktopPoolRef = useRef(new UploadPool(DESKTOP_MAX_CONCURRENT_UPLOADS));
-  const mobileSingleFlightRef = useRef(new SingleFlight());
 
   // Persist on every change so a hard reload doesn't lose the day's work.
   useEffect(() => {
@@ -141,18 +138,8 @@ export function ReceiptCaptureForm({
       const source: Source = isMobile ? "mobile_capture" : "desktop_upload";
 
       if (isMobile) {
-        // Mobile single-flight (explicit rejection): a second capture while one
-        // is uploading is ignored so it cannot overwrite the active upload's
-        // phase. The normal capture -> upload -> re-arm flow is unchanged.
-        if (!mobileSingleFlightRef.current.start()) return;
-        try {
-          const result = await upload(file, paymentChip, source);
-          // New receipt is in D1 now — refresh the recent rail immediately so
-          // it appears (the 15s pending-poll is the backstop if D1 lags).
-          if (result.ok) void refreshRecent();
-        } finally {
-          mobileSingleFlightRef.current.finish();
-        }
+        const result = await upload(file, paymentChip, source);
+        if (result.ok) void refreshRecent();
         return;
       }
 
@@ -204,6 +191,10 @@ export function ReceiptCaptureForm({
         onRecentRetry={refreshRecent}
         phase={phase}
         onPickFile={onPickFile}
+        onRetry={async () => {
+          const result = await retry();
+          if (result.ok) void refreshRecent();
+        }}
         onCancel={cancel}
         onReset={reset}
       />
