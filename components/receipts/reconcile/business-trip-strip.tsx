@@ -1,9 +1,11 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Btn } from "@/components/ui/btn";
+import { SaveQueue } from "@/lib/receipts/save-queue";
+import { guardedLinkClick } from "@/lib/receipts/review-navigation";
 import { formatDate } from "@/lib/receipts/format";
 
 // The amber business-trip strip in the reconcile detail pane (ADR 0010 D4).
@@ -14,6 +16,7 @@ import { formatDate } from "@/lib/receipts/format";
 // today's per-line PATCH behavior is preserved.
 
 interface TripSummary {
+  revision: number;
   trip_name: string | null;
   start_date: string;
   end_date: string;
@@ -22,6 +25,7 @@ interface TripSummary {
 
 interface BusinessTripStripProps {
   tripId: string | null;
+  beforeAction: () => Promise<{ trips: Record<string, number>; lines: Record<string, number>; finish: (ack?: { lineRevisions?: Record<string, number> }) => Promise<void> }>;
   locked: boolean;
   busy: boolean;
   onLegacyConfirm: () => void;
@@ -30,6 +34,7 @@ interface BusinessTripStripProps {
 
 export function BusinessTripStrip({
   tripId,
+  beforeAction,
   locked,
   busy,
   onLegacyConfirm,
@@ -37,18 +42,25 @@ export function BusinessTripStrip({
 }: BusinessTripStripProps) {
   const router = useRouter();
   const [trip, setTrip] = useState<TripSummary | null>(null);
+  const loadedLines = useRef<Record<string, number>>({});
+  const halted = useRef(false);
+  const [error, setError] = useState<string | null>(null);
   const [acting, setActing] = useState(false);
 
   // Lazy trip summary (one GET per strip render — fine at this scale).
   useEffect(() => {
     if (!tripId) return;
+    setTrip(null);
     let cancelled = false;
     void (async () => {
       try {
         const res = await fetch(`/api/receipts/trips/${tripId}`);
         if (!res.ok) return;
-        const data = (await res.json().catch(() => null)) as { trip?: TripSummary } | null;
-        if (!cancelled && data?.trip) setTrip(data.trip);
+        const data = (await res.json().catch(() => null)) as { trip?: TripSummary; lines?: { id: string; revision: number }[] } | null;
+        if (!cancelled && data?.trip) {
+          loadedLines.current = Object.fromEntries((data.lines ?? []).map(l => [l.id, l.revision]));
+          setTrip(data.trip);
+        }
       } catch {
         // non-fatal: fall back to the link without the date range
       }
@@ -66,17 +78,26 @@ export function BusinessTripStrip({
       );
       if (!ok) return;
     }
+    if (!trip || halted.current) return;
     setActing(true);
+    let finish: ((ack?: { lineRevisions?: Record<string, number> }) => Promise<void>) | undefined;
     try {
-      await fetch(`/api/receipts/trips/${tripId}`, {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ status }),
-      });
+      const own = await beforeAction();
+      finish = own.finish;
+      const expectedLines = { ...loadedLines.current };
+      for (const id of Object.keys(expectedLines)) if (own.lines[id] !== undefined) expectedLines[id] = own.lines[id];
+      const revision = Math.max(trip.revision, own.trips[tripId] ?? trip.revision);
+      const queue = new SaveQueue({ url: `/api/receipts/trips/${tripId}`, revision, entity: "trip",
+        buildBody: () => ({ status, expectedLines }) });
+      const ack = await queue.save();
+      await finish(ack);
+      finish = undefined;
       router.refresh();
-    } finally {
-      setActing(false);
-    }
+    } catch (err) {
+      await finish?.();
+      halted.current = Boolean(finish);
+      setError(err instanceof Error ? err.message : "Outcome uncertain — reload to review.");
+    } finally { setActing(false); }
   }
 
   // Legacy / edge: no trip link → per-line PATCH (unchanged behavior).
@@ -100,7 +121,7 @@ export function BusinessTripStrip({
     );
   }
 
-  const disabled = busy || acting || locked;
+  const disabled = busy || acting || locked || !trip || halted.current;
   return (
     <StripShell
       title={
@@ -108,6 +129,7 @@ export function BusinessTripStrip({
           Part of business trip{" "}
           <Link
             href={`/receipts/trips/${tripId}`}
+            onClick={e => guardedLinkClick(e, `/receipts/trips/${tripId}`, router.push)}
             className="font-semibold text-amber-700 hover:underline"
           >
             {trip?.trip_name?.trim() || "(unnamed trip)"}
@@ -120,6 +142,7 @@ export function BusinessTripStrip({
           : "Confirming/rejecting here applies to the whole trip."
       }
     >
+      {error && <span role="alert" className="text-xs text-red-700">{error} <button onClick={() => window.location.reload()} className="underline">Reload to review</button></span>}
       {!locked && (
         <div className="flex gap-2">
           <Btn

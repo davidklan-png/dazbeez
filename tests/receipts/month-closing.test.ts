@@ -54,6 +54,7 @@ function makeReceipt(overrides: Partial<ReceiptRecord> = {}): ReceiptRecord {
 
 function makeLine(overrides: Partial<AmexStatementLine> = {}): AmexStatementLine {
   return {
+    revision: 0,
     id: "line-1",
     statement_month: MONTH,
     transaction_date: "2026-06-15",

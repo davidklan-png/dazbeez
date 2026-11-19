@@ -1,3 +1,5 @@
+import { AmexWriteError, tripExpectation } from "@/lib/receipts/amex-write";
+import { isSealBoundaryConflict } from "@/lib/receipts/month-lock";
 import { NextResponse } from "next/server";
 import { requireReceiptsActor } from "@/lib/receipts/auth";
 import {
@@ -42,7 +44,10 @@ export async function POST(request: Request, { params }: RouteContext) {
   try {
     const actor = await requireReceiptsActor(request.headers);
     const { id } = await params;
-    const parsed = parseMemberIds(await request.json().catch(() => null));
+    const body = await request.json().catch(() => null);
+    const admission = tripExpectation(body ?? {}, true);
+    if (admission.error) return NextResponse.json(admission.error, { status: 400 });
+    const parsed = parseMemberIds(body);
     if (parsed.malformed) {
       return NextResponse.json(
         { error: "Body must be { lineIds?: string[], receiptIds?: string[] }." },
@@ -68,9 +73,11 @@ export async function POST(request: Request, { params }: RouteContext) {
       );
     }
 
-    const result = await attachTripMembers(id, parsed, actor);
-    return NextResponse.json({ ok: true, ...result }, { status: 200 });
+    const result = await attachTripMembers(id, parsed, actor, admission.expected);
+    return NextResponse.json(result, { status: 200 });
   } catch (error) {
+    if (error instanceof AmexWriteError) return NextResponse.json({ error: error.message, code: error.code }, { status: error.status });
+    if (isSealBoundaryConflict(error)) return NextResponse.json({ error: "Conflicts with an active build or sealed month.", code: "seal_conflict" }, { status: 409 });
     if (error instanceof Error && error.message.startsWith("Unauthorized")) {
       return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
     }
@@ -90,7 +97,10 @@ export async function DELETE(request: Request, { params }: RouteContext) {
   try {
     const actor = await requireReceiptsActor(request.headers);
     const { id } = await params;
-    const parsed = parseMemberIds(await request.json().catch(() => null));
+    const body = await request.json().catch(() => null);
+    const admission = tripExpectation(body ?? {}, true);
+    if (admission.error) return NextResponse.json(admission.error, { status: 400 });
+    const parsed = parseMemberIds(body);
     if (parsed.malformed) {
       return NextResponse.json(
         { error: "Body must be { lineIds?: string[], receiptIds?: string[] }." },
@@ -104,9 +114,11 @@ export async function DELETE(request: Request, { params }: RouteContext) {
       );
     }
 
-    const result = await detachTripMembers(id, parsed, actor);
-    return NextResponse.json({ ok: true, ...result }, { status: 200 });
+    const result = await detachTripMembers(id, parsed, actor, admission.expected);
+    return NextResponse.json(result, { status: 200 });
   } catch (error) {
+    if (error instanceof AmexWriteError) return NextResponse.json({ error: error.message, code: error.code }, { status: error.status });
+    if (isSealBoundaryConflict(error)) return NextResponse.json({ error: "Conflicts with an active build or sealed month.", code: "seal_conflict" }, { status: 409 });
     if (error instanceof Error && error.message.startsWith("Unauthorized")) {
       return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
     }

@@ -14,6 +14,7 @@
 // reconciliation sealed) and passed as `editable` + `disabledReason`; the cell
 // never offers an edit the API would reject.
 
+import { SaveQueue } from "@/lib/receipts/save-queue";
 import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Pill } from "@/components/ui/pill";
@@ -34,6 +35,13 @@ export function InlineCategoryCell(props: InlineCategoryCellProps) {
   const [status, setStatus] = useState<"idle" | "saving" | "error">("idle");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const inFlight = useRef<AbortController | null>(null);
+  const lineQueue = useRef<SaveQueue | null>(null);
+  const latest = useRef(value);
+  latest.current = value;
+  if (props.route?.kind === "line" && !lineQueue.current) {
+    lineQueue.current = new SaveQueue({ url: `/api/receipts/amex/lines/${props.route.id}`,
+      revision: props.route.revision, entity: "AMEX line", buildBody: () => buildCategoryPatchBody(latest.current) });
+  }
 
   // Follow server-resolved code changes after a router.refresh() (our own save,
   // or another tab's edit) — but never clobber an in-flight optimistic value.
@@ -41,7 +49,7 @@ export function InlineCategoryCell(props: InlineCategoryCellProps) {
   // recommended way to sync to a prop without a setState-in-effect.
   if (props.code !== trackedCode) {
     setTrackedCode(props.code ?? "");
-    if (status !== "saving") setValue(props.code ?? "");
+    if (status === "idle") setValue(props.code ?? "");
   }
 
   const needsAttendees = requiresAttendees(value);
@@ -49,6 +57,21 @@ export function InlineCategoryCell(props: InlineCategoryCellProps) {
   async function handleChange(next: string) {
     if (!props.editable || !props.route) return;
     if (next === value) return;
+    if (props.route.kind === "line") {
+      latest.current = next;
+      setValue(next);
+      setStatus("saving");
+      try {
+        if (props.route.revision === undefined) throw new Error("Reload to review this line before saving.");
+        await lineQueue.current!.save();
+        setStatus("idle");
+        router.refresh();
+      } catch (error) {
+        setStatus("error");
+        setErrorMsg(error instanceof Error ? error.message : "Outcome uncertain — reload to review.");
+      }
+      return;
+    }
     const prev = value;
     setValue(next); // optimistic
     setStatus("saving");
@@ -56,10 +79,7 @@ export function InlineCategoryCell(props: InlineCategoryCellProps) {
     inFlight.current?.abort();
     const ctrl = new AbortController();
     inFlight.current = ctrl;
-    const url =
-      props.route.kind === "receipt"
-        ? `/api/receipts/${props.route.id}`
-        : `/api/receipts/amex/lines/${props.route.id}`;
+    const url = `/api/receipts/${props.route.id}`;
     try {
       const res = await fetch(url, {
         method: "PATCH",
@@ -170,6 +190,7 @@ export function InlineCategoryCell(props: InlineCategoryCellProps) {
       {status === "error" && errorMsg && (
         <div className="rounded-md border border-red-200 bg-red-50 px-2 py-1 text-[10px] text-red-700">
           {errorMsg}
+          <button type="button" onClick={() => window.location.reload()} className="ml-2 underline">Reload to review</button>
         </div>
       )}
     </div>

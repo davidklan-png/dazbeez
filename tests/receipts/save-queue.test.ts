@@ -627,3 +627,63 @@ test("form-pane: s-key gate and Mark-reviewed button gating unchanged", () => {
     /disabled=\{!canMarkReviewed\(receipt\.status, isLocked\) \|\| !inView\}/,
   );
 });
+
+test("AMEX lane: edits and POST matching serialize with only acknowledged tokens", async () => {
+  const { calls, fetchImpl } = makeDeferredFetch();
+  let body = { receiptMissingReason: "古い" };
+  const q = new SaveQueue({ url: "/line", revision: 7, entity: "AMEX line", buildBody: () => body, fetchImpl });
+  const first = q.save(); body = { receiptMissingReason: "新しい理由" }; const pending = q.save();
+  const action = q.mutate("/reconcile", "POST", () => ({ amexLineId: "l", matchStatus: "no_receipt" }));
+  assert.equal(calls.length, 1); assert.equal(bodyOf(calls[0]).expectedRevision, 7);
+  calls[0].ok({ revision: 9 }); await first; await tick();
+  assert.equal(calls.length, 2); assert.equal(bodyOf(calls[1]).receiptMissingReason, "新しい理由");
+  assert.equal(bodyOf(calls[1]).expectedRevision, 9);
+  calls[1].ok({ revision: 12 }); await pending; await tick();
+  assert.equal(calls[2].init.method, "POST"); assert.equal(bodyOf(calls[2]).expectedRevision, 12);
+  calls[2].ok({ revision: 15 }); await action; assert.equal(q.revision, 15);
+});
+
+for (const ack of [{}, { revision: 3 }, { revision: 2 }, { revision: -1 }, { revision: 1.2 }, { revision: Number.MAX_SAFE_INTEGER + 1 }]) {
+  test(`AMEX lane: missing/unsafe/regressed acknowledgement halts: ${JSON.stringify(ack)}`, async () => {
+    const { calls, fetchImpl } = makeDeferredFetch();
+    const q = new SaveQueue({ url: "/line", revision: 3, entity: "AMEX line", buildBody: () => ({ attendees: ["保持"] }), fetchImpl });
+    const save = q.save(); const refused = assert.rejects(save, /Reload to review/);
+    calls[0].ok(ack); await refused;
+    assert.equal(q.halted, true); await assert.rejects(q.save()); assert.equal(calls.length, 1);
+  });
+}
+
+for (const status of [404, 409, 500]) {
+  test(`AMEX lane: ${status} preserves pending intent and halts matching/advance`, async () => {
+    const { calls, fetchImpl } = makeDeferredFetch(); let draft = "first";
+    const q = new SaveQueue({ url: "/line", revision: 3, entity: "AMEX line", buildBody: () => ({ receiptMissingReason: draft }), fetchImpl });
+    const p = q.save(); const failed = assert.rejects(p); draft = "latest local draft";
+    const action = q.mutate("/reconcile", "POST", () => ({})); const blocked = assert.rejects(action);
+    calls[0].failWith(status, "changed"); await failed; await blocked;
+    assert.equal(q.halted, true); assert.equal(draft, "latest local draft"); assert.equal(calls.length, 1);
+  });
+}
+
+test("AMEX lane: paused IME/trip barrier resumes only with its own aggregate ack", async () => {
+  const { calls, fetchImpl } = makeDeferredFetch(); let deferred = true; let draft = "日本語入力中";
+  const q = new SaveQueue({ url: "/line", revision: 5, entity: "AMEX line", deferFire: () => deferred, buildBody: () => ({ receiptMissingReason: draft }), fetchImpl });
+  const pending = q.save(); assert.equal(calls.length, 0);
+  draft = "日本語確定"; q.acceptAcknowledgedRevision(8); deferred = false; const drain = q.save();
+  assert.equal(calls.length, 1); assert.equal(bodyOf(calls[0]).expectedRevision, 8); assert.equal(bodyOf(calls[0]).receiptMissingReason, draft);
+  calls[0].ok({ revision: 10 }); await pending; await drain;
+});
+
+test("trip acknowledgement must include all loaded affected line tokens", async () => {
+  const { calls, fetchImpl } = makeDeferredFetch();
+  const q = new SaveQueue({ url: "/trip", revision: 3, entity: "trip", buildBody: () => ({ expectedLines: { l: 8 } }), fetchImpl });
+  const p = q.save(); const failed = assert.rejects(p, /Reload to review/);
+  calls[0].ok({ revision: 5, lineRevisions: {} }); await failed; assert.equal(q.halted, true);
+});
+
+test("AMEX lane: concurrent drain observers wait without enqueuing empty writes", async () => {
+  const { calls, fetchImpl } = makeDeferredFetch();
+  const q = new SaveQueue({ url: "/line", revision: 0, entity: "AMEX line", buildBody: () => ({ attendees: ["Late"] }), fetchImpl });
+  const save = q.save(); const nav = q.whenIdle(); const trip = q.whenIdle();
+  calls[0].ok({ revision: 2 }); await Promise.all([save, nav, trip]);
+  assert.equal(calls.length, 1); assert.equal(q.idle, true);
+});

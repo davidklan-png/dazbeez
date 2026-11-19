@@ -5,6 +5,7 @@ import type { AmexStatementLine, ReceiptRecord } from "@/lib/receipts/types";
 
 function makeLine(overrides: Partial<AmexStatementLine> = {}): AmexStatementLine {
   return {
+    revision: 0,
     id: "line-1",
     statement_month: "2024-01",
     transaction_date: "2024-01-15",
@@ -206,4 +207,12 @@ test("manifest CSV: invoice_registration_number empty when no receipt linked", (
   assert.ok(idx >= 0, "missing invoice_registration_number header");
   const dataCols = csvLines[1]!.split(",");
   assert.equal(dataCols[idx], "");
+});
+
+test("editing revisions never change accountant manifest bytes", () => {
+  const receipts = [makeReceipt()];
+  const before = buildReconciliationManifestCsv([makeLine({ revision: 0 })], receipts, {}, {});
+  const after = buildReconciliationManifestCsv([makeLine({ revision: 431 })], receipts, {}, {});
+  assert.equal(after, before);
+  assert.ok(!after.includes("revision"));
 });

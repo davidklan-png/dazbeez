@@ -1,8 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { SaveQueue } from "@/lib/receipts/save-queue";
+import { registerSaveFlusher, guardedNavigate } from "@/lib/receipts/review-navigation";
 import { Btn } from "@/components/ui/btn";
 import { Pill } from "@/components/ui/pill";
 import { Card } from "@/components/ui/card";
@@ -40,6 +42,10 @@ interface MemberRow {
 export function TripDetailScreen({ trip, lines, receipts }: TripDetailScreenProps) {
   const router = useRouter();
 
+  const composing = useRef(false);
+  const actionInFlight = useRef(false);
+  const lineTokens = useRef(Object.fromEntries(lines.map(l => [l.id, l.revision])));
+  const selectedTokens = useRef<Record<string, number>>({});
   // Editable fields (local state; Save PATCHes).
   const [fields, setFields] = useState({
     tripName: trip.trip_name ?? "",
@@ -54,6 +60,48 @@ export function TripDetailScreen({ trip, lines, receipts }: TripDetailScreenProp
 
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+
+  const latestFields = useRef(fields);
+  latestFields.current = fields;
+  const baseline = useRef({ ...fields });
+  const queue = useRef<SaveQueue | null>(null);
+  const config = {
+    url: `/api/receipts/trips/${trip.id}`, revision: trip.revision, entity: "trip",
+    deferFire: () => composing.current,
+    buildBody: () => {
+      const changed = Object.fromEntries(Object.entries(latestFields.current).filter(([k, v]) => v !== baseline.current[k as keyof typeof fields]));
+      if ("startDate" in changed || "endDate" in changed) {
+        changed.startDate = latestFields.current.startDate; changed.endDate = latestFields.current.endDate;
+      }
+      return changed;
+    },
+    onAcknowledged: (body: Record<string, unknown>, ack: { lineRevisions?: Record<string, number> }) => {
+      for (const k of Object.keys(baseline.current) as (keyof typeof fields)[]) if (k in body) baseline.current[k] = body[k] as string;
+      if (ack.lineRevisions) Object.assign(lineTokens.current, ack.lineRevisions);
+    },
+  };
+  if (!queue.current) queue.current = new SaveQueue(config); else queue.current.rebind(config);
+  const dirty = () => JSON.stringify(latestFields.current) !== JSON.stringify(baseline.current);
+  const flushFields = async () => {
+    do {
+      if (dirty()) await queue.current!.save();
+      await queue.current!.whenIdle();
+    } while (dirty());
+  };
+  const flushRef = useRef(flushFields);
+  flushRef.current = flushFields;
+  useEffect(() => registerSaveFlusher(async () => {
+    try { await flushRef.current(); } catch (err) { setFieldError(err instanceof Error ? err.message : "Reload to review."); throw err; }
+  }), []);
+  useEffect(() => {
+    const warn = (e: BeforeUnloadEvent) => {
+      if (JSON.stringify(latestFields.current) !== JSON.stringify(baseline.current) || !queue.current!.idle || queue.current!.halted) {
+        e.preventDefault(); e.returnValue = "";
+      }
+    };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, []);
 
   // Candidates picker.
   const [candidates, setCandidates] = useState<CandidateRow[]>([]);
@@ -102,7 +150,10 @@ export function TripDetailScreen({ trip, lines, receipts }: TripDetailScreenProp
         const data = (await res.json().catch(() => ({}))) as {
           candidates?: CandidateRow[];
         };
+        if (!res.ok) throw new Error("Could not load candidates. Reload to review.");
         if (!cancelled) setCandidates(data.candidates ?? []);
+      } catch (err) {
+        if (!cancelled) setAttachError(err instanceof Error ? err.message : "Could not load candidates.");
       } finally {
         if (!cancelled) setCandLoading(false);
       }
@@ -114,111 +165,56 @@ export function TripDetailScreen({ trip, lines, receipts }: TripDetailScreenProp
   }, [q, showAll, trip.id, refreshNonce]);
 
   async function saveFields() {
-    setFieldError(null);
-    setSaving(true);
+    setFieldError(null); setSaving(true);
+    try { await flushFields(); setFieldSaved(true); }
+    catch (err) { setFieldError(err instanceof Error ? err.message : "Outcome uncertain — reload to review."); }
+    finally { setSaving(false); }
+  }
+
+  async function runAction(action: () => Promise<unknown>, onError: (message: string) => void) {
+    if (actionInFlight.current) return;
+    actionInFlight.current = true; setBusy(true);
     try {
-      const res = await fetch(`/api/receipts/trips/${trip.id}`, {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          tripName: fields.tripName.trim() || null,
-          startDate: fields.startDate,
-          endDate: fields.endDate,
-          purpose: fields.purpose.trim() || null,
-          primaryLocation: fields.primaryLocation.trim() || null,
-        }),
-      });
-      const data = (await res.json().catch(() => ({}))) as { error?: string };
-      if (!res.ok) {
-        setFieldError(data.error ?? `Save failed (${res.status}).`);
-        return;
-      }
-      setFieldSaved(true);
-      router.refresh();
-    } catch {
-      setFieldError("Network error");
-    } finally {
-      setSaving(false);
-    }
+      await flushFields();
+      await action();
+      await flushFields();
+      if (!composing.current && !dirty()) router.refresh();
+    } catch (err) { onError(err instanceof Error ? err.message : "Outcome uncertain — reload to review."); }
+    finally { actionInFlight.current = false; setBusy(false); }
   }
 
   async function patchStatus(status: "confirmed" | "rejected") {
-    if (status === "rejected") {
-      const ok = window.confirm(
-        "Reject this trip? All member AMEX lines will be set to 'excluded' (receipt links survive).",
-      );
-      if (!ok) return;
-    }
+    if (status === "rejected" && !window.confirm("Reject this trip? All member AMEX lines become excluded (receipt links survive).")) return;
     setActionError(null);
-    setBusy(true);
-    try {
-      const res = await fetch(`/api/receipts/trips/${trip.id}`, {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ status }),
-      });
-      const data = (await res.json().catch(() => ({}))) as { error?: string };
-      if (!res.ok) {
-        setActionError(data.error ?? `Action failed (${res.status}).`);
-        return;
-      }
-      router.refresh();
-    } catch {
-      setActionError("Network error");
-    } finally {
-      setBusy(false);
-    }
+    await runAction(() => queue.current!.mutate(`/api/receipts/trips/${trip.id}`, "PATCH",
+      () => ({ status, expectedLines: Object.fromEntries(lines.map(l => [l.id, lineTokens.current[l.id]])) })), setActionError);
   }
 
   async function attach() {
-    const lineIds = candidates
-      .filter((c) => c.kind === "line" && selected.has(c.id))
-      .map((c) => c.id);
-    const receiptIds = candidates
-      .filter((c) => c.kind === "receipt" && selected.has(c.id))
-      .map((c) => c.id);
-    if (lineIds.length === 0 && receiptIds.length === 0) return;
+    const lineIds = candidates.filter(c => c.kind === "line" && selected.has(c.id)).map(c => c.id);
+    const receiptIds = candidates.filter(c => c.kind === "receipt" && selected.has(c.id)).map(c => c.id);
+    if (!lineIds.length && !receiptIds.length) return;
     setAttachError(null);
-    setBusy(true);
-    try {
-      const res = await fetch(`/api/receipts/trips/${trip.id}/members`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ lineIds, receiptIds }),
-      });
-      const data = (await res.json().catch(() => ({}))) as { error?: string };
-      if (!res.ok) {
-        setAttachError(data.error ?? `Attach failed (${res.status}).`);
-        return;
-      }
-      setSelected(new Set());
-      setRefreshNonce((n) => n + 1);
-      router.refresh();
-    } catch {
-      setAttachError("Network error");
-    } finally {
-      setBusy(false);
-    }
+    await runAction(async () => {
+      await queue.current!.mutate(`/api/receipts/trips/${trip.id}/members`, "POST", () => ({ lineIds, receiptIds,
+        expectedLines: Object.fromEntries(lineIds.map(id => [id, selectedTokens.current[id]])) }));
+      setSelected(new Set()); setRefreshNonce(n => n + 1);
+    }, setAttachError);
   }
 
   async function detach(row: MemberRow) {
-    setBusy(true);
-    try {
-      const body =
-        row.kind === "line" ? { lineIds: [row.id] } : { receiptIds: [row.id] };
-      await fetch(`/api/receipts/trips/${trip.id}/members`, {
-        method: "DELETE",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      setRefreshNonce((n) => n + 1);
-      router.refresh();
-    } finally {
-      setBusy(false);
-    }
+    setActionError(null);
+    await runAction(async () => {
+      const body = row.kind === "line" ? { lineIds: [row.id], expectedLines: { [row.id]: lineTokens.current[row.id] } }
+        : { receiptIds: [row.id], expectedLines: {} };
+      await queue.current!.mutate(`/api/receipts/trips/${trip.id}/members`, "DELETE", () => body);
+      setRefreshNonce(n => n + 1);
+    }, setActionError);
   }
 
   function toggleSelected(id: string) {
+    const candidate = candidates.find(c => c.id === id && c.kind === "line");
+    if (candidate && !selected.has(id)) selectedTokens.current[id] = candidate.revision!;
     setSelected((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
@@ -295,7 +291,13 @@ export function TripDetailScreen({ trip, lines, receipts }: TripDetailScreenProp
   }
 
   return (
-    <div className="mx-auto max-w-5xl px-6 py-8">
+    <div onCompositionStartCapture={() => { composing.current = true; }}
+      onCompositionEndCapture={() => { composing.current = false; if (!queue.current!.idle) void queue.current!.save().catch(err => setFieldError(err.message)); }}
+      onClickCapture={e => {
+        const a = (e.target as HTMLElement).closest("a");
+        if (!a || e.button !== 0 || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey || a.target === "_blank") return;
+        e.preventDefault(); e.stopPropagation(); void guardedNavigate(() => router.push(a.getAttribute("href")!));
+      }} className="mx-auto max-w-5xl px-6 py-8">
       <div className="mb-4">
         <Link
           href="/receipts/trips"
@@ -347,7 +349,7 @@ export function TripDetailScreen({ trip, lines, receipts }: TripDetailScreenProp
           </p>
         )}
         {actionError && (
-          <p className="mb-3 text-[12px] text-red-600">{actionError}</p>
+          <p className="mb-3 text-[12px] text-red-600">{actionError} <button type="button" onClick={() => window.location.reload()} className="underline">Reload to review</button></p>
         )}
 
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
@@ -395,7 +397,7 @@ export function TripDetailScreen({ trip, lines, receipts }: TripDetailScreenProp
           </Field>
         </div>
         {fieldError && (
-          <p className="mt-2 text-[12px] text-red-600">{fieldError}</p>
+          <p className="mt-2 text-[12px] text-red-600">{fieldError} <button type="button" onClick={() => window.location.reload()} className="underline">Reload to review</button></p>
         )}
         <div className="mt-3 flex justify-end">
           <Btn kind="primary" size="md" disabled={saving || exported_} onClick={saveFields}>
@@ -522,7 +524,7 @@ export function TripDetailScreen({ trip, lines, receipts }: TripDetailScreenProp
             </div>
           )}
           {attachError && (
-            <p className="mt-2 text-[12px] text-red-600">{attachError}</p>
+            <p className="mt-2 text-[12px] text-red-600">{attachError} <button type="button" onClick={() => window.location.reload()} className="underline">Reload to review</button></p>
           )}
           <div className="mt-3 flex items-center justify-between">
             <span className="text-[11px] text-gray-400">

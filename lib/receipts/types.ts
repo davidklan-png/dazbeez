@@ -399,6 +399,7 @@ export interface ReceiptAttendee {
 }
 
 export interface AmexStatementLine {
+  revision: number;
   id: string;
   statement_month: string;
   transaction_date: string;
@@ -493,6 +494,7 @@ export interface AmexLineAttendee {
 }
 
 export interface BusinessTripReport {
+  revision: number;
   id: string;
   trip_name: string | null;
   cardholder_name: string;
@@ -961,6 +963,8 @@ export interface ExportRow {
   rowType: "amex_line" | "receipt";
   // AMEX-line identity (null on receipt rows)
   lineId: string | null;
+  /** Editing metadata only; never serialized into accountant artifacts. */
+  lineRevision?: number;
   /** Original statement CSV row number (amex_statement_lines.raw_csv_line_number).
    *  The join key for the AMEX reconciliation passthrough file; null/absent on
    *  receipt rows and on lines imported before raw_csv_line_number existed.

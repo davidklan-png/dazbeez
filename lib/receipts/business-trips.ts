@@ -193,6 +193,7 @@ export function isInCandidateWindow(
 }
 
 export interface CandidateRow {
+  revision?: number;
   kind: "line" | "receipt";
   id: string;
   transactionDate: string | null;

@@ -1,5 +1,6 @@
 import {
   listAmexLines,
+  verifyAmexLineReads,
   getReconciliationForMonth,
   listAmexLineCountsByMonth,
   listReconciliationStatusByMonth,
@@ -207,6 +208,8 @@ export default async function ReconcilePage({
     matchValue: r.match_value,
     expenseCategoryCode: r.expense_category_code,
   }));
+
+  await verifyAmexLineReads(amexLines);
 
   return (
     <ReconcileScreen

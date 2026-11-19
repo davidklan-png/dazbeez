@@ -52,6 +52,7 @@ const VALID_BUSINESS_TRIP_STATUSES: AmexBusinessTripStatus[] = [
 export type AmexLinePatchInput = Parameters<typeof updateAmexLineCategory>[1];
 
 export type AmexLinePatchBody = {
+  expectedRevision?: unknown;
   expenseCategory?: string;
   expenseCategoryCode?: string;
   categoryStatus?: string;
