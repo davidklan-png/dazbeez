@@ -556,7 +556,7 @@ export function FormPane(props: FormPaneProps) {
 
   useEffect(() => {
     const guard = (event: BeforeUnloadEvent) => {
-      if (dedicatedActionRef.current || saveTimerRef.current || !saveQueue.idle || saveQueue.lastFailed || saveQueue.halted) {
+      if (businessPurposeComposingRef.current || dedicatedActionRef.current || saveTimerRef.current || !saveQueue.idle || saveQueue.lastFailed || saveQueue.halted) {
         event.preventDefault();
         event.returnValue = "";
       }

@@ -29,12 +29,23 @@ import { buildCategoryPatchBody } from "@/lib/receipts/category-cell";
 export type { InlineCategoryCellProps };
 
 export function InlineCategoryCell(props: InlineCategoryCellProps) {
+  // Route identity owns both the draft and queue; revision refreshes must not bless an old draft.
+  const target = props.route ? `${props.route.kind}:${props.route.id}` : "none";
+  return <CategoryEditor key={target} {...props} />;
+}
+
+function CategoryEditor(props: InlineCategoryCellProps) {
   const router = useRouter();
   const [value, setValue] = useState(props.code ?? "");
   const [trackedCode, setTrackedCode] = useState(props.code ?? "");
   const [status, setStatus] = useState<"idle" | "saving" | "error">("idle");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const inFlight = useRef<AbortController | null>(null);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
   const [receiptQueue] = useState(() => props.route?.kind === "receipt" ? new SaveQueue({
     url: `/api/receipts/${props.route.id}`,
     initialRevision: props.route.revision,
@@ -72,9 +83,11 @@ export function InlineCategoryCell(props: InlineCategoryCellProps) {
     if (receiptQueue) {
       try {
         await receiptQueue.mutate("PATCH", buildCategoryPatchBody(next));
+        if (!mounted.current) return;
         setStatus("idle");
         router.refresh();
       } catch (error) {
+        if (!mounted.current) return;
         setStatus("error");
         setErrorMsg(error instanceof Error ? error.message : "Category save failed.");
       }
@@ -95,6 +108,7 @@ export function InlineCategoryCell(props: InlineCategoryCellProps) {
         signal: ctrl.signal,
       });
       const json = (await res.json().catch(() => ({}))) as { error?: string };
+      if (!mounted.current) return;
       if (!res.ok) {
         setValue(prev); // roll back the optimistic change, visibly
         setStatus("error");
@@ -106,6 +120,7 @@ export function InlineCategoryCell(props: InlineCategoryCellProps) {
       // re-render from the new DB state.
       router.refresh();
     } catch (err) {
+      if (!mounted.current) return;
       if ((err as DOMException | undefined)?.name === "AbortError") return;
       setValue(prev);
       setStatus("error");
