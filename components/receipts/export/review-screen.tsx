@@ -459,9 +459,9 @@ function SideBySideSection({
                 categoryRules={categoryRules}
               />
             ))}
-            {standalone.map((row, i) => (
+            {standalone.map((row) => (
               <SideBySideRow
-                key={`none-${i}`}
+                key={`none-${row.lineId}`}
                 row={row}
                 receipt={undefined}
                 finalized={finalized}
@@ -582,7 +582,7 @@ function ConsolidatedGroup({
       </div>
       {rows.map((row, i) => (
         <SideBySideRow
-          key={i}
+          key={row.lineId}
           row={row}
           receipt={i === 0 ? receipt : undefined}
           finalized={finalized}
@@ -638,11 +638,11 @@ function AdditionalChargesSection({
             No cash/digital receipts in this month.
           </div>
         ) : (
-          chargeRows.map((r, i) => {
+          chargeRows.map((r) => {
             const dupBadge = r.receiptId ? dupBadgeById.get(r.receiptId) : undefined;
             return (
               <div
-                key={i}
+                key={r.receiptId}
                 className="grid grid-cols-[120px_1fr_120px_140px_100px] items-center border-b border-gray-150 px-4 py-2.5 text-[12px]"
               >
                 <span className="text-gray-600">{r.transactionDate ?? "—"}</span>

@@ -47,6 +47,7 @@ function makeLine(overrides: Partial<AmexStatementLine> = {}): AmexStatementLine
 
 function makeReceipt(overrides: Partial<ReceiptRecord> = {}): ReceiptRecord {
   return {
+    revision: 0,
     id: "r-1",
     captured_at: "2026-01-01T00:00:00Z",
     captured_by: "test@example.com",

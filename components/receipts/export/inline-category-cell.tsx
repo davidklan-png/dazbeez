@@ -14,7 +14,8 @@
 // reconciliation sealed) and passed as `editable` + `disabledReason`; the cell
 // never offers an edit the API would reject.
 
-import { useRef, useState } from "react";
+import { SaveQueue } from "@/lib/receipts/save-queue";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Pill } from "@/components/ui/pill";
 import {
@@ -28,31 +29,70 @@ import { buildCategoryPatchBody } from "@/lib/receipts/category-cell";
 export type { InlineCategoryCellProps };
 
 export function InlineCategoryCell(props: InlineCategoryCellProps) {
+  // Route identity owns both the draft and queue; revision refreshes must not bless an old draft.
+  const target = props.route ? `${props.route.kind}:${props.route.id}` : "none";
+  return <CategoryEditor key={target} {...props} />;
+}
+
+function CategoryEditor(props: InlineCategoryCellProps) {
   const router = useRouter();
   const [value, setValue] = useState(props.code ?? "");
   const [trackedCode, setTrackedCode] = useState(props.code ?? "");
   const [status, setStatus] = useState<"idle" | "saving" | "error">("idle");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const inFlight = useRef<AbortController | null>(null);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+  const [receiptQueue] = useState(() => props.route?.kind === "receipt" ? new SaveQueue({
+    url: `/api/receipts/${props.route.id}`,
+    initialRevision: props.route.revision,
+    buildBody: () => ({}),
+  }) : null);
+
+  useEffect(() => {
+    if (!receiptQueue || (status !== "saving" && status !== "error")) return;
+    const guard = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", guard);
+    return () => window.removeEventListener("beforeunload", guard);
+  }, [receiptQueue, status]);
 
   // Follow server-resolved code changes after a router.refresh() (our own save,
   // or another tab's edit) — but never clobber an in-flight optimistic value.
   // Adjusting state during render with a prop-change guard is the React-
   // recommended way to sync to a prop without a setState-in-effect.
-  if (props.code !== trackedCode) {
+  if ((props.code ?? "") !== trackedCode) {
     setTrackedCode(props.code ?? "");
-    if (status !== "saving") setValue(props.code ?? "");
+    if (status === "idle") setValue(props.code ?? "");
   }
 
   const needsAttendees = requiresAttendees(value);
 
   async function handleChange(next: string) {
-    if (!props.editable || !props.route) return;
+    if (!props.editable || !props.route || status === "saving" || receiptQueue?.halted) return;
     if (next === value) return;
     const prev = value;
     setValue(next); // optimistic
     setStatus("saving");
     setErrorMsg(null);
+    if (receiptQueue) {
+      try {
+        await receiptQueue.mutate("PATCH", buildCategoryPatchBody(next));
+        if (!mounted.current) return;
+        setStatus("idle");
+        router.refresh();
+      } catch (error) {
+        if (!mounted.current) return;
+        setStatus("error");
+        setErrorMsg(error instanceof Error ? error.message : "Category save failed.");
+      }
+      return;
+    }
     inFlight.current?.abort();
     const ctrl = new AbortController();
     inFlight.current = ctrl;
@@ -68,6 +108,7 @@ export function InlineCategoryCell(props: InlineCategoryCellProps) {
         signal: ctrl.signal,
       });
       const json = (await res.json().catch(() => ({}))) as { error?: string };
+      if (!mounted.current) return;
       if (!res.ok) {
         setValue(prev); // roll back the optimistic change, visibly
         setStatus("error");
@@ -79,6 +120,7 @@ export function InlineCategoryCell(props: InlineCategoryCellProps) {
       // re-render from the new DB state.
       router.refresh();
     } catch (err) {
+      if (!mounted.current) return;
       if ((err as DOMException | undefined)?.name === "AbortError") return;
       setValue(prev);
       setStatus("error");
@@ -108,7 +150,7 @@ export function InlineCategoryCell(props: InlineCategoryCellProps) {
           <select
             value={value}
             onChange={(e) => handleChange(e.target.value)}
-            disabled={status === "saving"}
+            disabled={status === "saving" || receiptQueue?.halted}
             className="h-[26px] min-w-0 flex-1 rounded-md border border-gray-200 bg-white px-1.5 text-[11.5px] text-gray-900 focus:border-amber-500 focus:outline-none disabled:bg-gray-50"
           >
             <option value="">— Select —</option>
@@ -144,7 +186,7 @@ export function InlineCategoryCell(props: InlineCategoryCellProps) {
           <button
             type="button"
             onClick={() => handleChange(props.suggestedCategoryCode!)}
-            disabled={status === "saving"}
+            disabled={status === "saving" || receiptQueue?.halted}
             className="inline-flex items-center gap-1 rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-800 hover:bg-amber-100 disabled:opacity-50"
           >
             <span>Suggested: {formatCategoryLabel(props.suggestedCategoryCode!)}</span>
@@ -170,6 +212,9 @@ export function InlineCategoryCell(props: InlineCategoryCellProps) {
       {status === "error" && errorMsg && (
         <div className="rounded-md border border-red-200 bg-red-50 px-2 py-1 text-[10px] text-red-700">
           {errorMsg}
+          {receiptQueue?.halted && <button type="button" className="ml-2 underline" onClick={() => {
+            if (window.confirm("Discard this category selection and reload for review?")) window.location.reload();
+          }}>Reload and review</button>}
         </div>
       )}
     </div>

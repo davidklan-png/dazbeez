@@ -16,7 +16,7 @@ const { FormPane } = require("../../components/receipts/review/form-pane");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { ReviewLayout } = require("../../components/receipts/review/review-layout");
 const receipt = {
-  id: "fixture", payment_path: "CASH", status: "reviewed", merchant: "Fixture",
+  id: "fixture", revision: 0, payment_path: "CASH", status: "reviewed", merchant: "Fixture",
   transaction_date: "2026-05-10", amount_minor: 100, currency: "JPY",
   expense_category_code: "entertainment", export_statement_month: "2026-07",
 } as ReceiptRecord;

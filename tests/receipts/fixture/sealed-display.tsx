@@ -24,7 +24,7 @@ function assert(value: unknown, message: string): asserts value {
 }
 function mount(path: PaymentPath, lock: ReceiptLockInfo, key: string = path, empty = false) {
   const receipt = {
-    id: "fixture", payment_path: path, transaction_date: "2026-05-10", status: "captured",
+    id: "fixture", revision: 0, payment_path: path, transaction_date: "2026-05-10", status: "captured",
     merchant: "Sealed display fixture", amount_minor: 4200, currency: "JPY",
     expense_category_code: "entertainment", export_statement_month: "2026-07",
     extraction_state: "processed", business_purpose: "Fixture purpose",

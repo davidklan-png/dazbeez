@@ -23,7 +23,7 @@ import { mkdtempSync, readFileSync, readdirSync, writeFileSync, existsSync, rmSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const TSX = join(process.cwd(), "node_modules", "tsx", "dist", "cli.mjs");
+const TSX = require.resolve("tsx/cli");
 const SCRIPT = join(process.cwd(), "scripts", "delete-sealed-export.ts");
 
 /**

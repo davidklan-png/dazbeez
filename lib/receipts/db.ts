@@ -1,3 +1,4 @@
+import { isReceiptRevision, ReceiptNotFoundError } from "./receipt-revision";
 import { expectedStatementMonths } from "./missing-statements";
 import { getReceiptsDb } from "@/lib/cloudflare-runtime";
 import { createAuditEntry } from "@/lib/receipts/audit";
@@ -405,6 +406,7 @@ export function buildReceiptUpdateSets(
  * audits together, and no success audit survives a rejected admission.
  */
 export interface ReceiptMutationExtras {
+  expectedRevision?: number;
   /** Replace the receipt's attendee roster atomically (route PATCH). */
   attendees?: CreateAttendeeInput[];
   /** Dedicated membership-override audit (ADR 0008 §D6), written by the route. */
@@ -420,13 +422,13 @@ export async function updateReceiptRecord(
   actor: string,
   extras: ReceiptMutationExtras = {},
   db: D1Database = getReceiptsDb(),
-): Promise<void> {
+): Promise<number> {
   const before = await db
     .prepare(`SELECT * FROM receipt_records WHERE id = ? LIMIT 1`)
     .bind(id)
     .first<ReceiptRecord>();
 
-  if (!before) throw new Error(`Receipt ${id} not found.`);
+  if (!before) throw new ReceiptNotFoundError(id);
   await rejectIfReceiptInFinalizedReconciliation(db, id);
   // Split lock (audit A5): for CASH/DIGITAL receipts, also check the
   // export-finalized gate against the EFFECTIVE transaction month (input
@@ -444,7 +446,10 @@ export async function updateReceiptRecord(
   const { sets, binds } = buildReceiptUpdateSets(input, before);
   const now = nowIso();
 
-  const stmts: D1PreparedStatement[] = [];
+  const stmts: D1PreparedStatement[] = [
+    db.prepare(`INSERT INTO receipt_edit_admissions (receipt_id, expected_revision) VALUES (?, ?)`)
+      .bind(id, extras.expectedRevision ?? before.revision),
+  ];
 
   if (sets.length > 0) {
     sets.push("updated_at = ?");
@@ -595,8 +600,11 @@ export async function updateReceiptRecord(
     );
   }
 
-  if (stmts.length === 0) return;
-  await db.batch(stmts);
+  stmts.push(db.prepare(`SELECT revision FROM receipt_records WHERE id = ?`).bind(id));
+  const results = await db.batch(stmts);
+  const revision = (results.at(-1)?.results?.[0] as { revision?: unknown } | undefined)?.revision;
+  if (!isReceiptRevision(revision)) throw new Error("Receipt acknowledgement missing revision.");
+  return revision;
 }
 
 export async function rejectIfReceiptInFinalizedReconciliation(
@@ -724,7 +732,7 @@ export async function listReceiptRecords(
  * 200-row limit is fine; revisit if D1 timings ever say otherwise.
  */
 const REVIEW_SEARCH_RECEIPT_COLUMNS =
-  "id, captured_at, captured_by, source, original_filename, " +
+  "id, revision, captured_at, captured_by, source, original_filename, " +
   "payment_path, expense_type, transaction_date, merchant, amount_minor, " +
   "currency, tax_amount_minor, business_purpose, alcohol_present, " +
   "attendees_required, status, original_r2_key, original_sha256, " +
@@ -876,7 +884,7 @@ export async function listAllReceiptsInMonth(
 // month-window read lean. `extraction_json` IS included: the matcher's
 // brand-on-receipt fallback (reconciliation.ts rawTextOf) reads rawText from it.
 const RECONCILE_RECEIPT_COLUMNS =
-  "id, captured_at, captured_by, source, original_filename, " +
+  "id, revision, captured_at, captured_by, source, original_filename, " +
   "payment_path, expense_type, transaction_date, merchant, amount_minor, " +
   "currency, tax_amount_minor, business_purpose, alcohol_present, " +
   "attendees_required, status, original_r2_key, original_sha256, " +
@@ -1020,13 +1028,14 @@ export async function softDeleteReceipt(
   actor: string,
   reason?: string,
   db: D1Database = getReceiptsDb(),
-): Promise<void> {
+  expectedRevision?: number,
+): Promise<number> {
   const record = await db
-    .prepare(`SELECT id, status, exported_month FROM receipt_records WHERE id = ? LIMIT 1`)
+    .prepare(`SELECT id, revision, status, exported_month FROM receipt_records WHERE id = ? AND deleted_at IS NULL LIMIT 1`)
     .bind(id)
-    .first<{ id: string; status: string; exported_month: string | null }>();
+    .first<{ id: string; revision: number; status: string; exported_month: string | null }>();
 
-  if (!record) throw new Error(`Receipt ${id} not found.`);
+  if (!record) throw new ReceiptNotFoundError(id);
 
   // Unified draft carve-out (ADR 0012): an exported receipt becomes deletable
   // when its month has an open correction draft (isMonthLockedForEdits → false).
@@ -1050,20 +1059,20 @@ export async function softDeleteReceipt(
   }
 
   const now = nowIso();
-  await db
-    .prepare(
-      `UPDATE receipt_records SET deleted_at = ?, deleted_by = ?, delete_reason = ?, updated_at = ? WHERE id = ?`,
-    )
-    .bind(now, actor, reason ?? null, now, id)
-    .run();
-
-  await createAuditEntry(db, {
-    actor,
-    action: "receipt.deleted",
-    objectType: "receipt",
-    objectId: id,
-    newValueJson: stringifyJson({ reason: reason ?? null }),
-  });
+  const results = await db.batch([
+    db.prepare(`INSERT INTO receipt_edit_admissions (receipt_id, expected_revision) VALUES (?, ?)`)
+      .bind(id, expectedRevision ?? record.revision),
+    db.prepare(`UPDATE receipt_records SET deleted_at = ?, deleted_by = ?, delete_reason = ?, updated_at = ? WHERE id = ?`)
+      .bind(now, actor, reason ?? null, now, id),
+    db.prepare(`INSERT INTO receipt_audit_log
+      (id, actor, action, object_type, object_id, new_value_json, created_at)
+      VALUES (?, ?, 'receipt.deleted', 'receipt', ?, ?, ?)`)
+      .bind(newUuid(), actor, id, stringifyJson({ reason: reason ?? null }), now),
+    db.prepare(`SELECT revision FROM receipt_records WHERE id = ?`).bind(id),
+  ]);
+  const revision = (results.at(-1)?.results?.[0] as { revision?: unknown } | undefined)?.revision;
+  if (!isReceiptRevision(revision)) throw new Error("Receipt acknowledgement missing revision.");
+  return revision;
 }
 
 // ─── Attendees ────────────────────────────────────────────────────────────────
