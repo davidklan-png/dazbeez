@@ -3,12 +3,21 @@ import assert from "node:assert/strict";
 import { amexFixture } from "./helpers/amex-sqlite";
 const json = (res: Response) => res.json() as Promise<{ code: string; revision: number; lines: number; receipts: number; unchangedLines: number; unchangedReceipts: number; lineRevisions: Record<string, number> }>;
 
+function snapshots(f: ReturnType<typeof amexFixture>, lineId: string, receiptId?: string | null) {
+  const previous = f.get("SELECT matched_receipt_id FROM amex_statement_lines WHERE id=?", lineId)?.matched_receipt_id;
+  return Object.fromEntries([...new Set([receiptId, previous].filter((id): id is string => typeof id === "string"))]
+    .map(id => [id, Number(f.get("SELECT revision FROM receipt_records WHERE id=?", id)?.revision ?? 0)]));
+}
+function reconcile(f: ReturnType<typeof amexFixture>, body: { amexLineId: string; receiptId?: string | null; matchStatus: string; expectedRevision: unknown }) {
+  return f.reconcile({ ...body, expectedReceipts: snapshots(f, body.amexLineId, body.receiptId) });
+}
+
 test("routes require safe loaded revisions; authentication still runs first", async () => {
   const f = amexFixture(); f.line(); f.trip();
   for (const token of [undefined, null, -1, 1.5, "0", Number.MAX_SAFE_INTEGER + 1]) {
     const res = await f.patch("l", { expectedRevision: token });
     assert.equal(res.status, 400); assert.match((await json(res)).code, /expected_revision/);
-    assert.equal((await f.reconcile({ amexLineId: "l", matchStatus: "no_receipt", expectedRevision: token })).status, 400);
+    assert.equal((await reconcile(f, { amexLineId: "l", matchStatus: "no_receipt", expectedRevision: token })).status, 400);
     assert.equal((await f.patchTrip("t", { expectedRevision: token })).status, 400);
   }
   assert.equal((await f.patch("l", {}, true)).status, 401);
@@ -79,17 +88,17 @@ test("exact acknowledgement is selected in batch, not a post-commit latest-token
 
 test("missing line cannot classify a supplied valid receipt; race disappearance also has no receipt effects", async () => {
   const f = amexFixture(); f.receipt();
-  assert.equal((await f.reconcile({ amexLineId: "gone", receiptId: "r", matchStatus: "confirmed", expectedRevision: 0 })).status, 404);
+  assert.equal((await reconcile(f, { amexLineId: "gone", receiptId: "r", matchStatus: "confirmed", expectedRevision: 0 })).status, 404);
   f.line(); const revision = f.revision();
   f.beforeBatch(() => f.sql.exec("DELETE FROM amex_statement_lines WHERE id='l'"));
-  assert.equal((await f.reconcile({ amexLineId: "l", receiptId: "r", matchStatus: "confirmed", expectedRevision: revision })).status, 404);
+  assert.equal((await reconcile(f, { amexLineId: "l", receiptId: "r", matchStatus: "confirmed", expectedRevision: revision })).status, 404);
   assert.equal(f.get("SELECT payment_path, status FROM receipt_records").payment_path, "UNKNOWN");
   assert.equal(f.get("SELECT status FROM receipt_records").status, "reviewed"); assert.equal(f.auditCount(), 0);
 });
 
 test("missing/deleted candidates refuse in transaction; match plus receipt audit failure rolls back all", async () => {
   const f = amexFixture(); f.receipt(); f.line();
-  const match = (id: string) => f.reconcile({ amexLineId: "l", receiptId: id, matchStatus: "confirmed", expectedRevision: f.revision() });
+  const match = (id: string) => reconcile(f, { amexLineId: "l", receiptId: id, matchStatus: "confirmed", expectedRevision: f.revision() });
   assert.equal((await match("absent")).status, 404);
   f.beforeBatch(() => f.sql.exec("UPDATE receipt_records SET deleted_at='gone' WHERE id='r'"));
   assert.equal((await match("r")).status, 409);
@@ -105,7 +114,7 @@ test("missing/deleted candidates refuse in transaction; match plus receipt audit
 test("match preserves UNKNOWN classification, merchant/date adoption, re-review clearing, and atomic audits", async () => {
   const f = amexFixture(); f.receipt(); f.line();
   f.sql.exec("UPDATE amex_statement_lines SET re_review_needed=1 WHERE id='l'");
-  const res = await f.reconcile({ amexLineId: "l", receiptId: "r", matchStatus: "confirmed", expectedRevision: f.revision() });
+  const res = await reconcile(f, { amexLineId: "l", receiptId: "r", matchStatus: "confirmed", expectedRevision: f.revision() });
   assert.equal(res.status, 200); assert.equal((await json(res)).revision, f.revision());
   const r = f.get("SELECT payment_path,merchant,transaction_date,status FROM receipt_records");
   assert.deepEqual({ ...r }, { payment_path: "AMEX", merchant: "AMEX merchant", transaction_date: "2026-11-01", status: "reconciled" });
@@ -117,11 +126,11 @@ test("match preserves UNKNOWN classification, merchant/date adoption, re-review 
 test("consolidated claims remain supported; unlink demotes only without surviving confirmed claims", async () => {
   const f = amexFixture(); f.receipt(); f.line(); f.line("l2");
   for (const id of ["l", "l2"]) {
-    assert.equal((await f.reconcile({ amexLineId: id, receiptId: "r", matchStatus: "confirmed", expectedRevision: f.revision(id) })).status, 200);
+    assert.equal((await reconcile(f, { amexLineId: id, receiptId: "r", matchStatus: "confirmed", expectedRevision: f.revision(id) })).status, 200);
   }
-  assert.equal((await f.reconcile({ amexLineId: "l", receiptId: null, matchStatus: "unmatched", expectedRevision: f.revision() })).status, 200);
+  assert.equal((await reconcile(f, { amexLineId: "l", receiptId: null, matchStatus: "unmatched", expectedRevision: f.revision() })).status, 200);
   assert.equal(f.get("SELECT status FROM receipt_records").status, "reconciled");
-  assert.equal((await f.reconcile({ amexLineId: "l2", receiptId: null, matchStatus: "unmatched", expectedRevision: f.revision("l2") })).status, 200);
+  assert.equal((await reconcile(f, { amexLineId: "l2", receiptId: null, matchStatus: "unmatched", expectedRevision: f.revision("l2") })).status, 200);
   assert.equal(f.get("SELECT status FROM receipt_records").status, "needs_review");
 });
 
@@ -195,9 +204,10 @@ test("whole-trip sealed-member failure rolls back trip metadata/status/all membe
 
 test("legal sealed-receipt overlay changes trip context without changing financial rows", async () => {
   const f = amexFixture(); f.receipt(); f.line("l", "r", "confirmed"); f.trip(); f.seal();
-  const receiptBefore = JSON.stringify(f.get("SELECT * FROM receipt_records")); const lineBefore = JSON.stringify(f.get("SELECT * FROM amex_statement_lines"));
+  const financialReceipt = () => Object.fromEntries(Object.entries(f.get("SELECT * FROM receipt_records")).filter(([k]) => k !== "revision"));
+  const receiptBefore = JSON.stringify(financialReceipt()); const lineBefore = JSON.stringify(f.get("SELECT * FROM amex_statement_lines"));
   const res = await f.members("t", { expectedRevision: f.tripRevision(), expectedLines: {}, receiptIds: ["r"] });
-  assert.equal(res.status, 200); assert.equal(JSON.stringify(f.get("SELECT * FROM receipt_records")), receiptBefore);
+  assert.equal(res.status, 200); assert.equal(JSON.stringify(financialReceipt()), receiptBefore);
   assert.equal(JSON.stringify(f.get("SELECT * FROM amex_statement_lines")), lineBefore);
   assert.equal((await f.patch("l", { expectedRevision: f.revision() })).status, 409);
 });

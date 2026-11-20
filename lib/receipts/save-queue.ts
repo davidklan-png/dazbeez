@@ -7,7 +7,7 @@ import { isReceiptRevision, RECEIPT_CONFLICT_MESSAGE } from "./receipt-revision"
 // Why this exists (same-session save ordering, 2026-11): the old debounce
 // aborted the in-flight PATCH and fired a new one, but fetch.abort() is
 // client-side only — an already-sent PATCH still applies server-side, and the
-// server (updateReceiptRecord) is last-write-wins with no CAS. Two overlapping
+// server then used last-write-wins. Two overlapping
 // PATCHes could therefore commit out of order and let an OLDER field snapshot
 // overwrite a newer one. "Mark reviewed" additionally fired its own PATCH
 // without waiting for an in-flight autosave, so a slow autosave could revert
@@ -33,8 +33,7 @@ import { isReceiptRevision, RECEIPT_CONFLICT_MESSAGE } from "./receipt-revision"
 // complete before the form can unmount — there is deliberately no
 // fire-and-forget machinery here.
 //
-// ponytail: this is client-only ordering. Cross-tab / cross-session
-// last-write-wins remains (no server CAS by design v1).
+// Receipt aggregate CAS also protects across tabs and processor writes.
 
 export type SaveFetch = (url: string, init: RequestInit) => Promise<Response>;
 
@@ -71,9 +70,8 @@ export interface SaveSuccess {
  *   • fetch rejects (connection lost; the request may still land), or
  *   • a 5xx / off-contract status: the route's catch-all 500
  *     (app/api/receipts/[id]/route.ts:387-401) can FOLLOW a committed
- *     UPDATE — updateReceiptRecord writes the row before its audit and
- *     membership steps (lib/receipts/db.ts), so a later crash answers 500
- *     with the write already durable, or
+ *     batch — a later response/compliance failure can follow a durable
+ *     receipt mutation, or
  *   • a 2xx whose body cannot be parsed: not a usable acknowledgement.
  * Once any of those happens the queue HALTS: no further request is sent
  * automatically (a later flush could not be claimed safely ordered if the
@@ -110,17 +108,16 @@ export function isConclusivePreWriteRefusal(status: number): boolean {
 
 /**
  * Runtime shape check for the success body, derived verbatim from the ONLY
- * success the receipt PATCH route can emit: `{ ok: true, warnings: string[] }`
+ * success the receipt PATCH route can emit: `{ ok: true, revision: number, warnings: string[] }`
  * (route.ts:386; warnings built as a string array at :375). A 2xx whose body
  * is anything else — primitive (`true`), array (`[]`), an error envelope
  * (`{error:…}`), or a non-array `warnings` — did not come from a completed
  * save handler and is therefore NOT an acknowledgement: it is an UNKNOWN
- * outcome and halts. No new ack key is invented; `ok: true` is the
- * endpoint's own.
+ * outcome and halts. Revision must be a nonnegative safe integer.
  */
 function isUsableSuccessAck(
   parsed: unknown,
-): parsed is { ok: true; warnings?: string[] } {
+): parsed is { ok: true; revision: number; warnings?: string[] } {
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     return false;
   }
@@ -272,22 +269,30 @@ export class SaveQueue {
     let target = url;
     let method: "POST" | "PATCH" | "DELETE" = "PATCH";
     let body: Record<string, unknown>;
-    let waiters: Waiter[];
-    if (this.hasPending) {
-      this.hasPending = false;
-      const markReviewed = this.pendingMarkReviewed;
-      this.pendingMarkReviewed = false;
-      waiters = this.waiters;
-      this.waiters = [];
-      body = this.config.buildBody(markReviewed);
-    } else {
-      const action = this.actions.shift()!;
-      target = action.url;
-      method = action.method;
-      body = action.buildBody();
-      waiters = [action.waiter];
+    let waiters: Waiter[] = [];
+    try {
+      if (this.hasPending) {
+        this.hasPending = false;
+        const markReviewed = this.pendingMarkReviewed;
+        this.pendingMarkReviewed = false;
+        waiters = this.waiters;
+        this.waiters = [];
+        body = this.config.buildBody(markReviewed);
+      } else {
+        const action = this.actions.shift()!;
+        target = action.url;
+        method = action.method;
+        waiters = [action.waiter];
+        body = action.buildBody();
+      }
+    } catch (error) {
+      this.inFlight = false;
+      this.lastFlushFailed = true;
+      const failure = error instanceof Error ? error : new Error("Reload to review before saving.");
+      for (const waiter of waiters) waiter.reject(failure);
+      this.stop(failure.message);
+      return;
     }
-    if (this.acknowledgedRevision !== undefined) body = { ...body, expectedRevision: this.acknowledgedRevision };
     void this.fire(target, body, waiters, fetchImpl, method);
   }
 
@@ -317,16 +322,20 @@ export class SaveQueue {
       }
       const ack = parsed as { revision?: unknown; receiptRevisions?: unknown; lineRevisions?: unknown; tripRevisions?: unknown } | null;
       const validToken = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
-      const revisioned = true;
-      const usableRevision = !revisioned || (validToken(ack?.revision) && (this.config.entity ? ack.revision > this.acknowledgedRevision : ack.revision >= this.acknowledgedRevision));
+      const usableRevision = validToken(ack?.revision) && (this.config.entity ? ack.revision > this.acknowledgedRevision : ack.revision >= this.acknowledgedRevision);
       const validMap = (v: unknown) => v !== null && typeof v === "object" && !Array.isArray(v) && Object.values(v).every(validToken);
       const expectedLines = body.expectedLines as Record<string, number> | undefined;
       const usableLines = (ack?.lineRevisions === undefined ? expectedLines === undefined : validMap(ack.lineRevisions)) &&
         (!expectedLines || Object.entries(expectedLines).every(([id, rev]) => validToken((ack?.lineRevisions as Record<string, unknown> | undefined)?.[id]) && (ack!.lineRevisions as Record<string, number>)[id] >= rev));
+      const expectedReceipts = body.expectedReceipts as Record<string, number> | undefined;
+      const usableReceipts = (ack?.receiptRevisions === undefined ? expectedReceipts === undefined && !this.config.entity : validMap(ack.receiptRevisions)) &&
+        (!expectedReceipts || (Object.keys(ack!.receiptRevisions as object).length === Object.keys(expectedReceipts).length &&
+          Object.entries(expectedReceipts).every(([id, rev]) => validToken((ack?.receiptRevisions as Record<string, unknown> | undefined)?.[id]) && (ack!.receiptRevisions as Record<string, number>)[id] >= rev)));
       const usableTrips = ack?.tripRevisions === undefined || validMap(ack.tripRevisions);
-      if (res.ok && isUsableSuccessAck(parsed) && usableRevision && usableLines && usableTrips) {
-        if (revisioned) this.acknowledgedRevision = ack!.revision as number;
+      if (res.ok && isUsableSuccessAck(parsed) && usableRevision && usableLines && usableTrips && usableReceipts) {
+        this.acknowledgedRevision = ack!.revision as number;
         result = { warnings: parsed.warnings ?? [], revision: this.acknowledgedRevision,
+          ...(ack?.receiptRevisions ? { receiptRevisions: ack.receiptRevisions as Record<string, number> } : {}),
           ...(ack?.lineRevisions ? { lineRevisions: ack.lineRevisions as Record<string, number> } : {}),
           ...(ack?.tripRevisions ? { tripRevisions: ack.tripRevisions as Record<string, number> } : {}) };
         this.config.onAcknowledged?.(body, result);

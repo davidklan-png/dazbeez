@@ -15,7 +15,7 @@ export function amexFixture(recursive = false, beforeRevision?: (sql: DatabaseSy
     if (f.startsWith("0048")) beforeRevision?.(sql);
     sql.exec(readFileSync(path.join(root, "db/receipts", f), "utf8"));
   }
-  let beforeBatch: (() => void) | undefined;
+  let beforeBatch: (() => void | Promise<void>) | undefined;
   let afterBatch: (() => void) | undefined;
   function prepare(query: string) {
     const stmt = { query, params: [] as unknown[],
@@ -27,7 +27,7 @@ export function amexFixture(recursive = false, beforeRevision?: (sql: DatabaseSy
     return stmt;
   }
   const db = { prepare, async batch(stmts: ReturnType<typeof prepare>[]) {
-    const before = beforeBatch; beforeBatch = undefined; before?.();
+    const before = beforeBatch; beforeBatch = undefined; await before?.();
     sql.exec("BEGIN");
     let out;
     try {
@@ -86,7 +86,7 @@ export function amexFixture(recursive = false, beforeRevision?: (sql: DatabaseSy
   function seal(month = "2026-11") { sql.prepare(`INSERT INTO amex_reconciliations(id,statement_month,status,line_count,matched_count,no_receipt_count,created_by,created_at) VALUES (?,?,'finalized',1,0,0,'fixture','t')`).run("seal-" + month, month); }
   const auditCount = () => get("SELECT count(*) n FROM receipt_audit_log").n;
   return { sql, db, writers, get, all, revision, tripRevision, line, receipt, trip, seal, auditCount, load,
-    beforeBatch(fn: () => void) { beforeBatch = fn; }, afterBatch(fn: () => void) { afterBatch = fn; },
+    beforeBatch(fn: () => void | Promise<void>) { beforeBatch = fn; }, afterBatch(fn: () => void) { afterBatch = fn; },
     patch: (id: string, body: unknown, deny = false) => patchRoute.PATCH(request(body, "PATCH", deny), { params: Promise.resolve({ id }) }),
     reconcile: (body: unknown) => reconcileRoute.POST(request(body, "POST")),
     patchTrip: (id: string, body: unknown) => tripRoute.PATCH(request(body), { params: Promise.resolve({ id }) }),

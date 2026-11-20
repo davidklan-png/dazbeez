@@ -85,6 +85,8 @@ test("T1-10: confirming a receipt already claimed by a DIFFERENT finalized month
       "confirmed",
       "operator",
       0,
+      { "receipt-A": 0 },
+      {},
       fakeDbWithSealedClaim(),
     ),
     /cannot be linked to another month/,

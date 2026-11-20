@@ -3,7 +3,7 @@
 import { createRoot } from "react-dom/client";
 import { flushSync } from "react-dom";
 import { ReconcileScreen, type ReconcileScreenProps } from "@/components/receipts/reconcile/reconcile-screen";
-import type { AmexStatementLine } from "@/lib/receipts/types";
+import type { AmexStatementLine, ReceiptRecord, ReceiptStatus } from "@/lib/receipts/types";
 import { navLog } from "./nav-shim";
 
 const root = createRoot(document.getElementById("app")!);
@@ -27,15 +27,57 @@ function line(id: string): AmexStatementLine {
     receipt_status: "no_receipt_required", receipt_missing_reason: id === "b" ? "Existing reason" : "", business_trip_id: null,
     business_trip_status: "not_applicable", expense_category_code: "supplies", re_review_needed: 0, updated_at: null };
 }
+function makeReceipt(id: string, merchant: string): ReceiptRecord {
+  return {
+    id,
+    revision: 0,
+    created_at: "2026-11-11T09:00:00.000Z",
+    updated_at: "2026-11-11T09:00:00.000Z",
+    captured_at: "2026-11-11T09:00:00.000Z",
+    captured_by: "fixture",
+    source: "desktop_upload",
+    original_filename: null,
+    payment_path: "CASH",
+    expense_type: "UNKNOWN",
+    transaction_date: "2026-11-10",
+    merchant,
+    amount_minor: 4200,
+    currency: "JPY",
+    tax_amount_minor: null,
+    business_purpose: null,
+    alcohol_present: 0,
+    attendees_required: 0,
+    status: "captured" as ReceiptStatus,
+    original_r2_key: `fixtures/${id}.pdf`,
+    original_sha256: "0".repeat(64),
+    original_content_type: "application/pdf",
+    original_size_bytes: 1000,
+    processed_r2_key: null,
+    extraction_json: null,
+    legacy: 0,
+    exported_month: null,
+    expense_category_code: null,
+    deleted_at: null,
+    deleted_by: null,
+    delete_reason: null,
+    export_statement_month: null,
+  };
+}
+
 let era = 0;
 let tripMode = false;
-function mount(trip = false) {
+function mount(trip = false, candidates = false) {
   requests.length = 0; navLog.length = 0; tripMode = trip;
   const props: ReconcileScreenProps = { amexLines: [line("a"), line("b")], receipts: [], autoMatches: [], orphanReceipts: [],
     leadingSlackReceipts: [], upcomingReceipts: [], undatedReceipts: [], duplicateCandidates: new Map(), incompletePurgeJobs: [],
     month: "2026-11", monthLabel: "November 2026", monthsAvailable: [{ month: "2026-10", lineCount: 1, unmatchedCount: 0, status: null }, { month: "2026-11", lineCount: 2, unmatchedCount: 0, status: null }],
     finalized: false, window: null, receiptsInWindow: [], attendeesByReceiptId: new Map(), attendeesByLineId: { a: ["村上多寿子"] },
     attendeeDirectory: [], categoryRules: [], initialLineId: "a" };
+  if (candidates) {
+    props.receipts = [{ ...makeReceipt("r", "Synthetic consolidated receipt"), revision: 3, payment_path: "AMEX", status: "reviewed" }];
+    props.autoMatches = props.amexLines.map(l => ({ amexLineId: l.id, receiptId: "r", confidenceScore: 100, matchReasons: ["Synthetic match"], consolidatedGroupSize: 2 }));
+    for (const l of props.amexLines) { l.match_status = "unmatched"; l.receipt_status = "missing_receipt"; }
+  }
   if (trip) { props.amexLines[0].business_trip_id = "t"; props.amexLines[0].business_trip_status = "candidate"; }
   flushSync(() => root.render(<ReconcileScreen key={++era} {...props} />));
 }
@@ -60,12 +102,12 @@ async function run() {
   await until(() => Number(requests.length) === 1, "reason blur + selection save");
   assert(selected("a"), "Selection escaped before first acknowledgement");
   type(reason(), "保存中に追記した理由");
-  requests[0].finish({ ok: true, revision: 2 });
+  requests[0].finish({ ok: true, receiptRevisions: {}, revision: 2 });
   await until(() => Number(requests.length) === 2, "late typing drain");
   assert(selected("a"), "Selection escaped before latest draft acknowledgement");
   assert(requests[1].body.receiptMissingReason === "保存中に追記した理由", "Latest Japanese reason lost");
   assert(Number(requests[1].body.expectedRevision) === 2, "Did not consume own acknowledgement");
-  requests[1].finish({ ok: true, revision: 4 });
+  requests[1].finish({ ok: true, receiptRevisions: {}, revision: 4 });
   await until(() => selected("b"), "selection after full drain");
   results.push("reason onBlur + line switch waits for late typing and acknowledged revisions");
 
@@ -76,7 +118,7 @@ async function run() {
   input.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "日本語確定" })); type(input, "日本語確定");
   await until(() => Number(requests.length) === 1, "IME final save");
   assert(requests[0].body.receiptMissingReason === "日本語確定", "IME final text was not preserved");
-  requests[0].finish({ ok: true, revision: 5 }); await until(() => selected("b"), "IME selection after ack");
+  requests[0].finish({ ok: true, receiptRevisions: {}, revision: 5 }); await until(() => selected("b"), "IME selection after ack");
   results.push("IME holds writes/navigation, then drains committed raw Japanese input");
 
   mount(); await tick(); type(reason(), "signoff draft"); await tick();
@@ -86,7 +128,7 @@ async function run() {
   const sign = [...document.querySelectorAll("button")].filter(b => b.textContent?.trim() === "Finalize").at(-1)!;
   sign.click(); await until(() => requests.length > 0, "pending timer before signoff");
   assert(requests[0].url.includes("/amex/lines/a"), "Signoff escaped pending reason timer");
-  requests[0].finish({ ok: true, revision: 6 }); await until(() => Number(requests.length) === 2, "signoff after save");
+  requests[0].finish({ ok: true, receiptRevisions: {}, revision: 6 }); await until(() => Number(requests.length) === 2, "signoff after save");
   assert(requests[1].url.endsWith("/finalize"), "No signoff after acknowledged line save");
   requests[1].finish({ ok: true, warnings: [] }); await tick();
   results.push("signoff flushes pending reason timer before finalization request");
@@ -100,26 +142,54 @@ async function run() {
   category.dispatchEvent(new Event("change", { bubbles: true }));
   window.dispatchEvent(new KeyboardEvent("keydown", { key: "u", bubbles: true }));
   await tick(); assert(Number(requests.length) === 1, "Category/action overwrote busy slot and overlapped roster save");
-  requests[0].finish({ ok: true, revision: 3 }); await until(() => Number(requests.length) === 2, "category behind roster");
+  requests[0].finish({ ok: true, receiptRevisions: {}, revision: 3 }); await until(() => Number(requests.length) === 2, "category behind roster");
   assert(requests[1].body.expenseCategoryCode === "communications", "Category draft lost");
-  requests[1].finish({ ok: true, revision: 5 }); await until(() => Number(requests.length) === 3, "unlink behind latest fields");
+  requests[1].finish({ ok: true, receiptRevisions: {}, revision: 5 }); await until(() => Number(requests.length) === 3, "unlink behind latest fields");
   assert(requests[2].url.endsWith("/reconcile") && Number(requests[2].body.expectedRevision) === 5, "Unlink escaped edit lane");
-  requests[2].finish({ ok: true, revision: 7 }); await tick();
+  requests[2].finish({ ok: true, revision: 7, receiptRevisions: {}, lineRevisions: {} }); await tick();
   results.push("roster/category/keyboard action share ordering despite shared busy-slot interleaving");
 
   mount(true); await tick(100); type(reason(), "trip pending reason");
   button("Confirm trip").click(); await until(() => Number(requests.length) === 1, "trip flush");
   assert(requests[0].url.includes("/amex/lines/a"), "Whole trip escaped pending editor");
-  requests[0].finish({ ok: true, revision: 2, tripRevisions: { t: 4 } });
+  requests[0].finish({ ok: true, receiptRevisions: {}, revision: 2, tripRevisions: { t: 4 } });
   await until(() => Number(requests.length) === 2, "whole trip after flush");
   assert(Number(requests[1].body.expectedRevision) === 4, "Trip did not consume own line-save context ack");
   assert((requests[1].body.expectedLines as Record<string, number>).a === 2, "Trip line token stale after own save");
   type(reason(), "trip in flight late typing"); await tick(500); assert(Number(requests.length) === 2, "Line write overlapped trip action");
-  requests[1].finish({ ok: true, revision: 6, lineRevisions: { a: 8 } });
+  requests[1].finish({ ok: true, receiptRevisions: {}, revision: 6, lineRevisions: { a: 8 } });
   await until(() => Number(requests.length) === 3, "late draft after own trip ack");
   assert(Number(requests[2].body.expectedRevision) === 8 && requests[2].body.receiptMissingReason === "trip in flight late typing", "Late trip draft/token lost");
-  requests[2].finish({ ok: true, revision: 10, tripRevisions: { t: 8 } }); await tick();
+  requests[2].finish({ ok: true, receiptRevisions: {}, revision: 10, tripRevisions: { t: 8 } }); await tick();
   results.push("whole-trip action flushes lines, holds late edits, resumes with verified aggregate tokens");
+
+  mount(false, true); await tick();
+  button("Bulk confirm").click();
+  await until(() => Number(requests.length) === 1, "bulk candidate admission");
+  assert((requests[0].body.expectedReceipts as Record<string, number>).r === 3, "Bulk did not use loaded candidate receipt token");
+  requests[0].finish({ ok: true, revision: 4, receiptRevisions: { r: 8 }, lineRevisions: {} });
+  await until(() => Number(requests.length) === 2, "second consolidated candidate");
+  assert((requests[1].body.expectedReceipts as Record<string, number>).r === 8, "Bulk did not consume own receipt acknowledgement");
+  assert((requests[1].body.expectedLines as Record<string, number>).a === 4, "Consolidated sibling was not admitted with own line acknowledgement");
+  requests[1].finish({ ok: true, revision: 6, receiptRevisions: { r: 12 }, lineRevisions: { a: 9 } }); await tick();
+  click("a"); await until(() => selected("a"), "select consolidated sibling"); button("Unlink").click();
+  await until(() => Number(requests.length) === 3, "unlink after bulk");
+  assert(Number(requests[2].body.expectedRevision) === 9, "Sibling lane did not consume exact own batch token");
+  assert((requests[2].body.expectedReceipts as Record<string, number>).r === 12, "Unlink lost previous affected receipt context");
+  requests[2].finish({ ok: true, revision: 11, receiptRevisions: { r: 14 }, lineRevisions: { b: 10 } }); await tick();
+  results.push("bulk consolidated candidates and later single unlink use loaded and own admitted receipt/line tokens");
+
+  for (const malformed of [false, true]) {
+    mount(false, true); await tick(); button("Confirm match").click();
+    await until(() => Number(requests.length) === 1, "single candidate decision");
+    assert((requests[0].body.expectedReceipts as Record<string, number>).r === 3, "Single match replaced loaded candidate token");
+    requests[0].finish(malformed ? { ok: true, revision: 2, receiptRevisions: {} }
+      : { error: "Candidate changed — reload to review", code: "amex_receipt_revision_conflict" }, malformed ? 200 : 409);
+    await tick(); button("Confirm match").click(); await tick();
+    assert(Number(requests.length) === 1, "Candidate failure automatically retried");
+    assert(document.body.textContent?.includes("Reload to review"), "Candidate failure has no recovery action");
+    results.push(`${malformed ? "malformed receipt acknowledgement" : "stale candidate"} halts single matching with loaded context retained`);
+  }
 
   for (const failure of ["conflict", "missing", "malformed", "lost"] as const) {
     mount(); await tick(); type(reason(), "保持する最新の入力"); click("b");

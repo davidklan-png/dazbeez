@@ -37,7 +37,7 @@ function makeDeferredFetch() {
         ok: (json: Record<string, unknown> = {}) =>
           resolve(
             // Default body = the endpoint's ack shape ({ok:true,warnings:[]}).
-            new Response(JSON.stringify({ ok: true, revision: Number(JSON.parse(init.body as string).expectedRevision) + 1, warnings: [], ...json }), {
+            new Response(JSON.stringify({ ok: true, receiptRevisions: {}, revision: Number(JSON.parse(init.body as string).expectedRevision) + 1, warnings: [], ...json }), {
               status: 200,
               headers: { "Content-Type": "application/json" },
             }),
@@ -744,4 +744,22 @@ test("a missing/deleted receipt halts future autosaves and dedicated actions", a
   await assert.rejects(q.save(), /no longer available/);
   await assert.rejects(q.mutate("DELETE", {}), /no longer available/);
   assert.equal(q.halted, true); assert.equal(calls, 1);
+});
+
+for (const receiptRevisions of [undefined, {}, { r: -1 }, { r: 2 }, { r: 4, unseen: 9 }]) {
+  test(`matching halts on an unusable affected-receipt acknowledgement: ${JSON.stringify(receiptRevisions)}`, async () => {
+    const q = new SaveQueue({ url: "/line", initialRevision: 0, entity: "AMEX line", buildBody: () => ({}),
+      fetchImpl: async () => Response.json({ ok: true, revision: 1, receiptRevisions }) });
+    await assert.rejects(q.mutate("/reconcile", "POST", () => ({ expectedReceipts: { r: 3 } })), /Reload to review/);
+    assert.equal(q.halted, true);
+  });
+}
+
+test("a local missing candidate context rejects and halts without leaving an in-flight slot", async () => {
+  let calls = 0;
+  const q = new SaveQueue({ url: "/line", initialRevision: 0, entity: "AMEX line", buildBody: () => ({}), fetchImpl: async () => {
+    calls++; return Response.json({ ok: true, revision: 1 });
+  } });
+  await assert.rejects(q.mutate("/reconcile", "POST", () => { throw new Error("Receipt context missing — reload to review."); }), /context missing/);
+  assert.equal(q.idle, true); assert.equal(q.halted, true); assert.equal(calls, 0);
 });

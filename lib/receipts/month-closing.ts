@@ -7,6 +7,7 @@ import {
   listAmexLineAttendeeNamesByMonth,
   listAmexLines,
   verifyAmexLineReads,
+  verifyReceiptReads,
   listAttendeeDirectory,
   listAttendeeNamesByReceiptIds,
   listReceiptRecordsByIds,
@@ -227,6 +228,7 @@ export async function buildExportBundle(month: string): Promise<ExportBundle> {
   }
 
   await verifyAmexLineReads(amexLines);
+  await verifyReceiptReads(allReceipts);
 
   return { rows, receipts: allReceipts, amexLines, attendeeMap, attendeeDirectory, amexAttendees, items };
 }

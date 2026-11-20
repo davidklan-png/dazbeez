@@ -1,4 +1,170 @@
-# AMEX line/trip write safety — independent implementation, integration blocked
+# AMEX line/trip write safety — PR219 integrated, release gates pending
+
+
+## Integration completion — 2026-11-21 JST
+
+Merged `origin/master` **dbe3c4f7dc6f28a88c2ec5e675a5ecd42b930926**
+(PR219) normally; merge commit **048112f**. The previous implementation head was
+`b01039200bb60b669b9b5e90bc9001f204b350e2`. No push, production write,
+migration, deployment, restart, queue lease or email was performed.
+
+The prior phase below is historical. PR219 is now merged here; integration is
+implemented. **This is still a draft, not release acceptance:** build/runtime
+and mounted-browser gates could not run successfully under this sandbox.
+Parent independent review and the production verification remain outstanding.
+
+### Completed coupling
+
+- Reconcile POST requires a safe `expectedReceipts` map for exactly the loaded
+  selected/suggested and previous receipt contexts. The matching D1 batch
+  asserts receipt identity/revision/deleted state, target lifecycle and finalized
+  claims before any line/receipt/audit mutation. Server code never calls the
+  receipt HTTP PATCH. Existing classification/adoption/demotion behavior stays
+  atomic. Receipt and admitted sibling-line tokens are selected in that batch;
+  a later writer cannot be mistaken for its acknowledgement.
+- Reconcile keeps loaded receipt tokens and accepts only validated own action
+  acknowledgements. Single, bulk and consolidated decisions share these tokens;
+  sibling line tokens are admitted before they can be acknowledged. Line edits
+  and trip actions also return exact affected receipt tokens. Missing, malformed,
+  unsafe, regressed or wrong-set acknowledgements halt; no automatic retry.
+- Shared SaveQueue retains PR219's required `initialRevision`, fixed-URL
+  PATCH/DELETE idle barrier, receipt conflict message/halt and draft/navigation
+  behavior. The AMEX URL/method action overload shares its serialized lane.
+  Inline category editing uses that queue for each target identity, including
+  PR219's receipt branch, optimistic draft retention and explicit reload.
+- 0048 adds reverse receipt invalidation for line rosters, trip business context,
+  pointer/link membership and OLD/NEW parents; receipt-only overlay members also
+  invalidate their observing trips/member lines. Counter-only updates do not
+  reverse-trigger. Reads assert snapshots without consuming revisions.
+- Real SQLite fixtures apply **0001–0048 with foreign keys**. Both recursion
+  modes, stale non-deleted candidates, extraction/merge/publication invalidation,
+  exact acknowledgements, previous receipt admission, consolidated/bulk outcomes,
+  sealed financial rows and Delete-versus-confirm races in both admission orders
+  pass. R7 deletion UX and tentative-detach implementation were not added.
+- All **47 shipped migrations 0001–0047 match origin/master byte-for-byte**.
+  No dependencies, endpoints, middleware, default cf:dev script or production
+  configuration changed. No pre-existing untracked files were present.
+
+### Integration gate commands and results
+
+All commands use this worktree and Node **v22.23.2** via `fnm exec --using 22`.
+The final gate rerun covers the committed implementation; a documentation-only
+results commit may follow it.
+
+1. `fnm exec --using 22 npm test` — **blocked**, exit 1 before test collection:
+   tsx cannot create its IPC socket (`listen EPERM .../tsx-501/*.pipe`).
+2. IPC-free full suite:
+   `fnm exec --using 22 node --require /tmp/amex-tsx-runner.cjs --import tsx --experimental-test-module-mocks --test 'tests/**/*.test.ts'`
+   — **2,041 collected, 2,040 pass, 0 fail, 1 existing skip**
+   (`export-revision-flow.test.ts`, rev-2 create/finalize integration).
+   The temporary runner only replaces nested CLI invocations of tsx with
+   `node --import tsx`; no product, database or transport mocks are added.
+   Without that child-launch workaround the same suite had 11 environment-only
+   CLI failures. The temporary file is reproducible as:
+
+   ```js
+   const cp = require('node:child_process');
+   const original = cp.spawnSync;
+   cp.spawnSync = function(command, args, options) {
+     if (Array.isArray(args) && /[/\\]tsx[/\\]dist[/\\]cli\.mjs$/.test(args[0] || '')) {
+       args = ['--import', 'tsx', ...args.slice(1)];
+     }
+     return original.call(this, command, args, options);
+   };
+   require('node:module').syncBuiltinESMExports();
+   ```
+
+3. Targeted command:
+
+   ```sh
+   fnm exec --using 22 node --import tsx --experimental-test-module-mocks --test \
+     tests/receipts/amex-receipt-coupling.test.ts \
+     tests/receipts/amex-write-persistence.test.ts \
+     tests/receipts/receipt-revision.test.ts tests/receipts/save-queue.test.ts \
+     tests/receipts/category-cell.test.ts tests/receipts/amex-line-patch.test.ts \
+     tests/receipts/attendee-atomic.test.ts tests/receipts/reconciliation.test.ts \
+     tests/receipts/reconciliation-signoff.test.ts tests/receipts/business-trips.test.ts \
+     tests/receipts/amex-import-contract.test.ts tests/receipts/amex-replace-retire.test.ts \
+     tests/receipts/review-navigation.test.ts
+   ```
+
+   **261 collected, 261 pass, 0 fail, 0 skip**. Full suite also covers seal
+   publication/upgrade/route races, duplicate, cross-month and manifest suites.
+   The seal-route injected ambiguous-batch fixture now targets the publication
+   batch, allowing the newly added snapshot-assertion reads to finish first.
+4. Changed TS/TSX/MJS file list from `git diff --name-only origin/master` plus
+   `git ls-files --others --exclude-standard`, passed as individual arguments to
+   `fnm exec --using 22 node node_modules/eslint/bin/eslint.js` — **pass, zero
+   errors/warnings**. `git diff --check` — **pass**.
+5. `fnm exec --using 22 npx next typegen` — **blocked**, exit 1: OpenNext config
+   initialization cannot listen on 127.0.0.1 (`EPERM`).
+   `fnm exec --using 22 npx tsc --noEmit` — **pass** using available generated
+   types; fresh Next type generation remains unverified.
+6. `fnm exec --using 22 npm run build:cf` — **blocked**, exit 1: Next/OpenNext's
+   local binding bridge cannot open a loopback listener (`EPERM`). No successful
+   final Worker artifact was emitted.
+7. `fnm exec --using 22 npx wrangler dev --local --port 8795 --inspector-port 9255 --var CLERK_SECRET_KEY:sk_test_local_fixture_only`
+   — **blocked**, exit 1: `.open-next/worker.js` absent after the failed build.
+   Wrangler's default preferences log path was also write-denied. No boot or
+   HTTP result is claimed. The key is synthetic; no remote binding was used.
+8. `fnm exec --using 22 node scripts/check-amex-write-fixture.mjs` — bundle/CSS
+   generation succeeds, but local Chrome/CDP times out before any scenario
+   result, exit 1. **0 verified mounted runs** at this checkpoint. The fixture
+   now includes 12 scenarios for each 375/1024 viewport (24 intended runs),
+   adding real-editor loaded candidate, consolidated own acknowledgements,
+   stale candidate and malformed receipt-ack cases. These still need an
+   unrestricted local browser run; no screenshots or signed-in UI state were
+   observed here.
+
+Remaining release gates: parent independent frozen-head review; ordinary npm
+launcher, fresh typegen, build:cf, local boot/routing/auth and mounted 375/1024
+fixtures in a sandbox that permits them. After separate authorization and
+migration/deploy, run the deployment smoke and inspect signed-in live receipt,
+line/trip values, badges, blocker lists and counts per AGENTS Step 4. No claim
+of live-state correctness or release readiness is made by this report.
+
+### Exact changed files versus merged origin/master
+
+```text
+app/(receipt-system)/receipts/reconcile/page.tsx
+app/api/receipts/amex/lines/[id]/route.ts
+app/api/receipts/reconcile/route.ts
+app/api/receipts/trips/[id]/candidates/route.ts
+app/api/receipts/trips/[id]/members/route.ts
+app/api/receipts/trips/[id]/route.ts
+components/receipts/export/inline-category-cell.tsx
+components/receipts/reconcile/business-trip-strip.tsx
+components/receipts/reconcile/reconcile-screen.tsx
+components/receipts/trips/trip-detail-screen.tsx
+db/receipts/0048_amex_write_revision.sql
+docs/audits/2026-11-19-amex-write-safety-implementation.md
+lib/receipts/amex-write.ts
+lib/receipts/api/amex-line-patch.ts
+lib/receipts/business-trips.ts
+lib/receipts/category-cell.ts
+lib/receipts/db.ts
+lib/receipts/month-closing.ts
+lib/receipts/save-queue.ts
+lib/receipts/types.ts
+scripts/check-amex-write-fixture.mjs
+tests/receipts/amex-receipt-coupling.test.ts
+tests/receipts/amex-write-persistence.test.ts
+tests/receipts/attendee-atomic.test.ts
+tests/receipts/blockers.test.ts
+tests/receipts/category-cell.test.ts
+tests/receipts/fixture/amex-entry.tsx
+tests/receipts/helpers/amex-sqlite.ts
+tests/receipts/manifest-csv.test.ts
+tests/receipts/month-closing.test.ts
+tests/receipts/reconciliation-signoff.test.ts
+tests/receipts/reconciliation.test.ts
+tests/receipts/save-queue.test.ts
+tests/receipts/seal-route-races.test.ts
+tests/receipts/statement-window.test.ts
+tests/receipts/tier1-10-cross-month-guard.test.ts
+```
+
+## Prior independent phase (historical)
 
 Base: `be216d5812aea2b6b98389ffa483c593c4353ed6` (merged PR218), branch
 `polly/receipts-amex-write-safety-20261119`, dedicated worktree of the same name.

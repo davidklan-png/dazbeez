@@ -1826,8 +1826,10 @@ export async function updateAmexReconciliation(
   matchStatus: AmexMatchStatus,
   actor: string,
   expectedRevision: number,
+  expectedReceipts: Record<string, number>,
+  expectedLines: Record<string, number> = {},
   db: D1Database = getReceiptsDb(),
-): Promise<{ ok: true; revision: number; tripRevisions: Record<string, number> }> {
+): Promise<{ ok: true; revision: number; tripRevisions: Record<string, number>; receiptRevisions: Record<string, number>; lineRevisions: Record<string, number> }> {
   const now = nowIso();
 
   // Capture previous state for two reasons:
@@ -1924,8 +1926,23 @@ export async function updateAmexReconciliation(
     }
   }
 
+  const receiptIds = [...new Set([receiptId, previousReceiptId].filter((id): id is string => !!id))];
   const statements = [
     ...admitAmexLine(db, amexLineId, expectedRevision),
+    ...Object.entries(expectedLines).flatMap(([id, rev]) => admitAmexLine(db, id, rev)),
+    amexAssertion(db, "amex_receipt_revision_conflict", `
+      NOT EXISTS (SELECT value FROM json_each(?) WHERE value NOT IN (SELECT key FROM json_each(?)))
+      AND NOT EXISTS (SELECT key FROM json_each(?) WHERE key NOT IN (SELECT value FROM json_each(?)))`,
+      [stringifyJson(receiptIds), stringifyJson(expectedReceipts), stringifyJson(expectedReceipts), stringifyJson(receiptIds)]),
+    ...receiptIds.flatMap(id => [
+      amexAssertion(db, "amex_receipt_missing", "EXISTS (SELECT 1 FROM receipt_records WHERE id = ?)", [id]),
+      amexAssertion(db, "amex_receipt_revision_conflict", `EXISTS (SELECT 1 FROM receipt_records WHERE id = ? AND revision = ? AND deleted_at IS NULL)`, [id, expectedReceipts[id] ?? -1]),
+    ]),
+    amexAssertion(db, "amex_receipt_ineligible", `NOT EXISTS (
+      SELECT 1 FROM amex_statement_lines l JOIN amex_reconciliations r ON r.statement_month=l.statement_month
+      WHERE l.matched_receipt_id=? AND l.match_status='confirmed' AND l.id != ?
+        AND l.statement_month != ? AND r.status='finalized' AND ?='confirmed')`,
+      [receiptId, amexLineId, statementMonth ?? "", matchStatus]),
     ...(receiptId ? [
       amexAssertion(db, "amex_receipt_missing", "EXISTS (SELECT 1 FROM receipt_records WHERE id = ?)", [receiptId]),
       amexAssertion(db, "amex_receipt_ineligible", `EXISTS (SELECT 1 FROM receipt_records WHERE id = ?
@@ -2057,10 +2074,17 @@ export async function updateAmexReconciliation(
         source: "amex_confirm_override" },
       { merchant: receiptAdoptAudit.oldMerchant, transactionDateFilled: false }));
   }
+  statements.push(db.prepare(`SELECT
+    (SELECT json_group_object(id, revision) FROM receipt_records WHERE id IN (SELECT value FROM json_each(?))) AS receipts_json,
+    (SELECT json_group_object(line_id, revision) FROM amex_line_revisions WHERE line_id IN (SELECT key FROM json_each(?))) AS lines_json`)
+    .bind(stringifyJson(receiptIds), stringifyJson(expectedLines)));
   statements.push(lineRevisionSelect(db, amexLineId));
-  const result = await amexBatch<{ revision: number; trip_revisions_json: string }>(db, statements);
+  const result = await amexBatch<{ revision: number; trip_revisions_json: string; receipts_json: string; lines_json: string }>(db, statements);
   const ack = result.at(-1)!.results[0]!;
-  return { ok: true, revision: ack.revision, tripRevisions: JSON.parse(ack.trip_revisions_json) as Record<string, number> };
+  const affected = result.at(-2)!.results[0]!;
+  return { ok: true, revision: ack.revision, tripRevisions: JSON.parse(ack.trip_revisions_json) as Record<string, number>,
+    receiptRevisions: JSON.parse(affected.receipts_json) as Record<string, number>,
+    lineRevisions: JSON.parse(affected.lines_json) as Record<string, number> };
 }
 
 // ─── AMEX statement artifacts ────────────────────────────────────────────────
@@ -2700,7 +2724,7 @@ export async function updateAmexLineCategory(
   actor: string,
   expectedRevision: number,
   db: D1Database = getReceiptsDb(),
-): Promise<{ ok: true; revision: number; tripRevisions: Record<string, number> }> {
+): Promise<{ ok: true; revision: number; tripRevisions: Record<string, number>; receiptRevisions: Record<string, number> }> {
   const sets: string[] = [];
   const binds: unknown[] = [];
 
@@ -2760,16 +2784,16 @@ export async function updateAmexLineCategory(
     statements.push(amexAudit(db, actor, "amex.line_categorized", "amex_line", lineId, input));
   }
   statements.push(lineRevisionSelect(db, lineId));
-  const result = await amexBatch<{ revision: number; trip_revisions_json: string }>(db, statements);
+  const result = await amexBatch<{ revision: number; trip_revisions_json: string; receipt_revisions_json: string }>(db, statements);
   const ack = result.at(-1)!.results[0]!;
-  return { ok: true, revision: ack.revision, tripRevisions: JSON.parse(ack.trip_revisions_json) as Record<string, number> };
+  return { ok: true, revision: ack.revision, tripRevisions: JSON.parse(ack.trip_revisions_json) as Record<string, number>, receiptRevisions: JSON.parse(ack.receipt_revisions_json) as Record<string, number> };
 }
 
 /** Internal/test roster entry point uses the same admitted aggregate batch. */
 export async function replaceAmexLineAttendees(
   lineId: string, names: string[], actor: string, expectedRevision: number,
   db: D1Database = getReceiptsDb(),
-): Promise<{ ok: true; revision: number; tripRevisions: Record<string, number> }> {
+): Promise<{ ok: true; revision: number; tripRevisions: Record<string, number>; receiptRevisions: Record<string, number> }> {
   return updateAmexLineCategory(lineId, { attendees: names }, actor, expectedRevision, db);
 }
 
@@ -3199,16 +3223,21 @@ function admitTrip(db: D1Database, id: string, expected: TripWriteExpectation, e
   return statements;
 }
 
-function tripAckSelect(db: D1Database, id: string, extraIds: string[] = []): D1PreparedStatement {
+function tripAckSelect(db: D1Database, id: string, extraIds: string[] = [], extraReceiptIds: string[] = []): D1PreparedStatement {
   return db.prepare(`SELECT revision,
     (SELECT json_group_object(line_id, revision) FROM amex_line_revisions
-      WHERE line_id IN (${TRIP_LINE_UNION}) OR line_id IN (SELECT value FROM json_each(?))) AS lines_json
-    FROM business_trip_reports WHERE id = ?`).bind(id, id, stringifyJson(extraIds), id);
+      WHERE line_id IN (${TRIP_LINE_UNION}) OR line_id IN (SELECT value FROM json_each(?))) AS lines_json,
+    (SELECT json_group_object(id, revision) FROM receipt_records WHERE id IN (
+      SELECT matched_receipt_id FROM amex_statement_lines WHERE id IN (${TRIP_LINE_UNION})
+        OR id IN (SELECT value FROM json_each(?))
+      UNION SELECT receipt_id FROM business_trip_report_receipts WHERE business_trip_report_id = ?
+      UNION SELECT value FROM json_each(?))) AS receipts_json
+    FROM business_trip_reports WHERE id = ?`).bind(id, id, stringifyJson(extraIds), id, id, stringifyJson(extraIds), id, stringifyJson(extraReceiptIds), id);
 }
 
-function tripAck(result: D1Result<{ revision: number; lines_json: string }>[]) {
+function tripAck(result: D1Result<{ revision: number; lines_json: string; receipts_json: string }>[]) {
   const ack = result.at(-1)!.results[0]!;
-  return { ok: true as const, revision: ack.revision, lineRevisions: JSON.parse(ack.lines_json) as Record<string, number> };
+  return { ok: true as const, revision: ack.revision, lineRevisions: JSON.parse(ack.lines_json) as Record<string, number>, receiptRevisions: JSON.parse(ack.receipts_json) as Record<string, number> };
 }
 
 export async function updateBusinessTrip(
@@ -3247,7 +3276,7 @@ export async function updateBusinessTrip(
       : newStatus !== before.status && newStatus === "rejected" ? "business_trip.rejected" : "business_trip.updated",
     "business_trip", id, input, { status: before.status }));
   statements.push(tripAckSelect(db, id, Object.keys(expected.expectedLines)));
-  return { ...tripAck(await amexBatch<{ revision: number; lines_json: string }>(db, statements)), status: newStatus };
+  return { ...tripAck(await amexBatch<{ revision: number; lines_json: string; receipts_json: string }>(db, statements)), status: newStatus };
 }
 
 export interface TripMemberIds {
@@ -3313,8 +3342,8 @@ async function writeTripMembers(tripId: string, members: TripMemberIds, actor: s
   }
   statements.push(db.prepare("UPDATE business_trip_reports SET revision = revision + 1 WHERE id = ?").bind(tripId));
   statements.push(amexAudit(db, actor, "business_trip.members_changed", "business_trip", tripId, { [attach ? "attach" : "detach"]: { lineIds, receiptIds } }));
-  statements.push(tripAckSelect(db, tripId, lineIds));
-  const result = await amexBatch<{ revision: number; lines_json: string; lines: number; receipts: number }>(db, statements);
+  statements.push(tripAckSelect(db, tripId, lineIds, receiptIds));
+  const result = await amexBatch<{ revision: number; lines_json: string; receipts_json: string; lines: number; receipts: number }>(db, statements);
   const counts = result[countsIndex]!.results[0]!;
   return { ...tripAck(result), lines: counts.lines, receipts: counts.receipts,
     unchangedLines: lineIds.length - counts.lines, unchangedReceipts: receiptIds.length - counts.receipts };
@@ -4195,4 +4224,11 @@ export async function unfinalizeReconciliation(
 export async function verifyAmexLineReads(lines: Pick<AmexStatementLine, "id" | "revision">[]): Promise<void> {
   const db = getReceiptsDb();
   if (lines.length) await amexBatch(db, lines.flatMap(l => admitAmexLine(db, l.id, l.revision)));
+}
+
+export async function verifyReceiptReads(receipts: Pick<ReceiptRecord, "id" | "revision">[]): Promise<void> {
+  if (!receipts.length) return;
+  const db = getReceiptsDb();
+  await amexBatch(db, receipts.map(r => amexAssertion(db, "amex_receipt_revision_conflict",
+    "EXISTS (SELECT 1 FROM receipt_records WHERE id = ? AND revision = ?)", [r.id, r.revision])));
 }

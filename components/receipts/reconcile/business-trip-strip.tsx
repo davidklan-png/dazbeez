@@ -25,7 +25,7 @@ interface TripSummary {
 
 interface BusinessTripStripProps {
   tripId: string | null;
-  beforeAction: () => Promise<{ trips: Record<string, number>; lines: Record<string, number>; finish: (ack?: { lineRevisions?: Record<string, number> }) => Promise<void> }>;
+  beforeAction: () => Promise<{ trips: Record<string, number>; lines: Record<string, number>; finish: (ack?: { lineRevisions?: Record<string, number>; receiptRevisions?: Record<string, number> }) => Promise<void> }>;
   locked: boolean;
   busy: boolean;
   onLegacyConfirm: () => void;
@@ -80,7 +80,7 @@ export function BusinessTripStrip({
     }
     if (!trip || halted.current) return;
     setActing(true);
-    let finish: ((ack?: { lineRevisions?: Record<string, number> }) => Promise<void>) | undefined;
+    let finish: ((ack?: { lineRevisions?: Record<string, number>; receiptRevisions?: Record<string, number> }) => Promise<void>) | undefined;
     try {
       const own = await beforeAction();
       finish = own.finish;

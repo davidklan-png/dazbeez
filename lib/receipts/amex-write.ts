@@ -6,7 +6,7 @@ export type AmexWriteCode =
   | "amex_line_missing" | "amex_line_revision_conflict"
   | "amex_trip_missing" | "amex_trip_revision_conflict"
   | "amex_trip_members_conflict" | "amex_trip_ownership_conflict"
-  | "amex_receipt_missing" | "amex_receipt_ineligible";
+  | "amex_receipt_missing" | "amex_receipt_ineligible" | "amex_receipt_revision_conflict";
 
 export class AmexWriteError extends Error {
   constructor(public code: AmexWriteCode, public status = code.endsWith("_missing") ? 404 : 409) {
@@ -62,8 +62,10 @@ export function lineRevisionSelect(db: D1Database, id: string): D1PreparedStatem
   return db.prepare(`SELECT revision,
     (SELECT json_group_object(id, revision) FROM business_trip_reports WHERE id IN (
       SELECT business_trip_id FROM amex_statement_lines WHERE id = ?
-      UNION SELECT business_trip_report_id FROM business_trip_report_lines WHERE amex_statement_line_id = ?)) AS trip_revisions_json
-    FROM amex_line_revisions WHERE line_id = ?`).bind(id, id, id);
+      UNION SELECT business_trip_report_id FROM business_trip_report_lines WHERE amex_statement_line_id = ?)) AS trip_revisions_json,
+    (SELECT json_group_object(id, revision) FROM receipt_records WHERE id IN (
+      SELECT matched_receipt_id FROM amex_statement_lines WHERE id = ?)) AS receipt_revisions_json
+    FROM amex_line_revisions WHERE line_id = ?`).bind(id, id, id, id);
 }
 
 export function tripExpectation(body: { expectedRevision?: unknown; expectedLines?: unknown }, requireLines: boolean) {
@@ -75,4 +77,8 @@ export function tripExpectation(body: { expectedRevision?: unknown; expectedLine
     return { error: { code: "expected_lines_invalid", error: "Loaded expectedLines revisions are required. Reload to review." } };
   }
   return { expected: { expectedRevision: body.expectedRevision as number, expectedLines: (lines ?? {}) as Record<string, number> } };
+}
+
+export function revisionMap(value: unknown): value is Record<string, number> {
+  return typeof value === "object" && value !== null && !Array.isArray(value) && Object.values(value).every(validRevision);
 }

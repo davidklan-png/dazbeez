@@ -1,6 +1,7 @@
 import {
   listAmexLines,
   verifyAmexLineReads,
+  verifyReceiptReads,
   getReconciliationForMonth,
   listAmexLineCountsByMonth,
   listReconciliationStatusByMonth,
@@ -210,6 +211,7 @@ export default async function ReconcilePage({
   }));
 
   await verifyAmexLineReads(amexLines);
+  await verifyReceiptReads(poolReceipts);
 
   return (
     <ReconcileScreen
