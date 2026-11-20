@@ -19,6 +19,7 @@ function makeRow(overrides: Partial<ExportRow> = {}): ExportRow {
     cardholderName: null,
     businessTripStatus: "not_applicable",
     receiptId: "rec-default",
+    receiptRevision: 0,
     status: "reviewed",
     originalR2Key: null,
     transactionDate: "2026-06-11",
@@ -66,7 +67,7 @@ test("category-cell routing: matched AMEX line → receipt PATCH (receipt shadow
   // A matched line's category lives on the RECEIPT. Writing it on the line would
   // desync the manifest (resolveLineCategory prefers the receipt).
   const p = buildCategoryCellProps(matchedLine(), false, false);
-  assert.deepEqual(p.route, { kind: "receipt", id: "rec-1" });
+  assert.deepEqual(p.route, { kind: "receipt", id: "rec-1", revision: 0 });
   assert.equal(p.sourceLabel, "from receipt");
   assert.equal(p.editable, true);
 });
@@ -80,7 +81,7 @@ test("category-cell routing: no-receipt / unmatched AMEX line → line PATCH", (
 
 test("category-cell routing: cash/digital receipt row → receipt PATCH", () => {
   const p = buildCategoryCellProps(cashReceipt(), false, false);
-  assert.deepEqual(p.route, { kind: "receipt", id: "rec-2" });
+  assert.deepEqual(p.route, { kind: "receipt", id: "rec-2", revision: 0 });
   assert.equal(p.sourceLabel, "from receipt");
   assert.equal(p.editable, true);
 });

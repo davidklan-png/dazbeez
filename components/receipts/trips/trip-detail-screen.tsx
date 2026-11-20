@@ -66,7 +66,7 @@ export function TripDetailScreen({ trip, lines, receipts }: TripDetailScreenProp
   const baseline = useRef({ ...fields });
   const queue = useRef<SaveQueue | null>(null);
   const config = {
-    url: `/api/receipts/trips/${trip.id}`, revision: trip.revision, entity: "trip",
+    url: `/api/receipts/trips/${trip.id}`, initialRevision: trip.revision, entity: "trip",
     deferFire: () => composing.current,
     buildBody: () => {
       const changed = Object.fromEntries(Object.entries(latestFields.current).filter(([k, v]) => v !== baseline.current[k as keyof typeof fields]));

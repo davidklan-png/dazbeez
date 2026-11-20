@@ -15,7 +15,7 @@
 // never offers an edit the API would reject.
 
 import { SaveQueue } from "@/lib/receipts/save-queue";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Pill } from "@/components/ui/pill";
 import {
@@ -29,25 +29,44 @@ import { buildCategoryPatchBody } from "@/lib/receipts/category-cell";
 export type { InlineCategoryCellProps };
 
 export function InlineCategoryCell(props: InlineCategoryCellProps) {
+  // Route identity owns both the draft and queue; revision refreshes must not bless an old draft.
+  const target = props.route ? `${props.route.kind}:${props.route.id}` : "none";
+  return <CategoryEditor key={target} {...props} />;
+}
+
+function CategoryEditor(props: InlineCategoryCellProps) {
   const router = useRouter();
   const [value, setValue] = useState(props.code ?? "");
   const [trackedCode, setTrackedCode] = useState(props.code ?? "");
   const [status, setStatus] = useState<"idle" | "saving" | "error">("idle");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const inFlight = useRef<AbortController | null>(null);
-  const lineQueue = useRef<SaveQueue | null>(null);
-  const latest = useRef(value);
-  latest.current = value;
-  if (props.route?.kind === "line" && !lineQueue.current) {
-    lineQueue.current = new SaveQueue({ url: `/api/receipts/amex/lines/${props.route.id}`,
-      revision: props.route.revision, entity: "AMEX line", buildBody: () => buildCategoryPatchBody(latest.current) });
-  }
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+  const [queue] = useState(() => props.route ? new SaveQueue({
+    url: props.route.kind === "receipt" ? `/api/receipts/${props.route.id}` : `/api/receipts/amex/lines/${props.route.id}`,
+    initialRevision: props.route.revision!,
+    entity: props.route.kind === "line" ? "AMEX line" : undefined,
+    buildBody: () => ({}),
+  }) : null);
+
+  useEffect(() => {
+    if (!queue || (status !== "saving" && status !== "error")) return;
+    const guard = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", guard);
+    return () => window.removeEventListener("beforeunload", guard);
+  }, [queue, status]);
 
   // Follow server-resolved code changes after a router.refresh() (our own save,
   // or another tab's edit) — but never clobber an in-flight optimistic value.
   // Adjusting state during render with a prop-change guard is the React-
   // recommended way to sync to a prop without a setState-in-effect.
-  if (props.code !== trackedCode) {
+  if ((props.code ?? "") !== trackedCode) {
     setTrackedCode(props.code ?? "");
     if (status === "idle") setValue(props.code ?? "");
   }
@@ -55,54 +74,21 @@ export function InlineCategoryCell(props: InlineCategoryCellProps) {
   const needsAttendees = requiresAttendees(value);
 
   async function handleChange(next: string) {
-    if (!props.editable || !props.route) return;
+    if (!props.editable || !props.route || status === "saving" || queue?.halted) return;
     if (next === value) return;
-    if (props.route.kind === "line") {
-      latest.current = next;
-      setValue(next);
-      setStatus("saving");
-      try {
-        if (props.route.revision === undefined) throw new Error("Reload to review this line before saving.");
-        await lineQueue.current!.save();
-        setStatus("idle");
-        router.refresh();
-      } catch (error) {
-        setStatus("error");
-        setErrorMsg(error instanceof Error ? error.message : "Outcome uncertain — reload to review.");
-      }
-      return;
-    }
-    const prev = value;
-    setValue(next); // optimistic
+    setValue(next);
     setStatus("saving");
     setErrorMsg(null);
-    inFlight.current?.abort();
-    const ctrl = new AbortController();
-    inFlight.current = ctrl;
-    const url = `/api/receipts/${props.route.id}`;
     try {
-      const res = await fetch(url, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(buildCategoryPatchBody(next)),
-        signal: ctrl.signal,
-      });
-      const json = (await res.json().catch(() => ({}))) as { error?: string };
-      if (!res.ok) {
-        setValue(prev); // roll back the optimistic change, visibly
-        setStatus("error");
-        setErrorMsg(json.error ?? "Category save failed.");
-        return;
-      }
+      if (!queue || props.route.revision === undefined) throw new Error("Reload to review before saving.");
+      await queue.mutate("PATCH", buildCategoryPatchBody(next));
+      if (!mounted.current) return;
       setStatus("idle");
-      // Refresh so gates / tiles / blocker counts / the resolved category all
-      // re-render from the new DB state.
       router.refresh();
-    } catch (err) {
-      if ((err as DOMException | undefined)?.name === "AbortError") return;
-      setValue(prev);
+    } catch (error) {
+      if (!mounted.current) return;
       setStatus("error");
-      setErrorMsg("Network error — category not saved.");
+      setErrorMsg(error instanceof Error ? error.message : "Category save failed.");
     }
   }
 
@@ -128,7 +114,7 @@ export function InlineCategoryCell(props: InlineCategoryCellProps) {
           <select
             value={value}
             onChange={(e) => handleChange(e.target.value)}
-            disabled={status === "saving"}
+            disabled={status === "saving" || queue?.halted}
             className="h-[26px] min-w-0 flex-1 rounded-md border border-gray-200 bg-white px-1.5 text-[11.5px] text-gray-900 focus:border-amber-500 focus:outline-none disabled:bg-gray-50"
           >
             <option value="">— Select —</option>
@@ -164,7 +150,7 @@ export function InlineCategoryCell(props: InlineCategoryCellProps) {
           <button
             type="button"
             onClick={() => handleChange(props.suggestedCategoryCode!)}
-            disabled={status === "saving"}
+            disabled={status === "saving" || queue?.halted}
             className="inline-flex items-center gap-1 rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-800 hover:bg-amber-100 disabled:opacity-50"
           >
             <span>Suggested: {formatCategoryLabel(props.suggestedCategoryCode!)}</span>
@@ -190,7 +176,9 @@ export function InlineCategoryCell(props: InlineCategoryCellProps) {
       {status === "error" && errorMsg && (
         <div className="rounded-md border border-red-200 bg-red-50 px-2 py-1 text-[10px] text-red-700">
           {errorMsg}
-          <button type="button" onClick={() => window.location.reload()} className="ml-2 underline">Reload to review</button>
+          {queue?.halted && <button type="button" className="ml-2 underline" onClick={() => {
+            if (window.confirm("Discard this category selection and reload for review?")) window.location.reload();
+          }}>Reload and review</button>}
         </div>
       )}
     </div>

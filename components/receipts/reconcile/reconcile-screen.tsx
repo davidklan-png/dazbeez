@@ -198,7 +198,7 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
     if (!queue) {
       const loaded = props.amexLines.find(l => l.id === id);
       if (!loaded) throw new Error("Line removed — reload to review.");
-      queue = new SaveQueue({ url: `/api/receipts/amex/lines/${id}`, revision: loaded.revision, entity: "AMEX line",
+      queue = new SaveQueue({ url: `/api/receipts/amex/lines/${id}`, initialRevision: loaded.revision, entity: "AMEX line",
         deferFire: () => composing.current || tripInFlight.current,
         buildBody: () => ({ ...dirty.current.get(id) }),
         onAcknowledged: (body, ack) => {

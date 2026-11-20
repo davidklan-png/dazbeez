@@ -276,6 +276,7 @@ export type ReceiptFileRole =
 // ─── Database row shapes ───────────────────────────────────────────────────
 
 export interface ReceiptRecord {
+  revision: number;
   id: string;
   captured_at: string;
   captured_by: string;
@@ -978,6 +979,7 @@ export interface ExportRow {
   businessTripStatus: AmexBusinessTripStatus | null;
   // Receipt identity (null on missing-receipt lines)
   receiptId: string | null;
+  receiptRevision?: number | null;
   /** ReceiptStatus on receipt rows and matched-receipt line rows; null otherwise. */
   status: ReceiptStatus | null;
   originalR2Key: string | null;

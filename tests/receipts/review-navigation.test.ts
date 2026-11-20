@@ -31,7 +31,7 @@ function makeDeferredFetch() {
           // Default body = the endpoint's ack shape ({ok:true,warnings:[]}).
           resolve(
             new Response(
-              JSON.stringify({ ok: true, warnings: [], ...json }),
+              JSON.stringify({ ok: true, revision: Number(JSON.parse(init.body as string).expectedRevision) + 1, warnings: [], ...json }),
               { status: 200 },
             ),
           ),
@@ -70,14 +70,14 @@ function makeFormHarness() {
     ...(markReviewed ? { status: "reviewed" } : {}),
   });
   const queue = new SaveQueue({
-    url: "/api/receipts/r1",
+    initialRevision: 0, url: "/api/receipts/r1",
     buildBody,
     deferFire: () => composing,
     fetchImpl: wrapFetch,
   });
   const render = () =>
     queue.rebind({
-      url: "/api/receipts/r1",
+      initialRevision: 0, url: "/api/receipts/r1",
       buildBody,
       deferFire: () => composing,
       fetchImpl: wrapFetch,

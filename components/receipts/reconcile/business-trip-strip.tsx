@@ -87,7 +87,7 @@ export function BusinessTripStrip({
       const expectedLines = { ...loadedLines.current };
       for (const id of Object.keys(expectedLines)) if (own.lines[id] !== undefined) expectedLines[id] = own.lines[id];
       const revision = Math.max(trip.revision, own.trips[tripId] ?? trip.revision);
-      const queue = new SaveQueue({ url: `/api/receipts/trips/${tripId}`, revision, entity: "trip",
+      const queue = new SaveQueue({ url: `/api/receipts/trips/${tripId}`, initialRevision: revision, entity: "trip",
         buildBody: () => ({ status, expectedLines }) });
       const ack = await queue.save();
       await finish(ack);

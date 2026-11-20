@@ -13,6 +13,7 @@ import type {
 function baseReceipt(overrides: Partial<ReceiptRecord> = {}): ReceiptRecord {
   const now = "2026-05-01T00:00:00Z";
   return {
+    revision: 0,
     id: "rec_1",
     captured_at: now,
     captured_by: "test",
