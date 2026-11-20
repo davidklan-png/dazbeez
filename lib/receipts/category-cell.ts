@@ -11,7 +11,7 @@ import { findCategorySuggestion, type CategoryRule } from "@/lib/receipts/catego
 
 export type CategoryRoute =
   | { kind: "receipt"; id: string; revision: number }
-  | { kind: "line"; id: string };
+  | { kind: "line"; id: string; revision?: number };
 
 export interface InlineCategoryCellProps {
   /** Resolved category code (resolveLineCategory for lines; the receipt's own
@@ -68,7 +68,7 @@ export function buildCategoryCellProps(
   const route: CategoryRoute | null = hasReceipt
     ? { kind: "receipt", id: row.receiptId!, revision: row.receiptRevision! }
     : row.lineId
-      ? { kind: "line", id: row.lineId }
+      ? { kind: "line", id: row.lineId, revision: row.lineRevision }
       : null;
 
   let editable = !finalized;

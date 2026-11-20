@@ -3,6 +3,7 @@ import { requireReceiptsActor } from "@/lib/receipts/auth";
 import {
   getBusinessTripWithMembers,
   listTripAttachCandidates,
+  verifyAmexLineReads,
 } from "@/lib/receipts/db";
 import { candidateWindow, filterAttachCandidates, dedupeChargeCandidates } from "@/lib/receipts/business-trips";
 
@@ -57,8 +58,13 @@ export async function GET(request: Request, { params }: RouteContext) {
       }),
     );
 
+    await verifyAmexLineReads(candidates.filter(c => c.kind === "line").map(c => ({ id: c.id, revision: c.revision! })));
+    const after = await getBusinessTripWithMembers(id);
+    if (after.trip?.revision !== detail.trip.revision) {
+      return NextResponse.json({ error: "Trip changed while loading candidates. Reload to review." }, { status: 409 });
+    }
     return NextResponse.json(
-      { candidates, window, tripId: id },
+      { candidates, window, tripId: id, revision: detail.trip.revision },
       { status: 200 },
     );
   } catch (error) {

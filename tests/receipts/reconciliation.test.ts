@@ -8,6 +8,7 @@ import type { AmexStatementLine, ReceiptRecord } from "@/lib/receipts/types";
 
 function makeAmexLine(overrides: Partial<AmexStatementLine> = {}): AmexStatementLine {
   return {
+    revision: 0,
     id: "amex-1",
     statement_month: "2024-01",
     transaction_date: "2024-01-15",

@@ -1,3 +1,4 @@
+import { amexFixture } from "./helpers/amex-sqlite";
 import test from "node:test";
 import assert from "node:assert/strict";
 // @ts-expect-error — node:sqlite is available at runtime in Node 22.5+ but not
@@ -16,53 +17,12 @@ import { createAttendees, replaceAmexLineAttendees } from "@/lib/receipts/db";
 // names, finalized-month guard, audit entry, read-count consistency.
 
 function setupTestDb(): DatabaseSync {
-  const sqlite = new DatabaseSync(":memory:");
-  sqlite.exec("PRAGMA foreign_keys = ON"); // D1 enforces FKs
-  sqlite.exec(`
-    CREATE TABLE receipt_records (id TEXT PRIMARY KEY);
-    -- Real 0001 DDL (FK + NOT NULLs the rollback regressions rely on).
-    CREATE TABLE receipt_attendees (
-      id TEXT PRIMARY KEY,
-      receipt_id TEXT NOT NULL REFERENCES receipt_records(id) ON DELETE CASCADE,
-      attendee_name TEXT NOT NULL,
-      company TEXT,
-      relationship TEXT,
-      is_dazbeez_employee INTEGER NOT NULL DEFAULT 0,
-      notes TEXT,
-      created_at TEXT NOT NULL
-    );
-    CREATE TABLE amex_statement_lines (
-      id TEXT PRIMARY KEY,
-      statement_month TEXT NOT NULL,
-      transaction_date TEXT NOT NULL DEFAULT '',
-      merchant TEXT NOT NULL DEFAULT '',
-      amount_minor INTEGER NOT NULL DEFAULT 0
-    );
-    -- Real 0005 DDL.
-    CREATE TABLE amex_line_attendees (
-      id TEXT PRIMARY KEY,
-      amex_statement_line_id TEXT NOT NULL REFERENCES amex_statement_lines(id) ON DELETE CASCADE,
-      attendee_name TEXT NOT NULL,
-      company TEXT,
-      relationship TEXT,
-      is_dazbeez_employee INTEGER NOT NULL DEFAULT 0,
-      notes TEXT,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL
-    );
-    CREATE TABLE amex_reconciliations (
-      id TEXT PRIMARY KEY, statement_month TEXT NOT NULL, status TEXT NOT NULL
-    );
-    CREATE TABLE receipt_audit_log (
-      id TEXT PRIMARY KEY, actor TEXT, action TEXT, object_type TEXT,
-      object_id TEXT, old_value_json TEXT, new_value_json TEXT, created_at TEXT
-    );
-    INSERT INTO receipt_records (id) VALUES ('r1');
-    INSERT INTO amex_statement_lines (id, statement_month) VALUES ('line1', '2026-08');
-    INSERT INTO amex_statement_lines (id, statement_month) VALUES ('lineSealed', '2026-05');
-    INSERT INTO amex_reconciliations (id, statement_month, status)
-      VALUES ('rec1', '2026-05', 'finalized');
-  `);
+  const f = amexFixture();
+  const sqlite = f.sql;
+  f.receipt("r1"); f.line("line1", null, "unmatched", "2026-08"); f.line("lineSealed", null, "unmatched", "2026-05");
+  sqlite.prepare(`INSERT INTO amex_line_attendees (id, amex_statement_line_id, attendee_name, created_at, updated_at)
+    VALUES ('pre1', 'lineSealed', 'Pre', 'now', 'now')`).run();
+  f.seal("2026-05");
   return sqlite;
 }
 
@@ -111,8 +71,13 @@ function d1Adapter(sqlite: DatabaseSync): D1Database {
     async batch(stmts: ReturnType<typeof prepare>[]) {
       sqlite.exec("BEGIN");
       try {
-        for (const s of stmts) sqlite.prepare(s.sql).run(...(s.params as never[]));
+        const results = stmts.map(s => {
+          const st = sqlite.prepare(s.sql);
+          if (/^\s*SELECT/i.test(s.sql)) return { success: true, results: st.all(...s.params), meta: { changes: 0 } };
+          const r = st.run(...s.params); return { success: true, results: [], meta: { changes: Number(r.changes) } };
+        });
         sqlite.exec("COMMIT");
+        return results;
       } catch (error) {
         sqlite.exec("ROLLBACK");
         throw error;
@@ -129,6 +94,10 @@ function receiptRoster(sqlite: DatabaseSync): string[] {
   return (sqlite
     .prepare("SELECT attendee_name FROM receipt_attendees WHERE receipt_id = 'r1' ORDER BY rowid")
     .all() as { attendee_name: string }[]).map((r) => r.attendee_name);
+}
+
+function rev(sqlite: DatabaseSync, id = "line1"): number {
+  return sqlite.prepare("SELECT revision FROM amex_line_revisions WHERE line_id = ?").get(id).revision;
 }
 
 function lineRoster(sqlite: DatabaseSync, lineId: string): string[] {
@@ -176,10 +145,10 @@ test("createAttendees: failed middle insert rolls back to previous roster, no au
 test("replaceAmexLineAttendees: failed middle insert rolls back to previous roster, no audit", async () => {
   const sqlite = setupTestDb();
   const db = d1Adapter(sqlite);
-  await replaceAmexLineAttendees("line1", ["Keep1"], "op", db);
+  await replaceAmexLineAttendees("line1", ["Keep1"], "op", rev(sqlite, "line1"), db);
 
   await assert.rejects(
-    replaceAmexLineAttendees("line1", ["P", null as unknown as string, "Q"], "op", db),
+    replaceAmexLineAttendees("line1", ["P", null as unknown as string, "Q"], "op", rev(sqlite, "line1"), db),
     /NOT NULL constraint failed/,
   );
 
@@ -233,13 +202,15 @@ test("createAttendees: concurrent replacements leave one complete roster, never 
   );
 });
 
-test("replaceAmexLineAttendees: concurrent replacements leave one complete roster, never a mix", async () => {
+test("replaceAmexLineAttendees: one same-token replacement wins, never a mixed roster", async () => {
   const sqlite = setupTestDb();
   const db = d1Adapter(sqlite);
-  await Promise.all([
-    replaceAmexLineAttendees("line1", ["A1", "A2"], "op", db),
-    replaceAmexLineAttendees("line1", ["B1", "B2", "B3"], "op", db),
+  const token = rev(sqlite);
+  const results = await Promise.allSettled([
+    replaceAmexLineAttendees("line1", ["A1", "A2"], "op", token, db),
+    replaceAmexLineAttendees("line1", ["B1", "B2", "B3"], "op", token, db),
   ]);
+  assert.equal(results.filter(r => r.status === "fulfilled").length, 1);
   const roster = lineRoster(sqlite, "line1");
   assert.ok(
     JSON.stringify(roster) === JSON.stringify(["A1", "A2"]) ||
@@ -276,10 +247,10 @@ test("replaceAmexLineAttendees: empty roster clears, order + duplicates + audit 
   const sqlite = setupTestDb();
   const db = d1Adapter(sqlite);
 
-  await replaceAmexLineAttendees("line1", ["Zed", "Dup", "Dup"], "op", db);
+  await replaceAmexLineAttendees("line1", ["Zed", "Dup", "Dup"], "op", rev(sqlite, "line1"), db);
   assert.deepEqual(lineRoster(sqlite, "line1"), ["Zed", "Dup", "Dup"]);
 
-  await replaceAmexLineAttendees("line1", [], "op", db);
+  await replaceAmexLineAttendees("line1", [], "op", rev(sqlite, "line1"), db);
   assert.deepEqual(lineRoster(sqlite, "line1"), []);
   const audit = sqlite
     .prepare("SELECT new_value_json FROM receipt_audit_log WHERE object_id = 'line1' ORDER BY rowid")
@@ -290,17 +261,9 @@ test("replaceAmexLineAttendees: empty roster clears, order + duplicates + audit 
 test("replaceAmexLineAttendees: finalized-month guard still blocks before any write", async () => {
   const sqlite = setupTestDb();
   const db = d1Adapter(sqlite);
-  // Seed directly — the guard (correctly) blocks the writer on a sealed month.
-  sqlite
-    .prepare(
-      `INSERT INTO amex_line_attendees (id, amex_statement_line_id, attendee_name, created_at, updated_at)
-       VALUES ('pre1', 'lineSealed', 'Pre', 'now', 'now')`,
-    )
-    .run();
-
   await assert.rejects(
-    replaceAmexLineAttendees("lineSealed", ["Blocked1", "Blocked2"], "op", db),
-    /is finalized/,
+    replaceAmexLineAttendees("lineSealed", ["Blocked1", "Blocked2"], "op", rev(sqlite, "lineSealed"), db),
+    /changed|sealed|finalized/,
   );
   assert.deepEqual(lineRoster(sqlite, "lineSealed"), ["Pre"]);
   assert.equal(auditCount(sqlite, "lineSealed"), 0);

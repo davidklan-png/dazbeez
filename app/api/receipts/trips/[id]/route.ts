@@ -1,3 +1,5 @@
+import { AmexWriteError, tripExpectation } from "@/lib/receipts/amex-write";
+import { isSealBoundaryConflict } from "@/lib/receipts/month-lock";
 import { NextResponse } from "next/server";
 import { requireReceiptsActor } from "@/lib/receipts/auth";
 import {
@@ -23,6 +25,8 @@ export async function GET(request: Request, { params }: RouteContext) {
     }
     return NextResponse.json(detail, { status: 200 });
   } catch (error) {
+    if (error instanceof AmexWriteError) return NextResponse.json({ error: error.message, code: error.code }, { status: error.status });
+    if (isSealBoundaryConflict(error)) return NextResponse.json({ error: "Conflicts with an active build or sealed month.", code: "seal_conflict" }, { status: 409 });
     if (error instanceof Error && error.message.startsWith("Unauthorized")) {
       return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
     }
@@ -39,6 +43,8 @@ export async function PATCH(request: Request, { params }: RouteContext) {
     const actor = await requireReceiptsActor(request.headers);
     const { id } = await params;
     const body = (await request.json().catch(() => ({}))) as {
+      expectedRevision?: unknown;
+      expectedLines?: unknown;
       tripName?: unknown;
       startDate?: unknown;
       endDate?: unknown;
@@ -47,6 +53,11 @@ export async function PATCH(request: Request, { params }: RouteContext) {
       status?: unknown;
     };
 
+    if (typeof body !== "object" || body === null || Array.isArray(body)) {
+      return NextResponse.json({ error: "Body must be an object.", code: "expected_revision_required" }, { status: 400 });
+    }
+    const admission = tripExpectation(body, body.status !== undefined);
+    if (admission.error) return NextResponse.json(admission.error, { status: 400 });
     // Date edits require BOTH dates so start<=end is checkable.
     const hasStartDate = "startDate" in body;
     const hasEndDate = "endDate" in body;
@@ -81,7 +92,7 @@ export async function PATCH(request: Request, { params }: RouteContext) {
       status = body.status as BusinessTripStatus;
     }
 
-    const newStatus = await updateBusinessTrip(
+    const result = await updateBusinessTrip(
       id,
       {
         tripName:
@@ -109,10 +120,13 @@ export async function PATCH(request: Request, { params }: RouteContext) {
         status,
       },
       actor,
+      admission.expected,
     );
 
-    return NextResponse.json({ ok: true, status: newStatus }, { status: 200 });
+    return NextResponse.json(result, { status: 200 });
   } catch (error) {
+    if (error instanceof AmexWriteError) return NextResponse.json({ error: error.message, code: error.code }, { status: error.status });
+    if (isSealBoundaryConflict(error)) return NextResponse.json({ error: "Conflicts with an active build or sealed month.", code: "seal_conflict" }, { status: 409 });
     if (error instanceof Error && error.message.startsWith("Unauthorized")) {
       return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
     }

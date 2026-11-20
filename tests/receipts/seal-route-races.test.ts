@@ -607,7 +607,9 @@ guardedTest("R2-B11 committed batch + unreadable identity reread → explicit un
 
 guardedTest("R2-B11 unclassified batch error with a non-matching reread → unconfirmed (never assumed rolled back)", async () => {
   freshContext();
-  ctx.d1.batch = (async (_stmts: { __spec: { sql: string; args: unknown[] } }[]) => {
+  const realBatch = ctx.d1.batch.bind(ctx.d1);
+  ctx.d1.batch = (async (stmts: { __spec: { sql: string; args: unknown[] } }[]) => {
+    if (stmts.every(s => s.__spec.sql.includes("amex_write_assertions"))) return realBatch(stmts);
     // Ambiguous transaction error with no recognizable signature — the
     // uncertain-acknowledgement path must engage regardless of rollback.
     throw new Error("injected ambiguous transaction error");

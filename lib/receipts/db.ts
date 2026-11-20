@@ -1,3 +1,4 @@
+import { admitAmexLine, amexAssertion, amexAudit, amexBatch, AmexWriteError, lineRevisionSelect } from "@/lib/receipts/amex-write";
 import { isReceiptRevision, ReceiptNotFoundError } from "./receipt-revision";
 import { expectedStatementMonths } from "./missing-statements";
 import { getReceiptsDb } from "@/lib/cloudflare-runtime";
@@ -26,13 +27,11 @@ import {
   type RecentCapture,
 } from "@/lib/receipts/recent-captures";
 import {
-  computeTripStatusLineUpdates,
   findOverlappingTrip,
   decideWiden,
   validateTripTransition,
   type CandidateRow,
   type ExistingTrip,
-  type TripTransition,
 } from "@/lib/receipts/business-trips";
 import type {
   AmexMatchStatus,
@@ -1685,7 +1684,7 @@ export async function listAmexLines(
   const db = getReceiptsDb();
   const result = await db
     .prepare(
-      `SELECT * FROM amex_statement_lines WHERE statement_month = ? ORDER BY transaction_date ASC`,
+      `SELECT *, (SELECT revision FROM amex_line_revisions WHERE line_id = amex_statement_lines.id) AS revision FROM amex_statement_lines WHERE statement_month = ? ORDER BY transaction_date ASC`,
     )
     .bind(month)
     .all<AmexStatementLine>();
@@ -1775,7 +1774,7 @@ export async function listAmexLinesByMatchedReceiptIds(
     const placeholders = chunk.map(() => "?").join(",");
     const result = await db
       .prepare(
-        `SELECT * FROM amex_statement_lines
+        `SELECT *, (SELECT revision FROM amex_line_revisions WHERE line_id = amex_statement_lines.id) AS revision FROM amex_statement_lines
          WHERE matched_receipt_id IN (${placeholders})
          ORDER BY statement_month ASC, transaction_date ASC`,
       )
@@ -1826,8 +1825,11 @@ export async function updateAmexReconciliation(
   receiptId: string | null,
   matchStatus: AmexMatchStatus,
   actor: string,
+  expectedRevision: number,
+  expectedReceipts: Record<string, number>,
+  expectedLines: Record<string, number> = {},
   db: D1Database = getReceiptsDb(),
-): Promise<void> {
+): Promise<{ ok: true; revision: number; tripRevisions: Record<string, number>; receiptRevisions: Record<string, number>; lineRevisions: Record<string, number> }> {
   const now = nowIso();
 
   // Capture previous state for two reasons:
@@ -1856,7 +1858,8 @@ export async function updateAmexReconciliation(
       statement_month: string | null;
     }>();
 
-  const previousReceiptId = previous?.matched_receipt_id ?? null;
+  if (!previous) throw new AmexWriteError("amex_line_missing");
+  const previousReceiptId = previous.matched_receipt_id ?? null;
   const previousStatus: AmexMatchStatus = previous?.match_status ?? "unmatched";
   const previousReceiptStatus: AmexReceiptStatus = previous?.receipt_status ?? "missing_receipt";
   const amexMerchant = previous?.merchant ?? null;
@@ -1923,7 +1926,28 @@ export async function updateAmexReconciliation(
     }
   }
 
+  const receiptIds = [...new Set([receiptId, previousReceiptId].filter((id): id is string => !!id))];
   const statements = [
+    ...admitAmexLine(db, amexLineId, expectedRevision),
+    ...Object.entries(expectedLines).flatMap(([id, rev]) => admitAmexLine(db, id, rev)),
+    amexAssertion(db, "amex_receipt_revision_conflict", `
+      NOT EXISTS (SELECT value FROM json_each(?) WHERE value NOT IN (SELECT key FROM json_each(?)))
+      AND NOT EXISTS (SELECT key FROM json_each(?) WHERE key NOT IN (SELECT value FROM json_each(?)))`,
+      [stringifyJson(receiptIds), stringifyJson(expectedReceipts), stringifyJson(expectedReceipts), stringifyJson(receiptIds)]),
+    ...receiptIds.flatMap(id => [
+      amexAssertion(db, "amex_receipt_missing", "EXISTS (SELECT 1 FROM receipt_records WHERE id = ?)", [id]),
+      amexAssertion(db, "amex_receipt_revision_conflict", `EXISTS (SELECT 1 FROM receipt_records WHERE id = ? AND revision = ? AND deleted_at IS NULL)`, [id, expectedReceipts[id] ?? -1]),
+    ]),
+    amexAssertion(db, "amex_receipt_ineligible", `NOT EXISTS (
+      SELECT 1 FROM amex_statement_lines l JOIN amex_reconciliations r ON r.statement_month=l.statement_month
+      WHERE l.matched_receipt_id=? AND l.match_status='confirmed' AND l.id != ?
+        AND l.statement_month != ? AND r.status='finalized' AND ?='confirmed')`,
+      [receiptId, amexLineId, statementMonth ?? "", matchStatus]),
+    ...(receiptId ? [
+      amexAssertion(db, "amex_receipt_missing", "EXISTS (SELECT 1 FROM receipt_records WHERE id = ?)", [receiptId]),
+      amexAssertion(db, "amex_receipt_ineligible", `EXISTS (SELECT 1 FROM receipt_records WHERE id = ?
+        AND deleted_at IS NULL AND status != 'archived')`, [receiptId]),
+    ] : []),
     db
       .prepare(
       `UPDATE amex_statement_lines
@@ -2038,52 +2062,29 @@ export async function updateAmexReconciliation(
     );
   }
 
-  // Single batched round-trip so the AMEX line update, the new-receipt
-  // promotion, and the old-receipt demotion either all succeed or all fail.
-  // Previously these were three independent awaits with no rollback path.
-  await db.batch(statements);
-
-  await createAuditEntry(db, {
-    actor,
-    action: "amex.reconciled",
-    objectType: "amex_line",
-    objectId: amexLineId,
-    oldValueJson: stringifyJson({
-      receiptId: previousReceiptId,
-      matchStatus: previousStatus,
-      receiptStatus: previousReceiptStatus,
-    }),
-    newValueJson: stringifyJson({
-      receiptId,
-      matchStatus,
-      receiptStatus: newReceiptStatus,
-      // Traceable record that this confirm also classified an UNKNOWN receipt
-      // as AMEX (audit-everything convention — never an invisible side effect).
-      ...(classifyAsAmex
-        ? { classifiedPaymentPath: { from: "UNKNOWN", to: "AMEX" } }
-        : {}),
-    }),
-  });
-
-  // Second audit entry when AMEX values were adopted onto the receipt.
+  statements.push(amexAudit(db, actor, "amex.reconciled", "amex_line", amexLineId,
+    { receiptId, matchStatus, receiptStatus: newReceiptStatus,
+      ...(classifyAsAmex ? { classifiedPaymentPath: { from: "UNKNOWN", to: "AMEX" } } : {}) },
+    { receiptId: previousReceiptId, matchStatus: previousStatus, receiptStatus: previousReceiptStatus }));
   if (receiptAdoptAudit && receiptId) {
-    await createAuditEntry(db, {
-      actor,
-      action: "receipt.updated",
-      objectType: "receipt",
-      objectId: receiptId,
-      oldValueJson: stringifyJson({
-        merchant: receiptAdoptAudit.oldMerchant,
-        transactionDateFilled: false,
-      }),
-      newValueJson: stringifyJson({
-        merchant: receiptAdoptAudit.newMerchant,
+    statements.push(amexAudit(db, actor, "receipt.updated", "receipt", receiptId,
+      { merchant: receiptAdoptAudit.newMerchant,
         transactionDateFilled: receiptAdoptAudit.filledDate !== null,
         ...(receiptAdoptAudit.filledDate ? { transactionDate: receiptAdoptAudit.filledDate } : {}),
-        source: "amex_confirm_override",
-      }),
-    });
+        source: "amex_confirm_override" },
+      { merchant: receiptAdoptAudit.oldMerchant, transactionDateFilled: false }));
   }
+  statements.push(db.prepare(`SELECT
+    (SELECT json_group_object(id, revision) FROM receipt_records WHERE id IN (SELECT value FROM json_each(?))) AS receipts_json,
+    (SELECT json_group_object(line_id, revision) FROM amex_line_revisions WHERE line_id IN (SELECT key FROM json_each(?))) AS lines_json`)
+    .bind(stringifyJson(receiptIds), stringifyJson(expectedLines)));
+  statements.push(lineRevisionSelect(db, amexLineId));
+  const result = await amexBatch<{ revision: number; trip_revisions_json: string; receipts_json: string; lines_json: string }>(db, statements);
+  const ack = result.at(-1)!.results[0]!;
+  const affected = result.at(-2)!.results[0]!;
+  return { ok: true, revision: ack.revision, tripRevisions: JSON.parse(ack.trip_revisions_json) as Record<string, number>,
+    receiptRevisions: JSON.parse(affected.receipts_json) as Record<string, number>,
+    lineRevisions: JSON.parse(affected.lines_json) as Record<string, number> };
 }
 
 // ─── AMEX statement artifacts ────────────────────────────────────────────────
@@ -2719,20 +2720,11 @@ export async function markPreviousArtifactsReplaced(
 
 export async function updateAmexLineCategory(
   lineId: string,
-  input: UpdateAmexLineCategoryInput,
+  input: UpdateAmexLineCategoryInput & { attendees?: string[] },
   actor: string,
-): Promise<void> {
-  const db = getReceiptsDb();
-
-  // Block edits if the month's reconciliation is finalized.
-  const lineMonth = await db
-    .prepare(`SELECT statement_month FROM amex_statement_lines WHERE id = ? LIMIT 1`)
-    .bind(lineId)
-    .first<{ statement_month: string }>();
-  if (lineMonth?.statement_month) {
-    await rejectIfFinalized(db, lineMonth.statement_month);
-  }
-
+  expectedRevision: number,
+  db: D1Database = getReceiptsDb(),
+): Promise<{ ok: true; revision: number; lineRevisions: Record<string, number>; tripRevisions: Record<string, number>; receiptRevisions: Record<string, number> }> {
   const sets: string[] = [];
   const binds: unknown[] = [];
 
@@ -2763,76 +2755,46 @@ export async function updateAmexLineCategory(
     binds.push(input.expenseCategoryCode ?? null);
   }
 
-  if (sets.length === 0) return;
 
-  sets.push("updated_at = ?");
-  binds.push(nowIso());
-  binds.push(lineId);
-
-  await db
-    .prepare(
-      `UPDATE amex_statement_lines SET ${sets.join(", ")} WHERE id = ?`,
-    )
-    .bind(...binds)
-    .run();
-
-  await createAuditEntry(db, {
-    actor,
-    action: "amex.line_categorized",
-    objectType: "amex_line",
-    objectId: lineId,
-    newValueJson: stringifyJson(input),
-  });
+  const statements = admitAmexLine(db, lineId, expectedRevision);
+  // Even an empty/same-value operation consumes its token; bookkeeping never
+  // writes a financial row and cannot bypass the real mutation's seal triggers.
+  statements.push(amexAssertion(db, "amex_line_sealed", `NOT EXISTS (
+    SELECT 1 FROM amex_statement_lines l JOIN amex_reconciliations r
+      ON r.statement_month = l.statement_month
+    WHERE l.id = ? AND r.status = 'finalized')`, [lineId]));
+  statements.push(amexAssertion(db, "amex_line_build_conflict", `NOT EXISTS (
+    SELECT 1 FROM amex_statement_lines l JOIN receipt_exports e ON e.export_month = l.statement_month
+    WHERE l.id = ? AND e.status = 'draft' AND e.sealing_token IS NOT NULL AND e.sealing_expires_at > CAST(strftime('%s', 'now') AS INTEGER))`, [lineId]));
+  if (sets.length) {
+    statements.push(db.prepare(`UPDATE amex_statement_lines SET ${sets.join(", ")}, updated_at = ? WHERE id = ?`)
+      .bind(...binds, nowIso(), lineId));
+  }
+  if (input.attendees !== undefined) {
+    const now = nowIso();
+    statements.push(db.prepare("DELETE FROM amex_line_attendees WHERE amex_statement_line_id = ?").bind(lineId));
+    for (const name of input.attendees) {
+      statements.push(db.prepare(`INSERT INTO amex_line_attendees
+        (id, amex_statement_line_id, attendee_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`)
+        .bind(newUuid(), lineId, name, now, now));
+    }
+  }
+  statements.push(db.prepare("UPDATE amex_line_revisions SET revision = revision + 1 WHERE line_id = ?").bind(lineId));
+  if (sets.length || input.attendees !== undefined) {
+    statements.push(amexAudit(db, actor, "amex.line_categorized", "amex_line", lineId, input));
+  }
+  statements.push(lineRevisionSelect(db, lineId));
+  const result = await amexBatch<{ revision: number; line_revisions_json: string; trip_revisions_json: string; receipt_revisions_json: string }>(db, statements);
+  const ack = result.at(-1)!.results[0]!;
+  return { ok: true, revision: ack.revision, lineRevisions: JSON.parse(ack.line_revisions_json) as Record<string, number>, tripRevisions: JSON.parse(ack.trip_revisions_json) as Record<string, number>, receiptRevisions: JSON.parse(ack.receipt_revisions_json) as Record<string, number> };
 }
 
-/**
- * Replace the line-direct attendee list (amex_line_attendees) for one AMEX
- * statement line — the write side migration 0022's signoff union always
- * expected but never had. Names arrive already normalized by the PATCH parser
- * (trim / drop empties / dedupe). Sealed by the same finalized-month guard as
- * updateAmexLineCategory, checked before any row is touched.
- */
+/** Internal/test roster entry point uses the same admitted aggregate batch. */
 export async function replaceAmexLineAttendees(
-  lineId: string,
-  names: string[],
-  actor: string,
+  lineId: string, names: string[], actor: string, expectedRevision: number,
   db: D1Database = getReceiptsDb(),
-): Promise<void> {
-  // Block edits if the month's reconciliation is finalized.
-  const lineMonth = await db
-    .prepare(`SELECT statement_month FROM amex_statement_lines WHERE id = ? LIMIT 1`)
-    .bind(lineId)
-    .first<{ statement_month: string }>();
-  if (lineMonth?.statement_month) {
-    await rejectIfFinalized(db, lineMonth.statement_month);
-  }
-
-  // Atomic replacement (audit finding 2) — same contract as createAttendees:
-  // DELETE + all INSERTs in ONE D1 batch so a mid-insert failure rolls back to
-  // the previous roster and concurrent replacements can never interleave.
-  const now = nowIso();
-  await db.batch([
-    db
-      .prepare(`DELETE FROM amex_line_attendees WHERE amex_statement_line_id = ?`)
-      .bind(lineId),
-    ...names.map((name) =>
-      db
-        .prepare(
-          `INSERT INTO amex_line_attendees
-            (id, amex_statement_line_id, attendee_name, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?)`,
-        )
-        .bind(newUuid(), lineId, name, now, now),
-    ),
-  ]);
-
-  await createAuditEntry(db, {
-    actor,
-    action: "amex.line_categorized",
-    objectType: "amex_line",
-    objectId: lineId,
-    newValueJson: stringifyJson({ attendees: names }),
-  });
+): Promise<{ ok: true; revision: number; lineRevisions: Record<string, number>; tripRevisions: Record<string, number>; receiptRevisions: Record<string, number> }> {
+  return updateAmexLineCategory(lineId, { attendees: names }, actor, expectedRevision, db);
 }
 
 // ─── Dashboard alert dismissals ───────────────────────────────────────────────
@@ -2927,7 +2889,7 @@ export async function createBusinessTripReports(
     // instead of minting a fresh UUID each run (the re-import duplicate defect).
     const existing = await db
       .prepare(
-        `SELECT id, cardholder_name, start_date, end_date, status
+        `SELECT id, cardholder_name, start_date, end_date, status, revision
          FROM business_trip_reports
          WHERE cardholder_name = ? AND status IN ('candidate','confirmed')`,
       )
@@ -2936,7 +2898,10 @@ export async function createBusinessTripReports(
     const match = findOverlappingTrip(candidate, existing.results ?? []);
 
     if (match) {
-      const stmts = buildTripLineLinkStmts(db, match.id, candidate.lineIds, now);
+      const stmts = [amexAssertion(db, "amex_trip_revision_conflict",
+        "EXISTS (SELECT 1 FROM business_trip_reports WHERE id = ? AND revision = ?)",
+        [match.id, (match as ExistingTrip & { revision: number }).revision]),
+        ...buildTripLineLinkStmts(db, match.id, candidate.lineIds, now)];
       const widen = decideWiden(match, candidate);
       if (widen.kind === "widen") {
         stmts.push(
@@ -2949,18 +2914,9 @@ export async function createBusinessTripReports(
             .bind(widen.range.start, widen.range.end, now, match.id),
         );
       }
+      stmts.push(amexAudit(db, actor, "business_trip.members_changed", "business_trip", match.id,
+        { source: "detection_dedupe", lineIds: candidate.lineIds, range: widen.kind }));
       await batchWrite(db, stmts);
-      await createAuditEntry(db, {
-        actor,
-        action: "business_trip.members_changed",
-        objectType: "business_trip",
-        objectId: match.id,
-        newValueJson: stringifyJson({
-          source: "detection_dedupe",
-          lineIds: candidate.lineIds,
-          range: widen.kind,
-        }),
-      });
       linked += 1;
       if (widen.kind === "widen") widened += 1;
       else if (widen.kind === "skip") widenedSkipped += 1;
@@ -2986,15 +2942,8 @@ export async function createBusinessTripReports(
         now,
       );
     const linkStmts = buildTripLineLinkStmts(db, tripId, candidate.lineIds, now);
-    await batchWrite(db, [insertStmt, ...linkStmts]);
-
-    await createAuditEntry(db, {
-      actor,
-      action: "amex.business_trip_detected",
-      objectType: "business_trip",
-      objectId: tripId,
-      newValueJson: stringifyJson(candidate),
-    });
+    await batchWrite(db, [insertStmt, ...linkStmts,
+      amexAudit(db, actor, "amex.business_trip_detected", "business_trip", tripId, candidate)]);
     created += 1;
   }
 
@@ -3018,17 +2967,14 @@ function buildTripLineLinkStmts(
   const CHUNK = 20;
   for (let j = 0; j < lineIds.length; j += CHUNK) {
     const chunkIds = lineIds.slice(j, j + CHUNK);
-    const linkPlaceholders = chunkIds.map(() => "(?, ?, ?, ?)").join(",");
-    const linkBinds = chunkIds.flatMap((lineId) => [newUuid(), tripId, lineId, now]);
-    stmts.push(
-      db
-        .prepare(
-          `INSERT OR IGNORE INTO business_trip_report_lines
-            (id, business_trip_report_id, amex_statement_line_id, created_at)
-           VALUES ${linkPlaceholders}`,
-        )
-        .bind(...linkBinds),
-    );
+    for (const lineId of chunkIds) {
+      stmts.push(db.prepare(`INSERT OR IGNORE INTO business_trip_report_lines
+        (id, business_trip_report_id, amex_statement_line_id, created_at)
+        SELECT ?, ?, id, ? FROM amex_statement_lines WHERE id = ?
+        AND business_trip_status NOT IN ('confirmed','excluded')
+        AND (business_trip_id IS NULL OR business_trip_id = ?)`)
+        .bind(newUuid(), tripId, now, lineId, tripId));
+    }
     const idPlaceholders = chunkIds.map(() => "?").join(",");
     stmts.push(
       db
@@ -3036,24 +2982,18 @@ function buildTripLineLinkStmts(
           `UPDATE amex_statement_lines
            SET business_trip_id = ?, business_trip_status = 'candidate', updated_at = ?
            WHERE id IN (${idPlaceholders})
-             AND business_trip_status NOT IN ('confirmed','excluded')`,
+             AND business_trip_status NOT IN ('confirmed','excluded')
+             AND (business_trip_id IS NULL OR business_trip_id = ?)`,
         )
-        .bind(tripId, now, ...chunkIds),
+        .bind(tripId, now, ...chunkIds, tripId),
     );
   }
   return stmts;
 }
 
-/** Run a list of prepared statements in chunked batches (D1 caps ~30/batch). */
-async function batchWrite(
-  db: D1Database,
-  stmts: D1PreparedStatement[],
-): Promise<void> {
-  const CHUNK = 30;
-  for (let i = 0; i < stmts.length; i += CHUNK) {
-    const slice = stmts.slice(i, i + CHUNK);
-    if (slice.length > 0) await db.batch(slice);
-  }
+/** One detection candidate is one transaction, regardless of member count. */
+async function batchWrite(db: D1Database, stmts: D1PreparedStatement[]): Promise<void> {
+  if (stmts.length) await amexBatch(db, stmts);
 }
 
 export async function listBusinessTripReports(
@@ -3099,7 +3039,7 @@ export async function listAmexLinesForBusinessTripReports(
     const placeholders = chunk.map(() => "?").join(",");
     const result = await db
       .prepare(
-        `SELECT btrl.business_trip_report_id AS report_id, asl.*
+        `SELECT btrl.business_trip_report_id AS report_id, asl.*, (SELECT revision FROM amex_line_revisions WHERE line_id = asl.id) AS revision
          FROM business_trip_report_lines btrl
          JOIN amex_statement_lines asl ON asl.id = btrl.amex_statement_line_id
          WHERE btrl.business_trip_report_id IN (${placeholders})`,
@@ -3195,6 +3135,7 @@ export async function createBusinessTrip(
 }
 
 export interface BusinessTripMemberLine {
+  revision: number;
   id: string;
   transaction_date: string;
   merchant: string;
@@ -3222,38 +3163,21 @@ export async function getBusinessTripWithMembers(
   id: string,
 ): Promise<BusinessTripDetail> {
   const db = getReceiptsDb();
-  const trip = await db
-    .prepare(`SELECT * FROM business_trip_reports WHERE id = ?`)
-    .bind(id)
-    .first<BusinessTripReport>();
-
-  const lines = await db
-    .prepare(
-      `SELECT asl.id, asl.transaction_date, asl.merchant, asl.amount_minor,
-              asl.statement_month, asl.business_trip_status
-       FROM business_trip_report_lines btl
-       JOIN amex_statement_lines asl ON asl.id = btl.amex_statement_line_id
-       WHERE btl.business_trip_report_id = ?
-       ORDER BY asl.transaction_date ASC`,
-    )
-    .bind(id)
-    .all<BusinessTripMemberLine>();
-
-  const receipts = await db
-    .prepare(
-      `SELECT r.id, r.transaction_date, r.merchant, r.amount_minor, r.status, r.payment_path
-       FROM business_trip_report_receipts btr
-       JOIN receipt_records r ON r.id = btr.receipt_id
-       WHERE btr.business_trip_report_id = ?
-       ORDER BY r.transaction_date ASC`,
-    )
-    .bind(id)
-    .all<BusinessTripMemberReceipt>();
-
+  const results = await db.batch([
+    db.prepare("SELECT * FROM business_trip_reports WHERE id = ?").bind(id),
+    db.prepare(`SELECT asl.id, asl.transaction_date, asl.merchant, asl.amount_minor, asl.statement_month,
+      asl.business_trip_status, (SELECT revision FROM amex_line_revisions WHERE line_id = asl.id) AS revision
+      FROM amex_statement_lines asl WHERE asl.business_trip_id = ? OR asl.id IN (
+        SELECT amex_statement_line_id FROM business_trip_report_lines WHERE business_trip_report_id = ?)
+      ORDER BY asl.transaction_date ASC`).bind(id, id),
+    db.prepare(`SELECT r.id, r.transaction_date, r.merchant, r.amount_minor, r.status, r.payment_path
+      FROM business_trip_report_receipts btr JOIN receipt_records r ON r.id = btr.receipt_id
+      WHERE btr.business_trip_report_id = ? ORDER BY r.transaction_date ASC`).bind(id),
+  ]);
   return {
-    trip,
-    lines: lines.results ?? [],
-    receipts: receipts.results ?? [],
+    trip: (results[0].results[0] as unknown as BusinessTripReport) ?? null,
+    lines: results[1].results as unknown as BusinessTripMemberLine[],
+    receipts: results[2].results as unknown as BusinessTripMemberReceipt[],
   };
 }
 
@@ -3272,134 +3196,87 @@ export interface UpdateBusinessTripInput {
  * 409). A confirm/reject transition syncs member lines via the pure
  * computeTripStatusLineUpdates helper. 'exported' is rejected (409 at route).
  */
-export async function updateBusinessTrip(
-  id: string,
-  input: UpdateBusinessTripInput,
-  actor: string,
-): Promise<BusinessTripStatus> {
-  const db = getReceiptsDb();
-  const now = nowIso();
-  const before = await db
-    .prepare(`SELECT * FROM business_trip_reports WHERE id = ?`)
-    .bind(id)
-    .first<BusinessTripReport>();
-  if (!before) throw new Error(`Business trip ${id} not found.`);
+export interface TripWriteExpectation {
+  expectedRevision: number;
+  expectedLines: Record<string, number>;
+}
 
+const TRIP_LINE_UNION = `SELECT id FROM amex_statement_lines WHERE business_trip_id = ?
+  UNION SELECT amex_statement_line_id FROM business_trip_report_lines WHERE business_trip_report_id = ?`;
+
+function admitTrip(db: D1Database, id: string, expected: TripWriteExpectation, exactMembers: boolean): D1PreparedStatement[] {
+  const statements = [
+    amexAssertion(db, "amex_trip_missing", "EXISTS (SELECT 1 FROM business_trip_reports WHERE id = ?)", [id]),
+    amexAssertion(db, "amex_trip_revision_conflict", `EXISTS (SELECT 1 FROM business_trip_reports WHERE id = ? AND revision = ? AND status != 'exported')`, [id, expected.expectedRevision]),
+  ];
+  if (exactMembers) {
+    statements.push(amexAssertion(db, "amex_trip_members_conflict", `
+      NOT EXISTS (SELECT id FROM (${TRIP_LINE_UNION}) WHERE id NOT IN (SELECT key FROM json_each(?)))
+      AND NOT EXISTS (SELECT key FROM json_each(?) WHERE key NOT IN (${TRIP_LINE_UNION}))`,
+      [id, id, stringifyJson(expected.expectedLines), stringifyJson(expected.expectedLines), id, id]));
+  }
+  for (const [lineId, revision] of Object.entries(expected.expectedLines)) {
+    statements.push(...admitAmexLine(db, lineId, revision));
+    statements.push(amexAssertion(db, "amex_trip_ownership_conflict", `EXISTS (SELECT 1 FROM amex_statement_lines
+      WHERE id = ? AND (business_trip_id IS NULL OR business_trip_id = ?))`, [lineId, id]));
+  }
+  return statements;
+}
+
+function tripAckSelect(db: D1Database, id: string, extraIds: string[] = [], extraReceiptIds: string[] = []): D1PreparedStatement {
+  return db.prepare(`SELECT revision,
+    (SELECT json_group_object(line_id, revision) FROM amex_line_revisions
+      WHERE line_id IN (${TRIP_LINE_UNION}) OR line_id IN (SELECT value FROM json_each(?))) AS lines_json,
+    (SELECT json_group_object(id, revision) FROM receipt_records WHERE id IN (
+      SELECT matched_receipt_id FROM amex_statement_lines WHERE id IN (${TRIP_LINE_UNION})
+        OR id IN (SELECT value FROM json_each(?))
+      UNION SELECT receipt_id FROM business_trip_report_receipts WHERE business_trip_report_id = ?
+      UNION SELECT value FROM json_each(?))) AS receipts_json
+    FROM business_trip_reports WHERE id = ?`).bind(id, id, stringifyJson(extraIds), id, id, stringifyJson(extraIds), id, stringifyJson(extraReceiptIds), id);
+}
+
+function tripAck(result: D1Result<{ revision: number; lines_json: string; receipts_json: string }>[]) {
+  const ack = result.at(-1)!.results[0]!;
+  return { ok: true as const, revision: ack.revision, lineRevisions: JSON.parse(ack.lines_json) as Record<string, number>, receiptRevisions: JSON.parse(ack.receipts_json) as Record<string, number> };
+}
+
+export async function updateBusinessTrip(
+  id: string, input: UpdateBusinessTripInput, actor: string, expected: TripWriteExpectation,
+) {
+  const db = getReceiptsDb();
+  const before = await db.prepare("SELECT * FROM business_trip_reports WHERE id = ?").bind(id).first<BusinessTripReport>();
+  if (!before) throw new AmexWriteError("amex_trip_missing");
+  const newStatus = input.status ?? before.status;
+  if (input.status !== undefined) {
+    const v = validateTripTransition(before.status, newStatus);
+    if (!v.ok) throw new Error(v.error ?? "Invalid trip transition.");
+  }
+  const statements = admitTrip(db, id, expected, input.status !== undefined);
   const sets: string[] = [];
   const binds: unknown[] = [];
-  if ("tripName" in input) { sets.push("trip_name = ?"); binds.push(input.tripName?.trim() || null); }
-  if ("purpose" in input) { sets.push("purpose = ?"); binds.push(input.purpose?.trim() || null); }
-  if ("primaryLocation" in input) { sets.push("primary_location = ?"); binds.push(input.primaryLocation?.trim() || null); }
+  if (input.tripName !== undefined) { sets.push("trip_name = ?"); binds.push(input.tripName?.trim() || null); }
+  if (input.purpose !== undefined) { sets.push("purpose = ?"); binds.push(input.purpose?.trim() || null); }
+  if (input.primaryLocation !== undefined) { sets.push("primary_location = ?"); binds.push(input.primaryLocation?.trim() || null); }
   if (input.startDate !== undefined) { sets.push("start_date = ?"); binds.push(input.startDate); }
   if (input.endDate !== undefined) { sets.push("end_date = ?"); binds.push(input.endDate); }
-
-  let newStatus: BusinessTripStatus = before.status;
-  if (input.status !== undefined && input.status !== before.status) {
-    const v = validateTripTransition(before.status, input.status);
-    if (!v.ok) throw new Error(v.error ?? "Invalid trip transition.");
-    newStatus = input.status;
-    sets.push("status = ?");
-    binds.push(newStatus);
+  if (input.status !== undefined) { sets.push("status = ?"); binds.push(input.status); }
+  const now = nowIso();
+  if (sets.length) {
+    statements.push(db.prepare(`UPDATE business_trip_reports SET ${sets.join(", ")}, updated_at = ? WHERE id = ?`).bind(...binds, now, id));
+  } else {
+    statements.push(db.prepare("UPDATE business_trip_reports SET revision = revision + 1 WHERE id = ?").bind(id));
   }
-
-  if (sets.length > 0) {
-    sets.push("updated_at = ?");
-    binds.push(now, id);
-    await db
-      .prepare(`UPDATE business_trip_reports SET ${sets.join(", ")} WHERE id = ?`)
-      .bind(...binds)
-      .run();
-
-    const action =
-      newStatus !== before.status && newStatus === "confirmed"
-        ? "business_trip.confirmed"
-        : newStatus !== before.status && newStatus === "rejected"
-          ? "business_trip.rejected"
-          : "business_trip.updated";
-    await createAuditEntry(db, {
-      actor,
-      action,
-      objectType: "business_trip",
-      objectId: id,
-      oldValueJson: stringifyJson({ status: before.status }),
-      newValueJson: stringifyJson(input),
-    });
+  if (newStatus !== before.status && (newStatus === "confirmed" || newStatus === "rejected")) {
+    statements.push(db.prepare(`UPDATE amex_statement_lines SET business_trip_id = ?, business_trip_status = ?, updated_at = ?
+      WHERE id IN (${TRIP_LINE_UNION})`)
+      .bind(newStatus === "confirmed" ? id : null, newStatus === "confirmed" ? "confirmed" : "excluded", now, id, id));
   }
-
-  // Status sync (ADR D4): apply member-line updates on a real transition.
-  if (
-    newStatus !== before.status &&
-    (newStatus === "confirmed" || newStatus === "rejected")
-  ) {
-    const memberLineIds = await getMemberLineIds(db, id);
-    const updates = computeTripStatusLineUpdates(
-      id,
-      memberLineIds,
-      newStatus as TripTransition,
-    );
-    await applyLineStatusUpdates(db, updates, now);
-  }
-
-  return newStatus;
-}
-
-async function getMemberLineIds(db: D1Database, tripId: string): Promise<string[]> {
-  const result = await db
-    .prepare(
-      `SELECT amex_statement_line_id AS id
-       FROM business_trip_report_lines
-       WHERE business_trip_report_id = ?`,
-    )
-    .bind(tripId)
-    .all<{ id: string }>();
-  return (result.results ?? []).map((r) => r.id);
-}
-
-async function applyLineStatusUpdates(
-  db: D1Database,
-  updates: Array<{
-    lineId: string;
-    businessTripId: string | null;
-    businessTripStatus: string;
-  }>,
-  now: string,
-): Promise<void> {
-  // Two bulk UPDATEs split by target status: confirmed keeps business_trip_id
-  // (already = tripId from attach); rejected clears it. Chunked for D1's bind
-  // ceiling.
-  const confirmedIds = updates
-    .filter((u) => u.businessTripStatus === "confirmed")
-    .map((u) => u.lineId);
-  const excludedIds = updates
-    .filter((u) => u.businessTripStatus === "excluded")
-    .map((u) => u.lineId);
-  const stmts: D1PreparedStatement[] = [];
-  for (let i = 0; i < confirmedIds.length; i += D1_ID_CHUNK_SIZE) {
-    const chunk = confirmedIds.slice(i, i + D1_ID_CHUNK_SIZE);
-    const ph = chunk.map(() => "?").join(",");
-    stmts.push(
-      db
-        .prepare(
-          `UPDATE amex_statement_lines SET business_trip_status = 'confirmed', updated_at = ?
-           WHERE id IN (${ph})`,
-        )
-        .bind(now, ...chunk),
-    );
-  }
-  for (let i = 0; i < excludedIds.length; i += D1_ID_CHUNK_SIZE) {
-    const chunk = excludedIds.slice(i, i + D1_ID_CHUNK_SIZE);
-    const ph = chunk.map(() => "?").join(",");
-    stmts.push(
-      db
-        .prepare(
-          `UPDATE amex_statement_lines
-           SET business_trip_id = NULL, business_trip_status = 'excluded', updated_at = ?
-           WHERE id IN (${ph})`,
-        )
-        .bind(now, ...chunk),
-    );
-  }
-  await batchWrite(db, stmts);
+  if (sets.length) statements.push(amexAudit(db, actor,
+    newStatus !== before.status && newStatus === "confirmed" ? "business_trip.confirmed"
+      : newStatus !== before.status && newStatus === "rejected" ? "business_trip.rejected" : "business_trip.updated",
+    "business_trip", id, input, { status: before.status }));
+  statements.push(tripAckSelect(db, id, Object.keys(expected.expectedLines)));
+  return { ...tripAck(await amexBatch<{ revision: number; lines_json: string; receipts_json: string }>(db, statements)), status: newStatus };
 }
 
 export interface TripMemberIds {
@@ -3407,170 +3284,69 @@ export interface TripMemberIds {
   receiptIds?: string[];
 }
 
-/**
- * Lines in `lineIds` currently claimed by a DIFFERENT trip — the attach route
- * refuses these with a 409 (operator detaches at the owning trip first; no
- * silent moves). Returns [] when all are free or already on this trip.
- */
-export async function findCrossTripLineConflicts(
-  tripId: string,
-  lineIds: string[],
-): Promise<Array<{ lineId: string; businessTripId: string }>> {
-  if (lineIds.length === 0) return [];
+/** Informational preflight only; mutation admission also checks ownership. */
+export async function findCrossTripLineConflicts(tripId: string, lineIds: string[]) {
+  const result = await getReceiptsDb().prepare(`SELECT id AS lineId, business_trip_id AS businessTripId
+    FROM amex_statement_lines WHERE id IN (SELECT value FROM json_each(?))
+    AND business_trip_id IS NOT NULL AND business_trip_id != ?`).bind(stringifyJson(lineIds), tripId)
+    .all<{ lineId: string; businessTripId: string }>();
+  return result.results ?? [];
+}
+
+export async function attachTripMembers(tripId: string, members: TripMemberIds, actor: string, expected: TripWriteExpectation) {
+  return writeTripMembers(tripId, members, actor, expected, true);
+}
+
+export async function detachTripMembers(tripId: string, members: TripMemberIds, actor: string, expected: TripWriteExpectation) {
+  return writeTripMembers(tripId, members, actor, expected, false);
+}
+
+async function writeTripMembers(tripId: string, members: TripMemberIds, actor: string, expected: TripWriteExpectation, attach: boolean) {
   const db = getReceiptsDb();
-  const conflicts: Array<{ lineId: string; businessTripId: string }> = [];
-  for (let i = 0; i < lineIds.length; i += D1_ID_CHUNK_SIZE) {
-    const chunk = lineIds.slice(i, i + D1_ID_CHUNK_SIZE);
-    const ph = chunk.map(() => "?").join(",");
-    const result = await db
-      .prepare(
-        `SELECT id, business_trip_id
-         FROM amex_statement_lines
-         WHERE id IN (${ph}) AND business_trip_id IS NOT NULL AND business_trip_id != ?`,
-      )
-      .bind(...chunk, tripId)
-      .all<{ id: string; business_trip_id: string }>();
-    for (const row of result.results ?? []) {
-      conflicts.push({ lineId: row.id, businessTripId: row.business_trip_id });
+  const lineIds = [...new Set(members.lineIds ?? [])];
+  const receiptIds = [...new Set(members.receiptIds ?? [])];
+  const statements = admitTrip(db, tripId, expected, false);
+  statements.push(amexAssertion(db, "amex_trip_members_conflict", `
+    NOT EXISTS (SELECT value FROM json_each(?) WHERE value NOT IN (SELECT key FROM json_each(?)))
+    AND NOT EXISTS (SELECT key FROM json_each(?) WHERE key NOT IN (SELECT value FROM json_each(?)))`,
+    [stringifyJson(lineIds), stringifyJson(expected.expectedLines), stringifyJson(expected.expectedLines), stringifyJson(lineIds)]));
+  // Existence is checked even for a duplicate/no-op association. Sealed receipts
+  // remain legal overlays: no receipt financial row is changed here.
+  for (const rid of receiptIds) {
+    statements.push(amexAssertion(db, "amex_receipt_missing", "EXISTS (SELECT 1 FROM receipt_records WHERE id = ? AND deleted_at IS NULL)", [rid]));
+  }
+  const countsIndex = statements.length;
+  statements.push(db.prepare(`SELECT
+    (SELECT count(*) FROM amex_statement_lines l WHERE id IN (SELECT value FROM json_each(?)) AND
+      ${attach ? `(business_trip_id IS NOT ? OR NOT EXISTS (SELECT 1 FROM business_trip_report_lines WHERE business_trip_report_id = ? AND amex_statement_line_id = l.id))`
+        : `(business_trip_id = ? OR EXISTS (SELECT 1 FROM business_trip_report_lines WHERE business_trip_report_id = ? AND amex_statement_line_id = l.id))`}) AS lines,
+    (SELECT count(*) FROM receipt_records r WHERE id IN (SELECT value FROM json_each(?)) AND
+      ${attach ? 'NOT' : ''} EXISTS (SELECT 1 FROM business_trip_report_receipts WHERE business_trip_report_id = ? AND receipt_id = r.id)) AS receipts`)
+    .bind(stringifyJson(lineIds), tripId, tripId, stringifyJson(receiptIds), tripId));
+  const now = nowIso();
+  for (const lid of lineIds) {
+    if (attach) {
+      statements.push(db.prepare(`INSERT OR IGNORE INTO business_trip_report_lines (id, business_trip_report_id, amex_statement_line_id, created_at) VALUES (?, ?, ?, ?)`).bind(newUuid(), tripId, lid, now));
+      statements.push(db.prepare(`UPDATE amex_statement_lines SET business_trip_id = ?,
+        business_trip_status = CASE WHEN (SELECT status FROM business_trip_reports WHERE id = ?) = 'confirmed' THEN 'confirmed' ELSE 'candidate' END, updated_at = ?
+        WHERE id = ? AND business_trip_id IS NOT ?`).bind(tripId, tripId, now, lid, tripId));
+    } else {
+      statements.push(db.prepare(`UPDATE amex_statement_lines SET business_trip_id = NULL, business_trip_status = 'excluded', updated_at = ? WHERE id = ? AND business_trip_id = ?`).bind(now, lid, tripId));
+      statements.push(db.prepare(`DELETE FROM business_trip_report_lines WHERE business_trip_report_id = ? AND amex_statement_line_id = ?`).bind(tripId, lid));
     }
   }
-  return conflicts;
-}
-
-/**
- * Attach lines + receipts to a trip. Lines get business_trip_id + status
- * ('confirmed' if the trip is confirmed, else 'candidate') and a link-table
- * row. Receipts get a link-table row ONLY — receipt rows are never written
- * (ADR D2; sealed receipts are legal members by construction). Cross-trip line
- * conflicts must be checked by the caller (findCrossTripLineConflicts) first.
- */
-export async function attachTripMembers(
-  tripId: string,
-  members: TripMemberIds,
-  actor: string,
-): Promise<{ lines: number; receipts: number }> {
-  const db = getReceiptsDb();
-  const now = nowIso();
-  const lineIds = (members.lineIds ?? []).filter(Boolean);
-  const receiptIds = (members.receiptIds ?? []).filter(Boolean);
-
-  const trip = await db
-    .prepare(`SELECT status FROM business_trip_reports WHERE id = ?`)
-    .bind(tripId)
-    .first<{ status: BusinessTripStatus }>();
-  if (!trip) throw new Error(`Business trip ${tripId} not found.`);
-  const lineStatus = trip.status === "confirmed" ? "confirmed" : "candidate";
-
-  const stmts: D1PreparedStatement[] = [];
-  for (let i = 0; i < lineIds.length; i += 20) {
-    const chunk = lineIds.slice(i, i + 20);
-    const linkPh = chunk.map(() => "(?, ?, ?, ?)").join(",");
-    const linkBinds = chunk.flatMap((lid) => [newUuid(), tripId, lid, now]);
-    stmts.push(
-      db
-        .prepare(
-          `INSERT OR IGNORE INTO business_trip_report_lines
-            (id, business_trip_report_id, amex_statement_line_id, created_at)
-           VALUES ${linkPh}`,
-        )
-        .bind(...linkBinds),
-    );
-    const idPh = chunk.map(() => "?").join(",");
-    stmts.push(
-      db
-        .prepare(
-          `UPDATE amex_statement_lines
-           SET business_trip_id = ?, business_trip_status = ?, updated_at = ?
-           WHERE id IN (${idPh})`,
-        )
-        .bind(tripId, lineStatus, now, ...chunk),
-    );
+  for (const rid of receiptIds) {
+    statements.push(attach
+      ? db.prepare(`INSERT OR IGNORE INTO business_trip_report_receipts (id, business_trip_report_id, receipt_id, created_at) VALUES (?, ?, ?, ?)`).bind(newUuid(), tripId, rid, now)
+      : db.prepare(`DELETE FROM business_trip_report_receipts WHERE business_trip_report_id = ? AND receipt_id = ?`).bind(tripId, rid));
   }
-  for (let i = 0; i < receiptIds.length; i += 20) {
-    const chunk = receiptIds.slice(i, i + 20);
-    const ph = chunk.map(() => "(?, ?, ?, ?)").join(",");
-    const binds = chunk.flatMap((rid) => [newUuid(), tripId, rid, now]);
-    stmts.push(
-      db
-        .prepare(
-          `INSERT OR IGNORE INTO business_trip_report_receipts
-            (id, business_trip_report_id, receipt_id, created_at)
-           VALUES ${ph}`,
-        )
-        .bind(...binds),
-    );
-  }
-  await batchWrite(db, stmts);
-
-  await createAuditEntry(db, {
-    actor,
-    action: "business_trip.members_changed",
-    objectType: "business_trip",
-    objectId: tripId,
-    newValueJson: stringifyJson({ attach: { lineIds, receiptIds } }),
-  });
-  return { lines: lineIds.length, receipts: receiptIds.length };
-}
-
-/**
- * Detach lines + receipts from a trip. Lines: business_trip_id = NULL, status
- * 'excluded', link row deleted (only for lines claimed by this trip). Receipts:
- * link row deleted. (Receipt rows are never written.)
- */
-export async function detachTripMembers(
-  tripId: string,
-  members: TripMemberIds,
-  actor: string,
-): Promise<{ lines: number; receipts: number }> {
-  const db = getReceiptsDb();
-  const now = nowIso();
-  const lineIds = (members.lineIds ?? []).filter(Boolean);
-  const receiptIds = (members.receiptIds ?? []).filter(Boolean);
-
-  const stmts: D1PreparedStatement[] = [];
-  for (let i = 0; i < lineIds.length; i += D1_ID_CHUNK_SIZE) {
-    const chunk = lineIds.slice(i, i + D1_ID_CHUNK_SIZE);
-    const ph = chunk.map(() => "?").join(",");
-    stmts.push(
-      db
-        .prepare(
-          `UPDATE amex_statement_lines
-           SET business_trip_id = NULL, business_trip_status = 'excluded', updated_at = ?
-           WHERE id IN (${ph}) AND business_trip_id = ?`,
-        )
-        .bind(now, ...chunk, tripId),
-    );
-    stmts.push(
-      db
-        .prepare(
-          `DELETE FROM business_trip_report_lines
-           WHERE business_trip_report_id = ? AND amex_statement_line_id IN (${ph})`,
-        )
-        .bind(tripId, ...chunk),
-    );
-  }
-  for (let i = 0; i < receiptIds.length; i += D1_ID_CHUNK_SIZE) {
-    const chunk = receiptIds.slice(i, i + D1_ID_CHUNK_SIZE);
-    const ph = chunk.map(() => "?").join(",");
-    stmts.push(
-      db
-        .prepare(
-          `DELETE FROM business_trip_report_receipts
-           WHERE business_trip_report_id = ? AND receipt_id IN (${ph})`,
-        )
-        .bind(tripId, ...chunk),
-    );
-  }
-  await batchWrite(db, stmts);
-
-  await createAuditEntry(db, {
-    actor,
-    action: "business_trip.members_changed",
-    objectType: "business_trip",
-    objectId: tripId,
-    newValueJson: stringifyJson({ detach: { lineIds, receiptIds } }),
-  });
-  return { lines: lineIds.length, receipts: receiptIds.length };
+  statements.push(db.prepare("UPDATE business_trip_reports SET revision = revision + 1 WHERE id = ?").bind(tripId));
+  statements.push(amexAudit(db, actor, "business_trip.members_changed", "business_trip", tripId, { [attach ? "attach" : "detach"]: { lineIds, receiptIds } }));
+  statements.push(tripAckSelect(db, tripId, lineIds, receiptIds));
+  const result = await amexBatch<{ revision: number; lines_json: string; receipts_json: string; lines: number; receipts: number }>(db, statements);
+  const counts = result[countsIndex]!.results[0]!;
+  return { ...tripAck(result), lines: counts.lines, receipts: counts.receipts,
+    unchangedLines: lineIds.length - counts.lines, unchangedReceipts: receiptIds.length - counts.receipts };
 }
 
 /** Current member line + receipt ids for a trip (for the picker's exclusion set). */
@@ -3617,6 +3393,7 @@ export async function listTripAttachCandidates(
   const lines = await db
     .prepare(
       `SELECT id, transaction_date, merchant, amount_minor, currency,
+              (SELECT revision FROM amex_line_revisions WHERE line_id = amex_statement_lines.id) AS revision,
               statement_month, match_status, business_trip_id, matched_receipt_id
        FROM amex_statement_lines
        WHERE ${datePred} ${hasQ ? "AND merchant LIKE ?" : ""}
@@ -3633,11 +3410,13 @@ export async function listTripAttachCandidates(
       match_status: string | null;
       business_trip_id: string | null;
       matched_receipt_id: string | null;
+      revision: number;
     }>();
   for (const l of lines.results ?? []) {
     rows.push({
       kind: "line",
       id: l.id,
+      revision: l.revision,
       transactionDate: l.transaction_date,
       merchant: l.merchant,
       amountMinor: l.amount_minor,
@@ -4439,4 +4218,17 @@ export async function unfinalizeReconciliation(
     objectId: row.id,
     newValueJson: stringifyJson({ reason, statementMonth, unfinalized: true }),
   });
+}
+
+/** Multi-read editors fail closed if any loaded aggregate changed while reading. */
+export async function verifyAmexLineReads(lines: Pick<AmexStatementLine, "id" | "revision">[]): Promise<void> {
+  const db = getReceiptsDb();
+  if (lines.length) await amexBatch(db, lines.flatMap(l => admitAmexLine(db, l.id, l.revision)));
+}
+
+export async function verifyReceiptReads(receipts: Pick<ReceiptRecord, "id" | "revision">[]): Promise<void> {
+  if (!receipts.length) return;
+  const db = getReceiptsDb();
+  await amexBatch(db, receipts.map(r => amexAssertion(db, "amex_receipt_revision_conflict",
+    "EXISTS (SELECT 1 FROM receipt_records WHERE id = ? AND revision = ?)", [r.id, r.revision])));
 }

@@ -1,3 +1,4 @@
+import { AmexWriteError, revisionInputError, revisionMap } from "@/lib/receipts/amex-write";
 import { NextResponse } from "next/server";
 import { requireReceiptsActor } from "@/lib/receipts/auth";
 import { isSealBoundaryConflict } from "@/lib/receipts/month-lock";
@@ -15,12 +16,17 @@ export async function POST(request: Request) {
   try {
     const actor = await requireReceiptsActor(request.headers);
 
-    const body = (await request.json()) as {
+    const body = (await request.json().catch(() => null)) as {
       amexLineId?: string;
+      expectedRevision?: unknown;
+      expectedReceipts?: unknown;
+      expectedLines?: unknown;
       receiptId?: string | null;
       matchStatus?: string;
     };
 
+    const revisionError = revisionInputError(body?.expectedRevision);
+    if (revisionError) return NextResponse.json(revisionError, { status: 400 });
     if (!body.amexLineId) {
       return NextResponse.json({ error: "amexLineId is required." }, { status: 400 });
     }
@@ -46,15 +52,23 @@ export async function POST(request: Request) {
       );
     }
 
-    await updateAmexReconciliation(
+    if (!revisionMap(body.expectedReceipts) || (body.expectedLines !== undefined && !revisionMap(body.expectedLines))) {
+      return NextResponse.json({ code: "expected_receipts_invalid", error: "Loaded expectedReceipts revisions and valid expectedLines are required. Reload to review." }, { status: 400 });
+    }
+
+    const result = await updateAmexReconciliation(
       body.amexLineId,
       body.receiptId ?? null,
       status,
       actor,
+      body.expectedRevision as number,
+      body.expectedReceipts,
+      body.expectedLines as Record<string, number> | undefined,
     );
 
-    return NextResponse.json({ ok: true }, { status: 200 });
+    return NextResponse.json(result, { status: 200 });
   } catch (error) {
+    if (error instanceof AmexWriteError) return NextResponse.json({ error: error.message, code: error.code }, { status: error.status });
     if (error instanceof Error && error.message.startsWith("Unauthorized")) {
       return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
     }

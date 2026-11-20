@@ -46,6 +46,8 @@ export type SaveBodyBuilder = (markReviewed: boolean) => Record<string, unknown>
 export interface SaveQueueConfig {
   url: string;
   initialRevision: number;
+  entity?: string;
+  onAcknowledged?: (body: Record<string, unknown>, ack: SaveSuccess) => void;
   buildBody: SaveBodyBuilder;
   fetchImpl?: SaveFetch;
   /** Return true to HOLD the pending flush (e.g. IME composition is active —
@@ -57,6 +59,9 @@ export interface SaveQueueConfig {
 export interface SaveSuccess {
   warnings: string[];
   revision: number;
+  receiptRevisions?: Record<string, number>;
+  lineRevisions?: Record<string, number>;
+  tripRevisions?: Record<string, number>;
 }
 
 /**
@@ -116,9 +121,9 @@ function isUsableSuccessAck(
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     return false;
   }
-  const body = parsed as { ok?: unknown; warnings?: unknown; revision?: unknown; error?: unknown };
+  const body = parsed as { ok?: unknown; warnings?: unknown; error?: unknown };
   if (body.error !== undefined) return false; // error envelope ≠ success ack
-  if (body.ok !== true || !isReceiptRevision(body.revision)) return false; // the endpoint's own acknowledgement
+  if (body.ok !== true || !isReceiptRevision((parsed as { revision?: unknown }).revision)) return false; // the endpoint's own acknowledgement
   if (body.warnings !== undefined && !isStringArray(body.warnings)) {
     return false; // wrong warnings type = not the endpoint's body
   }
@@ -143,18 +148,20 @@ interface Waiter {
 
 export class SaveQueue {
   private config: SaveQueueConfig;
-  private revision: number;
-  private haltMessage = SAVE_HALTED_MESSAGE;
   private inFlight = false;
   private hasPending = false;
   private pendingMarkReviewed = false;
   private lastFlushFailed = false;
   private haltedForUnknownOutcome = false;
   private waiters: Waiter[] = [];
+  private idleWaiters: { resolve: () => void; reject: (error: Error) => void }[] = [];
+  private acknowledgedRevision: number;
+  private stoppedMessage: string | null = null;
+  private actions: { url: string; method: "POST" | "PATCH" | "DELETE"; buildBody: () => Record<string, unknown>; waiter: Waiter }[] = [];
 
   constructor(config: SaveQueueConfig) {
     this.config = config;
-    this.revision = config.initialRevision;
+    this.acknowledgedRevision = config.initialRevision;
   }
 
   /** Replace the closures: the form re-renders with fresh field state, and
@@ -165,7 +172,7 @@ export class SaveQueue {
 
   /** True when nothing is in flight and no flush is waiting. */
   get idle(): boolean {
-    return !this.inFlight && !this.hasPending;
+    return !this.inFlight && !this.hasPending && this.actions.length === 0;
   }
 
   /** True when the most recent completed flush FAILED (cleared by the next
@@ -205,31 +212,88 @@ export class SaveQueue {
     });
   }
 
-  /** Caller flushes edits first; dedicated actions share the acknowledged token. */
-  mutate(method: "PATCH" | "DELETE", body: Record<string, unknown>): Promise<SaveSuccess> {
+  get revision(): number { return this.acknowledgedRevision; }
+
+  /** Observe a full drain without enqueuing another write. */
+  whenIdle(): Promise<void> {
     if (this.halted) return Promise.reject(new Error(this.haltMessage));
-    if (!this.idle) return Promise.reject(new Error("Wait for pending receipt saves."));
-    this.inFlight = true;
+    if (this.idle) return this.lastFailed ? Promise.reject(new Error("Save refused — correct the fields or reload to review.")) : Promise.resolve();
+    return new Promise((resolve, reject) => this.idleWaiters.push({ resolve, reject }));
+  }
+
+  /** Only consume tokens returned by this editor's verified aggregate action. */
+  acceptAcknowledgedRevision(revision: number): void {
+    if (this.inFlight || !Number.isSafeInteger(revision) || revision < (this.acknowledgedRevision ?? 0)) throw new Error("Invalid aggregate acknowledgement");
+    this.acknowledgedRevision = revision;
+  }
+
+  stop(message: string): void {
+    this.stoppedMessage = message;
+    this.haltedForUnknownOutcome = true;
+    this.lastFlushFailed = true;
+    for (const w of [...this.waiters, ...this.actions.map(a => a.waiter)]) w.reject(new Error(message));
+    this.waiters = []; this.actions = []; this.hasPending = false;
+    for (const w of this.idleWaiters) w.reject(new Error(message));
+    this.idleWaiters = [];
+  }
+
+  /** Receipt dedicated actions retain their fixed-URL idle barrier. */
+  mutate(method: "PATCH" | "DELETE", body: Record<string, unknown>): Promise<SaveSuccess>;
+  mutate(url: string, method: "POST" | "PATCH" | "DELETE", buildBody: () => Record<string, unknown>): Promise<SaveSuccess>;
+  mutate(urlOrMethod: string, methodOrBody: "POST" | "PATCH" | "DELETE" | Record<string, unknown>, buildBody?: () => Record<string, unknown>): Promise<SaveSuccess> {
+    if (this.halted) return Promise.reject(new Error(this.haltMessage));
+    if (!buildBody) {
+      if (!this.idle) return Promise.reject(new Error("Wait for pending receipt saves."));
+      this.inFlight = true;
+      return new Promise((resolve, reject) => {
+        void this.fire(this.config.url, methodOrBody as Record<string, unknown>, [{ resolve, reject }], this.config.fetchImpl ?? defaultFetch, urlOrMethod as "PATCH" | "DELETE");
+      });
+    }
     return new Promise((resolve, reject) => {
-      void this.fire(this.config.url, body, [{ resolve, reject }], this.config.fetchImpl ?? defaultFetch, method);
+      this.actions.push({ url: urlOrMethod, method: methodOrBody as "POST" | "PATCH" | "DELETE", buildBody, waiter: { resolve, reject } });
+      this.drain();
     });
   }
 
+  private get haltMessage(): string {
+    return this.stoppedMessage ?? (this.config.entity
+      ? `This ${this.config.entity} changed or the save outcome is uncertain. Reload to review; your edits are kept here and further writes are stopped.`
+      : SAVE_HALTED_MESSAGE);
+  }
+
   private drain(): void {
-    if (this.haltedForUnknownOutcome) return; // no automatic draining (B3)
-    if (this.inFlight || !this.hasPending) return;
-    if (this.config.deferFire?.()) return; // held; next save() re-attempts
+    if (this.halted || this.inFlight || (!this.hasPending && !this.actions.length)) return;
+    if (this.config.deferFire?.()) return;
     this.inFlight = true;
-    this.hasPending = false;
-    const markReviewed = this.pendingMarkReviewed;
-    this.pendingMarkReviewed = false;
-    const waiters = this.waiters;
-    this.waiters = [];
-    // Capture the config BEFORE awaiting — rebind must not swap the fetch
-    // under an in-flight request.
     const { url, fetchImpl = defaultFetch } = this.config;
-    const body = this.config.buildBody(markReviewed);
-    void this.fire(url, body, waiters, fetchImpl);
+    let target = url;
+    let method: "POST" | "PATCH" | "DELETE" = "PATCH";
+    let body: Record<string, unknown>;
+    let waiters: Waiter[] = [];
+    try {
+      if (this.hasPending) {
+        this.hasPending = false;
+        const markReviewed = this.pendingMarkReviewed;
+        this.pendingMarkReviewed = false;
+        waiters = this.waiters;
+        this.waiters = [];
+        body = this.config.buildBody(markReviewed);
+      } else {
+        const action = this.actions.shift()!;
+        target = action.url;
+        method = action.method;
+        waiters = [action.waiter];
+        body = action.buildBody();
+      }
+    } catch (error) {
+      this.inFlight = false;
+      this.lastFlushFailed = true;
+      const failure = error instanceof Error ? error : new Error("Reload to review before saving.");
+      for (const waiter of waiters) waiter.reject(failure);
+      this.stop(failure.message);
+      return;
+    }
+    void this.fire(target, body, waiters, fetchImpl, method);
   }
 
   private async fire(
@@ -237,7 +301,7 @@ export class SaveQueue {
     body: Record<string, unknown>,
     waiters: Waiter[],
     fetchImpl: SaveFetch,
-    method = "PATCH",
+    method: "POST" | "PATCH" | "DELETE",
   ): Promise<void> {
     let result: SaveSuccess | Error;
     let haltError: Error | null = null;
@@ -245,7 +309,7 @@ export class SaveQueue {
       const res = await fetchImpl(url, {
         method,
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...body, expectedRevision: this.revision }),
+        body: JSON.stringify({ ...body, expectedRevision: this.acknowledgedRevision }),
       });
       // Ack boundary: a success ack must be a 2xx WITH a parseable body; a
       // conclusive failure must be one of the route's proven PRE-WRITE
@@ -256,34 +320,51 @@ export class SaveQueue {
       } catch {
         parsed = null; // malformed/missing body — not a usable ack
       }
-      if (res.ok && isUsableSuccessAck(parsed) && parsed.revision >= this.revision) {
-        this.revision = parsed.revision;
-        result = { warnings: parsed.warnings ?? [], revision: parsed.revision };
+      const ack = parsed as { revision?: unknown; receiptRevisions?: unknown; lineRevisions?: unknown; tripRevisions?: unknown } | null;
+      const validToken = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
+      const usableRevision = validToken(ack?.revision) && (this.config.entity ? ack.revision > this.acknowledgedRevision : ack.revision >= this.acknowledgedRevision);
+      const validMap = (v: unknown) => v !== null && typeof v === "object" && !Array.isArray(v) && Object.values(v).every(validToken);
+      const expectedLines = body.expectedLines as Record<string, number> | undefined;
+      const usableLines = (ack?.lineRevisions === undefined ? expectedLines === undefined : validMap(ack.lineRevisions)) &&
+        (!expectedLines || Object.entries(expectedLines).every(([id, rev]) => validToken((ack?.lineRevisions as Record<string, unknown> | undefined)?.[id]) && (ack!.lineRevisions as Record<string, number>)[id] >= rev));
+      const expectedReceipts = body.expectedReceipts as Record<string, number> | undefined;
+      const usableReceipts = (ack?.receiptRevisions === undefined ? expectedReceipts === undefined && !this.config.entity : validMap(ack.receiptRevisions)) &&
+        (!expectedReceipts || (Object.keys(ack!.receiptRevisions as object).length === Object.keys(expectedReceipts).length &&
+          Object.entries(expectedReceipts).every(([id, rev]) => validToken((ack?.receiptRevisions as Record<string, unknown> | undefined)?.[id]) && (ack!.receiptRevisions as Record<string, number>)[id] >= rev)));
+      const usableTrips = ack?.tripRevisions === undefined || validMap(ack.tripRevisions);
+      if (res.ok && isUsableSuccessAck(parsed) && usableRevision && usableLines && usableTrips && usableReceipts) {
+        this.acknowledgedRevision = ack!.revision as number;
+        result = { warnings: parsed.warnings ?? [], revision: this.acknowledgedRevision,
+          ...(ack?.receiptRevisions ? { receiptRevisions: ack.receiptRevisions as Record<string, number> } : {}),
+          ...(ack?.lineRevisions ? { lineRevisions: ack.lineRevisions as Record<string, number> } : {}),
+          ...(ack?.tripRevisions ? { tripRevisions: ack.tripRevisions as Record<string, number> } : {}) };
+        this.config.onAcknowledged?.(body, result);
       } else if (!res.ok && isConclusivePreWriteRefusal(res.status)) {
         result = new Error(errorTextOf(parsed) ?? "Save failed");
-        if (res.status === 404 || (res.status === 409 && (parsed as { code?: string } | null)?.code === "receipt_revision_conflict")) {
-          haltError = new Error(RECEIPT_CONFLICT_MESSAGE);
+        if (this.config.entity ? (res.status === 404 || res.status === 409) : (res.status === 404 || (res.status === 409 && (parsed as { code?: string } | null)?.code === "receipt_revision_conflict"))) {
+          haltError = new Error(this.config.entity ? this.haltMessage : RECEIPT_CONFLICT_MESSAGE);
           result = haltError;
         }
       } else {
-        haltError = new Error(SAVE_HALTED_MESSAGE);
+        haltError = new Error(this.haltMessage);
         result = haltError;
       }
     } catch {
       // Transport loss: the request may still have been applied — UNKNOWN
       // outcome. Halt.
-      haltError = new Error(SAVE_HALTED_MESSAGE);
+      haltError = new Error(this.haltMessage);
       result = haltError;
     }
     this.inFlight = false;
     if (haltError) {
       // Halt BEFORE rejecting so even synchronous observers see it.
       this.haltedForUnknownOutcome = true;
-      this.haltMessage = haltError.message;
+      this.stoppedMessage = haltError.message;
       // Work queued behind the ambiguous request cannot be safely ordered:
       // reject (never silently drop) its waiters too. Fields stay with the
       // caller; the guidance message is the honest recovery state.
-      const queued = this.waiters;
+      const queued = [...this.waiters, ...this.actions.map(a => a.waiter)];
+      this.actions = [];
       this.waiters = [];
       this.hasPending = false;
       this.pendingMarkReviewed = false;
@@ -293,6 +374,10 @@ export class SaveQueue {
     for (const waiter of waiters) {
       if (result instanceof Error) waiter.reject(result);
       else waiter.resolve(result);
+    }
+    if (result instanceof Error || this.idle) {
+      const idle = this.idleWaiters; this.idleWaiters = [];
+      for (const w of idle) { if (result instanceof Error) w.reject(result); else w.resolve(); }
     }
     this.drain(); // no-op while halted
   }

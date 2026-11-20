@@ -6,6 +6,8 @@ import {
   getFinalizedReconciliationForMonth,
   listAmexLineAttendeeNamesByMonth,
   listAmexLines,
+  verifyAmexLineReads,
+  verifyReceiptReads,
   listAttendeeDirectory,
   listAttendeeNamesByReceiptIds,
   listReceiptRecordsByIds,
@@ -153,6 +155,7 @@ export async function buildExportBundle(month: string): Promise<ExportBundle> {
     rows.push({
       rowType: "amex_line",
       lineId: line.id,
+      lineRevision: line.revision,
       rawCsvLineNumber: line.raw_csv_line_number ?? null,
       matchStatus: line.match_status,
       receiptStatus: line.receipt_status,
@@ -223,6 +226,9 @@ export async function buildExportBundle(month: string): Promise<ExportBundle> {
     });
     items.push({ itemType: "receipt", itemId: receipt.id });
   }
+
+  await verifyAmexLineReads(amexLines);
+  await verifyReceiptReads(allReceipts);
 
   return { rows, receipts: allReceipts, amexLines, attendeeMap, attendeeDirectory, amexAttendees, items };
 }

@@ -74,7 +74,7 @@ test("category-cell routing: matched AMEX line → receipt PATCH (receipt shadow
 
 test("category-cell routing: no-receipt / unmatched AMEX line → line PATCH", () => {
   const p = buildCategoryCellProps(noReceiptLine(), false, false);
-  assert.deepEqual(p.route, { kind: "line", id: "line-2" });
+  assert.deepEqual(p.route, { kind: "line", id: "line-2", revision: undefined });
   assert.equal(p.sourceLabel, "on line");
   assert.equal(p.editable, true);
 });

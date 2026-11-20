@@ -1,5 +1,7 @@
 "use client";
 
+import { SaveQueue } from "@/lib/receipts/save-queue";
+import { registerSaveFlusher, guardedNavigate } from "@/lib/receipts/review-navigation";
 import { useRouter } from "next/navigation";
 import {
   useCallback,
@@ -181,6 +183,116 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
 
   const locked = props.finalized;
 
+  const lanes = useRef(new Map<string, SaveQueue>());
+  const receiptTokens = useRef(new Map(props.receipts.map(r => [r.id, r.revision])));
+  const ownMatches = useRef(new Map<string, string | null>());
+  const acknowledgedTrips = useRef<Record<string, number>>({});
+  const dirty = useRef(new Map<string, Record<string, unknown>>());
+  const composing = useRef(false);
+  const tripInFlight = useRef(false);
+  const timers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  const [localLines, setLocalLines] = useState<Record<string, Partial<AmexStatementLine>>>({});
+  const [lineAttendeeEdits, setLineAttendeeEdits] = useState<Record<string, string[]>>({});
+  const hasPending = useCallback(() => composing.current || [...dirty.current.values()].some(v => Object.keys(v).length > 0)
+    || [...lanes.current.values()].some(q => !q.idle || q.halted || q.lastFailed), []);
+  const lane = useCallback((id: string) => {
+    let queue = lanes.current.get(id);
+    if (!queue) {
+      const loaded = props.amexLines.find(l => l.id === id);
+      if (!loaded) throw new Error("Line removed — reload to review.");
+      queue = new SaveQueue({ url: `/api/receipts/amex/lines/${id}`, initialRevision: loaded.revision, entity: "AMEX line",
+        deferFire: () => composing.current || tripInFlight.current,
+        buildBody: () => ({ ...dirty.current.get(id) }),
+        onAcknowledged: (body, ack) => {
+          const previousId = ownMatches.current.has(id) ? ownMatches.current.get(id) : loaded.matched_receipt_id;
+          const affectedIds = "matchStatus" in body ? Object.keys(body.expectedReceipts as object) : previousId ? [previousId] : [];
+          if (!ack.receiptRevisions || Object.keys(ack.receiptRevisions).length !== affectedIds.length ||
+            affectedIds.some(rid => !(rid in ack.receiptRevisions!) || ack.receiptRevisions![rid] < (receiptTokens.current.get(rid) ?? 0))) {
+            throw new Error("Receipt acknowledgement incomplete — reload to review.");
+          }
+          Object.assign(acknowledgedTrips.current, ack.tripRevisions);
+          for (const [receiptId, revision] of Object.entries(ack.receiptRevisions ?? {})) {
+            if (receiptTokens.current.has(receiptId)) receiptTokens.current.set(receiptId, revision);
+          }
+          for (const [lineId, revision] of Object.entries(ack.lineRevisions ?? {})) {
+            if (lineId !== id) lanes.current.get(lineId)?.acceptAcknowledgedRevision(revision);
+          }
+          if ("matchStatus" in body) {
+            ownMatches.current.set(id, body.receiptId as string | null);
+            setLocalLines(prev => ({ ...prev, [id]: { ...prev[id], matched_receipt_id: body.receiptId as string | null,
+              match_status: body.matchStatus as AmexStatementLine["match_status"],
+              receipt_status: body.matchStatus === "confirmed" || body.matchStatus === "matched" ? "matched"
+                : body.matchStatus === "unmatched" ? "missing_receipt" : "no_receipt_required" } }));
+          }
+          const pending = dirty.current.get(id);
+          if (pending) for (const [key, value] of Object.entries(body)) {
+            if (JSON.stringify(pending[key]) === JSON.stringify(value)) delete pending[key];
+          }
+        } });
+      lanes.current.set(id, queue);
+    }
+    return queue;
+  }, [props.amexLines]);
+  const matchBody = useCallback((amexLineId: string, receiptId: string | null, matchStatus: string) => {
+    const previousId = ownMatches.current.has(amexLineId) ? ownMatches.current.get(amexLineId)
+      : props.amexLines.find(l => l.id === amexLineId)?.matched_receipt_id;
+    const affected = new Set([receiptId, previousId].filter((id): id is string => !!id));
+    const expectedReceipts = Object.fromEntries([...affected].map(id => {
+      const revision = receiptTokens.current.get(id) ?? props.receipts.find(r => r.id === id)?.revision;
+      if (revision === undefined) throw new Error("Receipt context missing — reload to review before matching.");
+      receiptTokens.current.set(id, revision);
+      return [id, revision];
+    }));
+    const expectedLines = Object.fromEntries(props.amexLines.filter(l => {
+      const rid = ownMatches.current.has(l.id) ? ownMatches.current.get(l.id) : l.matched_receipt_id;
+      return l.id !== amexLineId && !!rid && affected.has(rid);
+    }).map(l => [l.id, lane(l.id).revision]));
+    return { amexLineId, receiptId, matchStatus, expectedReceipts, expectedLines };
+  }, [props.amexLines, props.receipts, lane]);
+  const flushLine = useCallback(async (id: string) => {
+    const timer = timers.current.get(id);
+    if (timer) clearTimeout(timer);
+    timers.current.delete(id);
+    const queue = lane(id);
+    do {
+      if (Object.keys(dirty.current.get(id) ?? {}).length) await queue.save();
+      await queue.whenIdle();
+    } while (Object.keys(dirty.current.get(id) ?? {}).length);
+  }, [lane]);
+  const flushAll = useCallback(async () => {
+    try {
+      for (const id of new Set([...dirty.current.keys(), ...lanes.current.keys()])) await flushLine(id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Save outcome uncertain — reload to review.");
+      throw err;
+    }
+  }, [flushLine]);
+  useEffect(() => registerSaveFlusher(flushAll), [flushAll]);
+  useEffect(() => {
+    const warn = (e: BeforeUnloadEvent) => { if (hasPending()) { e.preventDefault(); e.returnValue = ""; } };
+    const back = () => { if (hasPending()) { history.go(1); setError("Unsaved or uncertain edits — reload to review before leaving."); } };
+    window.addEventListener("beforeunload", warn);
+    window.addEventListener("popstate", back);
+    const pendingTimers = timers.current;
+    return () => { window.removeEventListener("beforeunload", warn); window.removeEventListener("popstate", back); for (const t of pendingTimers.values()) clearTimeout(t); };
+  }, [hasPending]);
+  const stageLine = useCallback((id: string, fields: Record<string, unknown>, debounce = true) => {
+    lane(id); // bind to the loaded token at the first edit, never a later refresh
+    dirty.current.set(id, { ...dirty.current.get(id), ...fields });
+    const keys: Record<string, string> = { expenseCategoryCode: "expense_category_code", receiptStatus: "receipt_status", receiptMissingReason: "receipt_missing_reason", businessTripStatus: "business_trip_status" };
+    const overlay = Object.fromEntries(Object.entries(fields).filter(([key]) => keys[key]).map(([key, value]) => [keys[key], value]));
+    setLocalLines(prev => ({ ...prev, [id]: { ...prev[id], ...overlay } }));
+    const previous = timers.current.get(id);
+    if (previous) clearTimeout(previous);
+    const send = () => {
+      timers.current.delete(id);
+      void flushLine(id).catch(err => setError(err instanceof Error ? err.message : "Save outcome uncertain — reload to review."));
+    };
+    if (debounce) timers.current.set(id, setTimeout(send, 450)); else send();
+  }, [lane, flushLine]);
+  const selectLine = useCallback((id: string) => { void guardedNavigate(() => setActiveId(id)); }, []);
+  const loadedLines = useMemo(() => props.amexLines.map(l => ({ ...l, ...localLines[l.id] })), [props.amexLines, localLines]);
+
   // Match suggestions are computed server-side on every render of this page
   // (never persisted), so "re-run matching" is just a router.refresh(). New
   // receipts finish OCR asynchronously (upload → queue → MLX consumer on the
@@ -188,18 +300,18 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
   // receipt lands — refresh when the tab regains focus, and expose a manual
   // button in the top bar for mid-session refreshes.
   const refreshMatches = useCallback(() => {
-    startRefresh(() => router.refresh());
+    void guardedNavigate(() => startRefresh(() => router.refresh()));
   }, [router]);
 
   useEffect(() => {
     const onVisible = () => {
       if (document.visibilityState !== "visible") return;
-      if (busy !== null || bulkProgress !== null) return;
+      if (busy !== null || bulkProgress !== null || hasPending()) return;
       router.refresh();
     };
     document.addEventListener("visibilitychange", onVisible);
     return () => document.removeEventListener("visibilitychange", onVisible);
-  }, [router, busy, bulkProgress]);
+  }, [router, busy, bulkProgress, hasPending]);
 
   const matchMap = useMemo(
     () => new Map(props.autoMatches.map((m) => [m.amexLineId, m])),
@@ -215,30 +327,30 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
   // detail pane (a receipt may legitimately cover several card charges).
   const confirmedLinesByReceipt = useMemo(() => {
     const map = new Map<string, AmexStatementLine[]>();
-    for (const l of props.amexLines) {
+    for (const l of loadedLines) {
       if (l.match_status !== "confirmed" || !l.matched_receipt_id) continue;
       const group = map.get(l.matched_receipt_id) ?? [];
       group.push(l);
       map.set(l.matched_receipt_id, group);
     }
     return map;
-  }, [props.amexLines]);
+  }, [loadedLines]);
 
   const linesWithBand = useMemo(
     () =>
-      props.amexLines.map((line) => ({
+      loadedLines.map((line) => ({
         line,
         band: bandForLine(line, matchMap.get(line.id)),
         match: matchMap.get(line.id),
       })),
-    [props.amexLines, matchMap],
+    [loadedLines, matchMap],
   );
 
   const counts = useMemo(() => {
-    const confirmed = props.amexLines.filter((l) => isSettled(l)).length;
+    const confirmed = loadedLines.filter((l) => isSettled(l)).length;
     // A no_receipt line with no reason is incomplete (§1) — surface the count so
     // the operator sees the work before pressing sign-off, not after the gate.
-    const needsReason = props.amexLines.filter(
+    const needsReason = loadedLines.filter(
       (l) => l.match_status === "no_receipt" && !isSettled(l),
     ).length;
     const obvious = linesWithBand.filter(
@@ -250,7 +362,7 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
       (l) => l.band === "none" && l.line.match_status === "unmatched",
     ).length;
     return {
-      total: props.amexLines.length,
+      total: loadedLines.length,
       confirmed,
       needsReason,
       obvious,
@@ -259,7 +371,7 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
       noMatch,
       orphan: props.orphanReceipts.length,
     };
-  }, [props.amexLines, props.orphanReceipts.length, linesWithBand]);
+  }, [loadedLines, props.orphanReceipts.length, linesWithBand]);
 
   const active = activeId
     ? linesWithBand.find((l) => l.line.id === activeId) ?? null
@@ -277,26 +389,17 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
       setError(null);
       if (matchStatus === "no_receipt") setReasonFocusId(amexLineId);
       try {
-        const res = await fetch("/api/receipts/reconcile", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ amexLineId, receiptId, matchStatus }),
-        });
-        if (!res.ok) {
-          const json = (await res.json().catch(() => ({}))) as {
-            error?: string;
-          };
-          setError(json.error ?? "Reconcile failed.");
-          return;
-        }
-        router.refresh();
-      } catch {
-        setError("Network error.");
+        await flushLine(amexLineId);
+        await lane(amexLineId).mutate("/api/receipts/reconcile", "POST", () => matchBody(amexLineId, receiptId, matchStatus));
+        await flushLine(amexLineId);
+        if (!hasPending()) router.refresh();
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Save outcome uncertain — reload to review.");
       } finally {
         setBusy(null);
       }
     },
-    [locked, router],
+    [locked, router, flushLine, lane, hasPending, matchBody],
   );
 
   // Focus the just-marked line's reason input once the refreshed row has mounted
@@ -311,86 +414,16 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
     }
   }, [reasonFocusId, props.amexLines]);
 
-  const updateCategory = useCallback(
-    async (lineId: string, code: string) => {
-      if (locked) return;
-      setBusy(lineId);
-      setError(null);
-      try {
-        const res = await fetch(`/api/receipts/amex/lines/${lineId}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ expenseCategoryCode: code }),
-        });
-        if (!res.ok) {
-          const json = (await res.json().catch(() => ({}))) as {
-            error?: string;
-          };
-          setError(json.error ?? "Could not save category.");
-          return;
-        }
-        router.refresh();
-      } catch {
-        setError("Network error.");
-      } finally {
-        setBusy(null);
-      }
-    },
-    [locked, router],
-  );
+  const updateCategory = useCallback((id: string, code: string) => {
+    if (!locked) stageLine(id, { expenseCategoryCode: code || null }, false);
+  }, [locked, stageLine]);
+  const updateLineDetails = useCallback((id: string, body: {
+    receiptStatus?: AmexReceiptStatus; receiptMissingReason?: string | null; businessTripStatus?: AmexBusinessTripStatus;
+  }) => { if (!locked) stageLine(id, body); }, [locked, stageLine]);
 
-  const updateLineDetails = useCallback(
-    async (
-      lineId: string,
-      body: {
-        receiptStatus?: AmexReceiptStatus;
-        receiptMissingReason?: string | null;
-        businessTripStatus?: AmexBusinessTripStatus;
-      },
-    ) => {
-      if (locked) return;
-      setBusy(lineId);
-      setError(null);
-      try {
-        const res = await fetch(`/api/receipts/amex/lines/${lineId}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        });
-        if (!res.ok) {
-          const json = (await res.json().catch(() => ({}))) as {
-            error?: string;
-          };
-          setError(json.error ?? "Could not save line details.");
-          return;
-        }
-        router.refresh();
-      } catch {
-        setError("Network error.");
-      } finally {
-        setBusy(null);
-      }
-    },
-    [locked, router],
-  );
-
-  // ─── Line-direct attendees (no-receipt lines) ────────────────────────
-  // Edited in the detail pane's AttendeeEditor: optimistic local state + a
-  // debounced PATCH (same shape as the review form's autosave, same 450ms).
-  // Deliberately NO router.refresh() after attendee saves — a refresh clobbers
-  // WebKit IME composition and steals focus (PRs #190/#191). The optimistic
-  // value is the RAW list as typed, so the controlled input's value round-trips
-  // byte-identically through the rerender; the server normalizes on write.
-  const [lineAttendeeEdits, setLineAttendeeEdits] = useState<
-    Record<string, string[]>
-  >({});
   const [attendeeDirectory, setAttendeeDirectory] = useState(
     props.attendeeDirectory,
   );
-  const attendeeSaveTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(
-    new Map(),
-  );
-
   // Server-loaded line attendees overlaid with any optimistic edits.
   const attendeesByLineId = useMemo(
     () => ({ ...props.attendeesByLineId, ...lineAttendeeEdits }),
@@ -406,47 +439,11 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
     [],
   );
 
-  const updateLineAttendees = useCallback(
-    (lineId: string, names: string[]) => {
-      if (locked) return;
-      setLineAttendeeEdits((prev) => ({ ...prev, [lineId]: names }));
-      // Per-line trailing debounce: keystrokes collapse into one PATCH, and
-      // each timer's closure carries that line's LATEST names, so an older
-      // in-flight save can never land after a newer one for the same line.
-      const timers = attendeeSaveTimers.current;
-      const existing = timers.get(lineId);
-      if (existing) clearTimeout(existing);
-      timers.set(
-        lineId,
-        setTimeout(() => {
-          timers.delete(lineId);
-          void (async () => {
-            setBusy(lineId);
-            setError(null);
-            try {
-              const res = await fetch(`/api/receipts/amex/lines/${lineId}`, {
-                method: "PATCH",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ attendees: names }),
-              });
-              if (!res.ok) {
-                const json = (await res.json().catch(() => ({}))) as {
-                  error?: string;
-                };
-                setError(json.error ?? "Could not save attendees.");
-              }
-              // No router.refresh() here — see the comment above.
-            } catch {
-              setError("Network error.");
-            } finally {
-              setBusy(null);
-            }
-          })();
-        }, 450),
-      );
-    },
-    [locked],
-  );
+  const updateLineAttendees = useCallback((id: string, names: string[]) => {
+    if (locked) return;
+    setLineAttendeeEdits(prev => ({ ...prev, [id]: names }));
+    stageLine(id, { attendees: names });
+  }, [locked, stageLine]);
 
   // Blocking lines: any sign-off code firing on a row marks it red in EVERY
   // match group (the mark never depends on the grouping). Recomputed against
@@ -487,41 +484,22 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
 
   const bulkConfirmObvious = useCallback(async () => {
     if (locked) return;
-    const candidates = linesWithBand.filter(
-      (l) =>
-        l.band === "obvious" &&
-        l.match &&
-        !isSettled(l.line),
-    );
-    if (candidates.length === 0) return;
+    const candidates = linesWithBand.filter(l => l.band === "obvious" && l.match && !isSettled(l.line));
+    if (!candidates.length) return;
+    const failures: string[] = [];
     setBulkProgress({ current: 0, total: candidates.length });
-    let failed = 0;
     for (let i = 0; i < candidates.length; i++) {
-      setBulkProgress({ current: i + 1, total: candidates.length });
       const c = candidates[i]!;
+      setBulkProgress({ current: i + 1, total: candidates.length });
       try {
-        const res = await fetch("/api/receipts/reconcile", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            amexLineId: c.line.id,
-            receiptId: c.match!.receiptId,
-            matchStatus: "confirmed",
-          }),
-        });
-        if (!res.ok) failed++;
-      } catch {
-        failed++;
-      }
+        await flushLine(c.line.id);
+        await lane(c.line.id).mutate("/api/receipts/reconcile", "POST", () => matchBody(c.line.id, c.match!.receiptId, "confirmed"));
+      } catch (err) { failures.push(`${c.line.merchant}: ${err instanceof Error ? err.message : "Outcome uncertain"}`); }
     }
     setBulkProgress(null);
-    router.refresh();
-    if (failed > 0) {
-      setError(
-        `${failed} of ${candidates.length} match(es) failed to confirm — retry or check those lines.`,
-      );
-    }
-  }, [locked, linesWithBand, router, setError]);
+    if (failures.length) setError(failures.join("; "));
+    else if (!hasPending()) router.refresh();
+  }, [locked, linesWithBand, flushLine, lane, hasPending, router, matchBody]);
 
   // Reopen a sealed reconciliation for correction (operator decision
   // 2026-07-20; the audited unfinalize API existed with no GUI surface). The
@@ -563,6 +541,7 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
     setError(null);
     setSignoffBlockers(null);
     try {
+      await flushAll();
       const res = await fetch("/api/receipts/reconcile/finalize", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -601,11 +580,11 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
       setShowFinalizeModal(false);
       router.refresh();
     } catch {
-      setError("Network error during sign-off.");
+      setError("Sign-off stopped. Check the save error or reload to review before signing off.");
     } finally {
       setSignoffBusy(false);
     }
-  }, [locked, confirmType, props.month, router]);
+  }, [locked, confirmType, props.month, router, flushAll]);
 
   // ─── Keyboard ───────────────────────────────────────────────────────
   useKeyboardShortcuts({
@@ -633,7 +612,7 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
       ? linesWithBand.findIndex((l) => l.line.id === activeId)
       : 0;
     const next = linesWithBand[(idx + delta + linesWithBand.length) % linesWithBand.length];
-    if (next) setActiveId(next.line.id);
+    if (next) selectLine(next.line.id);
   }
 
   // ─── Months nav ─────────────────────────────────────────────────────
@@ -650,7 +629,14 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
       : null;
 
   return (
-    <div className="flex h-[calc(100vh-58px)] min-h-[680px] flex-col bg-gray-50">
+    <div onCompositionStartCapture={() => { composing.current = true; }}
+      onCompositionEndCapture={() => { composing.current = false; setTimeout(() => { void flushAll().catch(() => {}); }, 0); }}
+      onClickCapture={e => {
+        const anchor = (e.target as HTMLElement).closest("a");
+        if (!anchor || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || anchor.target === "_blank") return;
+        e.preventDefault(); e.stopPropagation();
+        void guardedNavigate(() => router.push(anchor.getAttribute("href")!));
+      }} className="flex h-[calc(100vh-58px)] min-h-[680px] flex-col bg-gray-50">
       {/* Top bar */}
       <div className="flex flex-wrap items-center gap-4 border-b border-gray-200 bg-white px-8 py-3.5">
         <div className="flex items-center gap-1">
@@ -765,6 +751,7 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
       {error && (
         <div className="border-b border-red-200 bg-red-50 px-8 py-2 text-sm text-red-700">
           {error}
+          <button type="button" className="ml-2 underline" onClick={() => window.location.reload()}>Reload to review</button>
         </div>
       )}
 
@@ -778,7 +765,7 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
                 {b.lineId ? (
                   <button
                     type="button"
-                    onClick={() => setActiveId(b.lineId)}
+                    onClick={() => selectLine(b.lineId!)}
                     className="text-left text-red-700 underline decoration-red-300 underline-offset-2 hover:text-red-900"
                   >
                     {b.message}
@@ -836,7 +823,7 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
           receiptMap={receiptMap}
           confirmedLinesByReceipt={confirmedLinesByReceipt}
           activeId={activeId}
-          setActiveId={setActiveId}
+          setActiveId={selectLine}
           blockingLineIds={blockingLineIds}
           flashLineId={flashLineId}
           tab={tab}
@@ -859,6 +846,30 @@ export function ReconcileScreen(props: ReconcileScreenProps) {
           attendeeDirectory={attendeeDirectory}
           onRegisterAttendee={registerAttendee}
           onUpdateLineAttendees={updateLineAttendees}
+          beforeTripAction={async () => {
+            do { await flushAll(); } while (hasPending());
+            tripInFlight.current = true;
+            return { trips: { ...acknowledgedTrips.current }, lines: Object.fromEntries([...lanes.current].map(([id, q]) => [id, q.revision!])),
+              finish: async (ack?: { lineRevisions?: Record<string, number>; receiptRevisions?: Record<string, number> }) => {
+                if (!ack?.lineRevisions) {
+                  for (const q of lanes.current.values()) q.stop("Trip action refused or uncertain — reload to review.");
+                  setError("Trip action refused or uncertain — reload to review. Your edits are kept here.");
+                  return;
+                }
+                const affectedReceipts = props.amexLines.filter(l => l.id in ack.lineRevisions!).map(l =>
+                  ownMatches.current.has(l.id) ? ownMatches.current.get(l.id) : l.matched_receipt_id).filter((id): id is string => !!id);
+                if (affectedReceipts.some(id => ack.receiptRevisions?.[id] === undefined || ack.receiptRevisions[id] < (receiptTokens.current.get(id) ?? 0))) {
+                  throw new Error("Receipt acknowledgement incomplete — reload to review.");
+                }
+                for (const [id, revision] of Object.entries(ack.lineRevisions)) lanes.current.get(id)?.acceptAcknowledgedRevision(revision);
+                for (const [id, revision] of Object.entries(ack.receiptRevisions ?? {})) {
+                  if (receiptTokens.current.has(id)) receiptTokens.current.set(id, revision);
+                }
+                tripInFlight.current = false;
+                await flushAll();
+              } };
+
+          }}
           month={props.month}
           locked={locked}
           busyLineId={busy}
@@ -1447,6 +1458,7 @@ function DetailPane({
   attendeeDirectory,
   onRegisterAttendee,
   onUpdateLineAttendees,
+  beforeTripAction,
   month,
   locked,
   busyLineId,
@@ -1470,6 +1482,7 @@ function DetailPane({
   attendeeDirectory: ReceiptAttendeeDirectoryEntry[];
   onRegisterAttendee: (entry: ReceiptAttendeeDirectoryEntry) => void;
   onUpdateLineAttendees: (lineId: string, names: string[]) => void;
+  beforeTripAction: () => Promise<{ trips: Record<string, number>; lines: Record<string, number>; finish: (ack?: { lineRevisions?: Record<string, number>; receiptRevisions?: Record<string, number> }) => Promise<void> }>;
   /** Concrete work month, carried into the matched-receipt Review deep-links. */
   month: string;
   locked: boolean;
@@ -1856,7 +1869,7 @@ function DetailPane({
                 onChange={(names) => onUpdateLineAttendees(line.id, names)}
                 directory={attendeeDirectory}
                 onRegister={onRegisterAttendee}
-                disabled={locked || busy}
+                disabled={locked}
               />
             </Field>
           )}
@@ -1867,6 +1880,7 @@ function DetailPane({
       {line.business_trip_status === "candidate" && (
         <BusinessTripStrip
           tripId={line.business_trip_id}
+          beforeAction={beforeTripAction}
           locked={locked}
           busy={busy}
           onLegacyConfirm={() =>
@@ -1926,7 +1940,7 @@ function NoReceiptFields({
   const saveMissingReason = () => {
     if (locked || missingReasonDraft === (line.receipt_missing_reason ?? "")) return;
     onUpdateLineDetails(line.id, {
-      receiptMissingReason: missingReasonDraft.trim() || null,
+      receiptMissingReason: missingReasonDraft,
     });
   };
 
@@ -1952,7 +1966,10 @@ function NoReceiptFields({
           id={`missing-reason-${line.id}`}
           disabled={locked}
           value={missingReasonDraft}
-          onChange={(e) => setMissingReasonDraft(e.target.value)}
+          onChange={(e) => {
+            setMissingReasonDraft(e.target.value);
+            onUpdateLineDetails(line.id, { receiptMissingReason: e.target.value });
+          }}
           onBlur={saveMissingReason}
           placeholder="e.g. card fee, online charge, receipt lost"
         />
