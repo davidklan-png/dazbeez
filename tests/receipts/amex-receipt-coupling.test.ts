@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { amexFixture } from "./helpers/amex-sqlite";
+import { SaveQueue } from "@/lib/receipts/save-queue";
 
 const json = (res: Response) => res.json() as Promise<{ code: string; receiptRevisions: Record<string, number>; lineRevisions: Record<string, number> }>;
 
@@ -74,6 +75,43 @@ test("own receipt acknowledgements support consolidated single/bulk decisions; o
   assert.equal((await f.reconcile({ ...second, expectedReceipts: ack.receiptRevisions })).status, 200);
   assert.equal(f.all("SELECT id FROM amex_statement_lines WHERE match_status='confirmed'").length, 2);
   assert.equal(f.get("SELECT matched_receipt_id FROM amex_statement_lines WHERE id='l3'").matched_receipt_id, null);
+});
+
+test("line PATCH acknowledgements advance consolidated sibling lanes from their original page-load tokens", async () => {
+  const f = amexFixture(); f.receipt("r", "reconciled", "AMEX");
+  f.line("l1", "r", "confirmed"); f.line("l2", "r", "confirmed"); f.line("unrelated");
+  const loaded = { l1: f.revision("l1"), l2: f.revision("l2") };
+  const lanes = new Map<string, SaveQueue>();
+  const requests: { id: string; expectedRevision: number; status: number }[] = [];
+  for (const id of ["l1", "l2"] as const) {
+    lanes.set(id, new SaveQueue({ url: `/line/${id}`, initialRevision: loaded[id], entity: "AMEX line",
+      buildBody: () => ({ expenseCategoryCode: "supplies" }),
+      fetchImpl: async (_url, init) => {
+        const body = JSON.parse(init.body as string);
+        const res = await f.patch(id, body);
+        requests.push({ id, expectedRevision: body.expectedRevision, status: res.status });
+        return res;
+      },
+      onAcknowledged: (_body, ack) => {
+        for (const [lineId, revision] of Object.entries(ack.lineRevisions ?? {})) {
+          if (lineId !== id) lanes.get(lineId)?.acceptAcknowledgedRevision(revision);
+        }
+      },
+    }));
+  }
+  assert.equal(lanes.get("l2")!.revision, loaded.l2);
+  const first = await lanes.get("l1")!.save();
+  assert.deepEqual(first.lineRevisions, { l1: f.revision("l1"), l2: f.revision("l2") });
+  assert.ok(lanes.get("l2")!.revision > loaded.l2);
+  assert.equal(lanes.get("l2")!.revision, first.lineRevisions!.l2);
+  const second = await lanes.get("l2")!.save();
+  assert.deepEqual(requests, [
+    { id: "l1", expectedRevision: loaded.l1, status: 200 },
+    { id: "l2", expectedRevision: first.lineRevisions!.l2, status: 200 },
+  ]);
+  assert.equal(lanes.get("l2")!.revision, second.revision);
+  assert.equal(second.revision, f.revision("l2"));
+  assert.ok([...lanes.values()].every(lane => lane.idle && !lane.halted));
 });
 
 for (const recursive of [false, true]) {

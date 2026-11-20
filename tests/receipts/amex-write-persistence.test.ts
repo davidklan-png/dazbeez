@@ -79,11 +79,15 @@ test("attendees-only and empty replacement consume tokens, sparse category prese
 });
 
 test("exact acknowledgement is selected in batch, not a post-commit latest-token read", async () => {
-  const f = amexFixture(); f.line();
+  const f = amexFixture(); f.receipt(); f.line("l", "r", "confirmed"); f.line("sibling", "r", "confirmed");
+  const loaded = f.revision();
   f.afterBatch(() => f.sql.exec("UPDATE amex_statement_lines SET memo='later' WHERE id='l'"));
-  const res = await f.patch("l", { expectedRevision: 0, attendees: [] });
+  const res = await f.patch("l", { expectedRevision: loaded, expenseCategoryCode: "supplies", attendees: [] });
   const ack = await json(res); assert.equal(res.status, 200); assert.ok(ack.revision < f.revision());
+  assert.equal(ack.lineRevisions.l, ack.revision);
+  assert.ok(ack.lineRevisions.sibling < f.revision("sibling"));
   assert.equal((await f.patch("l", { expectedRevision: ack.revision, attendees: ["Old draft"] })).status, 409);
+  assert.equal((await f.patch("sibling", { expectedRevision: ack.lineRevisions.sibling, expenseCategoryCode: "communications" })).status, 409);
 });
 
 test("missing line cannot classify a supplied valid receipt; race disappearance also has no receipt effects", async () => {

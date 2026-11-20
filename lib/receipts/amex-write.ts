@@ -60,12 +60,15 @@ export async function amexBatch<T>(db: D1Database, statements: D1PreparedStateme
 
 export function lineRevisionSelect(db: D1Database, id: string): D1PreparedStatement {
   return db.prepare(`SELECT revision,
+    (SELECT json_group_object(line_id, revision) FROM amex_line_revisions WHERE line_id IN (
+      SELECT id FROM amex_statement_lines WHERE id = ? OR matched_receipt_id = (
+        SELECT matched_receipt_id FROM amex_statement_lines WHERE id = ?))) AS line_revisions_json,
     (SELECT json_group_object(id, revision) FROM business_trip_reports WHERE id IN (
       SELECT business_trip_id FROM amex_statement_lines WHERE id = ?
       UNION SELECT business_trip_report_id FROM business_trip_report_lines WHERE amex_statement_line_id = ?)) AS trip_revisions_json,
     (SELECT json_group_object(id, revision) FROM receipt_records WHERE id IN (
       SELECT matched_receipt_id FROM amex_statement_lines WHERE id = ?)) AS receipt_revisions_json
-    FROM amex_line_revisions WHERE line_id = ?`).bind(id, id, id, id);
+    FROM amex_line_revisions WHERE line_id = ?`).bind(id, id, id, id, id, id);
 }
 
 export function tripExpectation(body: { expectedRevision?: unknown; expectedLines?: unknown }, requireLines: boolean) {

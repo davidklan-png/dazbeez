@@ -2724,7 +2724,7 @@ export async function updateAmexLineCategory(
   actor: string,
   expectedRevision: number,
   db: D1Database = getReceiptsDb(),
-): Promise<{ ok: true; revision: number; tripRevisions: Record<string, number>; receiptRevisions: Record<string, number> }> {
+): Promise<{ ok: true; revision: number; lineRevisions: Record<string, number>; tripRevisions: Record<string, number>; receiptRevisions: Record<string, number> }> {
   const sets: string[] = [];
   const binds: unknown[] = [];
 
@@ -2784,16 +2784,16 @@ export async function updateAmexLineCategory(
     statements.push(amexAudit(db, actor, "amex.line_categorized", "amex_line", lineId, input));
   }
   statements.push(lineRevisionSelect(db, lineId));
-  const result = await amexBatch<{ revision: number; trip_revisions_json: string; receipt_revisions_json: string }>(db, statements);
+  const result = await amexBatch<{ revision: number; line_revisions_json: string; trip_revisions_json: string; receipt_revisions_json: string }>(db, statements);
   const ack = result.at(-1)!.results[0]!;
-  return { ok: true, revision: ack.revision, tripRevisions: JSON.parse(ack.trip_revisions_json) as Record<string, number>, receiptRevisions: JSON.parse(ack.receipt_revisions_json) as Record<string, number> };
+  return { ok: true, revision: ack.revision, lineRevisions: JSON.parse(ack.line_revisions_json) as Record<string, number>, tripRevisions: JSON.parse(ack.trip_revisions_json) as Record<string, number>, receiptRevisions: JSON.parse(ack.receipt_revisions_json) as Record<string, number> };
 }
 
 /** Internal/test roster entry point uses the same admitted aggregate batch. */
 export async function replaceAmexLineAttendees(
   lineId: string, names: string[], actor: string, expectedRevision: number,
   db: D1Database = getReceiptsDb(),
-): Promise<{ ok: true; revision: number; tripRevisions: Record<string, number>; receiptRevisions: Record<string, number> }> {
+): Promise<{ ok: true; revision: number; lineRevisions: Record<string, number>; tripRevisions: Record<string, number>; receiptRevisions: Record<string, number> }> {
   return updateAmexLineCategory(lineId, { attendees: names }, actor, expectedRevision, db);
 }
 
